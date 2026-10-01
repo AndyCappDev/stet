@@ -7,11 +7,12 @@
 //! moxcms's `create_transform` routes CMYK profiles through an internal
 //! Lab→sRGB pipeline that over-saturates light/midtone colours noticeably
 //! relative to lcms2 / Acrobat / Ghostscript. This module bypasses moxcms
-//! for v2 `lut16Type` CMYK profiles: each grid point goes through the
-//! profile's `A2B1` (relative-colorimetric) CLUT, the legacy v2 PCS-Lab
-//! decode, and a hand-tuned Lab → XYZ-D50 → sRGB pipeline. The output
-//! matches lcms2's `cmsDoTransform(RelCol)` to ±1 RGB level on a 17⁴
-//! sweep against ISO Coated v2 300% (ECI), which is what GS produces for
+//! for v2 `lut16Type` CMYK profiles: each grid point goes through one of
+//! the profile's A2B CLUTs (chosen per rendering intent), the legacy v2
+//! PCS-Lab decode, and a hand-tuned Lab → XYZ-D50 → sRGB pipeline. Through
+//! `A2B1` the output matches lcms2's `cmsDoTransform(RelCol)` to ±1 RGB
+//! level on a 17⁴ sweep against ISO Coated v2 300% (ECI), which is what GS
+//! produces for
 //! typical print imagery (light greens, neutrals, blacks). Out-of-gamut
 //! colours clip to the sRGB boundary (also matching lcms2 / GS).
 //!
@@ -33,7 +34,7 @@ use moxcms::{
 };
 
 use super::Clut4;
-use super::bpc::{WP_D50, apply_bpc_rgb_u8, compute_bpc_params, lab_to_xyz_d50};
+use super::bpc::{WP_D50, apply_bpc_xyz_d50, compute_bpc_params, lab_to_xyz_d50};
 
 /// `0xFF00` — the legacy ICC v2 Lab denominator for L*. Stored values in
 /// `[0, 0xFF00]` map linearly to L*∈[0, 100]; values above `0xFF00` are
@@ -41,25 +42,28 @@ use super::bpc::{WP_D50, apply_bpc_rgb_u8, compute_bpc_params, lab_to_xyz_d50};
 /// the legal range.
 const PCS_LAB_DENOM: f32 = 65280.0;
 
-/// Sample a CMYK profile's `A2B1` (colorimetric) table into a [`Clut4`].
+/// Sample one of a CMYK profile's A2B tables into a [`Clut4`].
 ///
-/// Out-of-gamut Lab values clip to the sRGB boundary, matching lcms2's
-/// `cmsDoTransform(RelCol)` behaviour and avoiding the desaturation that
-/// hue-preserving chroma compression produces on pure process primaries
-/// (e.g. CMYK yellow → washed-out lemon).
+/// `table` is the profile's `A2B0`, `A2B1` or `A2B2` — the caller picks it
+/// for the rendering intent (see [`super::cmyk_tables`]). Out-of-gamut Lab
+/// values clip to the sRGB boundary, matching lcms2's `cmsDoTransform` and
+/// avoiding the desaturation that hue-preserving chroma compression
+/// produces on pure process primaries (e.g. CMYK yellow → washed-out
+/// lemon).
 ///
-/// Returns `None` when the profile lacks a colorimetric table or its
-/// shape is one we currently defer (mAB / mft1 / non-Lab PCS / non-CMYK
-/// input). In every `None` case the caller is expected to fall back to
-/// the existing moxcms-driven [`super::bake_clut4`] path.
+/// Returns `None` when the profile or table is a shape we currently defer
+/// (mAB / mft1 / non-Lab PCS / non-CMYK input). In every `None` case the
+/// caller is expected to fall back to the moxcms-driven
+/// [`super::bake_clut4`] path.
 ///
 /// `grid_n` controls the output CLUT resolution (the existing path uses
-/// 17). BPC is folded into every grid point so per-pixel runtime cost
-/// stays at zero.
+/// 17). With `scale_black`, black-point compensation is folded into every
+/// grid point, so per-pixel runtime cost stays at zero.
 pub(super) fn bake_clut4_hand_rolled(
     profile: &ColorProfile,
+    table: &LutWarehouse,
     grid_n: usize,
-    bpc_enabled: bool,
+    scale_black: bool,
 ) -> Option<Clut4> {
     if profile.color_space != DataColorSpace::Cmyk || profile.pcs != DataColorSpace::Lab {
         return None;
@@ -68,15 +72,16 @@ pub(super) fn bake_clut4_hand_rolled(
         return None;
     }
 
-    let colorimetric = SampledLut::from_warehouse(profile.lut_a_to_b_colorimetric.as_ref()?)?;
+    let lut = SampledLut::from_warehouse(table)?;
 
     // BPC is computed against this sampler's own (1,1,1,1) output, not
     // moxcms's transform output, so the source black-point matches what
     // the bake actually produces. Computing it against moxcms's transform
     // miscalibrates the post-correction and leaves K-heavy CMYK ~13 RGB
-    // levels lighter than baseline / GS.
-    let bpc = if bpc_enabled {
-        let lab_k = colorimetric.sample(1.0, 1.0, 1.0, 1.0);
+    // levels lighter than baseline / GS. This is lcms2's "darker colorant"
+    // black point, taken from the same table the bake reads.
+    let bpc = if scale_black {
+        let lab_k = lut.sample(1.0, 1.0, 1.0, 1.0);
         let l_star = (lab_k.l as f64 * 100.0).clamp(0.0, 100.0);
         let neutral = [l_star.min(50.0), 0.0, 0.0];
         let sbp = lab_to_xyz_d50(neutral);
@@ -102,13 +107,16 @@ pub(super) fn bake_clut4_hand_rolled(
                     let y = y_i as f32 / denom;
                     let k = k_i as f32 / denom;
 
-                    let lab_c = colorimetric.sample(c, m, y, k);
-                    let lin = lab_to_linear_srgb(lab_c);
-
-                    let mut rgb = encode_linear_srgb(lin);
+                    // Black-point compensation scales XYZ before the sRGB
+                    // gamut clip, as lcms2 does. Scaling the clipped sRGB
+                    // instead moves out-of-gamut colours: one channel is
+                    // already pinned, so the others shift (6 levels on a
+                    // saturated cyan).
+                    let mut xyz = lab_to_xyz_d50_abs(lut.sample(c, m, y, k));
                     if let Some(p) = bpc {
-                        rgb = apply_bpc_rgb_u8(rgb, p);
+                        xyz = apply_bpc_xyz_d50(xyz, p);
                     }
+                    let rgb = encode_linear_srgb(xyz_d50_to_linear_srgb_d65(xyz));
 
                     let off = (((k_i * grid_n + y_i) * grid_n + m_i) * grid_n + c_i) * 3;
                     data[off] = rgb[0];
@@ -120,6 +128,13 @@ pub(super) fn bake_clut4_hand_rolled(
     }
 
     Some(Clut4::from_baked(grid_n as u8, data))
+}
+
+/// Whether [`bake_clut4_hand_rolled`] can read `table` of `profile`.
+pub(super) fn can_sample(profile: &ColorProfile, table: &LutWarehouse) -> bool {
+    profile.color_space == DataColorSpace::Cmyk
+        && profile.pcs == DataColorSpace::Lab
+        && SampledLut::from_warehouse(table).is_some()
 }
 
 /// A profile A2B table prepared for sampling at arbitrary CMYK points.
@@ -247,21 +262,19 @@ fn sample_curve(table: &[u16], ch: usize, n_entries: usize, x: f32) -> f32 {
     v0 + (v1 - v0) * t
 }
 
-/// Decode normalised Lab (moxcms encoding) to absolute linear sRGB-D65.
-/// Out-of-gamut values are returned as-is; the caller clamps via
-/// [`encode_linear_srgb`].
-fn lab_to_linear_srgb(lab: Lab) -> [f64; 3] {
+/// Decode normalised Lab (moxcms encoding) to absolute XYZ-D50
+/// (`Y_white = 1.0`).
+fn lab_to_xyz_d50_abs(lab: Lab) -> [f64; 3] {
     // moxcms's `to_pcs_xyz` divides by `(1 + 32767/32768)` to land in the
     // ICC PCS XYZ encoding where the reference white maps to ≈0.5. Undo
     // that here so the matrix sees absolute XYZ (Y_white = 1.0).
     let xyz = lab.to_pcs_xyz();
     const PCS_UNDO: f64 = 1.0 + 32767.0 / 32768.0;
-    let xyz = [
+    [
         xyz.x as f64 * PCS_UNDO,
         xyz.y as f64 * PCS_UNDO,
         xyz.z as f64 * PCS_UNDO,
-    ];
-    xyz_d50_to_linear_srgb_d65(xyz)
+    ]
 }
 
 /// Encode linear sRGB to packed gamma-encoded u8, clipping to `[0, 1]`.

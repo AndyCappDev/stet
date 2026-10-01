@@ -170,6 +170,7 @@ fn build_type2_shading(
     let gs_alpha = ctx.gstate.fill_opacity;
     let gs_blend_mode = ctx.gstate.blend_mode;
     let gs_alpha_is_shape = ctx.gstate.alpha_is_shape;
+    let gs_rendering_intent = ctx.gstate.rendering_intent;
     ctx.current_display_list_mut()
         .push(DisplayElement::AxialShading {
             params: AxialShadingParams {
@@ -189,6 +190,7 @@ fn build_type2_shading(
                 alpha: gs_alpha,
                 blend_mode: gs_blend_mode,
                 alpha_is_shape: gs_alpha_is_shape,
+                rendering_intent: gs_rendering_intent,
                 spot_tint_blend: false,
             },
         });
@@ -238,6 +240,7 @@ fn build_type3_shading(
     let gs_alpha = ctx.gstate.fill_opacity;
     let gs_blend_mode = ctx.gstate.blend_mode;
     let gs_alpha_is_shape = ctx.gstate.alpha_is_shape;
+    let gs_rendering_intent = ctx.gstate.rendering_intent;
     ctx.current_display_list_mut()
         .push(DisplayElement::RadialShading {
             params: RadialShadingParams {
@@ -259,6 +262,7 @@ fn build_type3_shading(
                 alpha: gs_alpha,
                 blend_mode: gs_blend_mode,
                 alpha_is_shape: gs_alpha_is_shape,
+                rendering_intent: gs_rendering_intent,
                 spot_tint_blend: false,
             },
         });
@@ -455,6 +459,7 @@ fn build_type4_shading(
         let gs_alpha = ctx.gstate.fill_opacity;
         let gs_blend_mode = ctx.gstate.blend_mode;
         let gs_alpha_is_shape = ctx.gstate.alpha_is_shape;
+        let gs_rendering_intent = ctx.gstate.rendering_intent;
         ctx.current_display_list_mut()
             .push(DisplayElement::MeshShading {
                 params: MeshShadingParams {
@@ -469,6 +474,7 @@ fn build_type4_shading(
                     alpha: gs_alpha,
                     blend_mode: gs_blend_mode,
                     alpha_is_shape: gs_alpha_is_shape,
+                    rendering_intent: gs_rendering_intent,
                 },
             });
     }
@@ -512,6 +518,7 @@ fn build_type5_shading(
         let gs_alpha = ctx.gstate.fill_opacity;
         let gs_blend_mode = ctx.gstate.blend_mode;
         let gs_alpha_is_shape = ctx.gstate.alpha_is_shape;
+        let gs_rendering_intent = ctx.gstate.rendering_intent;
         ctx.current_display_list_mut()
             .push(DisplayElement::MeshShading {
                 params: MeshShadingParams {
@@ -526,6 +533,7 @@ fn build_type5_shading(
                     alpha: gs_alpha,
                     blend_mode: gs_blend_mode,
                     alpha_is_shape: gs_alpha_is_shape,
+                    rendering_intent: gs_rendering_intent,
                 },
             });
     }
@@ -569,6 +577,7 @@ fn build_type6_shading(
         let gs_alpha = ctx.gstate.fill_opacity;
         let gs_blend_mode = ctx.gstate.blend_mode;
         let gs_alpha_is_shape = ctx.gstate.alpha_is_shape;
+        let gs_rendering_intent = ctx.gstate.rendering_intent;
         ctx.current_display_list_mut()
             .push(DisplayElement::PatchShading {
                 params: PatchShadingParams {
@@ -583,6 +592,7 @@ fn build_type6_shading(
                     alpha: gs_alpha,
                     blend_mode: gs_blend_mode,
                     alpha_is_shape: gs_alpha_is_shape,
+                    rendering_intent: gs_rendering_intent,
                 },
             });
     }
@@ -624,6 +634,7 @@ fn build_type7_shading(
         let gs_alpha = ctx.gstate.fill_opacity;
         let gs_blend_mode = ctx.gstate.blend_mode;
         let gs_alpha_is_shape = ctx.gstate.alpha_is_shape;
+        let gs_rendering_intent = ctx.gstate.rendering_intent;
         ctx.current_display_list_mut()
             .push(DisplayElement::PatchShading {
                 params: PatchShadingParams {
@@ -638,6 +649,7 @@ fn build_type7_shading(
                     alpha: gs_alpha,
                     blend_mode: gs_blend_mode,
                     alpha_is_shape: gs_alpha_is_shape,
+                    rendering_intent: gs_rendering_intent,
                 },
             });
     }

@@ -1941,8 +1941,10 @@ fn samples_to_rgba(
             {
                 let avail_pixels = data.len() / 4;
                 let icc_pixels = avail_pixels.min(npixels);
+                let intent = stet_graphics::icc::intent_from_byte(params.rendering_intent);
                 if icc_pixels > 0
-                    && let Some(rgb) = cache.convert_image_8bit(cmyk_hash, data, icc_pixels)
+                    && let Some(rgb) =
+                        cache.convert_image_8bit_with_intent(cmyk_hash, data, icc_pixels, intent)
                 {
                     let mut rgba = vec![255u8; npixels * 4];
                     for i in 0..icc_pixels {
@@ -2122,7 +2124,8 @@ fn samples_to_rgba(
             // 1 byte per pixel → lookup in tint table → convert alt space to RGB
             // For CMYK alt space with ICC, build bulk CMYK data and convert via ICC
             if matches!(alt_space.as_ref(), ImageColorSpace::DeviceCMYK)
-                && let Some(rgba) = tint_separation_via_icc(data, npixels, tint_table, icc)
+                && let Some(rgba) =
+                    tint_separation_via_icc(data, npixels, tint_table, icc, params.rendering_intent)
             {
                 return rgba;
             }
@@ -2149,7 +2152,14 @@ fn samples_to_rgba(
             let no = tint_table.num_outputs as usize;
             // For CMYK alt space with ICC, build bulk CMYK data and convert via ICC
             if matches!(alt_space.as_ref(), ImageColorSpace::DeviceCMYK)
-                && let Some(rgba) = tint_devicen_via_icc(data, npixels, ni, tint_table, icc)
+                && let Some(rgba) = tint_devicen_via_icc(
+                    data,
+                    npixels,
+                    ni,
+                    tint_table,
+                    icc,
+                    params.rendering_intent,
+                )
             {
                 return rgba;
             }
@@ -2204,12 +2214,14 @@ fn samples_to_rgba(
 }
 
 /// Convert Separation (1-input) tint table output through ICC CMYK profile.
-/// Builds 4-byte CMYK data from tint table, then bulk-converts via ICC 8-bit transform.
+/// Builds 4-byte CMYK data from tint table, then bulk-converts via ICC 8-bit
+/// transform with the image's rendering intent (display-list byte).
 fn tint_separation_via_icc(
     data: &[u8],
     npixels: usize,
     tint_table: &TintLookupTable,
     icc: Option<&IccCache>,
+    rendering_intent: u8,
 ) -> Option<Vec<u8>> {
     let cache = icc?;
     let cmyk_hash = cache.default_cmyk_hash()?;
@@ -2225,7 +2237,8 @@ fn tint_separation_via_icc(
         cmyk_data[si + 2] = (alt_comps[2].clamp(0.0, 1.0) * 255.0).round() as u8;
         cmyk_data[si + 3] = (alt_comps[3].clamp(0.0, 1.0) * 255.0).round() as u8;
     }
-    let rgb = cache.convert_image_8bit(cmyk_hash, &cmyk_data, npixels)?;
+    let intent = stet_graphics::icc::intent_from_byte(rendering_intent);
+    let rgb = cache.convert_image_8bit_with_intent(cmyk_hash, &cmyk_data, npixels, intent)?;
     let mut rgba = vec![255u8; npixels * 4];
     for i in 0..npixels {
         rgba[i * 4] = rgb[i * 3];
@@ -2235,13 +2248,15 @@ fn tint_separation_via_icc(
     Some(rgba)
 }
 
-/// Convert DeviceN (N-input) tint table output through ICC CMYK profile.
+/// Convert DeviceN (N-input) tint table output through ICC CMYK profile,
+/// with the image's rendering intent (display-list byte).
 fn tint_devicen_via_icc(
     data: &[u8],
     npixels: usize,
     ni: usize,
     tint_table: &TintLookupTable,
     icc: Option<&IccCache>,
+    rendering_intent: u8,
 ) -> Option<Vec<u8>> {
     let cache = icc?;
     let cmyk_hash = cache.default_cmyk_hash()?;
@@ -2260,7 +2275,8 @@ fn tint_devicen_via_icc(
         cmyk_data[di + 2] = (alt_comps[2].clamp(0.0, 1.0) * 255.0).round() as u8;
         cmyk_data[di + 3] = (alt_comps[3].clamp(0.0, 1.0) * 255.0).round() as u8;
     }
-    let rgb = cache.convert_image_8bit(cmyk_hash, &cmyk_data, npixels)?;
+    let intent = stet_graphics::icc::intent_from_byte(rendering_intent);
+    let rgb = cache.convert_image_8bit_with_intent(cmyk_hash, &cmyk_data, npixels, intent)?;
     let mut rgba = vec![255u8; npixels * 4];
     for i in 0..npixels {
         rgba[i * 4] = rgb[i * 3];
@@ -4234,7 +4250,10 @@ fn render_group(
 ///      `blend_cmyk_nonseparable`), convert the result to sRGB through the
 ///      ICC system CMYK profile so it sits seamlessly next to the rest of the
 ///      page, and write the result to both the parent pixmap and (when
-///      present) the parent CMYK buffer.
+///      present) the parent CMYK buffer. The conversion is relative
+///      colorimetric: the CMYK buffer records no rendering intent per pixel,
+///      and a group composite has no single painting element to take one
+///      from.
 #[expect(clippy::too_many_arguments)]
 fn composite_non_isolated_cmyk(
     target: &mut Pixmap,
@@ -5220,6 +5239,9 @@ fn render_soft_masked(
             let ci = ci_row + x * 4;
             let pi = pi_row + px * 4;
 
+            // The conversions here are relative colorimetric: the CMYK
+            // buffer records no rendering intent per pixel.
+            //
             // Per-pixel gate: CMYK interpolation is only safe when both
             // endpoints are faithfully tracked. ICC-convert both cmyk
             // snapshots and compare with the sRGB endpoints; only take
@@ -7385,6 +7407,9 @@ fn render_overprint_fill(
     icc: Option<&IccCache>,
     no_aa: bool,
 ) {
+    // Overprint re-converts the composited CMYK with the painting
+    // element's intent.
+    let intent = stet_graphics::icc::intent_from_byte(params.rendering_intent);
     let Some(skia_path) = build_skia_path(path) else {
         return;
     };
@@ -7729,7 +7754,7 @@ fn render_overprint_fill(
                     )
                 } else if let Some(icc_cache) = icc {
                     icc_cache
-                        .convert_cmyk_readonly(new_c, new_m, new_y, new_k)
+                        .convert_cmyk_readonly_with_intent(new_c, new_m, new_y, new_k, intent)
                         .unwrap_or_else(|| cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k))
                 } else {
                     cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k)
@@ -8010,6 +8035,9 @@ fn render_overprint_stroke(
     icc: Option<&IccCache>,
     no_aa: bool,
 ) {
+    // Overprint re-converts the composited CMYK with the painting
+    // element's intent.
+    let intent = stet_graphics::icc::intent_from_byte(params.rendering_intent);
     // Convert stroke outline to fill path. Mirrors update_cmyk_buffer_for_stroke_overprint.
     let resolution_scale = (transform.sx * transform.sx + transform.sy * transform.sy)
         .sqrt()
@@ -8294,7 +8322,7 @@ fn render_overprint_stroke(
                     )
                 } else if let Some(icc_cache) = icc {
                     icc_cache
-                        .convert_cmyk_readonly(new_c, new_m, new_y, new_k)
+                        .convert_cmyk_readonly_with_intent(new_c, new_m, new_y, new_k, intent)
                         .unwrap_or_else(|| cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k))
                 } else {
                     cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k)
@@ -8500,6 +8528,9 @@ fn render_overprint_image(
     out_h: u32,
     icc: Option<&IccCache>,
 ) {
+    // Overprint re-converts the composited CMYK with the painting
+    // element's intent.
+    let intent = stet_graphics::icc::intent_from_byte(params.rendering_intent);
     let iw = params.width as usize;
     let ih = params.height as usize;
     let Some(image_inv) = params.image_matrix.invert() else {
@@ -8689,7 +8720,7 @@ fn render_overprint_image(
                     rgb
                 } else if let Some(icc_cache) = icc {
                     icc_cache
-                        .convert_cmyk_readonly(new_c, new_m, new_y, new_k)
+                        .convert_cmyk_readonly_with_intent(new_c, new_m, new_y, new_k, intent)
                         .unwrap_or_else(|| cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k))
                 } else {
                     cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k)
@@ -8829,7 +8860,7 @@ fn render_overprint_image(
                 )
             } else if let Some(icc_cache) = icc {
                 icc_cache
-                    .convert_cmyk_readonly(new_c, new_m, new_y, new_k)
+                    .convert_cmyk_readonly_with_intent(new_c, new_m, new_y, new_k, intent)
                     .unwrap_or_else(|| cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k))
             } else {
                 cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k)
@@ -11573,6 +11604,8 @@ fn render_axial_shading(
     cmyk_buf: Option<&mut [f32]>,
     icc: Option<&IccCache>,
 ) {
+    // Spot-tint and overprint re-conversions use the shading's intent.
+    let intent = stet_graphics::icc::intent_from_byte(params.rendering_intent);
     let pw = pixmap.width();
     let ph = pixmap.height();
     if params.color_stops.is_empty() || pw == 0 || ph == 0 {
@@ -12009,7 +12042,9 @@ fn render_axial_shading(
                             buf[ci + 3] = new_k as f32;
                             let (rv, gv, bv) = if let Some(icc_cache) = icc {
                                 icc_cache
-                                    .convert_cmyk_readonly(new_c, new_m, new_y, new_k)
+                                    .convert_cmyk_readonly_with_intent(
+                                        new_c, new_m, new_y, new_k, intent,
+                                    )
                                     .unwrap_or_else(|| cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k))
                             } else {
                                 cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k)
@@ -12043,7 +12078,7 @@ fn render_axial_shading(
                         let k = buf[ci + 3] as f64;
                         let (rv, gv, bv) = if let Some(icc_cache) = icc {
                             icc_cache
-                                .convert_cmyk_readonly(c, m, y, k)
+                                .convert_cmyk_readonly_with_intent(c, m, y, k, intent)
                                 .unwrap_or_else(|| cmyk_to_rgb_plrm(c, m, y, k))
                         } else {
                             cmyk_to_rgb_plrm(c, m, y, k)
@@ -12096,6 +12131,8 @@ fn render_radial_shading(
     mut cmyk_buf: Option<&mut [f32]>,
     icc: Option<&IccCache>,
 ) {
+    // Spot-tint and overprint re-conversions use the shading's intent.
+    let intent = stet_graphics::icc::intent_from_byte(params.rendering_intent);
     let pw = pixmap.width();
     let ph = pixmap.height();
     if params.color_stops.is_empty() || pw == 0 || ph == 0 {
@@ -12330,7 +12367,9 @@ fn render_radial_shading(
                         let m = buf[ci + 1] as f64;
                         let y = buf[ci + 2] as f64;
                         let k = buf[ci + 3] as f64;
-                        if let Some((r, g, b)) = icc_cache.convert_cmyk_readonly(c, m, y, k) {
+                        if let Some((r, g, b)) =
+                            icc_cache.convert_cmyk_readonly_with_intent(c, m, y, k, intent)
+                        {
                             data[offset] = (r * 255.0).round().clamp(0.0, 255.0) as u8;
                             data[offset + 1] = (g * 255.0).round().clamp(0.0, 255.0) as u8;
                             data[offset + 2] = (b * 255.0).round().clamp(0.0, 255.0) as u8;
@@ -12823,6 +12862,7 @@ fn render_patch_shading(
                 n,
                 icc_profile_hash,
                 icc,
+                stet_graphics::icc::intent_from_byte(params.rendering_intent),
                 cull.as_ref(),
             );
         }
@@ -12840,6 +12880,7 @@ fn render_patch_shading(
             alpha: params.alpha,
             blend_mode: params.blend_mode,
             alpha_is_shape: params.alpha_is_shape,
+            rendering_intent: params.rendering_intent,
         };
         render_mesh_shading(
             pixmap,
@@ -12864,6 +12905,7 @@ fn subdivide_patch_to_triangles(
     n: usize,
     icc_profile_hash: Option<&stet_graphics::icc::ProfileHash>,
     icc_cache: Option<&IccCache>,
+    intent: stet_graphics::icc::IccRenderingIntent,
     cull: Option<&ShadingCull>,
 ) {
     // Evaluate patch at grid points.
@@ -12904,10 +12946,11 @@ fn subdivide_patch_to_triangles(
             // and converts per-grid-point, rather than interpolating pre-converted
             // sRGB values from only the 4 corners.
             let color = if use_icc_interp {
-                if let Some((r, g, b)) = icc_cache
-                    .unwrap()
-                    .convert_color_readonly(icc_profile_hash.unwrap(), &raw)
-                {
+                if let Some((r, g, b)) = icc_cache.unwrap().convert_color_readonly_with_intent(
+                    icc_profile_hash.unwrap(),
+                    &raw,
+                    intent,
+                ) {
                     DeviceColor::from_rgb(r, g, b)
                 } else {
                     bilinear_color(&patch.colors, u, v)
@@ -13530,7 +13573,15 @@ mod tests {
         let n = 16;
 
         let mut all = Vec::new();
-        subdivide_patch_to_triangles(&patch, &mut all, n, None, None, None);
+        subdivide_patch_to_triangles(
+            &patch,
+            &mut all,
+            n,
+            None,
+            None,
+            stet_graphics::icc::IccRenderingIntent::RelativeColorimetric,
+            None,
+        );
         assert_eq!(all.len(), 2 * n * n);
 
         // A target the patch sits entirely inside keeps every triangle. The
@@ -13538,19 +13589,43 @@ mod tests {
         // start there too.
         let wide = ShadingCull::new(ctm, -500.0, -500.0, 1.0, 1.0, 4000, 4000).unwrap();
         let mut kept = Vec::new();
-        subdivide_patch_to_triangles(&patch, &mut kept, n, None, None, Some(&wide));
+        subdivide_patch_to_triangles(
+            &patch,
+            &mut kept,
+            n,
+            None,
+            None,
+            stet_graphics::icc::IccRenderingIntent::RelativeColorimetric,
+            Some(&wide),
+        );
         assert_eq!(kept.len(), all.len());
 
         // A target far below the patch keeps nothing.
         let elsewhere = ShadingCull::new(ctm, 0.0, 3000.0, 1.0, 1.0, 200, 140).unwrap();
         let mut none = Vec::new();
-        subdivide_patch_to_triangles(&patch, &mut none, n, None, None, Some(&elsewhere));
+        subdivide_patch_to_triangles(
+            &patch,
+            &mut none,
+            n,
+            None,
+            None,
+            stet_graphics::icc::IccRenderingIntent::RelativeColorimetric,
+            Some(&elsewhere),
+        );
         assert!(none.is_empty());
 
         // A band-sized target keeps precisely the triangles that reach it.
         let band = ShadingCull::new(ctm, -200.0, 0.0, 1.0, 1.0, 600, 40).unwrap();
         let mut banded = Vec::new();
-        subdivide_patch_to_triangles(&patch, &mut banded, n, None, None, Some(&band));
+        subdivide_patch_to_triangles(
+            &patch,
+            &mut banded,
+            n,
+            None,
+            None,
+            stet_graphics::icc::IccRenderingIntent::RelativeColorimetric,
+            Some(&band),
+        );
         let expected = all
             .iter()
             .filter(|tri| {

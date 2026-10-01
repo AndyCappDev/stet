@@ -2439,10 +2439,10 @@ impl<'a> ContentInterpreter<'a> {
     fn op_big_g(&mut self) -> Result<(), PdfError> {
         // G gray: set stroke color to gray
         let g = self.pop_number()?;
-        let (color, painted, is_cmyk) = self.gray_paint_for_gstate(g);
+        let (color, painted, is_cmyk, source) = self.gray_paint_for_gstate(g);
         self.gstate.stroke_color = color;
         self.gstate.stroke_color_space = ColorSpaceRef::DeviceGray;
-        self.gstate.stroke_color_source = None;
+        self.gstate.stroke_color_source = source;
         self.gstate.stroke_painted_channels = painted;
         self.gstate.stroke_is_device_cmyk = is_cmyk;
         self.gstate.stroke_is_none = false;
@@ -2456,10 +2456,10 @@ impl<'a> ContentInterpreter<'a> {
     fn op_small_g(&mut self) -> Result<(), PdfError> {
         // g gray: set fill color to gray
         let g = self.pop_number()?;
-        let (color, painted, is_cmyk) = self.gray_paint_for_gstate(g);
+        let (color, painted, is_cmyk, source) = self.gray_paint_for_gstate(g);
         self.gstate.fill_color = color;
         self.gstate.fill_color_space = ColorSpaceRef::DeviceGray;
-        self.gstate.fill_color_source = None;
+        self.gstate.fill_color_source = source;
         self.gstate.fill_painted_channels = painted;
         self.gstate.fill_is_device_cmyk = is_cmyk;
         self.gstate.fill_is_none = false;
@@ -2478,14 +2478,37 @@ impl<'a> ContentInterpreter<'a> {
     /// overprint dispatcher routes it through the K-only subset path,
     /// preserving the overprint-vs-spot behaviour the standalone gray
     /// promotion (GWG 3.0 b/h) needs.
-    fn gray_paint_for_gstate(&mut self, g: f64) -> (DeviceColor, u8, bool) {
+    ///
+    /// The fourth value is the colour's source, set when the colour depends
+    /// on the rendering intent (the promoted case).
+    fn gray_paint_for_gstate(
+        &mut self,
+        g: f64,
+    ) -> (DeviceColor, u8, bool, Option<Arc<ColorSource>>) {
         if self.pdfx_cmyk_intent && !self.in_smask_form {
             let k = (1.0 - g).clamp(0.0, 1.0);
-            let color = DeviceColor::from_cmyk_icc(0.0, 0.0, 0.0, k, &mut self.icc_cache);
-            (color, stet_graphics::device::CMYK_K, true)
+            let (color, source) = self.device_cmyk_paint([0.0, 0.0, 0.0, k]);
+            (color, stet_graphics::device::CMYK_K, true, source)
         } else {
-            (DeviceColor::from_gray(g), 0, false)
+            (DeviceColor::from_gray(g), 0, false, None)
         }
+    }
+
+    /// A DeviceCMYK colour under the current rendering intent, and its
+    /// source, so a later `ri` converts it again.
+    fn device_cmyk_paint(&mut self, cmyk: [f64; 4]) -> (DeviceColor, Option<Arc<ColorSource>>) {
+        let color = color_space::components_to_device_color_icc_with_intent(
+            &ResolvedColorSpace::DeviceCMYK,
+            &cmyk,
+            Some(&mut self.icc_cache),
+            self.gstate.rendering_intent,
+        );
+        let source = Arc::new(ColorSource(ColorSourceKind::Components {
+            space: ResolvedColorSpace::DeviceCMYK,
+            components: cmyk.to_vec(),
+            group_promote: false,
+        }));
+        (color, Some(source))
     }
 
     fn op_big_rg(&mut self) -> Result<(), PdfError> {
@@ -2685,7 +2708,11 @@ impl<'a> ContentInterpreter<'a> {
         if (color.r - color.g).abs() > f64::EPSILON || (color.r - color.b).abs() > f64::EPSILON {
             return;
         }
-        if let Some((r, g, b)) = self.icc_cache.convert_cmyk(0.0, 0.0, 0.0, k) {
+        let intent = stet_graphics::icc::intent_from_byte(self.gstate.rendering_intent);
+        if let Some((r, g, b)) = self
+            .icc_cache
+            .convert_cmyk_with_intent(0.0, 0.0, 0.0, k, intent)
+        {
             color.r = r;
             color.g = g;
             color.b = b;
@@ -2695,10 +2722,10 @@ impl<'a> ContentInterpreter<'a> {
     fn op_big_k(&mut self) -> Result<(), PdfError> {
         // K c m y k: set stroke color to CMYK
         let n = self.get_numbers(4)?;
-        self.gstate.stroke_color =
-            DeviceColor::from_cmyk_icc(n[0], n[1], n[2], n[3], &mut self.icc_cache);
+        let (color, source) = self.device_cmyk_paint([n[0], n[1], n[2], n[3]]);
+        self.gstate.stroke_color = color;
         self.gstate.stroke_color_space = ColorSpaceRef::DeviceCMYK;
-        self.gstate.stroke_color_source = None;
+        self.gstate.stroke_color_source = source;
         self.gstate.stroke_painted_channels = stet_graphics::device::CMYK_ALL;
         self.gstate.stroke_is_device_cmyk = true;
         self.gstate.stroke_is_none = false;
@@ -2712,10 +2739,10 @@ impl<'a> ContentInterpreter<'a> {
     fn op_small_k(&mut self) -> Result<(), PdfError> {
         // k c m y k: set fill color to CMYK
         let n = self.get_numbers(4)?;
-        self.gstate.fill_color =
-            DeviceColor::from_cmyk_icc(n[0], n[1], n[2], n[3], &mut self.icc_cache);
+        let (color, source) = self.device_cmyk_paint([n[0], n[1], n[2], n[3]]);
+        self.gstate.fill_color = color;
         self.gstate.fill_color_space = ColorSpaceRef::DeviceCMYK;
-        self.gstate.fill_color_source = None;
+        self.gstate.fill_color_source = source;
         self.gstate.fill_painted_channels = stet_graphics::device::CMYK_ALL;
         self.gstate.fill_is_device_cmyk = true;
         self.gstate.fill_is_none = false;
@@ -4988,6 +5015,7 @@ impl<'a> ContentInterpreter<'a> {
                     img_w,
                     img_h,
                     Some(&self.icc_cache),
+                    stet_graphics::icc::intent_from_byte(image_intent),
                 );
                 (rgba, ImageColorSpace::PreconvertedRGBA, img_w, img_h)
             } else {
@@ -6069,6 +6097,14 @@ impl<'a> ContentInterpreter<'a> {
             None => (0, 0),
         };
         let is_image_mask = matches!(dict.get(b"ImageMask"), Some(PdfObj::Bool(true)));
+        // As for image XObjects (ISO 32000 §11.3.4), the image's own
+        // `/Intent` overrides the gstate's.
+        let image_intent = match dict.get(b"Intent") {
+            Some(PdfObj::Name(n)) => {
+                rendering_intent::from_name(n).unwrap_or(self.gstate.rendering_intent)
+            }
+            _ => self.gstate.rendering_intent,
+        };
         let bpc = if is_image_mask {
             1
         } else {
@@ -6417,7 +6453,7 @@ impl<'a> ContentInterpreter<'a> {
                     .map(painted_channels_for_cs)
                     .unwrap_or(self.gstate.fill_painted_channels),
                 alpha_is_shape: self.gstate.alpha_is_shape,
-                rendering_intent: DEFAULT_RENDERING_INTENT,
+                rendering_intent: image_intent,
             },
         });
 
@@ -7753,8 +7789,11 @@ fn bilinear_upsample_image(
     out
 }
 
-/// Expand image sample data from arbitrary BPC to 8-bit.
 /// Merge image sample data with an SMask alpha channel into RGBA.
+///
+/// ICCBased samples convert through their own profile and DeviceCMYK through
+/// the default CMYK profile, both with `intent` (the image's rendering
+/// intent).
 fn merge_rgb_with_smask(
     image_data: &[u8],
     smask_data: &[u8],
@@ -7762,6 +7801,7 @@ fn merge_rgb_with_smask(
     width: u32,
     height: u32,
     icc: Option<&stet_graphics::icc::IccCache>,
+    intent: stet_graphics::icc::IccRenderingIntent,
 ) -> Vec<u8> {
     // For Indexed images, expand palette indices to RGB first
     if let ImageColorSpace::Indexed {
@@ -7781,7 +7821,7 @@ fn merge_rgb_with_smask(
                 expanded[i * n_base + c] = lookup.get(offset + c).copied().unwrap_or(0);
             }
         }
-        return merge_rgb_with_smask(&expanded, smask_data, base, width, height, icc);
+        return merge_rgb_with_smask(&expanded, smask_data, base, width, height, icc, intent);
     }
 
     // For Separation/DeviceN, convert through tint table to alternate space first
@@ -7802,7 +7842,7 @@ fn merge_rgb_with_smask(
                 expanded[i * no + c] = (alt_comps[c].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
             }
         }
-        return merge_rgb_with_smask(&expanded, smask_data, alt_space, width, height, icc);
+        return merge_rgb_with_smask(&expanded, smask_data, alt_space, width, height, icc, intent);
     }
     if let ImageColorSpace::DeviceN {
         alt_space,
@@ -7826,24 +7866,33 @@ fn merge_rgb_with_smask(
                 expanded[i * no + c] = (alt_comps[c].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
             }
         }
-        return merge_rgb_with_smask(&expanded, smask_data, alt_space, width, height, icc);
+        return merge_rgb_with_smask(&expanded, smask_data, alt_space, width, height, icc, intent);
     }
 
     let n_pixels = (width * height) as usize;
     let mut rgba = vec![255u8; n_pixels * 4];
     let n_comps = color_space.num_components();
 
-    // For CMYK data, try ICC bulk conversion first (matches samples_to_rgba quality)
-    if n_comps == 4
-        && let Some(cache) = icc
-        && let Some(cmyk_hash) = cache.default_cmyk_hash()
+    // ICC bulk conversion first (matches samples_to_rgba): an ICCBased
+    // image through its own profile, DeviceCMYK through the default CMYK
+    // profile.
+    let icc_hash = icc.and_then(|cache| match color_space {
+        ImageColorSpace::ICCBased { profile_hash, .. } if cache.has_profile(profile_hash) => {
+            Some(*profile_hash)
+        }
+        ImageColorSpace::DeviceCMYK => cache.default_cmyk_hash().copied(),
+        _ => None,
+    });
+    if let Some(cache) = icc
+        && let Some(hash) = icc_hash
     {
-        let cmyk_data = if image_data.len() >= n_pixels * 4 {
-            &image_data[..n_pixels * 4]
+        let n = n_comps as usize;
+        let samples = if image_data.len() >= n_pixels * n {
+            &image_data[..n_pixels * n]
         } else {
             image_data
         };
-        if let Some(rgb) = cache.convert_image_8bit(cmyk_hash, cmyk_data, n_pixels) {
+        if let Some(rgb) = cache.convert_image_8bit_with_intent(&hash, samples, n_pixels, intent) {
             for i in 0..n_pixels {
                 let alpha = smask_data.get(i).copied().unwrap_or(255);
                 let dst = i * 4;

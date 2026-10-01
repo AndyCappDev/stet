@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`rendering_intent` on the shading parameter structs**
+  (`AxialShadingParams`, `RadialShadingParams`, `MeshShadingParams`,
+  `PatchShadingParams`): the intent the shading's colours were converted
+  with, for renderers that convert them again. Code that builds these
+  structs with a struct literal must add the field (or use
+  `..Default::default()`); as with `GraphicsState.overprint_mode` in
+  0.8.3, the policy is that outside code reads these structs rather than
+  writes them.
+- **CMYK conversions that take a rendering intent:**
+  `IccCache::convert_cmyk_with_intent`, `convert_cmyk_readonly_with_intent`
+  and `DeviceColor::from_cmyk_icc_with_intent` in `stet-graphics`.
+  `convert_color_readonly_with_intent`, `convert_color_with_intent` and
+  `convert_image_8bit_with_intent` now honour the intent for CMYK profiles;
+  the intent-less conversions are relative colorimetric, as before.
 - **Render a page box, or a region, of a PDF page as the page:** `--box`
   on the command line and `PdfDocument::set_page_area` in
   `stet-pdf-reader`. `--box art` (or `media`, `crop`, `bleed`, `trim`)
@@ -25,6 +39,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CMYK colours, images and shadings in PDF honour the rendering
+  intent.** stet converted every CMYK source — DeviceCMYK and ICCBased
+  alike — through its profile's relative colorimetric table whatever the
+  document asked for, so `/Perceptual ri`, an ExtGState `/RI` or an
+  image's `/Intent` changed nothing — and most press profiles (ISO
+  Coated v2, FOGRA39, Japan Color 2001, SWOP) have perceptual tables that
+  differ. Each intent now reads the table lcms2, and so Ghostscript, uses:
+  `A2B1` for relative colorimetric, `A2B0` for perceptual, `A2B2` for
+  saturation, with black-point compensation as lcms2 applies it
+  (perceptual and saturation always; a profile with no `A2B2` gives
+  saturation its `A2B0`, uncompensated). Absolute colorimetric renders as
+  relative colorimetric, as before. Content that states no intent is
+  relative colorimetric, as before. Each extra table is built the first
+  time a page uses it. An `ri` after `k`/`K` applies to the colour
+  already set, as it does after `sc`/`scn`. Overprint follows the intent
+  of the element painting; transparency groups composited in CMYK stay
+  relative colorimetric.
+
+  This applies where the CMYK profile is a *source*: `--cmyk-profile`, the
+  system profile, or an ICCBased CMYK colour. **In a PDF/X document the
+  output intent's CMYK is the output**, so DeviceCMYK, and anything
+  converted into the output intent, is shown the same way whatever the
+  intent; there the intent governs the conversion into the output
+  intent (ICCBased and Lab colours), as before. The Ghent Workgroup's
+  output-intent tests (GWG 13.0, 22.1) depend on that. PostScript follows
+  in a later change.
+- **Inline images ignored the rendering intent**, always using relative
+  colorimetric; they now take the current intent, or their own `/Intent`.
+- **Images with an explicit `/Mask` skipped their ICC profile.** An
+  ICCBased image with a stencil `/Mask` showed its raw samples (RGB) or
+  went through the default CMYK profile instead of its own (CMYK); both
+  now convert through their profile, with the image's intent.
+- **CMYK profiles stet's own sampler cannot read** (ICC v4 `mAB` tables,
+  8-bit `lut8Type`) were converted through their perceptual table even for
+  relative colorimetric, the default intent. They now use the colorimetric
+  table, like every other profile, so their colours change.
+- **Black-point compensation for CMYK is applied before the sRGB gamut
+  clip**, as lcms2 does, rather than after. Colours outside sRGB, such as
+  saturated cyans, move by up to 2 levels.
 - **`PageBoxes` documented the wrong defaults.** It said an absent
   BleedBox, TrimBox or ArtBox falls back to the MediaBox; the PDF
   specification makes it the crop box. The values `page_boxes` returns

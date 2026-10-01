@@ -211,7 +211,7 @@ fn handle_function_based(
             opm_paired: false,
             painted_channels: 0,
             alpha_is_shape: false,
-            rendering_intent: crate::content::graphics_state::DEFAULT_RENDERING_INTENT,
+            rendering_intent: gstate.rendering_intent,
         },
     });
     Ok(())
@@ -269,6 +269,7 @@ fn handle_axial(
             alpha: gstate.fill_alpha,
             blend_mode: gstate.blend_mode,
             alpha_is_shape: gstate.alpha_is_shape,
+            rendering_intent: gstate.rendering_intent,
             spot_tint_blend: cs_has_spot_with_cmyk_alt(resolved_cs),
         },
     });
@@ -330,6 +331,7 @@ fn handle_radial(
             alpha: gstate.fill_alpha,
             blend_mode: gstate.blend_mode,
             alpha_is_shape: gstate.alpha_is_shape,
+            rendering_intent: gstate.rendering_intent,
             spot_tint_blend: cs_has_spot_with_cmyk_alt(resolved_cs),
         },
     });
@@ -537,6 +539,7 @@ fn handle_mesh(
             alpha: gstate.fill_alpha,
             blend_mode: gstate.blend_mode,
             alpha_is_shape: gstate.alpha_is_shape,
+            rendering_intent: gstate.rendering_intent,
         },
     });
     Ok(())
@@ -688,6 +691,7 @@ fn handle_patches(
             alpha: gstate.fill_alpha,
             blend_mode: gstate.blend_mode,
             alpha_is_shape: gstate.alpha_is_shape,
+            rendering_intent: gstate.rendering_intent,
         },
     });
     Ok(())

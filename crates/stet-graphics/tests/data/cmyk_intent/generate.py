@@ -11,12 +11,14 @@ script runs it once and records what it produces. It writes, next to itself:
   split.icc      CMYK profile whose A2B0 (perceptual) and A2B1 (colorimetric)
                  tables differ; no A2B2.
   split_sat.icc  The same, plus an A2B2 (saturation) table unlike both.
+  split_lut8.icc split.icc's tables as `lut8Type`, which stet's hand-rolled
+                 sampler does not read, so stet bakes it through moxcms.
   reference.rs   lcms2's sRGB output for each profile, intent and BPC setting,
                  included by `tests/cmyk_intent.rs`.
 
-Both profiles are ICC v2 output (`prtr`) profiles with a Lab PCS and
-`lut16Type` tables — the shape of FOGRA39, ISO Coated v2 or Japan Color 2001,
-and the shape stet's hand-rolled sampler reads. Each table is affine in CMYK
+The profiles are ICC v2 output (`prtr`) profiles with a Lab PCS. The first
+two use `lut16Type` tables — the shape of FOGRA39, ISO Coated v2 or Japan
+Color 2001, and the shape stet's hand-rolled sampler reads. Each table is affine in CMYK
 on a two-point grid, so tetrahedral and multilinear interpolation reproduce
 it exactly and the engines differ only in what the test is about.
 
@@ -54,54 +56,66 @@ def u16(v):
     return struct.pack(">H", v)
 
 
-def lut16(n_in, n_out, clut):
-    """An `mft2` tag on a 2-point grid with identity curves. `clut` maps grid
-    coordinates (each 0.0 or 1.0, first channel slowest) to normalised
-    outputs."""
-    t = b"mft2" + bytes(4) + bytes([n_in, n_out, 2, 0])
+def lut(bits, n_in, n_out, clut):
+    """An `mft2` (bits=16) or `mft1` (bits=8) tag on a 2-point grid with
+    identity curves. `clut` maps grid coordinates (each 0.0 or 1.0, first
+    channel slowest) to normalised outputs."""
+    t = (b"mft2" if bits == 16 else b"mft1") + bytes(4) + bytes([n_in, n_out, 2, 0])
     for v in (1, 0, 0, 0, 1, 0, 0, 0, 1):
         t += s15f16(v)
-    t += u16(2) + u16(2)
-    t += (u16(0) + u16(0xFFFF)) * n_in
+    if bits == 16:
+        t += u16(2) + u16(2)
+        curves = lambda n: (u16(0) + u16(0xFFFF)) * n
+        sample = lambda v: u16(round(v * 65535))
+    else:
+        # lut8Type curves have exactly 256 entries.
+        curves = lambda n: bytes(range(256)) * n
+        sample = lambda v: bytes([round(v * 255)])
+    t += curves(n_in)
     for idx in range(2**n_in):
         coords = [(idx >> (n_in - 1 - i)) & 1 for i in range(n_in)]
         out = clut([float(c) for c in coords])
         assert len(out) == n_out
         for v in out:
-            t += u16(round(min(max(v, 0.0), 1.0) * 65535))
-    t += (u16(0) + u16(0xFFFF)) * n_out
+            t += sample(min(max(v, 0.0), 1.0))
+    t += curves(n_out)
     return t
 
 
-def lab_table(l, a, b):
-    """A2B clut: CMYK → legacy v2 16-bit Lab (L* 0..100 → 0..0xFF00, a*/b*
-    → (v + 128) × 256)."""
+def lab_table(bits, l, a, b):
+    """A2B clut: CMYK → legacy v2 Lab. 16-bit: L* 0..100 → 0..0xFF00, a*/b*
+    → (v + 128) × 256. 8-bit: L* 0..100 → 0..255, a*/b* → v + 128."""
 
     def clut(cmyk):
         L = l(*cmyk)
         A = a(*cmyk)
         B = b(*cmyk)
         assert 0 <= L <= 100 and -128 <= A < 128 and -128 <= B < 128
-        return [L * 652.8 / 65535, (A + 128) * 256 / 65535, (B + 128) * 256 / 65535]
+        if bits == 16:
+            return [L * 652.8 / 65535, (A + 128) * 256 / 65535, (B + 128) * 256 / 65535]
+        return [L / 100, (A + 128) / 255, (B + 128) / 255]
 
-    return lut16(4, 3, clut)
+    return lut(bits, 4, 3, clut)
 
 
 # A2B1, colorimetric: paper white L*=100, 400% black L*=8.
-A2B1 = lab_table(
+A2B1 = lambda bits: lab_table(
+    bits,
     lambda c, m, y, k: 100 - 18 * c - 14 * m - 6 * y - 54 * k,
     lambda c, m, y, k: -32 * c + 62 * m - 6 * y,
     lambda c, m, y, k: -42 * c - 6 * m + 72 * y,
 )
 # A2B0, perceptual: a lighter black (L*=22) and less chroma, as a perceptual
 # table compressing into a smaller gamut would have.
-A2B0 = lab_table(
+A2B0 = lambda bits: lab_table(
+    bits,
     lambda c, m, y, k: 100 - 15 * c - 11 * m - 4 * y - 48 * k,
     lambda c, m, y, k: -26 * c + 52 * m - 4 * y,
     lambda c, m, y, k: -34 * c - 4 * m + 60 * y,
 )
 # A2B2, saturation: more chroma than either, black L*=7.
-A2B2 = lab_table(
+A2B2 = lambda bits: lab_table(
+    bits,
     lambda c, m, y, k: 100 - 20 * c - 16 * m - 5 * y - 52 * k,
     lambda c, m, y, k: -45 * c + 75 * m - 8 * y,
     lambda c, m, y, k: -55 * c - 8 * m + 85 * y,
@@ -115,7 +129,7 @@ def b2a(coords):
     return [ink, ink, ink, ink]
 
 
-B2A = lut16(3, 4, b2a)
+B2A = lambda bits: lut(bits, 3, 4, b2a)
 
 
 def xyz_tag(x, y, z):
@@ -134,17 +148,17 @@ def desc_tag(text):
     )
 
 
-def profile(description, with_saturation):
+def profile(description, with_saturation, bits=16):
     tags = [
         (b"desc", desc_tag(description)),
         (b"wtpt", xyz_tag(0.9642, 1.0, 0.8249)),
-        (b"A2B0", A2B0),
-        (b"A2B1", A2B1),
-        (b"B2A0", B2A),
-        (b"B2A1", B2A),
+        (b"A2B0", A2B0(bits)),
+        (b"A2B1", A2B1(bits)),
+        (b"B2A0", B2A(bits)),
+        (b"B2A1", B2A(bits)),
     ]
     if with_saturation:
-        tags += [(b"A2B2", A2B2), (b"B2A2", B2A)]
+        tags += [(b"A2B2", A2B2(bits)), (b"B2A2", B2A(bits))]
 
     table_len = 4 + 12 * len(tags)
     table = struct.pack(">I", len(tags))
@@ -169,7 +183,10 @@ def profile(description, with_saturation):
 # ------------------------------------------------------------------ lcms2
 
 # CMYK samples, 0–255: paper, primaries, secondaries, black ramps, rich and
-# total-ink black, and midtones.
+# total-ink black, and midtones. Avoid colours just outside sRGB where a
+# channel climbs steeply off zero, such as (204, 51, 0, 26) on `A2B2`:
+# there stet's 17⁴ table, interpolated in gamma-encoded RGB, misses lcms2
+# by ~6 levels whatever the intent, and the test is about intents.
 SAMPLES = [
     (0, 0, 0, 0),
     (255, 0, 0, 0),
@@ -186,7 +203,7 @@ SAMPLES = [
     (77, 153, 26, 51),
     (38, 255, 255, 0),
     (128, 128, 128, 0),
-    (204, 51, 0, 26),
+    (102, 26, 0, 13),
 ]
 
 # Index order of the generated tables; the test maps them to stet's intents.
@@ -234,6 +251,8 @@ def main():
     split_sat = profile("stet test: A2B0 != A2B1 != A2B2", with_saturation=True)
     (HERE / "split.icc").write_bytes(split)
     (HERE / "split_sat.icc").write_bytes(split_sat)
+    split_lut8 = profile("stet test: split.icc as lut8", with_saturation=False, bits=8)
+    (HERE / "split_lut8.icc").write_bytes(split_lut8)
 
     samples = ", ".join(f"[{c}, {m}, {y}, {k}]" for c, m, y, k in SAMPLES)
     lcms = ImageCms.core.littlecms_version
@@ -248,6 +267,8 @@ def main():
         rust_table("SPLIT", split),
         "",
         rust_table("SPLIT_SAT", split_sat),
+        "",
+        rust_table("SPLIT_LUT8", split_lut8),
         "",
     ]
     (HERE / "reference.rs").write_text("\n".join(out))

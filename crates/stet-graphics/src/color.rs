@@ -126,10 +126,32 @@ impl DeviceColor {
         }
     }
 
-    /// Create from CMYK, converting through ICC profile if available.
-    /// Falls back to PLRM formula when ICC is unavailable.
+    /// Create from CMYK, converting through ICC profile if available,
+    /// relative colorimetric. Falls back to PLRM formula when ICC is
+    /// unavailable.
     pub fn from_cmyk_icc(c: f64, m: f64, y: f64, k: f64, icc: &mut crate::icc::IccCache) -> Self {
-        if let Some((r, g, b)) = icc.convert_cmyk(c, m, y, k) {
+        Self::from_cmyk_icc_with_intent(
+            c,
+            m,
+            y,
+            k,
+            crate::icc::IccRenderingIntent::RelativeColorimetric,
+            icc,
+        )
+    }
+
+    /// Create from CMYK, converting through the default CMYK profile with
+    /// `intent` if one is available. Falls back to PLRM formula when ICC is
+    /// unavailable.
+    pub fn from_cmyk_icc_with_intent(
+        c: f64,
+        m: f64,
+        y: f64,
+        k: f64,
+        intent: crate::icc::IccRenderingIntent,
+        icc: &mut crate::icc::IccCache,
+    ) -> Self {
+        if let Some((r, g, b)) = icc.convert_cmyk_with_intent(c, m, y, k, intent) {
             Self {
                 r,
                 g,

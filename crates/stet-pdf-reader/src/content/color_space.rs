@@ -574,7 +574,8 @@ pub fn components_to_device_color_icc_with_intent(
             let y = components.get(2).copied().unwrap_or(0.0);
             let k = components.get(3).copied().unwrap_or(0.0);
             if let Some(cache) = icc_cache {
-                DeviceColor::from_cmyk_icc(c, m, y, k, cache)
+                let intent = stet_graphics::icc::intent_from_byte(intent);
+                DeviceColor::from_cmyk_icc_with_intent(c, m, y, k, intent, cache)
             } else {
                 DeviceColor::from_cmyk(c, m, y, k)
             }

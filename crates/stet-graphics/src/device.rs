@@ -866,6 +866,11 @@ pub struct AxialShadingParams {
     /// paints under the gradient (e.g. green checkmarks under a green→cyan
     /// DeviceN strip survive).
     pub spot_tint_blend: bool,
+    /// Rendering intent the shading's colours were converted with (see
+    /// [`crate::rendering_intent`]; default relative colorimetric). The
+    /// renderer uses it wherever it converts the shading's CMYK again at
+    /// render time — overprint, spot-tint blending, patch subdivision.
+    pub rendering_intent: u8,
 }
 
 /// Parameters for radial gradient shading (Type 3).
@@ -898,6 +903,8 @@ pub struct RadialShadingParams {
     pub alpha_is_shape: bool,
     /// See [`AxialShadingParams::spot_tint_blend`].
     pub spot_tint_blend: bool,
+    /// See [`AxialShadingParams::rendering_intent`].
+    pub rendering_intent: u8,
 }
 
 /// A vertex in a shading triangle mesh.
@@ -942,6 +949,8 @@ pub struct MeshShadingParams {
     pub blend_mode: u8,
     /// PDF `AIS` (alpha-is-shape). Default false.
     pub alpha_is_shape: bool,
+    /// See [`AxialShadingParams::rendering_intent`].
+    pub rendering_intent: u8,
 }
 
 /// A patch in a Coons or tensor-product patch mesh.
@@ -976,6 +985,8 @@ pub struct PatchShadingParams {
     pub blend_mode: u8,
     /// PDF `AIS` (alpha-is-shape). Default false.
     pub alpha_is_shape: bool,
+    /// See [`AxialShadingParams::rendering_intent`].
+    pub rendering_intent: u8,
 }
 
 /// Parameters for a tiled pattern fill.
@@ -1170,6 +1181,7 @@ impl Default for AxialShadingParams {
             blend_mode: 0,
             alpha_is_shape: false,
             spot_tint_blend: false,
+            rendering_intent: crate::rendering_intent::RELATIVE_COLORIMETRIC,
         }
     }
 }
@@ -1196,6 +1208,7 @@ impl Default for RadialShadingParams {
             blend_mode: 0,
             alpha_is_shape: false,
             spot_tint_blend: false,
+            rendering_intent: crate::rendering_intent::RELATIVE_COLORIMETRIC,
         }
     }
 }
@@ -1214,6 +1227,7 @@ impl Default for MeshShadingParams {
             alpha: 1.0,
             blend_mode: 0,
             alpha_is_shape: false,
+            rendering_intent: crate::rendering_intent::RELATIVE_COLORIMETRIC,
         }
     }
 }
@@ -1232,6 +1246,7 @@ impl Default for PatchShadingParams {
             alpha: 1.0,
             blend_mode: 0,
             alpha_is_shape: false,
+            rendering_intent: crate::rendering_intent::RELATIVE_COLORIMETRIC,
         }
     }
 }

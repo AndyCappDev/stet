@@ -18,7 +18,10 @@
 //! `B2A` tables disagree.
 
 use stet_graphics::color::DeviceColor;
+use stet_graphics::device::ImageColorSpace;
 use stet_graphics::display_list::{DisplayElement, DisplayList};
+use stet_graphics::icc::{BpcMode, IccCache, IccCacheOptions};
+use stet_graphics::rendering_intent;
 use stet_pdf_reader::PdfDocument;
 
 // ---------------------------------------------------------------- profile
@@ -66,14 +69,18 @@ fn lut16(n_in: usize, n_out: usize, clut: impl Fn(&[f64]) -> Vec<f64>) -> Vec<u8
 
 /// A CMYK output (`prtr`) ICC v2 profile with a Lab PCS whose Perceptual
 /// `B2A0` adds CMY under the black that the colorimetric `B2A1` leaves out,
-/// so a Lab colour converts to different CMYK under the two intents.
+/// so a Lab colour converts to different CMYK under the two intents. Its
+/// perceptual `A2B0` likewise has a lighter black than `A2B1`, so a CMYK
+/// colour converts to different sRGB.
 fn cmyk_output_profile() -> Vec<u8> {
     // Legacy 16-bit Lab: a/b = 0 encodes as 0x8000.
     let ab_zero = 32768.0 / 65535.0;
-    let a2b = |coords: &[f64]| {
-        let (c, m, y, k) = (coords[0], coords[1], coords[2], coords[3]);
-        let l = (1.0 - 0.2 * (c + m + y) - 0.6 * k).max(0.0) * (65280.0 / 65535.0);
-        vec![l, ab_zero, ab_zero]
+    let a2b_with_black = |black: f64| {
+        move |coords: &[f64]| {
+            let (c, m, y, k) = (coords[0], coords[1], coords[2], coords[3]);
+            let l = (1.0 - 0.2 * (c + m + y) - black * k).max(0.0) * (65280.0 / 65535.0);
+            vec![l, ab_zero, ab_zero]
+        }
     };
     let b2a_colorimetric = |coords: &[f64]| {
         let k = 1.0 - coords[0];
@@ -91,8 +98,8 @@ fn cmyk_output_profile() -> Vec<u8> {
     }
     let tags: Vec<(&[u8; 4], Vec<u8>)> = vec![
         (b"wtpt", wtpt),
-        (b"A2B0", lut16(4, 3, a2b)),
-        (b"A2B1", lut16(4, 3, a2b)),
+        (b"A2B0", lut16(4, 3, a2b_with_black(0.4))),
+        (b"A2B1", lut16(4, 3, a2b_with_black(0.6))),
         (b"B2A0", lut16(3, 4, b2a_perceptual)),
         (b"B2A1", lut16(3, 4, b2a_colorimetric)),
     ];
@@ -132,23 +139,42 @@ const LAB: &str = "[/Lab << /WhitePoint [0.9642 1 0.8249] /Range [-128 127 -128 
 
 /// A PDF/X-style document with the generated profile as its output intent
 /// and one page per content stream. Resources: `/Lab0` colour space,
-/// `/Sh0` axial shading of a constant Lab 60 0 0, and `/P0` a shading
-/// pattern over it.
+/// `/Sh0` axial shading of a constant Lab 60 0 0, `/P0` a shading pattern
+/// over it, `/Sh1` an axial shading of a constant DeviceCMYK 0 0 0 1,
+/// `/Im0` a 1×1 DeviceCMYK image of 0 0 0 1 with an explicit `/Mask`, and
+/// `/OP` an ExtGState turning overprint on.
 fn build_pdf(pages: &[&str]) -> Vec<u8> {
+    build_pdf_with(pages, true)
+}
+
+/// [`build_pdf`], with or without the output intent. Without it the profile
+/// is still embedded but unused; give it to the reader as a source profile.
+fn build_pdf_with(pages: &[&str], output_intent: bool) -> Vec<u8> {
     let profile = cmyk_output_profile();
     let shading = format!(
         "<< /ShadingType 2 /ColorSpace {LAB} /Coords [0 0 10 0] /Extend [true true] \
          /Function << /FunctionType 2 /Domain [0 1] /C0 [60 0 0] /C1 [60 0 0] /N 1 >> >>"
     );
-    let first_page = 7;
+    let cmyk_shading = "<< /ShadingType 2 /ColorSpace /DeviceCMYK /Coords [0 0 10 0] \
+         /Extend [true true] /Function << /FunctionType 2 /Domain [0 1] \
+         /C0 [0 0 0 1] /C1 [0 0 0 1] /N 1 >> >>";
+    let image = "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceCMYK \
+         /BitsPerComponent 8 /Mask 10 0 R /Filter /ASCIIHexDecode /Length 9 >>\nstream\n000000FF>\nendstream";
+    let mask = "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ImageMask true \
+         /Filter /ASCIIHexDecode /Length 3 >>\nstream\n00>\nendstream";
+    let first_page = 11;
     let kids: Vec<String> = (0..pages.len())
         .map(|i| format!("{} 0 R", first_page + 2 * i))
         .collect();
 
-    let mut objects: Vec<Vec<u8>> = vec![
+    let catalog: &[u8] = if output_intent {
         b"<< /Type /Catalog /Pages 2 0 R /OutputIntents [<< /Type /OutputIntent \
           /S /GTS_PDFX /OutputConditionIdentifier (Test) /DestOutputProfile 3 0 R >>] >>"
-            .to_vec(),
+    } else {
+        b"<< /Type /Catalog /Pages 2 0 R >>"
+    };
+    let mut objects: Vec<Vec<u8>> = vec![
+        catalog.to_vec(),
         format!(
             "<< /Type /Pages /Kids [{}] /Count {} >>",
             kids.join(" "),
@@ -162,11 +188,17 @@ fn build_pdf(pages: &[&str]) -> Vec<u8> {
         ]
         .concat(),
         format!(
-            "<< /ColorSpace << /Lab0 {LAB} >> /Pattern << /P0 5 0 R >> /Shading << /Sh0 6 0 R >> >>"
+            "<< /ColorSpace << /Lab0 {LAB} >> /Pattern << /P0 5 0 R >> \
+             /Shading << /Sh0 6 0 R /Sh1 7 0 R >> /XObject << /Im0 9 0 R >> \
+             /ExtGState << /OP << /OP true /op true /OPM 1 >> >> >>"
         )
         .into_bytes(),
         b"<< /Type /Pattern /PatternType 2 /Shading 6 0 R >>".to_vec(),
         shading.into_bytes(),
+        cmyk_shading.as_bytes().to_vec(),
+        b"null".to_vec(),
+        image.as_bytes().to_vec(),
+        mask.as_bytes().to_vec(),
     ];
     for (i, content) in pages.iter().enumerate() {
         objects.push(
@@ -210,6 +242,41 @@ fn build_pdf(pages: &[&str]) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------- helpers
+
+/// Where the generated CMYK profile comes from.
+#[derive(Clone, Copy)]
+enum Cmyk {
+    /// The document's output intent: a PDF/X document.
+    OutputIntent,
+    /// A CMYK source profile given to the reader (`--cmyk-profile`); the
+    /// document has no output intent.
+    Source,
+}
+
+/// A document of `pages` with the generated profile used as `cmyk`.
+fn document(pages: &[&str], cmyk: Cmyk) -> Vec<u8> {
+    build_pdf_with(pages, matches!(cmyk, Cmyk::OutputIntent))
+}
+
+fn open(pdf: &[u8], cmyk: Cmyk) -> PdfDocument<'_> {
+    match cmyk {
+        Cmyk::OutputIntent => {
+            let mut doc = PdfDocument::from_bytes(pdf).unwrap();
+            assert!(
+                doc.apply_output_intent_as_default_cmyk(),
+                "the generated output profile must register"
+            );
+            doc
+        }
+        Cmyk::Source => {
+            let cache = IccCache::new_with_options(IccCacheOptions {
+                bpc_mode: BpcMode::On,
+                source_cmyk_profile: Some(cmyk_output_profile()),
+            });
+            PdfDocument::from_bytes_with_icc(pdf, cache).unwrap()
+        }
+    }
+}
 
 /// The parts of a colour the intent can change.
 type Key = (u64, u64, u64, Option<(u64, u64, u64, u64)>);
@@ -320,4 +387,250 @@ fn shadings_use_the_paint_time_intent() {
     assert_eq!(c[0], c[1], "a shading pattern follows a later `ri`");
     assert_eq!(c[3], c[1], "`sh` converts with the current intent");
     assert_eq!(c[4], c[2], "with no `ri`, RelativeColorimetric applies");
+}
+
+/// [`painted`] for a document using the generated profile as `cmyk`.
+fn painted_with(pages: &[&str], cmyk: Cmyk) -> Vec<Key> {
+    let pdf = document(pages, cmyk);
+    let doc = open(&pdf, cmyk);
+    (0..pages.len())
+        .map(|i| {
+            let list = doc.render_page(i, 72.0).unwrap();
+            first_color(&list).unwrap_or_else(|| panic!("page {i} painted nothing"))
+        })
+        .collect()
+}
+
+/// With a CMYK *source* profile (no output intent), DeviceCMYK converts with
+/// the intent in effect at paint time.
+#[test]
+fn device_cmyk_uses_the_paint_time_intent() {
+    let c = painted_with(
+        &[
+            // 0: colour, then intent.
+            "0 0 0 1 k /Perceptual ri 0 0 10 10 re f",
+            // 1: intent, then colour.
+            "/Perceptual ri 0 0 0 1 k 0 0 10 10 re f",
+            // 2: no intent: relative colorimetric.
+            "0 0 0 1 k 0 0 10 10 re f",
+            // 3: Q undoes the intent, colour included.
+            "0 0 0 1 k q /Perceptual ri Q 0 0 10 10 re f",
+        ],
+        Cmyk::Source,
+    );
+    assert_ne!(
+        c[1], c[2],
+        "the generated profile must make the two intents convert CMYK differently"
+    );
+    assert_eq!(c[0], c[1], "the intent in effect at paint time applies");
+    assert_eq!(c[3], c[2], "Q restores the colour along with the intent");
+}
+
+/// In a PDF/X document DeviceCMYK is the output condition: the intent
+/// governs converting into it, not showing it, so every intent shows the
+/// same. GWG 22.1 depends on this — its DeviceCMYK X, painted under
+/// Perceptual, must match a CMYK blend result of the same values.
+#[test]
+fn device_cmyk_in_the_output_intent_ignores_the_intent() {
+    let c = painted_with(
+        &[
+            "/Perceptual ri 0 0 0 1 k 0 0 10 10 re f",
+            "/Saturation ri 0 0 0 1 k 0 0 10 10 re f",
+            "0 0 0 1 k 0 0 10 10 re f",
+        ],
+        Cmyk::OutputIntent,
+    );
+    assert_eq!(c[0], c[2]);
+    assert_eq!(c[1], c[2]);
+}
+
+#[test]
+fn device_cmyk_stroke_uses_the_paint_time_intent() {
+    let stroke = |content: &str| {
+        let pdf = document(&[content], Cmyk::Source);
+        let doc = open(&pdf, Cmyk::Source);
+        let list = doc.render_page(0, 72.0).unwrap();
+        list.elements()
+            .iter()
+            .find_map(|e| match e {
+                DisplayElement::Stroke { params, .. } => Some(key(&params.color)),
+                _ => None,
+            })
+            .expect("a stroke")
+    };
+    let after = stroke("0 0 0 1 K /Perceptual ri 0 0 m 10 10 l S");
+    assert_eq!(after, stroke("/Perceptual ri 0 0 0 1 K 0 0 m 10 10 l S"));
+    assert_ne!(after, stroke("0 0 0 1 K 0 0 m 10 10 l S"));
+}
+
+/// A DeviceCMYK shading converts its stops with the current intent and
+/// records it, for the renderer's own conversions.
+#[test]
+fn device_cmyk_shadings_use_and_record_the_intent() {
+    let shading = |content: &str| {
+        let pdf = document(&[content], Cmyk::Source);
+        let doc = open(&pdf, Cmyk::Source);
+        let list = doc.render_page(0, 72.0).unwrap();
+        list.elements()
+            .iter()
+            .find_map(|e| match e {
+                DisplayElement::AxialShading { params } => {
+                    Some((key(&params.color_stops[0].color), params.rendering_intent))
+                }
+                _ => None,
+            })
+            .expect("an axial shading")
+    };
+    let (perceptual, intent) = shading("/Perceptual ri /Sh1 sh");
+    assert_eq!(intent, rendering_intent::PERCEPTUAL);
+    let (relcol, intent) = shading("/Sh1 sh");
+    assert_eq!(intent, rendering_intent::RELATIVE_COLORIMETRIC);
+    assert_ne!(perceptual, relcol);
+}
+
+/// The first image's `rendering_intent`, and its first pixel when the
+/// reader converted it already.
+fn first_image(content: &str, cmyk: Cmyk) -> (u8, Option<[u8; 3]>) {
+    let pdf = document(&[content], cmyk);
+    let doc = open(&pdf, cmyk);
+    let list = doc.render_page(0, 72.0).unwrap();
+    list.elements()
+        .iter()
+        .find_map(|e| match e {
+            DisplayElement::Image {
+                sample_data,
+                params,
+                ..
+            } => Some((
+                params.rendering_intent,
+                matches!(params.color_space, ImageColorSpace::PreconvertedRGBA)
+                    .then(|| [sample_data[0], sample_data[1], sample_data[2]]),
+            )),
+            _ => None,
+        })
+        .expect("an image")
+}
+
+/// Inline images take the gstate intent, or their own `/Intent`, as image
+/// XObjects do.
+#[test]
+fn inline_images_carry_their_intent() {
+    let inline = |pre: &str, dict: &str| {
+        first_image(
+            &format!(
+                "{pre} q 10 0 0 10 0 0 cm BI /W 1 /H 1 /CS /DeviceCMYK /BPC 8 /F /AHx {dict} \
+                 ID 000000FF> EI Q"
+            ),
+            Cmyk::OutputIntent,
+        )
+        .0
+    };
+    assert_eq!(inline("", ""), rendering_intent::RELATIVE_COLORIMETRIC);
+    assert_eq!(inline("/Perceptual ri", ""), rendering_intent::PERCEPTUAL);
+    assert_eq!(
+        inline("/Perceptual ri", "/Intent /Saturation"),
+        rendering_intent::SATURATION
+    );
+}
+
+/// The first fill's colour as sRGB bytes.
+fn fill_rgb(content: &str, cmyk: Cmyk) -> [u8; 3] {
+    let pdf = document(&[content], cmyk);
+    let doc = open(&pdf, cmyk);
+    let list = doc.render_page(0, 72.0).unwrap();
+    let c = list
+        .elements()
+        .iter()
+        .find_map(|e| match e {
+            DisplayElement::Fill { params, .. } => Some(params.color.clone()),
+            _ => None,
+        })
+        .expect("a fill");
+    [c.r, c.g, c.b].map(|v| (v * 255.0).round() as u8)
+}
+
+fn assert_close(got: [u8; 3], want: [u8; 3], what: &str) {
+    for ch in 0..3 {
+        assert!(
+            got[ch].abs_diff(want[ch]) <= 1,
+            "{what}: {got:?}, want {want:?}"
+        );
+    }
+}
+
+/// An image with an explicit `/Mask` is converted by the reader, and must
+/// show the colour a DeviceCMYK fill of the same CMYK does, under either
+/// intent and either kind of profile.
+#[test]
+fn masked_images_match_device_cmyk_fills() {
+    for cmyk in [Cmyk::Source, Cmyk::OutputIntent] {
+        for ri in ["/Perceptual ri", ""] {
+            let (_, pixel) = first_image(&format!("{ri} q 10 0 0 10 0 0 cm /Im0 Do Q"), cmyk);
+            let pixel = pixel.expect("a masked image is converted by the reader");
+            let fill = fill_rgb(&format!("{ri} 0 0 0 1 k 0 0 10 10 re f"), cmyk);
+            assert_close(pixel, fill, &format!("{ri:?}: masked image vs fill"));
+        }
+    }
+    // And with a source profile, the two intents differ.
+    let (_, perceptual) = first_image("/Perceptual ri q 10 0 0 10 0 0 cm /Im0 Do Q", Cmyk::Source);
+    let (_, relcol) = first_image("q 10 0 0 10 0 0 cm /Im0 Do Q", Cmyk::Source);
+    assert_ne!(perceptual, relcol);
+}
+
+/// The centre pixel of page 1 rendered at 72 dpi.
+#[cfg(feature = "render")]
+fn centre(content: &str, cmyk: Cmyk) -> [u8; 3] {
+    let pdf = document(&[content], cmyk);
+    let doc = open(&pdf, cmyk);
+    let (rgba, w, _) = doc.render_page_to_rgba(0, 72.0).unwrap();
+    let at = (10 * w as usize + 5) * 4;
+    [rgba[at], rgba[at + 1], rgba[at + 2]]
+}
+
+/// The renderer converts DeviceCMYK image samples itself, with the image's
+/// intent: an image of 0 0 0 1 renders the colour a DeviceCMYK fill of
+/// 0 0 0 1 does under the same intent.
+#[cfg(feature = "render")]
+#[test]
+fn rendered_device_cmyk_images_match_fills() {
+    let image = |ri: &str, cmyk| {
+        centre(
+            &format!(
+                "{ri} q 20 0 0 20 0 0 cm BI /W 1 /H 1 /CS /DeviceCMYK /BPC 8 /F /AHx \
+                 ID 000000FF> EI Q"
+            ),
+            cmyk,
+        )
+    };
+    let fill = |ri: &str, cmyk| centre(&format!("{ri} 0 0 0 1 k 0 0 20 20 re f"), cmyk);
+    for cmyk in [Cmyk::Source, Cmyk::OutputIntent] {
+        for ri in ["/Perceptual ri", ""] {
+            assert_close(
+                image(ri, cmyk),
+                fill(ri, cmyk),
+                &format!("{ri:?}: image vs fill"),
+            );
+        }
+    }
+    assert_ne!(
+        image("/Perceptual ri", Cmyk::Source),
+        image("", Cmyk::Source),
+        "with a source profile the two intents must render differently"
+    );
+}
+
+/// Overprint composites CMYK and converts the result again, with the
+/// painting element's intent.
+#[cfg(feature = "render")]
+#[test]
+fn overprint_uses_the_intent() {
+    let cmyk = Cmyk::Source;
+    // K over K, overprinted: the composite is 0 0 0 1 again.
+    let overprinted = centre(
+        "/Perceptual ri 0 0 0 1 k 0 0 20 20 re f /OP gs 0 0 0 1 k 0 0 20 20 re f",
+        cmyk,
+    );
+    let plain = centre("/Perceptual ri 0 0 0 1 k 0 0 20 20 re f", cmyk);
+    assert_ne!(plain, centre("0 0 0 1 k 0 0 20 20 re f", cmyk));
+    assert_close(overprinted, plain, "overprinted vs plain");
 }

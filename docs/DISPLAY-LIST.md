@@ -336,6 +336,12 @@ DeviceRGB, DeviceCMYK, or ICCBased with embedded profile data). Gradient
 color stops are pre-sampled from PostScript functions. Mesh and patch data
 includes per-vertex colors and coordinates in device space.
 
+Each also carries `rendering_intent` (see "Rendering intent" below), the
+intent its colours were converted with. A renderer that converts a
+shading's CMYK again at render time — for overprint, spot-tint blending
+or patch subdivision — should use it, so those pixels match the
+pre-converted ones.
+
 ### PatternFill
 
 ```rust
@@ -561,7 +567,9 @@ at the time it was created:
   PostScript and PDF. Use the constants and the `from_name` / `name`
   helpers in `stet_graphics::rendering_intent` rather than bare numbers,
   and `stet_graphics::icc::intent_from_byte` to decode for ICC
-  conversion. (Before 0.8.2 the PDF reader wrote its own numbering here —
+  conversion. CMYK sources honour it: `IccCache` reads the profile's
+  `A2B1` for relative colorimetric, `A2B0` for perceptual and `A2B2` for
+  saturation. (Before 0.8.2 the PDF reader wrote its own numbering here —
   0=Perceptual, 1=RelativeColorimetric — so display lists built from PDF
   input disagreed with this table.)
 
