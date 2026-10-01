@@ -564,12 +564,14 @@ at the time it was created:
   applies, as a `u8` with one encoding across every param struct:
   0=RelativeColorimetric, 1=AbsoluteColorimetric, 2=Perceptual,
   3=Saturation. RelativeColorimetric is the initial intent in both
-  PostScript and PDF. Use the constants and the `from_name` / `name`
-  helpers in `stet_graphics::rendering_intent` rather than bare numbers,
-  and `stet_graphics::icc::intent_from_byte` to decode for ICC
-  conversion. CMYK sources honour it: `IccCache` reads the profile's
-  `A2B1` for relative colorimetric, `A2B0` for perceptual and `A2B2` for
-  saturation. (Before 0.8.2 the PDF reader wrote its own numbering here —
+  PostScript and PDF. Use the constants, the `RenderingIntent` enum and
+  the `from_name` / `name` helpers in `stet_graphics::rendering_intent`
+  rather than bare numbers, and `stet_graphics::icc::intent_from_byte` to
+  decode for ICC conversion. CMYK sources honour it: `IccCache` reads the
+  profile's `A2B1` for relative colorimetric, `A2B0` for perceptual and
+  `A2B2` for saturation. The exception is a PDF/X output intent's CMYK,
+  which is the output rather than a source: it is always shown relative
+  colorimetric, and the intent governs conversions into it. (Before 0.8.2 the PDF reader wrote its own numbering here —
   0=Perceptual, 1=RelativeColorimetric — so display lists built from PDF
   input disagreed with this table.)
 

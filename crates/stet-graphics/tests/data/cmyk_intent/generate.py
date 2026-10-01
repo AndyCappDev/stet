@@ -13,6 +13,8 @@ script runs it once and records what it produces. It writes, next to itself:
   split_sat.icc  The same, plus an A2B2 (saturation) table unlike both.
   split_lut8.icc split.icc's tables as `lut8Type`, which stet's hand-rolled
                  sampler does not read, so stet bakes it through moxcms.
+  same.icc       A2B0 a copy of A2B1, as in FOGRA39L and most profiles a
+                 system installs: the intents should barely differ.
   reference.rs   lcms2's sRGB output for each profile, intent and BPC setting,
                  included by `tests/cmyk_intent.rs`.
 
@@ -148,11 +150,11 @@ def desc_tag(text):
     )
 
 
-def profile(description, with_saturation, bits=16):
+def profile(description, with_saturation, bits=16, perceptual=A2B0):
     tags = [
         (b"desc", desc_tag(description)),
         (b"wtpt", xyz_tag(0.9642, 1.0, 0.8249)),
-        (b"A2B0", A2B0(bits)),
+        (b"A2B0", perceptual(bits)),
         (b"A2B1", A2B1(bits)),
         (b"B2A0", B2A(bits)),
         (b"B2A1", B2A(bits)),
@@ -253,6 +255,8 @@ def main():
     (HERE / "split_sat.icc").write_bytes(split_sat)
     split_lut8 = profile("stet test: split.icc as lut8", with_saturation=False, bits=8)
     (HERE / "split_lut8.icc").write_bytes(split_lut8)
+    same = profile("stet test: A2B0 == A2B1", with_saturation=False, perceptual=A2B1)
+    (HERE / "same.icc").write_bytes(same)
 
     samples = ", ".join(f"[{c}, {m}, {y}, {k}]" for c, m, y, k in SAMPLES)
     lcms = ImageCms.core.littlecms_version
@@ -269,6 +273,8 @@ def main():
         rust_table("SPLIT_SAT", split_sat),
         "",
         rust_table("SPLIT_LUT8", split_lut8),
+        "",
+        rust_table("SAME", same),
         "",
     ]
     (HERE / "reference.rs").write_text("\n".join(out))

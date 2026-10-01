@@ -5,10 +5,12 @@
 //! CMYK → sRGB conversion against lcms2, the colour engine inside
 //! Ghostscript.
 //!
-//! `data/cmyk_intent/` holds two generated CMYK profiles whose perceptual,
-//! colorimetric and (in one) saturation tables differ, and lcms2's output for
-//! each intent with black-point compensation off and on. `generate.py` there
-//! makes all three files; re-run it rather than editing them.
+//! `data/cmyk_intent/` holds generated CMYK profiles — two whose perceptual,
+//! colorimetric and (in one) saturation tables differ, the first again as
+//! `lut8Type`, and one whose perceptual table copies its colorimetric one —
+//! and lcms2's output for each intent with black-point compensation off and
+//! on. `generate.py` there makes every file; re-run it rather than editing
+//! them.
 
 use stet_graphics::icc::{BpcMode, IccCache, IccCacheOptions, IccRenderingIntent};
 
@@ -19,6 +21,7 @@ mod reference {
 const SPLIT: &[u8] = include_bytes!("data/cmyk_intent/split.icc");
 const SPLIT_SAT: &[u8] = include_bytes!("data/cmyk_intent/split_sat.icc");
 const SPLIT_LUT8: &[u8] = include_bytes!("data/cmyk_intent/split_lut8.icc");
+const SAME: &[u8] = include_bytes!("data/cmyk_intent/same.icc");
 
 /// Largest per-channel difference allowed from lcms2. stet bakes a 17⁴ table
 /// and interpolates it, and its Lab → sRGB arithmetic is its own.
@@ -92,6 +95,7 @@ fn every_intent_matches_lcms() {
                 intent,
                 bpc,
             );
+            assert_matches_lcms("same.icc", SAME, &reference::SAME, intent, bpc);
         }
     }
 }
@@ -238,6 +242,33 @@ fn the_output_intent_is_shown_with_one_table() {
             IccRenderingIntent::Perceptual
         ),
         source.convert_cmyk_readonly_with_intent(0.0, 0.0, 0.0, 1.0, relcol),
+    );
+}
+
+/// A profile whose perceptual table is a copy of its colorimetric one, as
+/// in FOGRA39L and most profiles a system installs, shows perceptual
+/// exactly as relative colorimetric with black-point compensation (the
+/// default), as lcms2 does: honouring the intent moves nothing there.
+#[test]
+fn identical_tables_show_perceptual_as_relative_colorimetric() {
+    let bpc_on = 1;
+    assert_eq!(
+        reference::SAME[0][bpc_on],
+        reference::SAME[1][bpc_on],
+        "lcms2 itself"
+    );
+    let cache = cache(SAME);
+    let hash = *cache.default_cmyk_hash().unwrap();
+    let samples: Vec<u8> = reference::SAMPLES.iter().flatten().copied().collect();
+    let n = reference::SAMPLES.len();
+    let image = |intent| {
+        cache
+            .convert_image_8bit_with_intent(&hash, &samples, n, intent)
+            .unwrap()
+    };
+    assert_eq!(
+        image(IccRenderingIntent::Perceptual),
+        image(IccRenderingIntent::RelativeColorimetric)
     );
 }
 
