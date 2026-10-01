@@ -76,6 +76,16 @@ pub enum PdfError {
     #[error("PDF requires a password")]
     PasswordRequired,
 
+    /// The [`PageArea`](crate::PageArea) chosen with
+    /// [`PdfDocument::set_page_area`](crate::PdfDocument::set_page_area)
+    /// does not overlap the page's MediaBox, or is not a finite rectangle,
+    /// so there is nothing to render.
+    #[error("page index {page}: the requested page area does not overlap the MediaBox")]
+    EmptyPageArea {
+        /// The 0-based page index.
+        page: usize,
+    },
+
     #[error("{0}")]
     Other(String),
 }

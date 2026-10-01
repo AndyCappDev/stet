@@ -153,6 +153,9 @@ Common options:
   --width <PX>               Override page width (PDF input only; not
                              combinable with --dpi or --page)
   --height <PX>              Override page height (same restrictions)
+  --box <BOX>                Render one area of each PDF page as the page:
+                             media, crop, bleed, trim, art, or llx,lly,urx,ury
+                             in PDF points (PDF input; --device png or pdf)
   --threads <N>              Worker-thread count (default: 75% of cores in
                              viewer mode, 8 otherwise)
   --password <PW>            Password for encrypted PDF input

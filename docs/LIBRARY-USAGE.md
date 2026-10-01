@@ -174,6 +174,27 @@ Full layer reference: [`PDF-LAYERS.md`](PDF-LAYERS.md).
 Runnable example: `cargo run --example render_pdf_layers -- some.pdf`
 (see [`crates/stet/examples/render_pdf_layers.rs`](../crates/stet/examples/render_pdf_layers.rs)).
 
+To render one area of each page instead of its crop box — the box a
+layout placed the PDF by, or one region of a large artboard — set a
+`PageArea`. The area then *is* the page: `page_size` reports its size,
+`/Rotate` applies to it, and only its pixels are rasterised.
+
+```rust
+use stet_pdf_reader::{PageArea, PdfDocument};
+
+let mut doc = PdfDocument::from_bytes(&pdf_data)?;
+doc.set_page_area(PageArea::TrimBox); // or MediaBox, BleedBox, ArtBox
+let (rgba, w, h) = doc.render_page_to_rgba(0, 300.0)?;
+
+// A region in the page's unrotated user space, in points.
+doc.set_page_area(PageArea::Rect([100.0, 200.0, 591.0, 1438.0]));
+let (rgba, w, h) = doc.render_page_to_rgba(0, 300.0)?;
+```
+
+A box the page does not declare is its crop box, and every area is
+clipped to the MediaBox (not the crop box, so a bleed renders). The CLI
+equivalent is `--box`.
+
 ## Text Extraction
 
 Both the PostScript interpreter and the PDF reader can record the text a

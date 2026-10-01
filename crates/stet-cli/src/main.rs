@@ -13,7 +13,7 @@ use stet_engine::eval::{parse_and_exec, parse_and_exec_file};
 use stet_graphics::icc::{BpcMode, IccCacheOptions};
 use stet_ops::build_system_dict;
 use stet_pdf::PdfDevice;
-use stet_pdf_reader::PdfDocument;
+use stet_pdf_reader::{PageArea, PdfDocument};
 use stet_render::SkiaDevice;
 
 /// CLI-level ICC configuration: aggregates `--no-icc`, `--output-profile`,
@@ -111,6 +111,7 @@ fn main() {
     let mut no_icc = false;
     let mut no_aa = false;
     let mut transparent = false;
+    let mut page_area: Option<PageArea> = None;
     let mut output_profile_path: Option<String> = None;
     let mut cmyk_profile_path: Option<String> = None;
     let mut bpc_mode = BpcMode::Auto;
@@ -216,6 +217,19 @@ fn main() {
                 transparent = true;
                 i += 1;
                 continue;
+            }
+            "--box" => {
+                if i + 1 < args.len() {
+                    page_area = Some(parse_box_spec(&args[i + 1]).unwrap_or_else(|e| {
+                        eprintln!("Error: invalid --box value '{}': {}", args[i + 1], e);
+                        std::process::exit(1);
+                    }));
+                    i += 2;
+                    continue;
+                } else {
+                    eprintln!("Error: --box requires a box name or llx,lly,urx,ury");
+                    std::process::exit(1);
+                }
             }
             "--output-profile" => {
                 if i + 1 < args.len() {
@@ -518,6 +532,21 @@ writes all pages to one file",
         std::process::exit(1);
     }
 
+    // `--box` picks an area of a PDF page; PostScript has no page boxes.
+    if page_area.is_some() {
+        if !matches!(device.as_str(), "png" | "viewport-png" | "pdf") {
+            eprintln!(
+                "Error: --box is only supported for --device png and --device pdf (got '{}')",
+                device
+            );
+            std::process::exit(1);
+        }
+        if file_args.is_empty() || !file_args.iter().all(|f| is_pdf_file(f)) {
+            eprintln!("Error: --box applies to PDF input only");
+            std::process::exit(1);
+        }
+    }
+
     match device.as_str() {
         "png" => {
             run_png_mode(
@@ -526,6 +555,7 @@ writes all pages to one file",
                 &icc_cfg,
                 no_aa,
                 transparent,
+                page_area,
                 page_filter,
                 false,
                 password.as_deref(),
@@ -547,6 +577,7 @@ writes all pages to one file",
                 &icc_cfg,
                 no_aa,
                 false,
+                page_area,
                 page_filter,
                 true,
                 password.as_deref(),
@@ -578,6 +609,7 @@ writes all pages to one file",
                     &page_filter,
                     password.as_deref(),
                     output_template.as_ref(),
+                    page_area,
                 );
             } else {
                 // PS input → PDF output. --password does not apply here.
@@ -643,6 +675,7 @@ fn run_png_mode(
     icc_cfg: &IccCliConfig,
     no_aa: bool,
     transparent: bool,
+    page_area: Option<PageArea>,
     page_filter: Option<std::collections::HashSet<i32>>,
     use_viewport: bool,
     password: Option<&str>,
@@ -662,6 +695,7 @@ fn run_png_mode(
             &page_filter,
             no_aa,
             transparent,
+            page_area,
             use_viewport,
             icc_cfg,
             password,
@@ -1257,6 +1291,11 @@ Common options:
                             be combined with --dpi.
     --height <PX>           Override page height (PDF input only). Cannot
                             be combined with --dpi.
+    --box <BOX>             Render one area of each PDF page as the page:
+                            media, crop, bleed, trim or art, or a rectangle
+                            llx,lly,urx,ury in PDF points in the page's
+                            unrotated space. A box the page does not declare
+                            is its crop box. PDF input; --device png or pdf.
     --threads <N>           Parallel band-rendering thread count. Defaults to
                             75% of cores in viewer mode and 8 otherwise, where
                             sequential PNG writing limits the benefit of more.
@@ -1961,6 +2000,32 @@ const NAMED_PAGE_SIZES: &[(&str, f64, f64)] = &[
     ("b5", 499.0, 709.0),
 ];
 
+/// Parse a `--box` value: a page box name (`media`, `crop`, `bleed`, `trim`,
+/// `art`, any case) or four comma-separated numbers `llx,lly,urx,ury` in PDF
+/// points.
+fn parse_box_spec(spec: &str) -> Result<PageArea, String> {
+    let spec = spec.trim();
+    match spec.to_ascii_lowercase().as_str() {
+        "media" => return Ok(PageArea::MediaBox),
+        "crop" => return Ok(PageArea::CropBox),
+        "bleed" => return Ok(PageArea::BleedBox),
+        "trim" => return Ok(PageArea::TrimBox),
+        "art" => return Ok(PageArea::ArtBox),
+        _ => {}
+    }
+    let numbers = spec
+        .split(',')
+        .map(|n| n.trim().parse::<f64>().ok().filter(|v| v.is_finite()))
+        .collect::<Option<Vec<f64>>>();
+    match numbers.as_deref() {
+        Some(&[llx, lly, urx, ury]) if urx != llx && ury != lly => {
+            Ok(PageArea::Rect([llx, lly, urx, ury]))
+        }
+        Some(&[_, _, _, _]) => Err("the rectangle has no area".into()),
+        _ => Err("expected media, crop, bleed, trim, art, or llx,lly,urx,ury".into()),
+    }
+}
+
 /// Parse a `--page` value: a named size or `WIDTHxHEIGHT` in points.
 ///
 /// Accepts an optional `landscape`/`portrait` suffix separated by `-` or `,`
@@ -2395,6 +2460,7 @@ fn run_pdf_input_png(
     page_filter: &Option<std::collections::HashSet<i32>>,
     no_aa: bool,
     transparent: bool,
+    page_area: Option<PageArea>,
     use_viewport: bool,
     icc_cfg: &IccCliConfig,
     password: Option<&str>,
@@ -2426,6 +2492,9 @@ fn run_pdf_input_png(
             }
             std::process::exit(1);
         });
+        if let Some(area) = page_area {
+            doc.set_page_area(area);
+        }
         // Opt-in: when `--use-output-intent` is set and the user didn't pin a
         // source CMYK profile via `--cmyk-profile`/`--output-profile`, prefer
         // the PDF's own `/OutputIntents[].DestOutputProfile`. Gated because
@@ -2534,6 +2603,7 @@ fn run_pdf_input_pdf(
     page_filter: &Option<std::collections::HashSet<i32>>,
     password: Option<&str>,
     output_template: Option<&stet_core::output_template::OutputTemplate>,
+    page_area: Option<PageArea>,
 ) {
     use stet_core::device::OutputDevice;
 
@@ -2561,6 +2631,9 @@ fn run_pdf_input_pdf(
             }
             std::process::exit(1);
         });
+        if let Some(area) = page_area {
+            doc.set_page_area(area);
+        }
         if icc_cfg.use_output_intent
             && icc_cfg.source_cmyk_path().is_none()
             && doc.apply_output_intent_as_default_cmyk()
@@ -2852,7 +2925,7 @@ fn run_text_subcommand(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_fit_dims, parse_page_size};
+    use super::{PageArea, compute_fit_dims, parse_box_spec, parse_page_size};
 
     const LETTER_W: f64 = 612.0;
     const LETTER_H: f64 = 792.0;
@@ -2922,6 +2995,25 @@ mod tests {
         assert_eq!(parse_page_size(" 620 x 1000 "), Ok((620.0, 1000.0)));
         // Fractional points are legal — PostScript units are reals.
         assert_eq!(parse_page_size("100.5x200.25"), Ok((100.5, 200.25)));
+    }
+
+    #[test]
+    fn box_spec_names_and_rectangles() {
+        assert_eq!(parse_box_spec("art"), Ok(PageArea::ArtBox));
+        assert_eq!(parse_box_spec("TRIM"), Ok(PageArea::TrimBox));
+        assert_eq!(parse_box_spec(" media "), Ok(PageArea::MediaBox));
+        assert_eq!(parse_box_spec("crop"), Ok(PageArea::CropBox));
+        assert_eq!(parse_box_spec("bleed"), Ok(PageArea::BleedBox));
+        assert_eq!(
+            parse_box_spec("10, 20.5,300,-40"),
+            Ok(PageArea::Rect([10.0, 20.5, 300.0, -40.0]))
+        );
+        assert!(parse_box_spec("artbox").is_err());
+        assert!(parse_box_spec("1,2,3").is_err());
+        assert!(parse_box_spec("1,2,3,4,5").is_err());
+        assert!(parse_box_spec("0,0,0,100").is_err());
+        assert!(parse_box_spec("0,0,nan,100").is_err());
+        assert!(parse_box_spec("0,0,inf,100").is_err());
     }
 
     #[test]

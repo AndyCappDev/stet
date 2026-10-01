@@ -190,6 +190,7 @@ zoom presets, minimap navigation, and drag-and-drop.
 | `--pages <RANGE>` | Page filter: `1`, `1-5`, `2,4,6` |
 | `--page <SIZE>` | Page size for PostScript/EPS input: a named size (`letter`, `legal`, `tabloid`, `ledger`, `executive`, `a0`–`a6`, `b4`, `b5`) or `WIDTHxHEIGHT` in points, e.g. `620x1000`. Add `-landscape` / `-portrait` to orient a named size. See [Page size](#page-size). |
 | `--width <PX>` / `--height <PX>` | Scale PDF output to a pixel size (PDF input only; not combinable with `--dpi` or `--page`) |
+| `--box <BOX>` | Render one area of each PDF page as the page: `media`, `crop`, `bleed`, `trim` or `art`, or `llx,lly,urx,ury` in PDF points (PDF input; `--device png` or `pdf`) |
 | `--threads <N>` | Worker-thread count (default: 75 % of cores in viewer mode, 8 otherwise) |
 | `--no-icc` | Disable ICC color management entirely |
 | `--no-aa` | Disable anti-aliasing |

@@ -14,37 +14,124 @@
 //! `parse_page_boxes` reads PageInfo for the inheritable fields and
 //! re-resolves the page dict for the page-local entries.
 
+use crate::error::PdfError;
 use crate::objects::PdfObj;
-use crate::page_tree::PageInfo;
+use crate::page_tree::{PageInfo, clamp_box_to_media, parse_rect};
 use crate::resolver::Resolver;
+
+/// Which area of a PDF page is rendered as the page.
+///
+/// Set with [`PdfDocument::set_page_area`]; [`PdfDocument::page_size`] and
+/// [`PdfDocument::render_page`] (and everything built on them) then treat
+/// that area as the page: its size is the page size, its lower-left corner
+/// the origin, and `/Rotate` applies to it as it does to the crop box. For
+/// placed artwork, render the box the layout cropped it to.
+///
+/// Resolution follows PDF 32000-1: an absent BleedBox, TrimBox or ArtBox is
+/// the crop box (Table 30), and every area, [`Rect`](Self::Rect) included,
+/// is reduced to its intersection with the MediaBox (§14.11.2). The crop
+/// box is not a limit, so a bleed area outside it renders.
+///
+/// Marked `#[non_exhaustive]`: other areas may be added, so `match` on it
+/// with a wildcard arm.
+///
+/// [`PdfDocument::set_page_area`]: crate::PdfDocument::set_page_area
+/// [`PdfDocument::page_size`]: crate::PdfDocument::page_size
+/// [`PdfDocument::render_page`]: crate::PdfDocument::render_page
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[non_exhaustive]
+pub enum PageArea {
+    /// The crop box: what a viewer shows. The default.
+    #[default]
+    CropBox,
+    /// The media box: the whole physical medium.
+    MediaBox,
+    /// The bleed box: the crop box when the page declares none.
+    BleedBox,
+    /// The trim box: the finished page after trimming; the crop box when
+    /// the page declares none.
+    TrimBox,
+    /// The art box: the extent of the page's meaningful content; the crop
+    /// box when the page declares none.
+    ArtBox,
+    /// A rectangle `[llx, lly, urx, ury]` in the page's default user space:
+    /// unrotated, in points, the space `/MediaBox` and `/ArtBox` are given
+    /// in. Corners may come in either order.
+    Rect([f64; 4]),
+}
+
+/// The rectangle `area` resolves to on the page `info`, in default user
+/// space, normalised so `[0] < [2]` and `[1] < [3]`.
+///
+/// [`PageArea::CropBox`] returns the page's crop box exactly as the page
+/// tree resolved it, so the default renders as it always has. Any other
+/// area that is empty after the MediaBox intersection, or not finite, is
+/// [`PdfError::EmptyPageArea`].
+pub(crate) fn resolve_page_area(
+    resolver: &Resolver,
+    info: &PageInfo,
+    page: usize,
+    area: PageArea,
+) -> Result<[f64; 4], PdfError> {
+    let declared = |key: &[u8]| {
+        resolver
+            .resolve(info.obj_num, 0)
+            .ok()
+            .and_then(|obj| obj.as_dict().and_then(|d| parse_rect(d, key, resolver)))
+    };
+    let wanted = match area {
+        PageArea::CropBox => return Ok(info.crop_box),
+        PageArea::MediaBox => info.media_box,
+        PageArea::BleedBox => declared(b"BleedBox").unwrap_or(info.crop_box),
+        PageArea::TrimBox => declared(b"TrimBox").unwrap_or(info.crop_box),
+        PageArea::ArtBox => declared(b"ArtBox").unwrap_or(info.crop_box),
+        PageArea::Rect(rect) => rect,
+    };
+    // Check before clamping: `f64::min`/`max` drop a NaN, which would turn a
+    // malformed rectangle into a plausible one.
+    if !wanted.iter().all(|v| v.is_finite()) {
+        return Err(PdfError::EmptyPageArea { page });
+    }
+    let [llx, lly, urx, ury] = clamp_box_to_media(&wanted, &info.media_box);
+    if urx > llx && ury > lly {
+        Ok([llx, lly, urx, ury])
+    } else {
+        Err(PdfError::EmptyPageArea { page })
+    }
+}
 
 /// Page geometry and presentation hints, drawn from the page dict
 /// plus the inherited MediaBox/CropBox already resolved on
 /// [`PageInfo`].
 ///
-/// All optional boxes (`crop_box`, `bleed_box`, `trim_box`,
-/// `art_box`) default to `MediaBox` per spec when absent. We expose
-/// them as `Option<[f64; 4]>` so callers can distinguish
-/// "explicitly set" from "spec-default fallback" — `Some` means the
-/// box was declared in the page dict (or inherited, for crop_box);
-/// `None` means it was never declared and the consumer should use
-/// `media_box` as the fallback.
+/// The optional boxes are reported as declared, as `Option<[f64; 4]>`,
+/// so callers can tell "explicitly set" from "spec default": `Some`
+/// means the box was declared in the page dict (or inherited, for
+/// `crop_box`); `None` means it was not. The spec defaults (PDF
+/// 32000-1, Table 30) are: an absent `crop_box` is the `media_box`, and
+/// an absent `bleed_box`, `trim_box` or `art_box` is the crop box. Every
+/// box is also reduced to its intersection with the `media_box`
+/// (§14.11.2). These values are raw: neither the defaults nor the
+/// intersection are applied. [`PdfDocument::page_area_rect`] applies both.
+///
+/// [`PdfDocument::page_area_rect`]: crate::PdfDocument::page_area_rect
 #[derive(Debug, Clone, PartialEq)]
 pub struct PageBoxes {
     /// `/MediaBox` — required; defines the boundaries of the
     /// physical medium.
     pub media_box: [f64; 4],
-    /// `/CropBox` — visible area; `None` means not declared (use
-    /// `media_box`). Inherited from the page tree if present on a
-    /// parent.
+    /// `/CropBox` — visible area; `None` means not declared (the
+    /// default is `media_box`). Inherited from the page tree if present
+    /// on a parent.
     pub crop_box: Option<[f64; 4]>,
     /// `/BleedBox` — bounds of the area within which page contents
-    /// may bleed when output in production.
+    /// may bleed when output in production. `None`: the crop box.
     pub bleed_box: Option<[f64; 4]>,
     /// `/TrimBox` — intended dimensions of the finished page after
-    /// trimming.
+    /// trimming. `None`: the crop box.
     pub trim_box: Option<[f64; 4]>,
-    /// `/ArtBox` — extent of the page's meaningful content.
+    /// `/ArtBox` — extent of the page's meaningful content. `None`:
+    /// the crop box.
     pub art_box: Option<[f64; 4]>,
     /// `/Rotate` — clockwise rotation in degrees (multiple of 90).
     pub rotate: u16,

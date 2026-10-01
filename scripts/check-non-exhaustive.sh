@@ -36,6 +36,7 @@ FILES=(
     crates/stet-pdf-reader/src/viewer_prefs.rs
     crates/stet-pdf-reader/src/embedded_files.rs
     crates/stet-pdf-reader/src/diagnostics.rs
+    crates/stet-pdf-reader/src/page_boxes.rs
     crates/stet-pdf-reader/src/layers/mod.rs
     crates/stet-pdf-reader/src/layers/metadata.rs
     crates/stet-pdf-reader/src/layers/configuration.rs

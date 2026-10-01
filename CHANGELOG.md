@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Render a page box, or a region, of a PDF page as the page:** `--box`
+  on the command line and `PdfDocument::set_page_area` in
+  `stet-pdf-reader`. `--box art` (or `media`, `crop`, `bleed`, `trim`)
+  renders that box; `--box llx,lly,urx,ury` renders a rectangle in PDF
+  points in the page's unrotated space. The area becomes the page — its
+  size is the output size, `/Rotate` applies to it, and `--width`,
+  `--height` and `--transparent` work on it — and only its pixels are
+  rasterised, so cropping placed artwork from a large page no longer means
+  rendering the whole page. A box the page does not declare is its crop
+  box, and areas are clipped to the MediaBox rather than the crop box, so
+  a bleed renders. For PDF input, with `--device png` or `--device pdf`.
+  `PageArea`, `PdfDocument::page_area_rect` and
+  `PdfError::EmptyPageArea` (an area that misses the page) are new.
+
+### Fixed
+
+- **`PageBoxes` documented the wrong defaults.** It said an absent
+  BleedBox, TrimBox or ArtBox falls back to the MediaBox; the PDF
+  specification makes it the crop box. The values `page_boxes` returns
+  are unchanged.
+
 ## [0.8.3] — 2026-10-01
 
 ### Added

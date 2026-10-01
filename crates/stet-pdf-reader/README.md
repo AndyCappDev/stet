@@ -76,6 +76,19 @@ let (rgba, w, h) = doc.render_page_to_rgba_with_background(
 )?;
 ```
 
+### A page box or region
+
+Render the box a layout placed the PDF by, or one region of a large page,
+as the page — only its pixels are rasterised:
+
+```rust
+use stet_pdf_reader::{PageArea, PdfDocument};
+
+let mut doc = PdfDocument::from_bytes(&data)?;
+doc.set_page_area(PageArea::ArtBox); // or a Rect([llx, lly, urx, ury])
+let (rgba, w, h) = doc.render_page_to_rgba(0, 300.0)?;
+```
+
 ### Extracting text
 
 The assembly helpers live in `stet-graphics`, the display-list crate this

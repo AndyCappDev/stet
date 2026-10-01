@@ -339,7 +339,7 @@ fn collect_pages_recursive(
 }
 
 /// Clamp a box to fit within the media box (intersection).
-fn clamp_box_to_media(crop: &[f64; 4], media: &[f64; 4]) -> [f64; 4] {
+pub(crate) fn clamp_box_to_media(crop: &[f64; 4], media: &[f64; 4]) -> [f64; 4] {
     // Normalize both boxes so [0]<[2] and [1]<[3]
     let (c_llx, c_urx) = (crop[0].min(crop[2]), crop[0].max(crop[2]));
     let (c_lly, c_ury) = (crop[1].min(crop[3]), crop[1].max(crop[3]));
@@ -374,7 +374,7 @@ fn arr_to_rect(arr: &[PdfObj], resolver: &Resolver) -> Option<[f64; 4]> {
 
 /// Parse a rectangle array [llx, lly, urx, ury] from a dict key.
 /// Handles both direct arrays and indirect references to arrays.
-fn parse_rect(dict: &PdfDict, key: &[u8], resolver: &Resolver) -> Option<[f64; 4]> {
+pub(crate) fn parse_rect(dict: &PdfDict, key: &[u8], resolver: &Resolver) -> Option<[f64; 4]> {
     match dict.get(key)? {
         PdfObj::Array(a) => arr_to_rect(a, resolver),
         PdfObj::Ref(n, g) => match resolver.resolve(*n, *g).ok()? {

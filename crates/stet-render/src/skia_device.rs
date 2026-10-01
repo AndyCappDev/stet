@@ -151,6 +151,9 @@ impl PageBackground {
         matches!(self, PageBackground::Transparent)
     }
 
+    /// Only `SkiaDevice` clears a pixmap to paper; the render functions
+    /// start every band transparent and finish with `finish_page_pixels`.
+    #[cfg(feature = "ps-device")]
     fn paper_color(self) -> Color {
         match self {
             PageBackground::White => Color::WHITE,

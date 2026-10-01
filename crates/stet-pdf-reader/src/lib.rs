@@ -214,7 +214,7 @@ pub use layers::{
 pub use metadata::{DocumentMetadata, PdfDate, TrappedFlag};
 pub use objects::{PdfDict, PdfObj};
 pub use outline::{OutlineItem, OutlineStyle};
-pub use page_boxes::PageBoxes;
+pub use page_boxes::{PageArea, PageBoxes};
 pub use page_tree::PageInfo;
 /// The level for [`PdfDocument::set_text_extraction`], from `stet-graphics`.
 pub use stet_graphics::device::TextExtraction;
@@ -251,6 +251,9 @@ pub struct PdfDocument<'a> {
     /// How much text rendered display lists record as `TextRun` elements.
     /// Off by default. See [`PdfDocument::set_text_extraction`].
     text_extraction: TextExtraction,
+    /// The area of each page rendered as the page. The crop box by
+    /// default. See [`PdfDocument::set_page_area`].
+    page_area: PageArea,
     /// Whether rendered pages include annotation appearances. On by
     /// default. See [`PdfDocument::set_render_annotations`].
     render_annotations: bool,
@@ -380,6 +383,7 @@ impl<'a> PdfDocument<'a> {
             overprint: true,
             render_annotations: true,
             text_extraction: TextExtraction::Off,
+            page_area: PageArea::CropBox,
             ocg_off,
             output_intent_icc,
             metadata_cache: OnceCell::new(),
@@ -458,6 +462,40 @@ impl<'a> PdfDocument<'a> {
         self.text_extraction
     }
 
+    /// Render `area` of each page as the page, instead of its crop box.
+    ///
+    /// [`page_size`](Self::page_size), [`render_page`](Self::render_page)
+    /// and the `render_page_to_rgba*` methods then treat the area as the
+    /// page: its size is the page size, and `/Rotate` applies to it. For a
+    /// PDF placed in a layout, render the box the layout cropped it to, such
+    /// as [`PageArea::ArtBox`] or [`PageArea::TrimBox`]; for one region of
+    /// a large page, a [`PageArea::Rect`] in the page's user space. Only the
+    /// area's pixels are rasterised; the page's content is still
+    /// interpreted in full.
+    ///
+    /// [`PageArea::CropBox`] by default. See [`PageArea`] for how an absent
+    /// box resolves and how areas are clipped. An area that does not
+    /// overlap a page's MediaBox makes rendering that page fail with
+    /// [`PdfError::EmptyPageArea`].
+    pub fn set_page_area(&mut self, area: PageArea) {
+        self.page_area = area;
+    }
+
+    /// The area set by [`set_page_area`](Self::set_page_area).
+    pub fn page_area(&self) -> PageArea {
+        self.page_area
+    }
+
+    /// The rectangle the current [`PageArea`] resolves to on `page`, as
+    /// `[llx, lly, urx, ury]` in default user space (unrotated points).
+    pub fn page_area_rect(&self, page: usize) -> Result<[f64; 4], PdfError> {
+        let info = self
+            .pages
+            .get(page)
+            .ok_or(PdfError::PageOutOfRange(page, self.pages.len()))?;
+        page_boxes::resolve_page_area(&self.resolver, info, page, self.page_area)
+    }
+
     /// Set a font data provider for environments without filesystem access.
     pub fn set_font_provider(&mut self, provider: FontProvider) {
         self.font_provider = Some(provider);
@@ -469,12 +507,16 @@ impl<'a> PdfDocument<'a> {
     }
 
     /// Page dimensions in points (width, height), accounting for rotation.
+    ///
+    /// The size of the [`PageArea`] set with
+    /// [`set_page_area`](Self::set_page_area): the crop box by default.
     pub fn page_size(&self, page: usize) -> Result<(f64, f64), PdfError> {
         let info = self
             .pages
             .get(page)
             .ok_or(PdfError::PageOutOfRange(page, self.pages.len()))?;
-        let [llx, lly, urx, ury] = info.crop_box;
+        let [llx, lly, urx, ury] =
+            page_boxes::resolve_page_area(&self.resolver, info, page, self.page_area)?;
         let (w, h) = ((urx - llx).abs(), (ury - lly).abs());
         match info.rotate.rem_euclid(360) {
             90 | 270 => Ok((h, w)),
@@ -524,14 +566,16 @@ impl<'a> PdfDocument<'a> {
     ///
     /// The display list uses device-space coordinates (paths pre-transformed
     /// through the initial CTM). The initial CTM applies DPI scaling, Y-flip,
-    /// and CropBox offset.
+    /// `/Rotate`, and the offset of the [`PageArea`] set with
+    /// [`set_page_area`](Self::set_page_area) — the crop box by default.
     pub fn render_page(&self, page: usize, dpi: f64) -> Result<DisplayList, PdfError> {
         let info = self
             .pages
             .get(page)
             .ok_or(PdfError::PageOutOfRange(page, self.pages.len()))?;
 
-        let [llx, lly, urx, ury] = info.crop_box;
+        let [llx, lly, urx, ury] =
+            page_boxes::resolve_page_area(&self.resolver, info, page, self.page_area)?;
         let (page_w, page_h) = ((urx - llx).abs(), (ury - lly).abs());
 
         // Build initial CTM: scale by dpi/72, Y-flip (PDF Y-up → device Y-down),

@@ -367,9 +367,31 @@ if pb.has_additional_actions { println!("page-AA dict declared"); }
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Each box is `Option<[f64; 4]>` so callers can distinguish "explicitly
-set" from "inherits MediaBox per spec default". Rotation is normalized
-to 0/90/180/270 (negative values wrap; non-multiples of 90 coerce to 0).
+Each box is `Option<[f64; 4]>`, reported as declared, so callers can
+distinguish "explicitly set" from "spec default". The spec defaults (PDF
+32000-1, Table 30): an absent CropBox is the MediaBox, and an absent
+BleedBox, TrimBox or ArtBox is the crop box; every box is also reduced to
+its intersection with the MediaBox (§14.11.2). `page_boxes` applies
+neither. Rotation is normalized to 0/90/180/270 (negative values wrap;
+non-multiples of 90 coerce to 0).
+
+### Rendering a box instead of the crop box
+
+`set_page_area(PageArea)` makes `page_size`, `render_page` and the
+`render_page_to_rgba*` methods treat another area as the page: `MediaBox`,
+`BleedBox`, `TrimBox`, `ArtBox`, or a `Rect([llx, lly, urx, ury])` in the
+page's unrotated user space. `page_area_rect(page)` gives the rectangle an
+area resolves to, with the defaults and the MediaBox intersection applied.
+An area that misses the MediaBox fails with `PdfError::EmptyPageArea`.
+
+```rust
+# use stet_pdf_reader::{PageArea, PdfDocument};
+# let mut doc: PdfDocument = unimplemented!();
+doc.set_page_area(PageArea::ArtBox);
+let art = doc.page_area_rect(0)?;          // the crop box if no /ArtBox
+let (rgba, w, h) = doc.render_page_to_rgba(0, 300.0)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
 
 ## Embedded files
 
