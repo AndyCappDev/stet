@@ -26,11 +26,14 @@
 //!
 //! Profiles whose tables are `mAB`/`mBA` (v4 multi-process elements) or
 //! `lut8Type` (mft1) fall back to the moxcms-based bake; callers detect
-//! the `None` return and use the existing path.
+//! the `None` return and use the existing path. `lut8Type` tables are read
+//! for one purpose only, the black point lcms2 would detect (see
+//! [`OwnedLutSampler::for_black_point`]): widening the bake or the
+//! proofing chain to them would move every colour through those profiles.
 
 use moxcms::{
     CmsError, ColorProfile, Cube, DataColorSpace, Hypercube, Lab, LutStore, LutType, LutWarehouse,
-    RenderingIntent, ToneCurveEvaluator, TransformExecutor, Xyz,
+    Matrix3d, RenderingIntent, ToneCurveEvaluator, TransformExecutor, Xyz,
 };
 
 use super::Clut4;
@@ -72,7 +75,7 @@ pub(super) fn bake_clut4_hand_rolled(
         return None;
     }
 
-    let lut = SampledLut::from_warehouse(table)?;
+    let lut = OwnedLutSampler::from_warehouse(table, 4, 3)?;
 
     // BPC is computed against this sampler's own (1,1,1,1) output, not
     // moxcms's transform output, so the source black-point matches what
@@ -81,7 +84,7 @@ pub(super) fn bake_clut4_hand_rolled(
     // levels lighter than baseline / GS. This is lcms2's "darker colorant"
     // black point, taken from the same table the bake reads.
     let bpc = if scale_black {
-        let lab_k = lut.sample(1.0, 1.0, 1.0, 1.0);
+        let lab_k = lut.sample_cmyk_to_lab(1.0, 1.0, 1.0, 1.0);
         let l_star = (lab_k.l as f64 * 100.0).clamp(0.0, 100.0);
         let neutral = [l_star.min(50.0), 0.0, 0.0];
         let sbp = lab_to_xyz_d50(neutral);
@@ -112,7 +115,7 @@ pub(super) fn bake_clut4_hand_rolled(
                     // instead moves out-of-gamut colours: one channel is
                     // already pinned, so the others shift (6 levels on a
                     // saturated cyan).
-                    let mut xyz = lab_to_xyz_d50_abs(lut.sample(c, m, y, k));
+                    let mut xyz = lab_to_xyz_d50_abs(lut.sample_cmyk_to_lab(c, m, y, k));
                     if let Some(p) = bpc {
                         xyz = apply_bpc_xyz_d50(xyz, p);
                     }
@@ -134,132 +137,7 @@ pub(super) fn bake_clut4_hand_rolled(
 pub(super) fn can_sample(profile: &ColorProfile, table: &LutWarehouse) -> bool {
     profile.color_space == DataColorSpace::Cmyk
         && profile.pcs == DataColorSpace::Lab
-        && SampledLut::from_warehouse(table).is_some()
-}
-
-/// A profile A2B table prepared for sampling at arbitrary CMYK points.
-struct SampledLut<'a> {
-    input_table: &'a [u16],
-    output_table: &'a [u16],
-    n_in_entries: usize,
-    n_out_entries: usize,
-    cube_data: Vec<f32>,
-    cube_grid: usize,
-}
-
-impl<'a> SampledLut<'a> {
-    fn from_warehouse(warehouse: &'a LutWarehouse) -> Option<Self> {
-        let lut = match warehouse {
-            LutWarehouse::Lut(l) => l,
-            // mAB (v4 multi-process elements) deferred — Phase 1.1.
-            LutWarehouse::Multidimensional(_) => return None,
-        };
-        if lut.lut_type != LutType::Lut16 {
-            // mft1 (lut8Type) deferred.
-            return None;
-        }
-        if lut.num_input_channels != 4 || lut.num_output_channels != 3 {
-            return None;
-        }
-        let input_table = match &lut.input_table {
-            LutStore::Store16(v) => v.as_slice(),
-            LutStore::Store8(_) => return None,
-        };
-        let output_table = match &lut.output_table {
-            LutStore::Store16(v) => v.as_slice(),
-            LutStore::Store8(_) => return None,
-        };
-        let clut_table = match &lut.clut_table {
-            LutStore::Store16(v) => v.as_slice(),
-            LutStore::Store8(_) => return None,
-        };
-        let n_in_entries = lut.num_input_table_entries as usize;
-        let n_out_entries = lut.num_output_table_entries as usize;
-        let cube_grid = lut.num_clut_grid_points as usize;
-        if cube_grid < 2 || n_in_entries < 2 || n_out_entries < 2 {
-            return None;
-        }
-        if input_table.len() < n_in_entries.checked_mul(4)? {
-            return None;
-        }
-        if output_table.len() < n_out_entries.checked_mul(3)? {
-            return None;
-        }
-        let cube_total = cube_grid
-            .checked_mul(cube_grid)?
-            .checked_mul(cube_grid)?
-            .checked_mul(cube_grid)?
-            .checked_mul(3)?;
-        if clut_table.len() < cube_total {
-            return None;
-        }
-        let cube_data: Vec<f32> = clut_table[..cube_total]
-            .iter()
-            .map(|&v| v as f32 / 65535.0)
-            .collect();
-        Some(SampledLut {
-            input_table,
-            output_table,
-            n_in_entries,
-            n_out_entries,
-            cube_data,
-            cube_grid,
-        })
-    }
-
-    /// Run a CMYK input through the table's input curves, 4D CLUT, and
-    /// output curves; return moxcms-normalised Lab.
-    fn sample(&self, c: f32, m: f32, y: f32, k: f32) -> Lab {
-        // Per-channel input curves.
-        let c_in = sample_curve(self.input_table, 0, self.n_in_entries, c);
-        let m_in = sample_curve(self.input_table, 1, self.n_in_entries, m);
-        let y_in = sample_curve(self.input_table, 2, self.n_in_entries, y);
-        let k_in = sample_curve(self.input_table, 3, self.n_in_entries, k);
-
-        // 4D quadlinear CLUT lookup. Hypercube has (x, y, z, w) with w
-        // varying fastest. ICC mft2 stores "the last input channel varies
-        // most rapidly" — for CMYK that's K. So we hand x=C, y=M, z=Y, w=K.
-        // `Hypercube::new` is cheap (no allocation; just stride bookkeeping)
-        // so we can build it per-call without measurable overhead.
-        let hypercube = match Hypercube::new(&self.cube_data, self.cube_grid, 3) {
-            Ok(h) => h,
-            Err(_) => return Lab::new(1.0, 0.5, 0.5),
-        };
-        let pcs = hypercube.quadlinear_vec3(c_in, m_in, y_in, k_in);
-
-        // Per-channel output curves.
-        let l_post = sample_curve(self.output_table, 0, self.n_out_entries, pcs.v[0]);
-        let a_post = sample_curve(self.output_table, 1, self.n_out_entries, pcs.v[1]);
-        let b_post = sample_curve(self.output_table, 2, self.n_out_entries, pcs.v[2]);
-
-        // The CLUT and output curves operate on `raw / 65535`. Convert to
-        // moxcms-normalised Lab via the legacy v2 mft2 encoding:
-        //   L* = raw_L * 100 / 0xFF00 → l_norm = post_L * 65535 / 0xFF00
-        //   a* = raw_a / 256 - 128    → a_norm = post_a * 65535 / 0xFF00
-        //   b* = raw_b / 256 - 128    → b_norm = post_b * 65535 / 0xFF00
-        let scale = 65535.0 / PCS_LAB_DENOM;
-        Lab::new(
-            (l_post * scale).clamp(0.0, 1.0),
-            (a_post * scale).clamp(0.0, 1.0),
-            (b_post * scale).clamp(0.0, 1.0),
-        )
-    }
-}
-
-/// 1D curve lookup with linear interpolation. `table` packs all channels
-/// sequentially: channel `ch`'s `n_entries` values start at offset
-/// `ch * n_entries`. `x` is in `[0, 1]`; the result is in `[0, 1]`.
-#[inline]
-fn sample_curve(table: &[u16], ch: usize, n_entries: usize, x: f32) -> f32 {
-    let base = ch * n_entries;
-    let scale = (n_entries - 1) as f32;
-    let pos = x.clamp(0.0, 1.0) * scale;
-    let i0 = pos.floor() as usize;
-    let i1 = (i0 + 1).min(n_entries - 1);
-    let t = pos - i0 as f32;
-    let v0 = table[base + i0] as f32 / 65535.0;
-    let v1 = table[base + i1] as f32 / 65535.0;
-    v0 + (v1 - v0) * t
+        && OwnedLutSampler::from_warehouse(table, 4, 3).is_some()
 }
 
 /// Decode normalised Lab (moxcms encoding) to absolute XYZ-D50
@@ -549,16 +427,69 @@ impl LabToCmykSampler {
     }
 }
 
-/// Owned v2 `lut16Type` sampler covering `(n_in, n_out)` shapes the
-/// proofing chain needs: `(3, 3)` for an RGB-source A2B → Lab and `(3, 4)`
-/// for an OutputIntent B2A → CMYK. Stores its own Vec copies of the
-/// table data so the sampler outlives the source `ColorProfile`. The
-/// (4, 3) CMYK A2B path keeps using the older [`SampledLut`] above
-/// unchanged.
+/// How a `lut8Type` or `lut16Type` table encodes Lab on its PCS side, as
+/// lcms2 reads it. `_cmsReadInputLUT` and `_cmsReadOutputLUT` treat a
+/// `lut16Type` Lab table as the legacy ICC v2 encoding (L\* = 100 at
+/// `0xFF00`) and convert it; a `lut8Type` one they read as v4 (L\* = 100 at
+/// `0xFF`), which is also what the 8-bit v2 encoding is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum LabEncoding {
+    /// `lut16Type`: `0xFF00`-denominated.
+    V2,
+    /// `lut8Type`: full-scale.
+    V4,
+}
+
+impl LabEncoding {
+    /// Lab (L\* 0–100, a\*/b\* −128–127) → the table's `[0, 1]` axes.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "read by the black-point detector, which lands next"
+        )
+    )]
+    fn encode(self, lab: [f64; 3]) -> [f64; 3] {
+        let full = [
+            lab[0] / 100.0,
+            (lab[1] + 128.0) / 255.0,
+            (lab[2] + 128.0) / 255.0,
+        ];
+        match self {
+            LabEncoding::V4 => full,
+            LabEncoding::V2 => full.map(|v| v * f64::from(PCS_LAB_DENOM) / 65535.0),
+        }
+    }
+
+    /// The table's `[0, 1]` outputs → Lab.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "read by the black-point detector, which lands next"
+        )
+    )]
+    fn decode(self, v: [f64; 3]) -> [f64; 3] {
+        let full = match self {
+            LabEncoding::V4 => v,
+            LabEncoding::V2 => v.map(|x| x * 65535.0 / f64::from(PCS_LAB_DENOM)),
+        };
+        [
+            full[0] * 100.0,
+            full[1] * 255.0 - 128.0,
+            full[2] * 255.0 - 128.0,
+        ]
+    }
+}
+
+/// Owned sampler for a profile's `lut16Type` table — and, for the black
+/// point only, its `lut8Type` one — in the `(n_in, n_out)` shapes stet
+/// reads: `(4, 3)` for a CMYK A2B → Lab, `(3, 3)` for an RGB-source A2B →
+/// Lab and `(3, 4)` for an OutputIntent B2A → CMYK. Stores its own copies
+/// of the table data so the sampler outlives the source `ColorProfile`.
 ///
-/// Curves are pre-converted from `u16/65535` to `f32` once at
-/// construction so the per-pixel `sample_curve_owned` doesn't repeat the
-/// division on every call.
+/// Curves and grid are pre-converted to `f32` in `[0, 1]` once at
+/// construction so the per-sample curve lookups don't repeat the division.
 struct OwnedLutSampler {
     input_table: Vec<f32>,
     output_table: Vec<f32>,
@@ -566,40 +497,66 @@ struct OwnedLutSampler {
     n_out_entries: usize,
     cube_data: Vec<f32>,
     cube_grid: usize,
+    encoding: LabEncoding,
 }
 
 impl OwnedLutSampler {
+    /// A `lut16Type` table of shape `(expected_n_in, expected_n_out)`.
     fn from_warehouse(
         warehouse: &LutWarehouse,
         expected_n_in: usize,
         expected_n_out: usize,
+    ) -> Option<Self> {
+        Self::load(warehouse, expected_n_in, expected_n_out, false)
+    }
+
+    /// A `lut8Type` or `lut16Type` table, for finding a profile's black
+    /// point the way lcms2 does — see [`Self::lab_to_ink`] and
+    /// [`Self::ink_to_lab`]. A three-input table must carry the identity
+    /// matrix, as the ICC requires of a Lab-indexed one; lcms2 would apply
+    /// any other, and these evaluators do not.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "read by the black-point detector, which lands next"
+        )
+    )]
+    fn for_black_point(
+        warehouse: &LutWarehouse,
+        expected_n_in: usize,
+        expected_n_out: usize,
+    ) -> Option<Self> {
+        if let LutWarehouse::Lut(lut) = warehouse
+            && expected_n_in == 3
+            && lut.matrix != Matrix3d::IDENTITY
+        {
+            return None;
+        }
+        Self::load(warehouse, expected_n_in, expected_n_out, true)
+    }
+
+    fn load(
+        warehouse: &LutWarehouse,
+        expected_n_in: usize,
+        expected_n_out: usize,
+        allow_lut8: bool,
     ) -> Option<Self> {
         let lut = match warehouse {
             LutWarehouse::Lut(l) => l,
             // mAB/mBA (v4 multi-process elements) deferred.
             LutWarehouse::Multidimensional(_) => return None,
         };
-        if lut.lut_type != LutType::Lut16 {
-            // mft1 (lut8Type) deferred.
-            return None;
-        }
+        let encoding = match lut.lut_type {
+            LutType::Lut16 => LabEncoding::V2,
+            LutType::Lut8 if allow_lut8 => LabEncoding::V4,
+            _ => return None,
+        };
         if lut.num_input_channels as usize != expected_n_in
             || lut.num_output_channels as usize != expected_n_out
         {
             return None;
         }
-        let input_table_u16 = match &lut.input_table {
-            LutStore::Store16(v) => v.as_slice(),
-            LutStore::Store8(_) => return None,
-        };
-        let output_table_u16 = match &lut.output_table {
-            LutStore::Store16(v) => v.as_slice(),
-            LutStore::Store8(_) => return None,
-        };
-        let clut_table_u16 = match &lut.clut_table {
-            LutStore::Store16(v) => v.as_slice(),
-            LutStore::Store8(_) => return None,
-        };
         let n_in_entries = lut.num_input_table_entries as usize;
         let n_out_entries = lut.num_output_table_entries as usize;
         let cube_grid = lut.num_clut_grid_points as usize;
@@ -607,40 +564,95 @@ impl OwnedLutSampler {
             return None;
         }
         let in_total = n_in_entries.checked_mul(expected_n_in)?;
-        if input_table_u16.len() < in_total {
-            return None;
-        }
         let out_total = n_out_entries.checked_mul(expected_n_out)?;
-        if output_table_u16.len() < out_total {
-            return None;
-        }
         let mut cube_total: usize = expected_n_out;
         for _ in 0..expected_n_in {
             cube_total = cube_total.checked_mul(cube_grid)?;
         }
-        if clut_table_u16.len() < cube_total {
-            return None;
-        }
-        let input_table: Vec<f32> = input_table_u16[..in_total]
-            .iter()
-            .map(|&v| v as f32 / 65535.0)
-            .collect();
-        let output_table: Vec<f32> = output_table_u16[..out_total]
-            .iter()
-            .map(|&v| v as f32 / 65535.0)
-            .collect();
-        let cube_data: Vec<f32> = clut_table_u16[..cube_total]
-            .iter()
-            .map(|&v| v as f32 / 65535.0)
-            .collect();
         Some(OwnedLutSampler {
-            input_table,
-            output_table,
+            input_table: normalised(&lut.input_table, in_total)?,
+            output_table: normalised(&lut.output_table, out_total)?,
             n_in_entries,
             n_out_entries,
-            cube_data,
+            cube_data: normalised(&lut.clut_table, cube_total)?,
             cube_grid,
+            encoding,
         })
+    }
+
+    /// 4-in / 3-out: CMYK → moxcms-normalised Lab, through the input
+    /// curves, a quadlinear lookup and the output curves. The bake's
+    /// sampler.
+    fn sample_cmyk_to_lab(&self, c: f32, m: f32, y: f32, k: f32) -> Lab {
+        let c_in = sample_curve_f32(&self.input_table, 0, self.n_in_entries, c);
+        let m_in = sample_curve_f32(&self.input_table, 1, self.n_in_entries, m);
+        let y_in = sample_curve_f32(&self.input_table, 2, self.n_in_entries, y);
+        let k_in = sample_curve_f32(&self.input_table, 3, self.n_in_entries, k);
+
+        // 4D quadlinear CLUT lookup. Hypercube has (x, y, z, w) with w
+        // varying fastest. ICC mft2 stores "the last input channel varies
+        // most rapidly" — for CMYK that's K. So we hand x=C, y=M, z=Y, w=K.
+        // `Hypercube::new` is cheap (no allocation; just stride bookkeeping)
+        // so we can build it per-call without measurable overhead.
+        let hypercube = match Hypercube::new(&self.cube_data, self.cube_grid, 3) {
+            Ok(h) => h,
+            Err(_) => return Lab::new(1.0, 0.5, 0.5),
+        };
+        let pcs = hypercube.quadlinear_vec3(c_in, m_in, y_in, k_in);
+
+        let l_post = sample_curve_f32(&self.output_table, 0, self.n_out_entries, pcs.v[0]);
+        let a_post = sample_curve_f32(&self.output_table, 1, self.n_out_entries, pcs.v[1]);
+        let b_post = sample_curve_f32(&self.output_table, 2, self.n_out_entries, pcs.v[2]);
+
+        // moxcms normalises Lab as L*/100 and (a* + 128)/255. For the legacy
+        // v2 encoding that is the raw value × 65535 / 0xFF00:
+        //   L* = raw_L * 100 / 0xFF00 → l_norm = post_L * 65535 / 0xFF00
+        //   a* = raw_a / 256 - 128    → a_norm = post_a * 65535 / 0xFF00
+        // and for v4 the raw value itself.
+        let scale = match self.encoding {
+            LabEncoding::V2 => 65535.0 / PCS_LAB_DENOM,
+            LabEncoding::V4 => 1.0,
+        };
+        Lab::new(
+            (l_post * scale).clamp(0.0, 1.0),
+            (a_post * scale).clamp(0.0, 1.0),
+            (b_post * scale).clamp(0.0, 1.0),
+        )
+    }
+
+    /// 4-in / 3-out: CMYK ink (each `[0, 1]`) → Lab, interpolated as lcms2
+    /// interpolates a four-input table, for the black point it detects.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "read by the black-point detector, which lands next"
+        )
+    )]
+    fn ink_to_lab(&self, ink: [f64; 4]) -> [f64; 3] {
+        let curved: [f64; 4] = std::array::from_fn(|ch| {
+            sample_curve_f32(&self.input_table, ch, self.n_in_entries, ink[ch] as f32) as f64
+        });
+        let mut pcs = [0.0; 3];
+        eval4_lcms(&self.cube_data, self.cube_grid, curved, &mut pcs);
+        let post: [f64; 3] = std::array::from_fn(|ch| {
+            sample_curve_f32(&self.output_table, ch, self.n_out_entries, pcs[ch] as f32) as f64
+        });
+        self.encoding.decode(post)
+    }
+
+    /// 3-in / 4-out: Lab → CMYK ink (each `[0, 1]`), trilinear as lcms2
+    /// reads a Lab-indexed output table, for the black point it detects.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "read by the black-point detector, which lands next"
+        )
+    )]
+    fn lab_to_ink(&self, lab: [f64; 3]) -> [f64; 4] {
+        let pcs = self.encoding.encode(lab).map(|v| v as f32);
+        self.sample_pcs_lab_to_cmyk(pcs).map(f64::from)
     }
 
     /// 3-in / 3-out: RGB source → mft2 PCS-Lab encoded `[L, a, b]`.
@@ -708,9 +720,115 @@ impl OwnedLutSampler {
     }
 }
 
-/// 1D curve lookup over a pre-`/65535`-converted `f32` table. Mirrors
-/// [`sample_curve`] above but skips the per-call integer-to-float
-/// division so per-pixel runtime cost stays low.
+/// A table's first `len` entries, normalised to `[0, 1]`; `None` when it
+/// holds fewer.
+fn normalised(store: &LutStore, len: usize) -> Option<Vec<f32>> {
+    match store {
+        LutStore::Store16(v) => Some(v.get(..len)?.iter().map(|&x| x as f32 / 65535.0).collect()),
+        LutStore::Store8(v) => Some(v.get(..len)?.iter().map(|&x| x as f32 / 255.0).collect()),
+    }
+}
+
+/// lcms2's interpolation of a four-input table (`Eval4Inputs`): linear in
+/// the first input, between tetrahedral interpolations over the other
+/// three in the two grid planes either side of it. `cube` holds the grid
+/// with the last input varying fastest and three outputs per point.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "read by the black-point detector, which lands next"
+    )
+)]
+fn eval4_lcms(cube: &[f32], grid: usize, input: [f64; 4], out: &mut [f64; 3]) {
+    // Grid index, fraction and the offset to the next point along one input.
+    let axis = |v: f64, stride: usize| {
+        let v = v.clamp(0.0, 1.0);
+        let p = v * (grid - 1) as f64;
+        let i = (p.floor() as usize).min(grid - 1);
+        let step = if v >= 1.0 { 0 } else { stride };
+        (i * stride, p - i as f64, step)
+    };
+    let n_out = 3;
+    let (k0, rk, k_step) = axis(input[0], n_out * grid * grid * grid);
+    let x = axis(input[1], n_out * grid * grid);
+    let y = axis(input[2], n_out * grid);
+    let z = axis(input[3], n_out);
+    let mut lo = [0.0; 3];
+    let mut hi = [0.0; 3];
+    tetrahedral3(cube, k0, x, y, z, &mut lo);
+    tetrahedral3(cube, k0 + k_step, x, y, z, &mut hi);
+    for ch in 0..n_out {
+        out[ch] = lo[ch] + (hi[ch] - lo[ch]) * rk;
+    }
+}
+
+/// lcms2's `TetrahedralInterpFloat` over one three-input slice of a grid
+/// starting at `base`; each axis is `(offset, fraction, step)`.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "read by the black-point detector, which lands next"
+    )
+)]
+fn tetrahedral3(
+    cube: &[f32],
+    base: usize,
+    (x0, rx, sx): (usize, f64, usize),
+    (y0, ry, sy): (usize, f64, usize),
+    (z0, rz, sz): (usize, f64, usize),
+    out: &mut [f64; 3],
+) {
+    let (x1, y1, z1) = (x0 + sx, y0 + sy, z0 + sz);
+    for (ch, o) in out.iter_mut().enumerate() {
+        let d = |x: usize, y: usize, z: usize| f64::from(cube[base + x + y + z + ch]);
+        let c0 = d(x0, y0, z0);
+        let (c1, c2, c3) = if rx >= ry && ry >= rz {
+            (
+                d(x1, y0, z0) - c0,
+                d(x1, y1, z0) - d(x1, y0, z0),
+                d(x1, y1, z1) - d(x1, y1, z0),
+            )
+        } else if rx >= rz && rz >= ry {
+            (
+                d(x1, y0, z0) - c0,
+                d(x1, y1, z1) - d(x1, y0, z1),
+                d(x1, y0, z1) - d(x1, y0, z0),
+            )
+        } else if rz >= rx && rx >= ry {
+            (
+                d(x1, y0, z1) - d(x0, y0, z1),
+                d(x1, y1, z1) - d(x1, y0, z1),
+                d(x0, y0, z1) - c0,
+            )
+        } else if ry >= rx && rx >= rz {
+            (
+                d(x1, y1, z0) - d(x0, y1, z0),
+                d(x0, y1, z0) - c0,
+                d(x1, y1, z1) - d(x1, y1, z0),
+            )
+        } else if ry >= rz && rz >= rx {
+            (
+                d(x1, y1, z1) - d(x0, y1, z1),
+                d(x0, y1, z0) - c0,
+                d(x0, y1, z1) - d(x0, y1, z0),
+            )
+        } else if rz >= ry && ry >= rx {
+            (
+                d(x1, y1, z1) - d(x0, y1, z1),
+                d(x0, y1, z1) - d(x0, y0, z1),
+                d(x0, y0, z1) - c0,
+            )
+        } else {
+            (0.0, 0.0, 0.0)
+        };
+        *o = c0 + c1 * rx + c2 * ry + c3 * rz;
+    }
+}
+
+/// 1D curve lookup over a pre-`/65535`-converted `f32` table, so per-pixel
+/// runtime cost stays low.
 #[inline]
 fn sample_curve_f32(table: &[f32], ch: usize, n_entries: usize, x: f32) -> f32 {
     let base = ch * n_entries;
@@ -808,5 +926,150 @@ impl TransformExecutor<f64> for HandRolledChainStage1Rgb {
             dst[px * 4 + 3] = cmyk[3] as f64;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // lcms2's answers for the generated test profiles; this module reads the
+    // round-trip legs.
+    #[allow(dead_code)]
+    mod reference {
+        include!("../../tests/data/cmyk_intent/reference.rs");
+    }
+
+    const INKLIMIT: &[u8] = include_bytes!("../../tests/data/cmyk_intent/inklimit.icc");
+    const INKLIMIT_LUT8: &[u8] = include_bytes!("../../tests/data/cmyk_intent/inklimit_lut8.icc");
+
+    /// The two legs of lcms2's black-point round trip: `B2A0` and `A2B1`.
+    fn legs(icc: &[u8]) -> (OwnedLutSampler, OwnedLutSampler) {
+        let profile = ColorProfile::new_from_slice(icc).unwrap();
+        let b2a0 = profile.lut_b_to_a_perceptual.as_ref().unwrap();
+        let a2b1 = profile.lut_a_to_b_colorimetric.as_ref().unwrap();
+        (
+            OwnedLutSampler::for_black_point(b2a0, 3, 4).unwrap(),
+            OwnedLutSampler::for_black_point(a2b1, 4, 3).unwrap(),
+        )
+    }
+
+    fn assert_near<const N: usize>(what: &str, got: [f64; N], want: [f64; N], tolerance: f64) {
+        for (g, w) in got.iter().zip(want) {
+            assert!(
+                (g - w).abs() <= tolerance,
+                "{what}: got {got:?}, lcms2 {want:?}"
+            );
+        }
+    }
+
+    // lcms2 evaluates these tables at 16 bits a stage: 1/65535 ink, and
+    // 100/65280 L* on a `lut16Type` table.
+    const INK_TOLERANCE: f64 = 1e-4;
+    const LAB_TOLERANCE: f64 = 0.005;
+
+    #[test]
+    fn perceptual_output_table_matches_lcms() {
+        for (name, icc, want) in [
+            ("inklimit", INKLIMIT, &reference::INKLIMIT_B2A0),
+            (
+                "inklimit_lut8",
+                INKLIMIT_LUT8,
+                &reference::INKLIMIT_LUT8_B2A0,
+            ),
+        ] {
+            let (b2a0, _) = legs(icc);
+            for (lab, want) in reference::LAB_SAMPLES.iter().zip(want) {
+                let got = b2a0.lab_to_ink(*lab);
+                assert_near(
+                    &format!("{name} B2A0 at {lab:?}"),
+                    got,
+                    *want,
+                    INK_TOLERANCE,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn colorimetric_input_table_matches_lcms() {
+        for (name, icc, want) in [
+            ("inklimit", INKLIMIT, &reference::INKLIMIT_A2B1),
+            (
+                "inklimit_lut8",
+                INKLIMIT_LUT8,
+                &reference::INKLIMIT_LUT8_A2B1,
+            ),
+        ] {
+            let (_, a2b1) = legs(icc);
+            for (cmyk, want) in reference::SAMPLES.iter().zip(want) {
+                let got = a2b1.ink_to_lab(cmyk.map(|v| f64::from(v) / 255.0));
+                assert_near(
+                    &format!("{name} A2B1 at {cmyk:?}"),
+                    got,
+                    *want,
+                    LAB_TOLERANCE,
+                );
+            }
+        }
+    }
+
+    /// Lab 0/0/0 through `B2A0` then `A2B1` lands where lcms2's does —
+    /// about 310% ink, L* 19, not 400% ink's L* 8. That needs trilinear
+    /// interpolation of `B2A0`: tetrahedral would give 250% ink.
+    #[test]
+    fn round_trip_matches_lcms() {
+        for (name, icc, want) in [
+            ("inklimit", INKLIMIT, reference::INKLIMIT_ROUND_TRIP),
+            (
+                "inklimit_lut8",
+                INKLIMIT_LUT8,
+                reference::INKLIMIT_LUT8_ROUND_TRIP,
+            ),
+        ] {
+            let (b2a0, a2b1) = legs(icc);
+            let got = a2b1.ink_to_lab(b2a0.lab_to_ink([0.0; 3]));
+            assert_near(&format!("{name} round trip"), got, want, LAB_TOLERANCE);
+        }
+    }
+
+    /// lcms2 interpolates a four-input table linearly in the first input
+    /// and tetrahedrally in the other three — not quadlinearly, which the
+    /// generated profiles' affine tables cannot tell apart.
+    #[test]
+    fn four_input_interpolation_is_lcms2s() {
+        // A 2⁴ grid that is zero except at C=0, M=Y=K=1.
+        let mut cube = vec![0.0f32; 16 * 3];
+        let corner = 0b0111;
+        cube[corner * 3..corner * 3 + 3].copy_from_slice(&[1.0, 1.0, 1.0]);
+        let mut out = [0.0; 3];
+        // At the C=0 plane's centre, tetrahedral weights the corner by one
+        // half (the M=Y=K diagonal's ends); trilinear would by one eighth.
+        eval4_lcms(&cube, 2, [0.0, 0.5, 0.5, 0.5], &mut out);
+        assert_near("C=0", out, [0.5; 3], 1e-12);
+        // Halfway to the C=1 plane, where the grid is zero: linear in C.
+        eval4_lcms(&cube, 2, [0.5, 0.5, 0.5, 0.5], &mut out);
+        assert_near("C=0.5", out, [0.25; 3], 1e-12);
+        // Off the diagonal, M > Y > K: the M, MY, MYK tetrahedron.
+        eval4_lcms(&cube, 2, [0.0, 0.9, 0.6, 0.3], &mut out);
+        assert_near("M>Y>K", out, [0.3; 3], 1e-12);
+        // The grid's far edge, where lcms2 does not step past the end.
+        eval4_lcms(&cube, 2, [0.0, 1.0, 1.0, 1.0], &mut out);
+        assert_near("corner", out, [1.0; 3], 1e-12);
+    }
+
+    /// `lut8Type` tables are read for the black point only: the bake and
+    /// the proofing chain still pass them to moxcms.
+    #[test]
+    fn lut8_tables_are_for_the_black_point_only() {
+        let profile = ColorProfile::new_from_slice(INKLIMIT_LUT8).unwrap();
+        let a2b1 = profile.lut_a_to_b_colorimetric.as_ref().unwrap();
+        let b2a0 = profile.lut_b_to_a_perceptual.as_ref().unwrap();
+        assert!(OwnedLutSampler::from_warehouse(a2b1, 4, 3).is_none());
+        assert!(OwnedLutSampler::from_warehouse(b2a0, 3, 4).is_none());
+        assert!(!can_sample(&profile, a2b1));
+        assert!(LabToCmykSampler::new(&profile, RenderingIntent::Perceptual).is_none());
+        assert!(OwnedLutSampler::for_black_point(a2b1, 4, 3).is_some());
+        assert!(OwnedLutSampler::for_black_point(b2a0, 3, 4).is_some());
     }
 }
