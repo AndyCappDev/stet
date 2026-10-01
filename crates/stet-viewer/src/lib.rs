@@ -24,10 +24,10 @@
 //!
 //! ```text
 //!    background thread                          main thread
-//!   ┌────────────────────┐   DisplayList    ┌──────────────────┐
-//!   │ stet::Interpreter  │   messages       │   run_viewer()   │
-//!   │ stet_pdf_reader    │ ───────────────► │  egui event loop │
-//!   └────────────────────┘                  └──────────────────┘
+//!   ┌────────────────────┐   DisplayList    ┌───────────────────────────┐
+//!   │ stet::Interpreter  │   messages       │ run_viewer_with_options() │
+//!   │ stet_pdf_reader    │ ───────────────► │     egui event loop       │
+//!   └────────────────────┘                  └───────────────────────────┘
 //! ```
 //!
 //! # Typical use
@@ -44,6 +44,7 @@ mod viewer;
 use std::sync::mpsc;
 
 use stet_graphics::display_list::DisplayList;
+use stet_graphics::icc::BpcMode;
 
 /// Raw display list tuple sent by Context at each showpage:
 /// `(DisplayList, dpi, page_width, page_height, effective_cmyk_bytes,
@@ -207,6 +208,32 @@ pub fn create_channels() -> (
 const DEFAULT_PAGE_W: f64 = 612.0;
 const DEFAULT_PAGE_H: f64 = 792.0;
 
+/// How [`run_viewer_with_options`] sets up the viewer.
+///
+/// Build it with `..Default::default()` for the fields you don't set; the
+/// defaults match [`run_viewer`]'s behaviour.
+#[derive(Clone, Debug, Default)]
+pub struct ViewerOptions {
+    /// Render at this DPI instead of one derived from the monitor size.
+    /// The chosen DPI is sent to the interpreter over the channel.
+    pub dpi_override: Option<f64>,
+    /// The first page's (width, height) in PostScript points, for the
+    /// initial window's aspect ratio. Compositors that ignore client-side
+    /// repositioning (Wayland) place the window from its first size.
+    pub page_size: Option<(f64, f64)>,
+    /// The CMYK profile pages were built with, for pages whose
+    /// [`PageReady::cmyk_bytes`] is `None`.
+    pub system_cmyk_bytes: Option<std::sync::Arc<Vec<u8>>>,
+    /// Render without anti-aliasing.
+    pub no_aa: bool,
+    /// Black-point compensation for the colours the viewer converts as it
+    /// renders — DeviceCMYK and ICCBased images, and overprint. Pass the
+    /// mode of the [`IccCache`](stet_graphics::icc::IccCache) the display
+    /// lists were built with, or images render differently from the fills
+    /// beside them.
+    pub bpc_mode: BpcMode,
+}
+
 /// Run the viewer window on the current thread (must be main thread).
 ///
 /// `dpi_override`: if `Some`, use this DPI instead of auto-calculating from
@@ -217,7 +244,15 @@ const DEFAULT_PAGE_H: f64 = 792.0;
 /// (especially Wayland, which ignores client-side repositioning) places the
 /// window correctly from the start.
 ///
+/// Images and overprint are converted with the default black-point
+/// compensation, so display lists built with any other mode render
+/// inconsistently; [`run_viewer_with_options`] takes the mode.
+///
 /// This function blocks until the viewer window is closed.
+#[deprecated(
+    since = "0.8.4",
+    note = "use `run_viewer_with_options`, which also takes the black-point compensation mode"
+)]
 pub fn run_viewer(
     viewer_end: ViewerEnd,
     dpi_override: Option<f64>,
@@ -226,26 +261,30 @@ pub fn run_viewer(
     system_cmyk_bytes: Option<std::sync::Arc<Vec<u8>>>,
     no_aa: bool,
 ) {
-    run_viewer_inner(
+    run_viewer_with_options(
         viewer_end,
-        dpi_override,
         filename,
-        page_size,
-        system_cmyk_bytes,
-        no_aa,
+        ViewerOptions {
+            dpi_override,
+            page_size,
+            system_cmyk_bytes,
+            no_aa,
+            bpc_mode: BpcMode::default(),
+        },
     )
 }
 
-/// Inner implementation of `run_viewer`.
-fn run_viewer_inner(
+/// Run the viewer window on the current thread (must be main thread),
+/// set up by `options`. `filename` titles the window.
+///
+/// This function blocks until the viewer window is closed.
+pub fn run_viewer_with_options(
     viewer_end: ViewerEnd,
-    dpi_override: Option<f64>,
     filename: Option<&str>,
-    page_size: Option<(f64, f64)>,
-    system_cmyk_bytes: Option<std::sync::Arc<Vec<u8>>>,
-    no_aa: bool,
+    options: ViewerOptions,
 ) {
-    let app = viewer::ViewerApp::new(viewer_end, dpi_override, system_cmyk_bytes, no_aa);
+    let page_size = options.page_size;
+    let app = viewer::ViewerApp::new(viewer_end, options);
 
     let title = match filename {
         Some(name) => {
@@ -279,7 +318,7 @@ fn run_viewer_inner(
     let init_w = content_w;
     let init_h = content_h + status_bar_est;
 
-    let options = eframe::NativeOptions {
+    let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(&title)
             .with_inner_size([init_w, init_h])
@@ -288,6 +327,6 @@ fn run_viewer_inner(
         persist_window: false,
         ..Default::default()
     };
-    eframe::run_native("stet", options, Box::new(|_cc| Ok(Box::new(app))))
+    eframe::run_native("stet", native_options, Box::new(|_cc| Ok(Box::new(app))))
         .expect("Failed to start viewer");
 }

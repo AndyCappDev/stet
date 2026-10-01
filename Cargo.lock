@@ -3136,6 +3136,7 @@ dependencies = [
  "eframe",
  "egui",
  "rayon",
+ "stet",
  "stet-core",
  "stet-graphics",
  "stet-render",

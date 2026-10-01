@@ -58,12 +58,14 @@ over channels. The public API reflects that split:
 
 | Item | Role |
 |------|------|
-| [`run_viewer`] | Enter the viewer event loop. Blocks until the window closes. |
+| [`run_viewer_with_options`] | Enter the viewer event loop. Blocks until the window closes. |
+| [`ViewerOptions`] | How the viewer is set up: DPI, first page size, CMYK profile, anti-aliasing, and black-point compensation — which must match the colour cache the display lists were built with. |
 | [`create_channels`] | Build the matched `(InterpreterEnd, ViewerEnd)` pair that wires the two threads together. |
 | [`ViewerMsg`] | Interpreter → viewer messages (`Page`, `NewJob`, `JobDone`). |
 | [`PageReady`] | A single page's display list + pixel dimensions + reference DPI, ready for display. |
 
-[`run_viewer`]: https://docs.rs/stet-viewer/latest/stet_viewer/fn.run_viewer.html
+[`run_viewer_with_options`]: https://docs.rs/stet-viewer/latest/stet_viewer/fn.run_viewer_with_options.html
+[`ViewerOptions`]: https://docs.rs/stet-viewer/latest/stet_viewer/struct.ViewerOptions.html
 [`create_channels`]: https://docs.rs/stet-viewer/latest/stet_viewer/fn.create_channels.html
 [`ViewerMsg`]: https://docs.rs/stet-viewer/latest/stet_viewer/enum.ViewerMsg.html
 [`PageReady`]: https://docs.rs/stet-viewer/latest/stet_viewer/struct.PageReady.html

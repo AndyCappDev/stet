@@ -46,6 +46,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default.
 - **`Context::newerror`** in `stet-core`: whether a job that ended in
   `PsError::Stop` ended on an error or on `quit`, which also stops.
+- **`ViewerOptions` and `run_viewer_with_options`** in `stet-viewer`:
+  the viewer's settings as a struct, with the new `bpc_mode` among them —
+  the black-point compensation of the colour cache the display lists were
+  built with, which the viewer must convert images and overprint with too.
 - **Render a page box, or a region, of a PDF page as the page:** `--box`
   on the command line and `PdfDocument::set_page_area` in
   `stet-pdf-reader`. `--box art` (or `media`, `crop`, `bleed`, `trim`)
@@ -59,6 +63,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a bleed renders. For PDF input, with `--device png` or `--device pdf`.
   `PageArea`, `PdfDocument::page_area_rect` and
   `PdfError::EmptyPageArea` (an area that misses the page) are new.
+
+### Deprecated
+
+- **`stet_viewer::run_viewer`**, for `run_viewer_with_options`. It has no
+  way to take the black-point compensation mode, so it keeps the default;
+  it will be removed in 0.9.0.
 
 ### Fixed
 
@@ -138,6 +148,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   BleedBox, TrimBox or ArtBox falls back to the MediaBox; the PDF
   specification makes it the crop box. The values `page_boxes` returns
   are unchanged.
+- **The viewer ignored `--bpc off` and `--no-icc` for images.** It
+  converts DeviceCMYK and ICCBased images, and overprinted colours, as it
+  renders, through a cache built with the default black-point
+  compensation, so those images stayed compensated beside fills that were
+  not — up to ~20 levels darker for K=100 through Ghostscript's default
+  CMYK profile.
 - **A PostScript program ending in `quit` failed in the `stet` library.**
   `Interpreter::render`, `render_to_display_list`, `render_to_pdf` and
   `exec` returned "PostScript error: stop" and discarded the job's pages,

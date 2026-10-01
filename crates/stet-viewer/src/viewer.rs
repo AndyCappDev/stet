@@ -10,9 +10,10 @@ use std::time::{Duration, Instant};
 
 use egui::{ColorImage, TextureHandle, TextureOptions, Vec2};
 use stet_graphics::display_list::DisplayList;
+use stet_graphics::icc::BpcMode;
 use stet_render::{ImageCache, PreparedDisplayList};
 
-use crate::{ScreenInfo, ViewerEnd, ViewerMsg};
+use crate::{PageReady, ScreenInfo, ViewerEnd, ViewerMsg, ViewerOptions};
 
 /// Message delivered from the prep worker to the main viewer thread.
 /// Page content has already been processed (display list prepared, ICC
@@ -30,6 +31,7 @@ struct PendingWorker {
     raw_rx: Receiver<ViewerMsg>,
     prepared_tx: std::sync::mpsc::Sender<PreparedMsg>,
     system_cmyk_bytes: Option<Arc<Vec<u8>>>,
+    bpc_mode: BpcMode,
     discard_flag: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -178,6 +180,41 @@ struct StoredPage {
     full_page: Option<FullPageBuffer>,
 }
 
+/// Prepare a received page for display: its precomputed bboxes, the
+/// colour cache it renders with, and its images, decoded and converted.
+///
+/// The cache converts what the display list left for render time —
+/// DeviceCMYK and ICCBased images, overprint — so it must match the one
+/// that built the list: the same CMYK profile (the page's own, else the
+/// session's `system_cmyk_bytes`), proofing and black-point compensation.
+fn prepare_page(
+    page: PageReady,
+    system_cmyk_bytes: Option<&Arc<Vec<u8>>>,
+    bpc_mode: BpcMode,
+) -> StoredPage {
+    let prepared = stet_render::prepare_display_list(&page.display_list);
+    let cmyk_bytes = page.cmyk_bytes.as_ref().or(system_cmyk_bytes);
+    let icc_cache = stet_render::build_icc_cache_for_list_with_bpc(
+        &page.display_list,
+        cmyk_bytes,
+        page.cmyk_proofing,
+        bpc_mode,
+    );
+    let image_cache = ImageCache::build(&page.display_list, Some(&icc_cache));
+    StoredPage {
+        display_list: Arc::new(page.display_list),
+        prepared: Arc::new(prepared),
+        width: page.width,
+        height: page.height,
+        dpi: page.dpi,
+        page_num: page.page_num,
+        cached_render: None,
+        icc_cache: Arc::new(icc_cache),
+        image_cache: Arc::new(image_cache),
+        full_page: None,
+    }
+}
+
 /// Pre-rendered full-page buffer at a specific zoom level.
 /// Panning blits from this buffer instead of re-rendering.
 struct FullPageBuffer {
@@ -224,12 +261,14 @@ const MINIMAP_MAX_H: f32 = 200.0;
 const MINIMAP_MARGIN: f32 = 12.0;
 
 impl ViewerApp {
-    pub fn new(
-        viewer_end: ViewerEnd,
-        dpi_override: Option<f64>,
-        system_cmyk_bytes: Option<std::sync::Arc<Vec<u8>>>,
-        no_aa: bool,
-    ) -> Self {
+    pub fn new(viewer_end: ViewerEnd, options: ViewerOptions) -> Self {
+        let ViewerOptions {
+            dpi_override,
+            page_size: _,
+            system_cmyk_bytes,
+            no_aa,
+            bpc_mode,
+        } = options;
         // Heavy per-page prep runs on a worker thread so navigation input
         // stays snappy even while many pages are streaming in. The worker
         // is spawned lazily on the first update() call because it needs
@@ -239,7 +278,8 @@ impl ViewerApp {
         let pending_worker = Some(PendingWorker {
             raw_rx: viewer_end.page_receiver,
             prepared_tx,
-            system_cmyk_bytes: system_cmyk_bytes.clone(),
+            system_cmyk_bytes,
+            bpc_mode,
             discard_flag: prep_discard_flag.clone(),
         });
         Self {
@@ -391,6 +431,7 @@ impl ViewerApp {
             raw_rx,
             prepared_tx,
             system_cmyk_bytes,
+            bpc_mode,
             discard_flag,
         } = cfg;
         let ui_ctx = ctx.clone();
@@ -401,26 +442,7 @@ impl ViewerApp {
                         if discard_flag.load(std::sync::atomic::Ordering::Relaxed) {
                             continue;
                         }
-                        let prepared = stet_render::prepare_display_list(&page.display_list);
-                        let cmyk_bytes = page.cmyk_bytes.as_ref().or(system_cmyk_bytes.as_ref());
-                        let icc_cache = stet_render::build_icc_cache_for_list(
-                            &page.display_list,
-                            cmyk_bytes,
-                            page.cmyk_proofing,
-                        );
-                        let image_cache = ImageCache::build(&page.display_list, Some(&icc_cache));
-                        let stored = StoredPage {
-                            display_list: Arc::new(page.display_list),
-                            prepared: Arc::new(prepared),
-                            width: page.width,
-                            height: page.height,
-                            dpi: page.dpi,
-                            page_num: page.page_num,
-                            cached_render: None,
-                            icc_cache: Arc::new(icc_cache),
-                            image_cache: Arc::new(image_cache),
-                            full_page: None,
-                        };
+                        let stored = prepare_page(page, system_cmyk_bytes.as_ref(), bpc_mode);
                         if prepared_tx
                             .send(PreparedMsg::Page(Box::new(stored)))
                             .is_err()
@@ -1822,5 +1844,87 @@ impl eframe::App for ViewerApp {
         if !self.interpreter_done {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stet_graphics::icc::{IccCache, IccCacheOptions};
+
+    /// A CMYK profile whose 400% black is not L* 0, so black-point
+    /// compensation moves K=100.
+    const SPLIT: &[u8] = include_bytes!("../../stet-graphics/tests/data/cmyk_intent/split.icc");
+
+    /// K=100 filled on the left half; a K=100 DeviceCMYK image, which the
+    /// display list keeps as CMYK for render time, on the right.
+    const FILL_AND_IMAGE: &[u8] = b"%!PS\n\
+        0 0 0 1 setcmykcolor 0 0 306 792 rectfill\n\
+        gsave 306 0 translate 306 792 scale\n\
+        1 1 8 [1 0 0 1 0 0] <000000FF> false 4 colorimage grestore showpage\n";
+
+    /// Build the page as the CLI does under `--bpc`, prepare it as the
+    /// viewer does, render it, and return the fill's and the image's colour.
+    fn fill_and_image(bake: BpcMode, prepare: BpcMode) -> ([u8; 3], [u8; 3]) {
+        let mut interp = stet::Interpreter::new();
+        interp.context().icc_cache = IccCache::new_with_options(IccCacheOptions {
+            bpc_mode: bake,
+            source_cmyk_profile: Some(SPLIT.to_vec()),
+        });
+        let page = interp
+            .render_to_display_list(FILL_AND_IMAGE, 72.0)
+            .unwrap()
+            .remove(0);
+        let (w, h) = (page.width, page.height);
+        let stored = prepare_page(
+            PageReady {
+                display_list: page.display_list,
+                width: w,
+                height: h,
+                dpi: page.dpi,
+                page_num: 1,
+                cmyk_bytes: None,
+                cmyk_proofing: false,
+            },
+            Some(&Arc::new(SPLIT.to_vec())),
+            prepare,
+        );
+        let rgba = stet_render::render_region_prepared(
+            &stored.display_list,
+            &stored.prepared,
+            0.0,
+            0.0,
+            w as f64,
+            h as f64,
+            w,
+            h,
+            stored.dpi,
+            Some(&stored.icc_cache),
+            Some(&stored.image_cache),
+            false,
+        );
+        let at = |x: u32| {
+            let i = ((h / 2 * w + x) * 4) as usize;
+            [rgba[i], rgba[i + 1], rgba[i + 2]]
+        };
+        (at(w / 4), at(w * 3 / 4))
+    }
+
+    /// An image converts with the black-point compensation the page was
+    /// built with, so it matches the fill beside it — `--bpc off` and
+    /// `--no-icc` included, which used to leave images compensated.
+    #[test]
+    fn images_render_with_the_pages_black_point_compensation() {
+        let mut fills = Vec::new();
+        for mode in [BpcMode::Off, BpcMode::On, BpcMode::Auto] {
+            let (fill, image) = fill_and_image(mode, mode);
+            assert_eq!(fill, image, "{mode:?}");
+            fills.push(fill);
+        }
+        // The profile tells the modes apart, or the test proves nothing.
+        assert_ne!(fills[0], fills[1]);
+        // And a cache set up unlike the bake does disagree with it.
+        let (fill, image) = fill_and_image(BpcMode::Off, BpcMode::On);
+        assert_ne!(fill, image);
     }
 }

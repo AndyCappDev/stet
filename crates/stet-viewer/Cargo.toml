@@ -18,3 +18,7 @@ stet-render = { workspace = true, features = ["parallel"] }
 eframe.workspace = true
 egui.workspace = true
 rayon.workspace = true
+
+[dev-dependencies]
+# Builds the unit tests' pages from PostScript.
+stet.workspace = true

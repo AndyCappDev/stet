@@ -38,6 +38,18 @@ struct IccCliConfig {
 }
 
 impl IccCliConfig {
+    /// The black-point compensation colours are converted with: `--bpc`,
+    /// or off under `--no-icc`. Every cache a front end builds takes it from
+    /// here — the one display lists are built with and the viewer's
+    /// render-time one — so the two cannot disagree.
+    fn effective_bpc_mode(&self) -> BpcMode {
+        if self.no_icc {
+            BpcMode::Off
+        } else {
+            self.bpc_mode
+        }
+    }
+
     /// Resolved source CMYK profile path: `--cmyk-profile` wins over
     /// `--output-profile` when both are given. Used as the "source CMYK"
     /// override; `--output-profile` continues to control PDF embedding bytes
@@ -1240,13 +1252,16 @@ fn run_viewer_mode(
             interrupt_flag: viewer_end.interrupt_flag,
             password_response_sender: viewer_end.password_response_sender,
         };
-        stet_viewer::run_viewer(
+        stet_viewer::run_viewer_with_options(
             new_viewer_end,
-            dpi_override,
             first_file.as_deref(),
-            first_page_size,
-            system_cmyk_bytes,
-            no_aa,
+            stet_viewer::ViewerOptions {
+                dpi_override,
+                page_size: first_page_size,
+                system_cmyk_bytes,
+                no_aa,
+                bpc_mode: icc_cfg.effective_bpc_mode(),
+            },
         );
     }
     std::process::exit(0);
@@ -1458,7 +1473,7 @@ fn build_icc_cache(icc_cfg: &IccCliConfig) -> stet_graphics::icc::IccCache {
 
     if icc_cfg.no_icc {
         return IccCache::new_with_options(IccCacheOptions {
-            bpc_mode: BpcMode::Off,
+            bpc_mode: icc_cfg.effective_bpc_mode(),
             source_cmyk_profile: None,
         });
     }
@@ -1471,7 +1486,7 @@ fn build_icc_cache(icc_cfg: &IccCliConfig) -> stet_graphics::icc::IccCache {
         validate_cmyk_icc(&bytes, path);
         eprintln!("[ICC] Loaded source CMYK profile: {}", path);
         return IccCache::new_with_options(IccCacheOptions {
-            bpc_mode: icc_cfg.bpc_mode,
+            bpc_mode: icc_cfg.effective_bpc_mode(),
             source_cmyk_profile: Some(bytes),
         });
     }
@@ -1487,13 +1502,13 @@ fn build_icc_cache(icc_cfg: &IccCliConfig) -> stet_graphics::icc::IccCache {
         }
         eprintln!("[ICC] Loaded output profile: {}", path);
         return IccCache::new_with_options(IccCacheOptions {
-            bpc_mode: icc_cfg.bpc_mode,
+            bpc_mode: icc_cfg.effective_bpc_mode(),
             source_cmyk_profile: Some(bytes),
         });
     }
 
     let mut cache = IccCache::new_with_options(IccCacheOptions {
-        bpc_mode: icc_cfg.bpc_mode,
+        bpc_mode: icc_cfg.effective_bpc_mode(),
         source_cmyk_profile: None,
     });
     cache.search_system_cmyk_profile();
