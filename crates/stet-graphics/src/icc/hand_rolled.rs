@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Scott Bowman
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Hand-rolled colorimetric CLUT samplers.
+//! Hand-rolled samplers for ICC `lut16Type` tables.
 //!
 //! moxcms's `create_transform` routes CMYK profiles through an internal
 //! Lab→sRGB pipeline that over-saturates light/midtone colours noticeably
@@ -56,7 +56,7 @@ const PCS_LAB_DENOM: f32 = 65280.0;
 /// `grid_n` controls the output CLUT resolution (the existing path uses
 /// 17). BPC is folded into every grid point so per-pixel runtime cost
 /// stays at zero.
-pub(super) fn bake_clut4_perceptual(
+pub(super) fn bake_clut4_hand_rolled(
     profile: &ColorProfile,
     grid_n: usize,
     bpc_enabled: bool,
@@ -330,9 +330,11 @@ fn linear_to_srgb(v: f64) -> f64 {
 // is locally exact. moxcms's chain composes the same two CLUTs per pixel,
 // and to match its byte-level accuracy we do the same.
 //
-// This module presently uses the Perceptual tables only (A2B0 / B2A0,
-// matching moxcms's intent default). Step 2 of the GWG 16.1 plan will
-// expand to all four ICC rendering intents.
+// Both legs take the rendering intent and read that intent's tables
+// (A2B0/B2A0 perceptual, A2B1/B2A1 colorimetric, A2B2/B2A2 saturation),
+// falling back to whichever table the profile carries. Absolute
+// colorimetric reads the colorimetric tables; its white-point adaptation
+// is not applied.
 
 /// Source RGB profile A2B sampler: either an owned `lut16Type` table or a
 /// shaper-matrix (TRC + colorant matrix) fallback. Held by value inside

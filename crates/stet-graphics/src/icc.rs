@@ -9,7 +9,7 @@
 //! DeviceCMYK → RGB conversion beyond the naive PLRM formula.
 
 pub mod bpc;
-mod perceptual;
+mod hand_rolled;
 
 use bpc::{
     BpcParams, apply_bpc_f64, apply_bpc_rgb_u8, compute_bpc_params, detect_source_black_point,
@@ -143,7 +143,7 @@ impl TransformExecutor<f64> for GrayToRgbIdentity {
 /// `Clut4`. Used as stage 2 of the proofing chain so the chain output goes
 /// through the same hand-rolled colorimetric path as direct DeviceCMYK
 /// conversion, avoiding the moxcms over-saturation cited in
-/// `perceptual.rs`.
+/// `hand_rolled.rs`.
 struct Clut4ToRgb {
     clut4: Clut4,
 }
@@ -212,11 +212,14 @@ impl<T: Copy + Default + Send + Sync + 'static> TransformExecutor<T> for Chained
 
 /// Pre-baked 4D CLUT sampling a CMYK ICC transform on a regular grid.
 ///
-/// At profile-registration time we sample moxcms at `grid_n^4` evenly-spaced
-/// CMYK points and store the sRGB output. At image-conversion time we do
-/// K-slice plus 3D tetrahedral interpolation inside each slice. This is ~30×
-/// faster than direct moxcms for LUT-based CMYK profiles (e.g., SWOP) while
-/// staying well inside imperceptible ΔE for typical print-workflow inputs.
+/// At profile-registration time we evaluate the profile at `grid_n^4`
+/// evenly-spaced CMYK points and store the sRGB output — through
+/// [`hand_rolled::bake_clut4_hand_rolled`] (the profile's `A2B1` table)
+/// where it can read the profile, else through a moxcms transform
+/// ([`bake_clut4`]). At image-conversion time we do K-slice plus 3D
+/// tetrahedral interpolation inside each slice. This is ~30× faster than
+/// direct moxcms for LUT-based CMYK profiles (e.g., SWOP) while staying well
+/// inside imperceptible ΔE for typical print-workflow inputs.
 #[derive(Clone)]
 struct Clut4 {
     /// Grid points per axis (typical: 17).
@@ -229,7 +232,7 @@ struct Clut4 {
 impl Clut4 {
     /// Construct a Clut4 from a pre-baked byte buffer with the same memory
     /// layout `bake_clut4` produces (K outermost, Y, M, C innermost; 3 bytes
-    /// per grid point). Used by [`perceptual::bake_clut4_perceptual`] so its
+    /// per grid point). Used by [`hand_rolled::bake_clut4_hand_rolled`] so its
     /// output is byte-compatible with [`apply_clut4_cmyk_to_rgb`].
     fn from_baked(grid_n: u8, data: Vec<u8>) -> Self {
         debug_assert_eq!(data.len(), (grid_n as usize).pow(4) * 3);
@@ -243,10 +246,13 @@ impl Clut4 {
 /// Cached ICC transform to sRGB (specific to source layout).
 #[derive(Clone)]
 struct CachedTransform {
-    /// 8-bit transform for image data. When proofing is enabled and the
-    /// source is RGB, this is the Perceptual-intent chain so existing
-    /// callers (no intent plumbing yet) keep producing the GWG 13.0
-    /// baseline byte-for-byte.
+    /// 8-bit transform for image data, used by callers that pass no
+    /// intent. When proofing is enabled and the source is RGB, this is the
+    /// Perceptual-intent chain, which keeps the GWG 13.0 baseline
+    /// byte-for-byte. Otherwise it is moxcms's transform for the first
+    /// intent that builds, Perceptual first — so for a CMYK profile it
+    /// reads `A2B0`, while `clut4` (which CMYK conversions prefer) reads
+    /// `A2B1`. The two agree only on profiles whose tables are equal.
     transform_8bit: Arc<dyn TransformExecutor<u8> + Send + Sync>,
     /// f64 transform for single-color conversions. Same intent default
     /// as `transform_8bit`.
@@ -268,7 +274,7 @@ struct CachedTransform {
     /// in turn lets the renderer's `cmyk_group_blend` gate fire on
     /// ICCBased RGB swatches inside a `/CS DeviceCMYK` page group
     /// (GWG 16.1).
-    chain_stage1_per_intent: [Option<Arc<perceptual::HandRolledChainStage1Rgb>>; 4],
+    chain_stage1_per_intent: [Option<Arc<hand_rolled::HandRolledChainStage1Rgb>>; 4],
     /// Number of source components.
     n: u32,
     /// Whether the source profile is Lab (needs value normalization).
@@ -332,7 +338,7 @@ pub struct IccCache {
     /// the parallel CMYK buffer would otherwise compute. Surfaced under
     /// CMYK-group blends — GWG 22.1's ColorBurn form over a Lab BG is the
     /// canonical case where the indirect path drifts visibly.
-    lab_to_oi_per_intent: [Option<Arc<perceptual::LabToCmykSampler>>; 4],
+    lab_to_oi_per_intent: [Option<Arc<hand_rolled::LabToCmykSampler>>; 4],
 }
 
 impl Default for IccCache {
@@ -467,14 +473,15 @@ impl IccCache {
         let dst_layout_8 = Layout::Rgb;
         let dst_layout_f64 = Layout::Rgb;
 
-        // Try multiple rendering intents — Perceptual first so the
-        // moxcms-driven `transform_f64` Arc honours the profile's perceptual
-        // table. Most CMYK paths route through the perceptual A2B0 CLUT
-        // (`bake_clut4_perceptual`) instead, but a few sites still call the
-        // f64 transform directly (e.g. `Luminosity` soft-mask conversion in
-        // the renderer); for those sites, picking the Perceptual transform
-        // here keeps the per-pixel result aligned with the CLUT path. ICC v4
-        // profiles may only have A2B0, so this also covers those.
+        // Try multiple rendering intents and keep the first that builds,
+        // Perceptual first: ICC v4 profiles may carry only A2B0. For a CMYK
+        // profile this transform is *not* what conversions normally use —
+        // they prefer the CLUT4 baked below, which `bake_clut4_hand_rolled`
+        // samples from A2B1 (relative colorimetric). The transform is reached
+        // only when that bake returns `None` (it then also feeds the
+        // fallback `bake_clut4`, so the fallback table reads A2B0), in chain
+        // mode, and from `round_trip_rgb_via_cmyk`. On a profile whose A2B0
+        // and A2B1 differ, those paths disagree with the CLUT4 path.
         let intents = [
             RenderingIntent::Perceptual,
             RenderingIntent::RelativeColorimetric,
@@ -569,7 +576,7 @@ impl IccCache {
             Default::default();
         let mut chain_per_intent_f64: [Option<Arc<dyn TransformExecutor<f64> + Send + Sync>>; 4] =
             Default::default();
-        let mut chain_stage1_per_intent: [Option<Arc<perceptual::HandRolledChainStage1Rgb>>; 4] =
+        let mut chain_stage1_per_intent: [Option<Arc<hand_rolled::HandRolledChainStage1Rgb>>; 4] =
             Default::default();
         let chain_data: Option<ChainPair> = if self.proofing_enabled
             && let Some(oi_hash) = self.default_cmyk_hash
@@ -623,7 +630,7 @@ impl IccCache {
                     RenderingIntent::AbsoluteColorimetric,
                 ] {
                     let Some(stage1) =
-                        perceptual::HandRolledChainStage1Rgb::new(&profile, &oi_profile, intent)
+                        hand_rolled::HandRolledChainStage1Rgb::new(&profile, &oi_profile, intent)
                     else {
                         continue;
                     };
@@ -728,7 +735,7 @@ impl IccCache {
         // For 4-channel (CMYK) profiles, pre-bake a 17^4 CLUT for fast image
         // conversion. Two paths produce the same Clut4 layout:
         //
-        // 1. `bake_clut4_perceptual` samples the profile's own A2B1
+        // 1. `bake_clut4_hand_rolled` samples the profile's own A2B1
         //    (colorimetric) table directly, decodes the legacy v2 PCS-Lab
         //    encoding, and clips out-of-gamut colours to the sRGB boundary.
         //    Output matches lcms2's `cmsDoTransform(RelCol)` to ±1 RGB level.
@@ -753,7 +760,7 @@ impl IccCache {
         let clut4 = if n == 4 && !chain_active {
             // Direct (non-proofing) CMYK profiles: pre-bake a CLUT for fast
             // image conversion.
-            let c = perceptual::bake_clut4_perceptual(&profile, 17, bpc_enabled).or_else(|| {
+            let c = hand_rolled::bake_clut4_hand_rolled(&profile, 17, bpc_enabled).or_else(|| {
                 let params = if bpc_enabled {
                     detect_source_black_point(transform_8bit.as_ref())
                         .map(|sbp| compute_bpc_params(sbp, [0.0; 3], bpc::WP_D50))
@@ -898,8 +905,8 @@ impl IccCache {
         {
             // Route single-color CMYK through the same baked CLUT image
             // conversions use, so a flat fill matches the surrounding gradient
-            // stops byte-for-byte. BPC and the perceptual A2B0 sampling are
-            // already folded into the CLUT.
+            // stops byte-for-byte. BPC is already folded into the CLUT, which
+            // is the profile's A2B1 (relative colorimetric) table.
             let (r, g, b) = sample_clut4_single_f64(clut, src[0], src[1], src[2], src[3]);
             (r, g, b)
         } else {
@@ -973,11 +980,12 @@ impl IccCache {
     }
 
     /// Convert a single color through an ICC profile using a specific
-    /// rendering intent. Falls back to the cached default chain (built
-    /// from the Perceptual tables) when no per-intent chain is
-    /// available — that path matches [`Self::convert_color_readonly`]
-    /// byte-for-byte and is the common case for non-PDF/X documents and
-    /// CMYK source profiles.
+    /// rendering intent. Falls back to the cached default transform when
+    /// no per-intent chain is available — that path matches
+    /// [`Self::convert_color_readonly`] byte-for-byte and is the common
+    /// case for non-PDF/X documents. CMYK sources do not honour `intent`
+    /// yet: they convert through the profile's one baked table, which is
+    /// relative colorimetric.
     pub fn convert_color_readonly_with_intent(
         &self,
         hash: &ProfileHash,
@@ -1092,9 +1100,8 @@ impl IccCache {
             return None;
         }
 
-        // CMYK profiles route through the pre-baked CLUT4. Per-intent
-        // CMYK B2A selection on this side of the chain is deferred —
-        // step 4 will revisit when BPC + AbsCol land.
+        // CMYK profiles route through the pre-baked CLUT4, of which there
+        // is one per profile: `intent` is not honoured for CMYK sources.
         if let Some(clut) = &cached.clut4 {
             return Some(apply_clut4_cmyk_to_rgb(
                 clut,
@@ -1283,8 +1290,9 @@ impl IccCache {
         ];
         if let Some(clut) = cached.clut4.as_ref() {
             // Sample the same baked CLUT image conversions use, so a flat fill
-            // matches the surrounding gradient stops byte-for-byte. BPC and the
-            // perceptual A2B0 sampling are already folded into the CLUT.
+            // matches the surrounding gradient stops byte-for-byte. BPC is
+            // already folded into the CLUT, which is the profile's A2B1
+            // (relative colorimetric) table.
             let (r, g, b) = sample_clut4_single_f64(clut, src[0], src[1], src[2], src[3]);
             return Some((r, g, b));
         }
@@ -1367,7 +1375,7 @@ impl IccCache {
             if self.lab_to_oi_per_intent[i].is_some() {
                 continue;
             }
-            if let Some(sampler) = perceptual::LabToCmykSampler::build(&profile, intent) {
+            if let Some(sampler) = hand_rolled::LabToCmykSampler::build(&profile, intent) {
                 self.lab_to_oi_per_intent[i] = Some(Arc::new(sampler));
             }
         }
@@ -2176,11 +2184,11 @@ mod tests {
         }
     }
 
-    /// White CMYK (0,0,0,0) routed through the perceptual CLUT must land at
+    /// White CMYK (0,0,0,0) routed through the baked CLUT4 must land at
     /// pure white sRGB. Catches scaling errors in the PCS-Lab decode (the
     /// most likely place to introduce a uniform brightness shift).
     #[test]
-    fn test_perceptual_clut_white_anchor() {
+    fn test_clut4_white_anchor() {
         let Some(cmyk_bytes) = find_system_cmyk_profile() else {
             return;
         };
@@ -2201,7 +2209,7 @@ mod tests {
     /// within u8 quantization on the same input. Anchors the requirement
     /// that flat CMYK fills match adjacent gradient stops byte-for-byte.
     #[test]
-    fn test_perceptual_clut_single_matches_bulk() {
+    fn test_clut4_single_matches_bulk() {
         let Some(cmyk_bytes) = find_system_cmyk_profile() else {
             return;
         };
