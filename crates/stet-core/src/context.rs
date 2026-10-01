@@ -742,6 +742,23 @@ impl Context {
         }
         Ok(())
     }
+
+    /// `$error /newerror`: whether a job that ended in [`PsError::Stop`]
+    /// ended on an error rather than on `quit`.
+    ///
+    /// `quit` is PostScript (`sysdict.ps`): it clears `newerror` and calls
+    /// `stop`, so a job that quits ends in the same `Stop` as one that
+    /// errors, and only this tells them apart. `true` when `$error` has no
+    /// `newerror`, so a `stop` nothing explains still counts as an error.
+    pub fn newerror(&self) -> bool {
+        let Some(name) = self.names.find(b"newerror") else {
+            return true;
+        };
+        self.dicts
+            .get(self.dollar_error, &DictKey::Name(name))
+            .is_none_or(|obj| matches!(obj.value, PsValue::Bool(true)))
+    }
+
     /// Execute a PostScript procedure synchronously and return.
     pub fn exec_sync(&mut self, proc_obj: PsObject) -> Result<(), PsError> {
         let f = self.exec_sync_fn.expect("exec_sync not initialized");

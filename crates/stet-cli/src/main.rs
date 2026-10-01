@@ -1863,7 +1863,7 @@ fn execjob(
     // (quit sets newerror=false before calling stop).
     let job_result = match &exec_result {
         Err(PsError::Stop) => {
-            if is_newerror_set(ctx) {
+            if ctx.newerror() {
                 let _ = parse_and_exec(ctx, b"{ handleerror } stopped pop");
                 exec_result
             } else {
@@ -1915,20 +1915,6 @@ fn execjob(
     ctx.current_operator = None;
 
     job_result
-}
-
-/// Check if `$error/newerror` is true (indicates a real error, not a clean quit).
-fn is_newerror_set(ctx: &Context) -> bool {
-    use stet_core::dict::DictKey;
-    use stet_core::object::PsValue;
-    let newerror_id = ctx
-        .names
-        .find(b"newerror")
-        .unwrap_or(stet_core::object::NameId(0));
-    match ctx.dicts.get(ctx.dollar_error, &DictKey::Name(newerror_id)) {
-        Some(obj) => matches!(obj.value, PsValue::Bool(true)),
-        None => true, // If we can't check, assume error
-    }
 }
 
 /// Run init scripts to bootstrap the resource system, error handlers, and

@@ -313,10 +313,12 @@ impl Interpreter {
             if let Some((llx, lly, _, _)) = read_eps_bounding_box(ps_data) {
                 self.exec_eps(ps_data, llx, lly)
             } else {
-                parse_and_exec(&mut self.ctx, ps_data).map_err(ps_err)
+                let result = parse_and_exec(&mut self.ctx, ps_data);
+                job_result(&self.ctx, result)
             }
         } else {
-            parse_and_exec(&mut self.ctx, ps_data).map_err(ps_err)
+            let result = parse_and_exec(&mut self.ctx, ps_data);
+            job_result(&self.ctx, result)
         };
 
         self.record_end_of_job_warnings();
@@ -350,13 +352,11 @@ impl Interpreter {
         let save_id = extract_save_id(&save_obj);
 
         let result = parse_and_exec(&mut self.ctx, ps_data);
+        let result = job_result(&self.ctx, result);
 
         end_job(&mut self.ctx, save_id);
 
-        match result {
-            Ok(()) | Err(PsError::Quit) => Ok(()),
-            Err(e) => Err(StetError::PostScript(e.to_string())),
-        }
+        result
     }
 
     /// Non-fatal problems noticed during the most recent render call.
@@ -434,11 +434,8 @@ impl Interpreter {
         let save_obj = self.ctx.vm_save();
         let save_id = extract_save_id(&save_obj);
 
-        let exec_result = match parse_and_exec(&mut self.ctx, ps_data) {
-            Ok(()) => Ok(()),
-            Err(PsError::Quit) => Ok(()),
-            Err(e) => Err(StetError::PostScript(e.to_string())),
-        };
+        let exec_result = parse_and_exec(&mut self.ctx, ps_data);
+        let exec_result = job_result(&self.ctx, exec_result);
 
         self.record_end_of_job_warnings();
         finish_device(&mut self.ctx);
@@ -854,4 +851,17 @@ fn extract_save_id(save_obj: &stet_core::object::PsObject) -> u32 {
 
 fn ps_err(e: PsError) -> StetError {
     StetError::PostScript(e.to_string())
+}
+
+/// How a job ended, for the caller: `quit` ends it cleanly, not in error.
+///
+/// Read `newerror` before the job's `restore`, while `$error` still says
+/// how the job stopped.
+fn job_result(ctx: &Context, result: Result<(), PsError>) -> Result<(), StetError> {
+    match result {
+        Ok(()) | Err(PsError::Quit) => Ok(()),
+        // PostScript `quit` clears `newerror` and calls `stop`.
+        Err(PsError::Stop) if !ctx.newerror() => Ok(()),
+        Err(e) => Err(ps_err(e)),
+    }
 }

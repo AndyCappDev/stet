@@ -44,6 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in `stet-render`: the black-point compensation mode for colours the
   renderer converts, which `build_icc_cache_for_list` leaves at the
   default.
+- **`Context::newerror`** in `stet-core`: whether a job that ended in
+  `PsError::Stop` ended on an error or on `quit`, which also stops.
 - **Render a page box, or a region, of a PDF page as the page:** `--box`
   on the command line and `PdfDocument::set_page_area` in
   `stet-pdf-reader`. `--box art` (or `media`, `crop`, `bleed`, `trim`)
@@ -136,6 +138,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   BleedBox, TrimBox or ArtBox falls back to the MediaBox; the PDF
   specification makes it the crop box. The values `page_boxes` returns
   are unchanged.
+- **A PostScript program ending in `quit` failed in the `stet` library.**
+  `Interpreter::render`, `render_to_display_list`, `render_to_pdf` and
+  `exec` returned "PostScript error: stop" and discarded the job's pages,
+  because `quit` stops the job the way an error does. They now treat it as
+  the clean end of the job, as the CLI always has; a real error is still
+  an error.
 
 ## [0.8.3] — 2026-10-01
 
