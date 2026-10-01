@@ -27,7 +27,7 @@ own gate and it exits non-zero on failure:
 
 ```bash
 cargo build --release
-./target/release/stet unit_tests/ps_tests.ps   # 68 files, 2813 assertions
+./target/release/stet unit_tests/ps_tests.ps   # 68 files, 2848 assertions
 ```
 
 ### Git hooks

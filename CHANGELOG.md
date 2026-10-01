@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.3] — 2026-10-01
+
 ### Added
 
 - **Transparent page backgrounds: `--transparent` for `--device png`,
@@ -42,6 +44,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`stet_core::graphics_state::GraphicsState` has a new field,
+  `overprint_mode`,** which `setoverprintmode` sets (see Added). Code that
+  builds a `GraphicsState` with a struct literal no longer compiles; use
+  `GraphicsState::new()` and set the fields you need. Reading the struct is
+  unaffected. It is the interpreter's graphics state, public only because
+  its module is, and will be marked `#[non_exhaustive]` in a later release
+  like `PdfGraphicsState`.
 - **The embedded URW++ base 35 fonts are distributed under the SIL Open
   Font License 1.1** instead of the GNU AGPL v3 with a font exception. In
   2017 URW++ licensed the Version 2.0 fonts under a choice of AGPL, LPPL
