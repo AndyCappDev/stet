@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `convert_color_readonly_with_intent`, `convert_color_with_intent` and
   `convert_image_8bit_with_intent` now honour the intent for CMYK profiles;
   the intent-less conversions are relative colorimetric, as before.
+- **`GraphicsState.icc_components`** in `stet-core`: the components of
+  the current colour in an ICCBased space, kept so `setrenderingintent`
+  can convert them again. Adding it breaks struct literals of
+  `GraphicsState`, under the same reader-not-writer policy.
 - **`SkiaDevice::set_bpc_mode` and `build_icc_cache_for_list_with_bpc`**
   in `stet-render`: the black-point compensation mode for colours the
   renderer converts, which `build_icc_cache_for_list` leaves at the
@@ -67,8 +71,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   converted into the output intent, is shown the same way whatever the
   intent; there the intent governs the conversion into the output
   intent (ICCBased and Lab colours), as before. The Ghent Workgroup's
-  output-intent tests (GWG 13.0, 22.1) depend on that. PostScript follows
-  in a later change.
+  output-intent tests (GWG 13.0, 22.1) depend on that.
+- **CMYK colours, images and shadings in PostScript honour
+  `setrenderingintent`** the same way. PostScript has no output intent, so
+  the CMYK profile is always a source: `setcmykcolor`, colours in ICCBased,
+  Indexed, Separation and DeviceN spaces that convert through a CMYK
+  profile, shadings and images now take the current intent, and
+  `setrenderingintent` converts the current colour again, as `ri` does in
+  PDF and as Ghostscript does.
 - **`--bpc` did not reach PostScript images.** The PNG device converts
   DeviceCMYK images and overprinted colours as it renders, through a
   colour cache it builds for itself with the default options, so

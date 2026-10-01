@@ -315,6 +315,12 @@ pub struct GraphicsState {
     /// 1 value for Separation, N values for DeviceN. None for device color spaces.
     pub tint_values: Option<Vec<f64>>,
 
+    /// Components of the most recent colour set in an ICCBased space with a
+    /// profile, as given to `setcolor`. Meaningful only while `color_space`
+    /// is that space. The colour is converted when it is set, so
+    /// `setrenderingintent` converts these again under the new intent.
+    pub icc_components: Option<Vec<f64>>,
+
     /// Cached pre-sampled tint lookup table for the current Separation/DeviceN color space.
     /// Set when setcolorspace installs a Separation/DeviceN space.
     pub cached_tint_table: Option<Arc<crate::device::TintLookupTable>>,
@@ -380,6 +386,7 @@ impl GraphicsState {
             pattern_components: Vec::new(),
             bbox: None,
             tint_values: None,
+            icc_components: None,
             cached_tint_table: None,
             fill_opacity: 1.0,
             stroke_opacity: 1.0,
@@ -427,6 +434,7 @@ impl GraphicsState {
             pattern_components,
             bbox,
             tint_values,
+            icc_components,
             cached_tint_table,
             fill_opacity,
             stroke_opacity,
@@ -484,6 +492,7 @@ impl GraphicsState {
         self.pattern_components = pattern_components;
         self.bbox = bbox;
         self.tint_values = tint_values;
+        self.icc_components = icc_components;
         self.cached_tint_table = cached_tint_table;
         self.fill_opacity = fill_opacity;
         self.stroke_opacity = stroke_opacity;

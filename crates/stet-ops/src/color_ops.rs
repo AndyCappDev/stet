@@ -18,6 +18,12 @@ use stet_graphics::device::{
     CMYK_C, CMYK_K, CMYK_M, CMYK_Y, cmyk_channel_for_name, devicen_process_cmyk,
     separation_process_cmyk,
 };
+use stet_graphics::icc::{IccCache, IccRenderingIntent, intent_from_byte};
+
+/// The rendering intent colours are converted with: the graphics state's.
+fn gstate_intent(ctx: &Context) -> IccRenderingIntent {
+    intent_from_byte(ctx.gstate.rendering_intent)
+}
 
 /// Drop the pattern half of the current color.
 ///
@@ -40,6 +46,7 @@ pub fn op_setgray(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?;
     ctx.gstate.color = DeviceColor::from_gray(gray.clamp(0.0, 1.0));
     ctx.gstate.color_space = ColorSpace::DeviceGray;
+    ctx.gstate.icc_components = None;
     clear_pattern_color(ctx);
     // UseCIEColor remapping (PLRM 6.2.5)
     if is_use_cie_color(ctx)
@@ -74,6 +81,7 @@ pub fn op_setrgbcolor(ctx: &mut Context) -> Result<(), PsError> {
     ctx.gstate.color =
         DeviceColor::from_rgb(r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0));
     ctx.gstate.color_space = ColorSpace::DeviceRGB;
+    ctx.gstate.icc_components = None;
     clear_pattern_color(ctx);
     // UseCIEColor remapping (PLRM 6.2.5)
     if is_use_cie_color(ctx)
@@ -109,14 +117,17 @@ pub fn op_setcmykcolor(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
-    ctx.gstate.color = DeviceColor::from_cmyk_icc(
+    let intent = gstate_intent(ctx);
+    ctx.gstate.color = DeviceColor::from_cmyk_icc_with_intent(
         c.clamp(0.0, 1.0),
         m.clamp(0.0, 1.0),
         y.clamp(0.0, 1.0),
         k.clamp(0.0, 1.0),
+        intent,
         &mut ctx.icc_cache,
     );
     ctx.gstate.color_space = ColorSpace::DeviceCMYK;
+    ctx.gstate.icc_components = None;
     clear_pattern_color(ctx);
     // UseCIEColor remapping (PLRM 6.2.5)
     if is_use_cie_color(ctx)
@@ -154,6 +165,7 @@ pub fn op_sethsbcolor(ctx: &mut Context) -> Result<(), PsError> {
     ctx.gstate.color =
         DeviceColor::from_hsb(h.clamp(0.0, 1.0), s.clamp(0.0, 1.0), b.clamp(0.0, 1.0));
     ctx.gstate.color_space = ColorSpace::DeviceRGB;
+    ctx.gstate.icc_components = None;
     clear_pattern_color(ctx);
     Ok(())
 }
@@ -408,8 +420,10 @@ fn cie_space_object(ctx: &mut Context, name: &[u8], dict_entity: EntityId) -> Ps
 
 /// `setcolor`: comp1 ... compn → — (set color using current color space)
 pub fn op_setcolor(ctx: &mut Context) -> Result<(), PsError> {
-    // Clear tint values by default; Separation/DeviceN arms re-set them.
+    // Clear tint values and ICC components by default; the Separation,
+    // DeviceN and ICCBased arms re-set them.
     ctx.gstate.tint_values = None;
+    ctx.gstate.icc_components = None;
     match ctx.gstate.color_space.clone() {
         ColorSpace::DeviceGray => op_setgray(ctx),
         ColorSpace::DeviceRGB => op_setrgbcolor(ctx),
@@ -551,14 +565,16 @@ fn set_color_from_tint_result(
         }
     }
 
+    let intent = gstate_intent(ctx);
     ctx.gstate.color = match n {
         1 => DeviceColor::from_gray(components[0]),
         3 => DeviceColor::from_rgb(components[0], components[1], components[2]),
-        4 => DeviceColor::from_cmyk_icc(
+        4 => DeviceColor::from_cmyk_icc_with_intent(
             components[0],
             components[1],
             components[2],
             components[3],
+            intent,
             &mut ctx.icc_cache,
         ),
         _ => DeviceColor::from_gray(0.0),
@@ -705,11 +721,9 @@ pub fn op_currentcolor(ctx: &mut Context) -> Result<(), PsError> {
     Ok(())
 }
 
-/// Set color in an Indexed color space: index → —
-///
-/// Looks up the index in the palette and sets the resolved base-space color.
 /// Set color from ICCBased color space with an actual ICC profile.
-/// Pops N components, converts through ICC profile, stores as DeviceColor.
+/// Pops N components, converts through ICC profile, stores as DeviceColor,
+/// and keeps the components for [`reconvert_color_for_intent`].
 fn set_icc_color(ctx: &mut Context, n: u32, hash: &[u8; 32]) -> Result<(), PsError> {
     if (ctx.o_stack.len() as u32) < n {
         return Err(PsError::StackUnderflow);
@@ -733,7 +747,11 @@ fn set_icc_color(ctx: &mut Context, n: u32, hash: &[u8; 32]) -> Result<(), PsErr
         };
     }
     // Convert through ICC
-    if let Some((r, g, b)) = ctx.icc_cache.convert_color(hash, &comps) {
+    let intent = gstate_intent(ctx);
+    if let Some((r, g, b)) = ctx
+        .icc_cache
+        .convert_color_with_intent(hash, &comps, intent)
+    {
         ctx.gstate.color = DeviceColor::from_rgb(r, g, b);
     } else {
         // Fallback to device-based conversion
@@ -744,19 +762,24 @@ fn set_icc_color(ctx: &mut Context, n: u32, hash: &[u8; 32]) -> Result<(), PsErr
                 comps[1].clamp(0.0, 1.0),
                 comps[2].clamp(0.0, 1.0),
             ),
-            4 => DeviceColor::from_cmyk_icc(
+            4 => DeviceColor::from_cmyk_icc_with_intent(
                 comps[0].clamp(0.0, 1.0),
                 comps[1].clamp(0.0, 1.0),
                 comps[2].clamp(0.0, 1.0),
                 comps[3].clamp(0.0, 1.0),
+                intent,
                 &mut ctx.icc_cache,
             ),
             _ => DeviceColor::black(),
         };
     }
+    ctx.gstate.icc_components = Some(comps);
     Ok(())
 }
 
+/// Set color in an Indexed color space: index → —
+///
+/// Looks up the index in the palette and sets the resolved base-space color.
 fn set_indexed_color(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
@@ -811,7 +834,8 @@ fn set_indexed_color(ctx: &mut Context) -> Result<(), PsError> {
             let m = lookup[offset + 1] as f64 / 255.0;
             let y = lookup[offset + 2] as f64 / 255.0;
             let k = lookup[offset + 3] as f64 / 255.0;
-            DeviceColor::from_cmyk_icc(c, m, y, k, &mut ctx.icc_cache)
+            let intent = gstate_intent(ctx);
+            DeviceColor::from_cmyk_icc_with_intent(c, m, y, k, intent, &mut ctx.icc_cache)
         }
         _ => DeviceColor::from_gray(0.0),
     };
@@ -823,12 +847,17 @@ fn set_indexed_color(ctx: &mut Context) -> Result<(), PsError> {
 }
 
 /// Return the default (initial) color for a color space per PLRM.
+///
+/// Also records the components of an ICCBased default for
+/// [`reconvert_color_for_intent`], and clears them for any other space.
 fn default_color_for_space(cs: &ColorSpace, ctx: &mut Context) -> DeviceColor {
+    let intent = gstate_intent(ctx);
+    ctx.gstate.icc_components = None;
     match cs {
         ColorSpace::DeviceGray => DeviceColor::from_gray(0.0),
         ColorSpace::DeviceRGB => DeviceColor::from_rgb(0.0, 0.0, 0.0),
         ColorSpace::DeviceCMYK => {
-            DeviceColor::from_cmyk_icc(0.0, 0.0, 0.0, 1.0, &mut ctx.icc_cache)
+            DeviceColor::from_cmyk_icc_with_intent(0.0, 0.0, 0.0, 1.0, intent, &mut ctx.icc_cache)
         }
         ColorSpace::CIEBasedABC { params, .. } => DeviceColor::from_cie_abc(0.0, 0.0, 0.0, params),
         ColorSpace::CIEBasedA { params, .. } => DeviceColor::from_cie_a(0.0, params),
@@ -845,15 +874,27 @@ fn default_color_for_space(cs: &ColorSpace, ctx: &mut Context) -> DeviceColor {
                 4 => &[0.0, 0.0, 0.0, 1.0],
                 _ => return DeviceColor::black(),
             };
+            if profile_hash.is_some() {
+                ctx.gstate.icc_components = Some(default_comps.to_vec());
+            }
             if let Some(hash) = profile_hash
-                && let Some((r, g, b)) = ctx.icc_cache.convert_color(hash, default_comps)
+                && let Some((r, g, b)) =
+                    ctx.icc_cache
+                        .convert_color_with_intent(hash, default_comps, intent)
             {
                 return DeviceColor::from_rgb(r, g, b);
             }
             match n {
                 1 => DeviceColor::from_gray(0.0),
                 3 => DeviceColor::from_rgb(0.0, 0.0, 0.0),
-                4 => DeviceColor::from_cmyk_icc(0.0, 0.0, 0.0, 1.0, &mut ctx.icc_cache),
+                4 => DeviceColor::from_cmyk_icc_with_intent(
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0,
+                    intent,
+                    &mut ctx.icc_cache,
+                ),
                 _ => DeviceColor::black(),
             }
         }
@@ -873,11 +914,12 @@ fn default_color_for_space(cs: &ColorSpace, ctx: &mut Context) -> DeviceColor {
                         lookup[1] as f64 / 255.0,
                         lookup[2] as f64 / 255.0,
                     ),
-                    ColorSpace::DeviceCMYK => DeviceColor::from_cmyk_icc(
+                    ColorSpace::DeviceCMYK => DeviceColor::from_cmyk_icc_with_intent(
                         lookup[0] as f64 / 255.0,
                         lookup[1] as f64 / 255.0,
                         lookup[2] as f64 / 255.0,
                         lookup[3] as f64 / 255.0,
+                        intent,
                         &mut ctx.icc_cache,
                     ),
                     _ => DeviceColor::from_gray(0.0),
@@ -894,6 +936,101 @@ fn default_color_for_space(cs: &ColorSpace, ctx: &mut Context) -> DeviceColor {
         // nothing; the device color only matters once a pattern is installed.
         ColorSpace::Pattern { .. } => DeviceColor::black(),
     }
+}
+
+/// Convert the current colour again under the graphics state's rendering
+/// intent, after `setrenderingintent` changes it.
+///
+/// stet converts a colour when it is set, but the intent that applies is the
+/// one in force when it is painted: `setrenderingintent` is the PDF `ri`
+/// operator, and Ghostscript changes the colour of a fill that follows `ri`
+/// without a new colour. Only conversions through a CMYK
+/// profile depend on the intent, so this re-converts the CMYK a colour was
+/// set with and leaves every other colour alone. The underlying colour of an
+/// uncoloured pattern is brought up to date the same way.
+pub fn reconvert_color_for_intent(ctx: &mut Context) {
+    let intent = gstate_intent(ctx);
+    let gs = &mut ctx.gstate;
+    if let Some(color) = color_for_intent(
+        &mut ctx.icc_cache,
+        &gs.color_space,
+        &gs.color,
+        gs.icc_components.as_deref(),
+        intent,
+    ) {
+        gs.color = color;
+    }
+    if let ColorSpace::Pattern { base: Some(base) } = &gs.color_space
+        && let Some(under) = &gs.pattern_underlying_color
+        && let Some(color) = color_for_intent(
+            &mut ctx.icc_cache,
+            base,
+            under,
+            Some(&gs.pattern_components),
+            intent,
+        )
+    {
+        gs.pattern_underlying_color = Some(color);
+    }
+}
+
+/// `color`, set in `space`, converted again with `intent`; `None` when its
+/// conversion does not depend on the intent or cannot be repeated.
+///
+/// Repeats the conversion the colour was set with: CMYK reaching the default
+/// CMYK profile (DeviceCMYK, an Indexed palette over it, or the alternate of
+/// a Separation or DeviceN space), recorded in `native_cmyk`; or the
+/// components of an ICCBased colour through its own profile.
+fn color_for_intent(
+    icc: &mut IccCache,
+    space: &ColorSpace,
+    color: &DeviceColor,
+    icc_components: Option<&[f64]>,
+    intent: IccRenderingIntent,
+) -> Option<DeviceColor> {
+    let rgb = match space {
+        ColorSpace::ICCBased {
+            profile_hash: Some(hash),
+            ..
+        } => match icc_components {
+            Some(comps) => icc.convert_color_with_intent(hash, comps, intent)?,
+            // An ICCBased space installed by UseCIEColor as DefaultCMYK
+            // holds colours `setcmykcolor` converted.
+            None => {
+                let (c, m, y, k) = color.native_cmyk?;
+                icc.convert_cmyk_with_intent(c, m, y, k, intent)?
+            }
+        },
+        ColorSpace::DeviceCMYK => {
+            let (c, m, y, k) = color.native_cmyk?;
+            icc.convert_cmyk_with_intent(c, m, y, k, intent)?
+        }
+        ColorSpace::Indexed { base, .. } if matches!(base.as_ref(), ColorSpace::DeviceCMYK) => {
+            let (c, m, y, k) = color.native_cmyk?;
+            icc.convert_cmyk_with_intent(c, m, y, k, intent)?
+        }
+        // A Gray or RGB alternate converts without a profile, though a
+        // process colorant behind one still records `native_cmyk`.
+        ColorSpace::Separation {
+            num_alt_components: 4,
+            ..
+        }
+        | ColorSpace::DeviceN {
+            num_alt_components: 4,
+            ..
+        } => {
+            let (c, m, y, k) = color.native_cmyk?;
+            icc.convert_cmyk_with_intent(c, m, y, k, intent)?
+        }
+        _ => return None,
+    };
+    let (r, g, b) = rgb;
+    Some(DeviceColor {
+        r,
+        g,
+        b,
+        ..color.clone()
+    })
 }
 
 /// Resolve a color space from a PsObject (name or array).

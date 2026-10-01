@@ -718,7 +718,10 @@ pub fn op_setrenderingintent(ctx: &mut Context) -> Result<(), PsError> {
     };
     let intent = rendering_intent::from_name(&name_bytes).ok_or(PsError::RangeCheck)?;
     ctx.o_stack.pop()?;
-    ctx.gstate.rendering_intent = intent;
+    if intent != ctx.gstate.rendering_intent {
+        ctx.gstate.rendering_intent = intent;
+        crate::color_ops::reconvert_color_for_intent(ctx);
+    }
     Ok(())
 }
 

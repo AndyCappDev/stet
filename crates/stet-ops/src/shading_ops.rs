@@ -19,6 +19,7 @@ use stet_graphics::device::{
     RadialShadingParams, ShadingColorSpace,
 };
 use stet_graphics::display_list::DisplayElement;
+use stet_graphics::icc::{IccRenderingIntent, intent_from_byte};
 use stet_graphics::mesh_shading;
 
 use crate::color_ops::{precompute_cie_decode_tables, resolve_color_space_from_obj};
@@ -323,12 +324,18 @@ fn build_type1_shading(
                                 Ok(alt) => components_to_device_color(
                                     &alt,
                                     get_alt_space(color_space),
+                                    intent_from_byte(ctx.gstate.rendering_intent),
                                     &mut ctx.icc_cache,
                                 ),
                                 Err(_) => continue,
                             }
                         } else {
-                            components_to_device_color(&results, color_space, &mut ctx.icc_cache)
+                            components_to_device_color(
+                                &results,
+                                color_space,
+                                intent_from_byte(ctx.gstate.rendering_intent),
+                                &mut ctx.icc_cache,
+                            )
                         }
                     }
                     Err(_) => continue,
@@ -348,6 +355,7 @@ fn build_type1_shading(
                         Ok(alt) => components_to_device_color(
                             &alt,
                             get_alt_space(color_space),
+                            intent_from_byte(ctx.gstate.rendering_intent),
                             &mut ctx.icc_cache,
                         ),
                         Err(_) => continue,
@@ -865,11 +873,17 @@ fn sample_shading_function(
                 let color = components_to_device_color(
                     &alt,
                     get_alt_space(color_space),
+                    intent_from_byte(ctx.gstate.rendering_intent),
                     &mut ctx.icc_cache,
                 );
                 (color, alt)
             } else {
-                let color = components_to_device_color(&results, color_space, &mut ctx.icc_cache);
+                let color = components_to_device_color(
+                    &results,
+                    color_space,
+                    intent_from_byte(ctx.gstate.rendering_intent),
+                    &mut ctx.icc_cache,
+                );
                 (color, results)
             }
         } else {
@@ -884,6 +898,7 @@ fn sample_shading_function(
                 let color = components_to_device_color(
                     &alt,
                     get_alt_space(color_space),
+                    intent_from_byte(ctx.gstate.rendering_intent),
                     &mut ctx.icc_cache,
                 );
                 (color, alt)
@@ -897,7 +912,12 @@ fn sample_shading_function(
                         .and_then(|o| o.as_f64())
                         .unwrap_or(0.0);
                 }
-                let color = components_to_device_color(&comps, color_space, &mut ctx.icc_cache);
+                let color = components_to_device_color(
+                    &comps,
+                    color_space,
+                    intent_from_byte(ctx.gstate.rendering_intent),
+                    &mut ctx.icc_cache,
+                );
                 (color, comps)
             }
         };
@@ -1066,6 +1086,7 @@ fn capture_shading_color_space(ctx: &Context, color_space: &ColorSpace) -> Shadi
 fn components_to_device_color(
     comps: &[f64],
     color_space: &ColorSpace,
+    intent: IccRenderingIntent,
     icc_cache: &mut stet_graphics::icc::IccCache,
 ) -> DeviceColor {
     match color_space {
@@ -1077,11 +1098,12 @@ fn components_to_device_color(
             comps[1].clamp(0.0, 1.0),
             comps[2].clamp(0.0, 1.0),
         ),
-        ColorSpace::DeviceCMYK if comps.len() >= 4 => DeviceColor::from_cmyk_icc(
+        ColorSpace::DeviceCMYK if comps.len() >= 4 => DeviceColor::from_cmyk_icc_with_intent(
             comps[0].clamp(0.0, 1.0),
             comps[1].clamp(0.0, 1.0),
             comps[2].clamp(0.0, 1.0),
             comps[3].clamp(0.0, 1.0),
+            intent,
             icc_cache,
         ),
         ColorSpace::CIEBasedABC { params, .. } if comps.len() >= 3 => {
@@ -1100,7 +1122,7 @@ fn components_to_device_color(
             n, profile_hash, ..
         } => {
             if let Some(hash) = profile_hash
-                && let Some((r, g, b)) = icc_cache.convert_color(hash, comps)
+                && let Some((r, g, b)) = icc_cache.convert_color_with_intent(hash, comps, intent)
             {
                 return DeviceColor::from_rgb(r, g, b);
             }
@@ -1111,11 +1133,12 @@ fn components_to_device_color(
                     comps[1].clamp(0.0, 1.0),
                     comps[2].clamp(0.0, 1.0),
                 ),
-                4 if comps.len() >= 4 => DeviceColor::from_cmyk_icc(
+                4 if comps.len() >= 4 => DeviceColor::from_cmyk_icc_with_intent(
                     comps[0].clamp(0.0, 1.0),
                     comps[1].clamp(0.0, 1.0),
                     comps[2].clamp(0.0, 1.0),
                     comps[3].clamp(0.0, 1.0),
+                    intent,
                     icc_cache,
                 ),
                 _ => DeviceColor::from_gray(0.0),
@@ -1124,11 +1147,12 @@ fn components_to_device_color(
         _ => {
             // Fallback: heuristic based on count
             if comps.len() >= 4 {
-                DeviceColor::from_cmyk_icc(
+                DeviceColor::from_cmyk_icc_with_intent(
                     comps[0].clamp(0.0, 1.0),
                     comps[1].clamp(0.0, 1.0),
                     comps[2].clamp(0.0, 1.0),
                     comps[3].clamp(0.0, 1.0),
+                    intent,
                     icc_cache,
                 )
             } else if comps.len() >= 3 {
@@ -1500,6 +1524,7 @@ fn pop_color_components(
             .unwrap_or(0.0);
     }
 
+    let intent = intent_from_byte(ctx.gstate.rendering_intent);
     match color_space {
         ColorSpace::DeviceGray => {
             DeviceColor::from_gray(comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0))
@@ -1517,11 +1542,12 @@ fn pop_color_components(
         }
         ColorSpace::DeviceCMYK => {
             if comps.len() >= 4 {
-                DeviceColor::from_cmyk_icc(
+                DeviceColor::from_cmyk_icc_with_intent(
                     comps[0].clamp(0.0, 1.0),
                     comps[1].clamp(0.0, 1.0),
                     comps[2].clamp(0.0, 1.0),
                     comps[3].clamp(0.0, 1.0),
+                    intent,
                     &mut ctx.icc_cache,
                 )
             } else {
@@ -1556,7 +1582,9 @@ fn pop_color_components(
             n, profile_hash, ..
         } => {
             if let Some(hash) = profile_hash
-                && let Some((r, g, b)) = ctx.icc_cache.convert_color(hash, &comps)
+                && let Some((r, g, b)) = ctx
+                    .icc_cache
+                    .convert_color_with_intent(hash, &comps, intent)
             {
                 return DeviceColor::from_rgb(r, g, b);
             }
@@ -1567,11 +1595,12 @@ fn pop_color_components(
                     comps[1].clamp(0.0, 1.0),
                     comps[2].clamp(0.0, 1.0),
                 ),
-                4 if comps.len() >= 4 => DeviceColor::from_cmyk_icc(
+                4 if comps.len() >= 4 => DeviceColor::from_cmyk_icc_with_intent(
                     comps[0].clamp(0.0, 1.0),
                     comps[1].clamp(0.0, 1.0),
                     comps[2].clamp(0.0, 1.0),
                     comps[3].clamp(0.0, 1.0),
+                    intent,
                     &mut ctx.icc_cache,
                 ),
                 _ => DeviceColor::from_gray(0.0),
@@ -1580,11 +1609,12 @@ fn pop_color_components(
         _ => {
             // Separation/DeviceN/Indexed: use component count heuristic
             if comps.len() >= 4 {
-                DeviceColor::from_cmyk_icc(
+                DeviceColor::from_cmyk_icc_with_intent(
                     comps[0].clamp(0.0, 1.0),
                     comps[1].clamp(0.0, 1.0),
                     comps[2].clamp(0.0, 1.0),
                     comps[3].clamp(0.0, 1.0),
+                    intent,
                     &mut ctx.icc_cache,
                 )
             } else if comps.len() >= 3 {

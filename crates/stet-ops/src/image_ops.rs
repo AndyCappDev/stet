@@ -15,6 +15,7 @@ use stet_fonts::geometry::Matrix;
 use stet_graphics::color::DeviceColor;
 use stet_graphics::device::{ImageColorSpace, ImageParams};
 use stet_graphics::display_list::DisplayElement;
+use stet_graphics::icc::intent_from_byte;
 use stet_graphics::image_limits::{validate_image_dimension, validate_image_size};
 
 // ---------- image operator ----------
@@ -1355,6 +1356,7 @@ fn samples_to_rgba(
 ) -> Vec<u8> {
     let pixel_count = width as usize * height as usize;
     let mut rgba = vec![255u8; pixel_count * 4]; // Pre-fill alpha = 255
+    let intent = intent_from_byte(ctx.gstate.rendering_intent);
 
     // Check for Indexed color space
     if let ColorSpace::Indexed {
@@ -1391,7 +1393,7 @@ fn samples_to_rgba(
                     let m = lookup.get(offset + 1).copied().unwrap_or(0) as f64 / 255.0;
                     let y = lookup.get(offset + 2).copied().unwrap_or(0) as f64 / 255.0;
                     let k = lookup.get(offset + 3).copied().unwrap_or(0) as f64 / 255.0;
-                    DeviceColor::from_cmyk_icc(c, m, y, k, &mut ctx.icc_cache)
+                    DeviceColor::from_cmyk_icc_with_intent(c, m, y, k, intent, &mut ctx.icc_cache)
                 }
                 _ => DeviceColor::from_gray(0.0),
             };
@@ -1430,7 +1432,10 @@ fn samples_to_rgba(
             Some(decoded)
         };
         let src = decoded_samples.as_deref().unwrap_or(samples);
-        if let Some(rgb_data) = ctx.icc_cache.convert_image_8bit(&hash, src, pixel_count) {
+        if let Some(rgb_data) =
+            ctx.icc_cache
+                .convert_image_8bit_with_intent(&hash, src, pixel_count, intent)
+        {
             // Convert RGB to RGBA
             for i in 0..pixel_count {
                 let pi = i * 4;
@@ -1465,7 +1470,10 @@ fn samples_to_rgba(
             Some(decoded)
         };
         let src = decoded_samples.as_deref().unwrap_or(samples);
-        if let Some(rgb_data) = ctx.icc_cache.convert_image_8bit(&hash, src, pixel_count) {
+        if let Some(rgb_data) =
+            ctx.icc_cache
+                .convert_image_8bit_with_intent(&hash, src, pixel_count, intent)
+        {
             for i in 0..pixel_count {
                 let pi = i * 4;
                 let ri = i * 3;
@@ -1590,11 +1598,12 @@ fn samples_to_rgba(
                     let d_max = decode.get(c * 2 + 1).copied().unwrap_or(1.0);
                     *val = (d_min + raw * (d_max - d_min)).clamp(0.0, 1.0);
                 }
-                let color = DeviceColor::from_cmyk_icc(
+                let color = DeviceColor::from_cmyk_icc_with_intent(
                     cmyk[0],
                     cmyk[1],
                     cmyk[2],
                     cmyk[3],
+                    intent,
                     &mut ctx.icc_cache,
                 );
                 rgba[pi] = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
