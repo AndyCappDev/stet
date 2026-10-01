@@ -26,7 +26,7 @@ use stet_graphics::device::{
     PatchShadingParams, RadialShadingParams, ShadingColorSpace, ShadingVertex, StrokeParams,
     TintLookupTable,
 };
-use stet_graphics::icc::IccCache;
+use stet_graphics::icc::{BpcMode, IccCache, IccCacheOptions};
 use stet_graphics::layer_set::LayerSet;
 
 /// Axis-aligned rectangle in device pixel coordinates.
@@ -109,6 +109,10 @@ pub struct SkiaDevice {
     sink_factory: Box<dyn PageSinkFactory>,
     /// Raw bytes of the system CMYK ICC profile (for building render-thread IccCaches).
     system_cmyk_bytes: Option<std::sync::Arc<Vec<u8>>>,
+    /// Black-point compensation for the render-thread IccCaches, so
+    /// conversions made at render time (DeviceCMYK images, overprint)
+    /// agree with the ones the interpreter made while painting.
+    bpc_mode: BpcMode,
     /// Transient IccCache used during non-banded replay_to_device rendering.
     render_icc_cache: Option<IccCache>,
     /// Disable anti-aliasing for all fill/stroke operations (matches GhostScript).
@@ -216,6 +220,7 @@ impl SkiaDevice {
             pending_render: None,
             sink_factory,
             system_cmyk_bytes: None,
+            bpc_mode: BpcMode::default(),
             render_icc_cache: None,
             no_aa: false,
             use_viewport_path: false,
@@ -279,6 +284,15 @@ impl SkiaDevice {
     /// Set the system CMYK ICC profile bytes for ICC-aware rendering.
     pub fn set_system_cmyk_bytes(&mut self, bytes: std::sync::Arc<Vec<u8>>) {
         self.system_cmyk_bytes = Some(bytes);
+    }
+
+    /// Set the black-point compensation mode for render-time colour
+    /// conversion. Pass the interpreter's
+    /// [`IccCache::bpc_mode`](stet_graphics::icc::IccCache::bpc_mode) so
+    /// colours converted while rendering (DeviceCMYK images, overprint)
+    /// agree with the ones converted while painting.
+    pub fn set_bpc_mode(&mut self, bpc_mode: BpcMode) {
+        self.bpc_mode = bpc_mode;
     }
 
     /// Disable anti-aliasing for all fill/stroke operations.
@@ -1706,7 +1720,28 @@ pub fn build_icc_cache_for_list(
     system_cmyk_bytes: Option<&std::sync::Arc<Vec<u8>>>,
     proofing_enabled: bool,
 ) -> IccCache {
-    let mut cache = IccCache::new();
+    build_icc_cache_for_list_with_bpc(
+        list,
+        system_cmyk_bytes,
+        proofing_enabled,
+        BpcMode::default(),
+    )
+}
+
+/// [`build_icc_cache_for_list`] with an explicit black-point compensation
+/// mode. Pass the mode of the cache that produced the display list, or
+/// colours converted at render time (images, overprint) disagree with the
+/// ones converted while it was built.
+pub fn build_icc_cache_for_list_with_bpc(
+    list: &DisplayList,
+    system_cmyk_bytes: Option<&std::sync::Arc<Vec<u8>>>,
+    proofing_enabled: bool,
+    bpc_mode: BpcMode,
+) -> IccCache {
+    let mut cache = IccCache::new_with_options(IccCacheOptions {
+        bpc_mode,
+        source_cmyk_profile: None,
+    });
     let mut seen = HashSet::new();
 
     // Register system CMYK profile first. Proofing must stay off here: the
@@ -6932,7 +6967,12 @@ impl OutputDevice for SkiaDevice {
         // `render_element`, same display list — differs only in how culling
         // and epochs are computed.
         if self.use_viewport_path {
-            let icc_cache = build_icc_cache_for_list(&list, self.system_cmyk_bytes.as_ref(), false);
+            let icc_cache = build_icc_cache_for_list_with_bpc(
+                &list,
+                self.system_cmyk_bytes.as_ref(),
+                false,
+                self.bpc_mode,
+            );
             let rgba = render_to_rgba_viewport(
                 &list,
                 page_w,
@@ -6951,7 +6991,12 @@ impl OutputDevice for SkiaDevice {
         let band_h = select_band_height(page_w, page_h);
 
         // Build ICC cache for this page's display list
-        let icc_cache = build_icc_cache_for_list(&list, self.system_cmyk_bytes.as_ref(), false);
+        let icc_cache = build_icc_cache_for_list_with_bpc(
+            &list,
+            self.system_cmyk_bytes.as_ref(),
+            false,
+            self.bpc_mode,
+        );
 
         // If banding not worthwhile, render the full page as a single band.
         // This still uses render_element (same as banded path) so that Group

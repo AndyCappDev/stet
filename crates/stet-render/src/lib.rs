@@ -40,7 +40,6 @@ pub use skia_device::PageBackground;
 pub use skia_device::PreparedDisplayList;
 #[cfg(feature = "ps-device")]
 pub use skia_device::SkiaDevice;
-pub use skia_device::build_icc_cache_for_list;
 pub use skia_device::debug_bbox_comparison;
 pub use skia_device::prepare_display_list;
 pub use skia_device::render_region;
@@ -54,3 +53,4 @@ pub use skia_device::render_to_rgba_viewport;
 pub use skia_device::render_to_rgba_with_background;
 pub use skia_device::render_to_rgba_with_layers;
 pub use skia_device::viewport_band_count;
+pub use skia_device::{build_icc_cache_for_list, build_icc_cache_for_list_with_bpc};

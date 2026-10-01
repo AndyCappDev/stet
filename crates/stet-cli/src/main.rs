@@ -719,11 +719,13 @@ fn run_png_mode(
 
     // Register device factory (before setpagedevice)
     let cmyk_bytes = ctx.icc_cache.system_cmyk_bytes().cloned();
+    let bpc_mode = ctx.icc_cache.bpc_mode();
     ctx.device_factory = Some(Box::new(move |w, h| {
         let mut dev = SkiaDevice::new(w, h);
         if let Some(ref bytes) = cmyk_bytes {
             dev.set_system_cmyk_bytes(bytes.clone());
         }
+        dev.set_bpc_mode(bpc_mode);
         dev.set_no_aa(no_aa);
         dev.set_page_background(page_background(transparent));
         dev.set_use_viewport_path(use_viewport);
