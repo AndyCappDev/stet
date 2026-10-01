@@ -9,6 +9,9 @@
 //! image is converted when the page is rendered, by a colour cache the PNG
 //! device builds for itself. That cache was once built with default options,
 //! so `--bpc off` changed fills and left images as they were.
+//!
+//! `--default-intent` sets the rendering intent pages start with, for
+//! PostScript and PDF input alike.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -56,13 +59,14 @@ impl Drop for TempDir {
 }
 
 /// A 20×10 pt page: the left half filled with `cmyk`, the right half a
-/// 1×1 DeviceCMYK image of the same colour.
-fn fill_beside_image(cmyk: [u8; 4]) -> String {
+/// 1×1 DeviceCMYK image of the same colour, after `prefix`.
+fn fill_beside_image(prefix: &str, cmyk: [u8; 4]) -> String {
     let [c, m, y, k] = cmyk.map(|v| v as f64 / 255.0);
     let hex: String = cmyk.iter().map(|v| format!("{v:02X}")).collect();
     format!(
         "%!PS\n\
          << /PageSize [20 10] >> setpagedevice\n\
+         {prefix}\n\
          {c} {m} {y} {k} setcmykcolor 0 0 10 10 rectfill\n\
          gsave 10 0 translate 10 10 scale /DeviceCMYK setcolorspace\n\
          << /ImageType 1 /Width 1 /Height 1 /BitsPerComponent 8\n\
@@ -72,18 +76,75 @@ fn fill_beside_image(cmyk: [u8; 4]) -> String {
     )
 }
 
-/// Render `ps` to PNG at 72 dpi with `args`; returns the RGB of the pixel at
-/// the centre of the left half and of the right half.
-fn render(ps: &str, args: &[&str], tag: &str) -> ([u8; 3], [u8; 3]) {
-    let dir = TempDir::new(tag);
-    std::fs::write(dir.0.join("in.ps"), ps).expect("write ps");
-    let out = Command::new(stet_bin())
+/// The same page as [`fill_beside_image`], as a PDF, with `prefix` at the
+/// start of its content stream.
+fn pdf_fill_beside_image(prefix: &str, cmyk: [u8; 4]) -> Vec<u8> {
+    let [c, m, y, k] = cmyk.map(|v| v as f64 / 255.0);
+    let mut content = format!(
+        "{prefix} {c} {m} {y} {k} k 0 0 10 10 re f\n\
+         q 10 0 0 10 10 0 cm BI /W 1 /H 1 /CS /DeviceCMYK /BPC 8 ID "
+    )
+    .into_bytes();
+    content.extend(cmyk);
+    content.extend(b"\nEI Q\n");
+    let mut stream = format!("<< /Length {} >>\nstream\n", content.len()).into_bytes();
+    stream.extend(&content);
+    stream.extend(b"\nendstream");
+    let objects: [Vec<u8>; 4] = [
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 20 10] /Contents 4 0 R \
+          /Resources << >> >>"
+            .to_vec(),
+        stream,
+    ];
+    let mut pdf = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, body) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend(format!("{} 0 obj\n", i + 1).as_bytes());
+        pdf.extend(body);
+        pdf.extend(b"\nendobj\n");
+    }
+    let xref = pdf.len();
+    pdf.extend(format!("xref\n0 {}\n0000000000 65535 f\r\n", objects.len() + 1).as_bytes());
+    for off in offsets {
+        pdf.extend(format!("{off:010} 00000 n\r\n").as_bytes());
+    }
+    pdf.extend(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    pdf
+}
+
+/// Run stet on `input` (written as `in.<ext>`) with `args`; returns its exit
+/// status and output.
+fn run(input: &[u8], ext: &str, args: &[&str], dir: &TempDir) -> std::process::Output {
+    let name = format!("in.{ext}");
+    std::fs::write(dir.0.join(&name), input).expect("write input");
+    Command::new(stet_bin())
         .current_dir(&dir.0)
         .args(["--device", "png", "--dpi", "72", "-o", "out.png"])
         .args(args)
-        .arg("in.ps")
+        .arg(&name)
         .output()
-        .expect("run stet");
+        .expect("run stet")
+}
+
+/// Render `ps` to PNG at 72 dpi with `args`; returns the RGB of the pixel at
+/// the centre of the left half and of the right half.
+fn render(ps: &str, args: &[&str], tag: &str) -> ([u8; 3], [u8; 3]) {
+    render_input(ps.as_bytes(), "ps", args, tag)
+}
+
+/// [`render`] for any input: `ext` is `ps` or `pdf`.
+fn render_input(input: &[u8], ext: &str, args: &[&str], tag: &str) -> ([u8; 3], [u8; 3]) {
+    let dir = TempDir::new(tag);
+    let out = run(input, ext, args, &dir);
     assert!(
         out.status.success(),
         "stet failed: {}",
@@ -108,7 +169,7 @@ fn render(ps: &str, args: &[&str], tag: &str) -> ([u8; 3], [u8; 3]) {
 fn bpc_reaches_postscript_images() {
     let profile = profile();
     let profile = profile.to_str().expect("utf-8 path");
-    let ps = fill_beside_image([0, 0, 0, 255]);
+    let ps = fill_beside_image("", [0, 0, 0, 255]);
     let mut seen = Vec::new();
     for bpc in ["on", "off"] {
         let (fill, image) = render(
@@ -120,4 +181,65 @@ fn bpc_reaches_postscript_images() {
         seen.push(fill);
     }
     assert_ne!(seen[0], seen[1], "--bpc made no difference to the black");
+}
+
+/// A page of [`fill_beside_image`] in `ext` (`ps` or `pdf`) that first
+/// selects `intent`, or nothing when it is `None`.
+fn page(ext: &str, intent: Option<&str>, cmyk: [u8; 4]) -> Vec<u8> {
+    match (ext, intent) {
+        ("ps", None) => fill_beside_image("", cmyk).into_bytes(),
+        ("ps", Some(i)) => {
+            fill_beside_image(&format!("/{i} setrenderingintent"), cmyk).into_bytes()
+        }
+        (_, None) => pdf_fill_beside_image("", cmyk),
+        (_, Some(i)) => pdf_fill_beside_image(&format!("/{i} ri"), cmyk),
+    }
+}
+
+/// `--default-intent` is where PostScript and PDF pages start: the same as
+/// selecting the intent in the file, fills and images alike, and the file's
+/// own choice still wins.
+#[test]
+fn default_intent_is_where_pages_start() {
+    let profile = profile();
+    let profile = profile.to_str().expect("utf-8 path");
+    let black = [0, 0, 0, 255];
+    let flag = ["--cmyk-profile", profile, "--default-intent", "perceptual"];
+    let plain = ["--cmyk-profile", profile];
+    for ext in ["ps", "pdf"] {
+        let render = |intent, args: &[&str], tag: &str| {
+            render_input(
+                &page(ext, intent, black),
+                ext,
+                args,
+                &format!("{ext}-{tag}"),
+            )
+        };
+        let asked = render(Some("Perceptual"), &plain, "asked");
+        let relative = render(None, &plain, "relative");
+        let default = render(None, &flag, "default");
+        let overridden = render(Some("RelativeColorimetric"), &flag, "overridden");
+        assert_ne!(asked, relative, "{ext}: the intents must differ");
+        assert_eq!(asked.0, asked.1, "{ext}: fill and image");
+        assert_eq!(default, asked, "{ext}: --default-intent perceptual");
+        assert_eq!(overridden, relative, "{ext}: the file's own intent wins");
+    }
+}
+
+#[test]
+fn default_intent_values_are_checked() {
+    let dir = TempDir::new("intent-refused");
+    let ps = fill_beside_image("", [0, 0, 0, 255]);
+    for (args, message) in [
+        (&["--default-intent", "vivid"][..], "must be one of"),
+        (
+            &["--no-icc", "--default-intent", "perceptual"][..],
+            "cannot be combined with --no-icc",
+        ),
+    ] {
+        let out = run(ps.as_bytes(), "ps", args, &dir);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{args:?} accepted");
+        assert!(stderr.contains(message), "{args:?}: {stderr}");
+    }
 }

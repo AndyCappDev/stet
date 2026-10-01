@@ -393,6 +393,13 @@ let (rgba, w, h) = doc.render_page_to_rgba(0, 300.0)?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+### Starting rendering intent
+
+`set_default_rendering_intent(RenderingIntent)` sets the intent each page
+starts with, in place of `RelativeColorimetric`; `default_rendering_intent()`
+reads it back. The page's own `ri`, ExtGState `/RI` and image `/Intent` still
+apply over it. `RenderingIntent` is re-exported from `stet_graphics`.
+
 ## Embedded files
 
 ```rust

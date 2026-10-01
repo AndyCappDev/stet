@@ -218,6 +218,7 @@ pub use page_boxes::{PageArea, PageBoxes};
 pub use page_tree::PageInfo;
 /// The level for [`PdfDocument::set_text_extraction`], from `stet-graphics`.
 pub use stet_graphics::device::TextExtraction;
+pub use stet_graphics::rendering_intent::RenderingIntent;
 #[cfg(feature = "render")]
 pub use stet_render::PageBackground;
 pub use viewer_prefs::{
@@ -254,6 +255,9 @@ pub struct PdfDocument<'a> {
     /// The area of each page rendered as the page. The crop box by
     /// default. See [`PdfDocument::set_page_area`].
     page_area: PageArea,
+    /// The rendering intent each page starts with. RelativeColorimetric by
+    /// default. See [`PdfDocument::set_default_rendering_intent`].
+    default_rendering_intent: RenderingIntent,
     /// Whether rendered pages include annotation appearances. On by
     /// default. See [`PdfDocument::set_render_annotations`].
     render_annotations: bool,
@@ -384,6 +388,7 @@ impl<'a> PdfDocument<'a> {
             render_annotations: true,
             text_extraction: TextExtraction::Off,
             page_area: PageArea::CropBox,
+            default_rendering_intent: RenderingIntent::RelativeColorimetric,
             ocg_off,
             output_intent_icc,
             metadata_cache: OnceCell::new(),
@@ -484,6 +489,24 @@ impl<'a> PdfDocument<'a> {
     /// The area set by [`set_page_area`](Self::set_page_area).
     pub fn page_area(&self) -> PageArea {
         self.page_area
+    }
+
+    /// The rendering intent each page starts with, in place of
+    /// RelativeColorimetric. The document's own choices still apply over
+    /// it: an `ri` operator, an ExtGState `/RI` or an image's `/Intent`.
+    ///
+    /// The intent selects which of a CMYK profile's tables converts CMYK
+    /// colour; most press profiles' perceptual tables differ from their
+    /// colorimetric ones. In a PDF/X document it governs conversions into
+    /// the output intent, not how that intent's CMYK is shown.
+    pub fn set_default_rendering_intent(&mut self, intent: RenderingIntent) {
+        self.default_rendering_intent = intent;
+    }
+
+    /// The intent set by
+    /// [`set_default_rendering_intent`](Self::set_default_rendering_intent).
+    pub fn default_rendering_intent(&self) -> RenderingIntent {
+        self.default_rendering_intent
     }
 
     /// The rectangle the current [`PageArea`] resolves to on `page`, as
@@ -656,6 +679,7 @@ impl<'a> PdfDocument<'a> {
             interpreter.set_pdfx_cmyk_intent();
         }
         interpreter.set_text_extraction(self.text_extraction);
+        interpreter.set_initial_rendering_intent(self.default_rendering_intent);
 
         // Render page content
         if let Err(e) = interpreter.interpret_stream_public(&content_data) {

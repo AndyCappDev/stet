@@ -288,3 +288,33 @@ let mut interp = stet::Interpreter::builder()
     .suppress_output()    // silence PS print/==/= operators
     .build();
 ```
+
+### Rendering intent
+
+Pages start with the RelativeColorimetric rendering intent. Most press CMYK
+profiles (FOGRA39, ISO Coated v2, Japan Color, SWOP) carry a different
+table for each intent, so the intent changes how CMYK colour looks. Set a
+different starting intent with `default_rendering_intent` on the
+interpreter or `set_default_rendering_intent` on a PDF document. It is a
+default, not an override: a program's `setrenderingintent`, or a PDF's
+`ri`, `/RI` or image `/Intent`, still applies.
+
+```rust
+use stet::{Interpreter, RenderingIntent};
+
+let mut interp = Interpreter::builder()
+    .default_rendering_intent(RenderingIntent::Perceptual)
+    .build();
+```
+
+```rust
+use stet_pdf_reader::{PdfDocument, RenderingIntent};
+
+let mut doc = PdfDocument::from_bytes(&pdf_data)?;
+doc.set_default_rendering_intent(RenderingIntent::Perceptual);
+```
+
+`RenderingIntent::Perceptual` matches what lcms2-based tools such as
+ImageMagick use by default. In a PDF/X document the intent governs
+conversions *into* the output intent; the output intent's own CMYK is
+always shown the same way. The CLI equivalent is `--default-intent`.

@@ -200,6 +200,7 @@ zoom presets, minimap navigation, and drag-and-drop.
 | `--use-output-intent` | Honour the PDF's embedded OutputIntent as the source CMYK profile (default) |
 | `--no-output-intent` | Ignore the PDF's embedded OutputIntent and use the system CMYK profile |
 | `--bpc <on\|off\|auto>` | Black-point compensation (default: `auto`, currently equivalent to `on`) |
+| `--default-intent <relative\|perceptual\|saturation\|absolute>` | Rendering intent pages start with (default: `relative`): which of a CMYK profile's tables converts CMYK colour. A document's own intent (`ri`, `/RI`, an image's `/Intent`, `setrenderingintent`) still wins |
 | `--password <PW>` | Password for encrypted PDF input |
 | `--timeout <SECONDS>` | Abort a job running longer than this. No limit by default — PostScript is Turing-complete and legitimate jobs run for minutes. Set one for untrusted input |
 | `--json` | `stet text` only: print JSON with each line's position instead of plain text. See [`stet text`](#stet-text-file) |

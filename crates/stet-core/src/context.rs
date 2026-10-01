@@ -195,6 +195,12 @@ pub struct Context {
 
     // Graphics state
     pub gstate: GraphicsState,
+    /// The rendering intent a fresh graphics state starts with — at
+    /// startup, after `setpagedevice` and at the end of a job — in place of
+    /// RelativeColorimetric. `setrenderingintent` still changes it. Set it
+    /// with [`Context::set_default_rendering_intent`], which also applies it
+    /// to the current graphics state.
+    pub default_rendering_intent: stet_graphics::rendering_intent::RenderingIntent,
     pub gstate_stack: Vec<crate::graphics_state::GstateEntry>,
     /// Storage for gstate objects (PsValue::Gstate indexes into this).
     pub gstate_store: Vec<GraphicsState>,
@@ -841,6 +847,25 @@ impl Context {
         Ok(data)
     }
 
+    /// A graphics state as the interpreter starts one: PLRM's initial
+    /// values, with [`default_rendering_intent`](Self::default_rendering_intent).
+    pub fn initial_gstate(&self) -> GraphicsState {
+        let mut gstate = GraphicsState::new();
+        gstate.rendering_intent = self.default_rendering_intent.byte();
+        gstate
+    }
+
+    /// Set [`default_rendering_intent`](Self::default_rendering_intent) and
+    /// make it the current graphics state's intent. Call it before running
+    /// a program: the current colour is not converted again.
+    pub fn set_default_rendering_intent(
+        &mut self,
+        intent: stet_graphics::rendering_intent::RenderingIntent,
+    ) {
+        self.default_rendering_intent = intent;
+        self.gstate.rendering_intent = intent.byte();
+    }
+
     /// Create a new context with empty stacks and stores.
     /// Call `build_system_dict` afterward to populate operators.
     pub fn new() -> Self {
@@ -1146,6 +1171,7 @@ impl Context {
             allow_ps_resolution: false,
             exit_code: None,
             gstate: GraphicsState::new(),
+            default_rendering_intent: Default::default(),
             gstate_stack: Vec::new(),
             gstate_store: Vec::new(),
             device: None,

@@ -48,7 +48,7 @@ use stet_graphics::icc::IccCache;
 use stet_graphics::image_limits::{
     validate_bits_per_component, validate_image_dimension, validate_image_size,
 };
-use stet_graphics::rendering_intent;
+use stet_graphics::rendering_intent::{self, RenderingIntent};
 use stet_graphics::text::GlyphStep;
 
 /// Maximum nesting of re-entrant content streams.
@@ -498,6 +498,13 @@ impl<'a> ContentInterpreter<'a> {
     /// keeps display lists free of them.
     pub fn set_text_extraction(&mut self, level: TextExtraction) {
         self.text_extraction = level;
+    }
+
+    /// Start the page under `intent` instead of RelativeColorimetric. The
+    /// content's own `ri`, ExtGState `/RI` and image `/Intent` still apply
+    /// over it. Call before interpreting.
+    pub fn set_initial_rendering_intent(&mut self, intent: RenderingIntent) {
+        self.set_rendering_intent(intent.byte());
     }
 
     /// Mark this document as declaring a PDF/X-style CMYK output intent. Opts

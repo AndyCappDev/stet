@@ -9,7 +9,6 @@ use stet_core::context::Context;
 use stet_core::device::NullDevice;
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
-use stet_core::graphics_state::GraphicsState;
 use stet_core::object::{EntityId, ObjFlags, PsObject, PsValue};
 use stet_core::output_template::{ExpandError, OutputTemplate};
 use stet_fonts::geometry::{Matrix, PathSegment};
@@ -316,7 +315,7 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
     let saved_ctm = ctx.gstate.ctm;
     let current_font = ctx.gstate.current_font;
     let clip_path_version = ctx.gstate.clip_path_version;
-    ctx.gstate = GraphicsState::new();
+    ctx.gstate = ctx.initial_gstate();
     ctx.gstate.page_device = page_device;
     ctx.gstate.current_font = current_font;
     // Advanced, not reset: `grestore` compares versions to decide whether

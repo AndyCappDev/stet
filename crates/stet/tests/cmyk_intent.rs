@@ -15,7 +15,7 @@
 //! perceptual, colorimetric and saturation tables differ; `generate.py`
 //! there describes them.
 
-use stet::{DisplayElement, Interpreter};
+use stet::{DisplayElement, Interpreter, RenderingIntent};
 use stet_graphics::color::DeviceColor;
 use stet_graphics::icc::{BpcMode, IccCache, IccCacheOptions, IccRenderingIntent};
 
@@ -63,8 +63,12 @@ fn iccbased_space() -> String {
 /// Run `body` as a one-page program with `SPLIT` as the CMYK profile and
 /// return the display list's elements.
 fn elements(body: &str) -> Vec<DisplayElement> {
+    elements_in(&mut Interpreter::new(), body)
+}
+
+/// [`elements`] in `interp`.
+fn elements_in(interp: &mut Interpreter, body: &str) -> Vec<DisplayElement> {
     let src = format!("%!PS-Adobe-3.0\n{body}\nshowpage\n");
-    let mut interp = Interpreter::new();
     interp.context().icc_cache = cache();
     let mut pages = interp.render_to_display_list(src.as_bytes(), 72.0).unwrap();
     assert_eq!(pages.len(), 1);
@@ -293,5 +297,61 @@ fn images_converted_while_painting_take_the_intent() {
             "channel {ch}: got {}, want {w}",
             data[ch]
         );
+    }
+}
+
+/// The builder's default intent is where every page starts — including
+/// after `setpagedevice`, which reinitialises the graphics state, and in
+/// later jobs — and `setrenderingintent` still changes it.
+#[test]
+fn the_default_intent_is_where_pages_start() {
+    let mut interp = Interpreter::builder()
+        .default_rendering_intent(RenderingIntent::Perceptual)
+        .build();
+    let fill = |elements: Vec<DisplayElement>| {
+        elements
+            .iter()
+            .find_map(|e| match e {
+                DisplayElement::Fill { params, .. } => {
+                    Some((rgb(&params.color), params.rendering_intent))
+                }
+                _ => None,
+            })
+            .expect("a fill")
+    };
+    let perceptual = (
+        default_profile(BLACK, PERCEPTUAL),
+        stet_graphics::rendering_intent::PERCEPTUAL,
+    );
+    for (body, want, what) in [
+        (
+            "0 0 0 1 setcmykcolor 0 0 10 10 rectfill",
+            perceptual,
+            "first job",
+        ),
+        (
+            "0 0 0 1 setcmykcolor 0 0 10 10 rectfill",
+            perceptual,
+            "next job",
+        ),
+        (
+            "<< /PageSize [50 50] >> setpagedevice\n\
+             0 0 0 1 setcmykcolor 0 0 10 10 rectfill",
+            perceptual,
+            "after setpagedevice",
+        ),
+        (
+            "/RelativeColorimetric setrenderingintent\n\
+             0 0 0 1 setcmykcolor 0 0 10 10 rectfill",
+            (
+                default_profile(BLACK, RELCOL),
+                stet_graphics::rendering_intent::RELATIVE_COLORIMETRIC,
+            ),
+            "setrenderingintent",
+        ),
+    ] {
+        let (color, intent) = fill(elements_in(&mut interp, body));
+        assert_rgb(color, want.0, what);
+        assert_eq!(intent, want.1, "{what}");
     }
 }

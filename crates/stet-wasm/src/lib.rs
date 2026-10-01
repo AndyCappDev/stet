@@ -948,7 +948,7 @@ fn end_job(ctx: &mut Context, save_id: u32) {
     ctx.e_stack.clear();
     ctx.loops.clear();
     ctx.d_stack.truncate(3);
-    ctx.gstate = stet_core::graphics_state::GraphicsState::new();
+    ctx.gstate = ctx.initial_gstate();
     ctx.gstate_stack.clear();
     let _ = ctx.vm_restore(save_id);
     reset_context(ctx);
@@ -961,7 +961,7 @@ fn reset_context(ctx: &mut Context) {
     ctx.capture_display_lists = None;
     ctx.o_stack.clear();
     ctx.e_stack.clear();
-    ctx.gstate = stet_core::graphics_state::GraphicsState::new();
+    ctx.gstate = ctx.initial_gstate();
     ctx.gstate_stack.clear();
     // Reset d_stack to the 3 standard dicts (systemdict, globaldict, userdict)
     ctx.d_stack.truncate(3);

@@ -182,7 +182,7 @@ Text extraction (stet text):
 Colour management:
   --no-icc                   Disable ICC colour management; use the PLRM
                              CMYK→sRGB formulas. Cannot combine with
-                             --cmyk-profile or --bpc
+                             --cmyk-profile, --bpc or --default-intent
   --output-profile <FILE>    ICC output profile (also used as source CMYK
                              when --cmyk-profile is not set)
   --cmyk-profile <FILE>      Pin the source CMYK ICC profile for CMYK→sRGB
@@ -191,6 +191,11 @@ Colour management:
   --no-output-intent         Ignore it and use the system CMYK profile
   --bpc <on|off|auto>        Black-point compensation (default: auto,
                              currently equivalent to on)
+  --default-intent <relative|perceptual|saturation|absolute>
+                             Rendering intent pages start with (default:
+                             relative): which of a CMYK profile's tables
+                             converts CMYK colour. The document's own
+                             intent still wins
 ```
 
 `stet --help` prints the same list; `scripts/check-cli-docs.sh` in the

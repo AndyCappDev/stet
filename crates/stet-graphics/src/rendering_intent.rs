@@ -55,6 +55,45 @@ pub fn name(intent: u8) -> Option<&'static [u8]> {
     }
 }
 
+/// A rendering intent, for APIs that take one: the four standard intents,
+/// each of which maps to its display-list byte with [`byte`](Self::byte).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum RenderingIntent {
+    /// `/RelativeColorimetric`, the initial intent.
+    #[default]
+    RelativeColorimetric,
+    /// `/AbsoluteColorimetric`.
+    AbsoluteColorimetric,
+    /// `/Perceptual`.
+    Perceptual,
+    /// `/Saturation`.
+    Saturation,
+}
+
+impl RenderingIntent {
+    /// The intent's display-list byte.
+    pub fn byte(self) -> u8 {
+        match self {
+            Self::RelativeColorimetric => RELATIVE_COLORIMETRIC,
+            Self::AbsoluteColorimetric => ABSOLUTE_COLORIMETRIC,
+            Self::Perceptual => PERCEPTUAL,
+            Self::Saturation => SATURATION,
+        }
+    }
+
+    /// The intent a display-list byte encodes, or `None` for a value outside
+    /// the encoding.
+    pub fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            RELATIVE_COLORIMETRIC => Some(Self::RelativeColorimetric),
+            ABSOLUTE_COLORIMETRIC => Some(Self::AbsoluteColorimetric),
+            PERCEPTUAL => Some(Self::Perceptual),
+            SATURATION => Some(Self::Saturation),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,6 +112,20 @@ mod tests {
         for (n, b) in ALL {
             assert_eq!(from_name(n), Some(b), "{}", String::from_utf8_lossy(n));
         }
+    }
+
+    #[test]
+    fn the_enum_round_trips_through_its_byte() {
+        for intent in [
+            RenderingIntent::RelativeColorimetric,
+            RenderingIntent::AbsoluteColorimetric,
+            RenderingIntent::Perceptual,
+            RenderingIntent::Saturation,
+        ] {
+            assert_eq!(RenderingIntent::from_byte(intent.byte()), Some(intent));
+        }
+        assert_eq!(RenderingIntent::default().byte(), RELATIVE_COLORIMETRIC);
+        assert_eq!(RenderingIntent::from_byte(4), None);
     }
 
     #[test]

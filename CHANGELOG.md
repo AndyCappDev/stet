@@ -23,6 +23,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `convert_color_readonly_with_intent`, `convert_color_with_intent` and
   `convert_image_8bit_with_intent` now honour the intent for CMYK profiles;
   the intent-less conversions are relative colorimetric, as before.
+- **`--default-intent relative|perceptual|saturation|absolute`**: the
+  rendering intent pages start with, for PostScript and PDF input, in
+  place of relative colorimetric. A document that selects an intent — an
+  `ri` operator, an ExtGState `/RI`, an image's `/Intent`,
+  `setrenderingintent` — still gets it; this is a default, not an
+  override. With most press profiles the intent picks a different CMYK
+  table, so `--default-intent perceptual` gives the colours lcms2-based
+  tools such as ImageMagick produce by default. In the library:
+  `PdfDocument::set_default_rendering_intent` in `stet-pdf-reader`,
+  `InterpreterBuilder::default_rendering_intent` in `stet`, and
+  `Context::set_default_rendering_intent` / `Context::initial_gstate` in
+  `stet-core`, taking the new `RenderingIntent` enum
+  (`stet_graphics::rendering_intent`, re-exported by both).
 - **`GraphicsState.icc_components`** in `stet-core`: the components of
   the current colour in an ICCBased space, kept so `setrenderingintent`
   can convert them again. Adding it breaks struct literals of

@@ -11,6 +11,7 @@ use stet_core::context::Context;
 use stet_core::eps::{content_is_epsf, read_eps_bounding_box, strip_dos_eps_header};
 use stet_engine::eval::{parse_and_exec, parse_and_exec_file};
 use stet_graphics::icc::{BpcMode, IccCacheOptions};
+use stet_graphics::rendering_intent::RenderingIntent;
 use stet_ops::build_system_dict;
 use stet_pdf::PdfDevice;
 use stet_pdf_reader::{PageArea, PdfDocument};
@@ -31,6 +32,9 @@ struct IccCliConfig {
     /// output for every CMYK pixel and can expose CMYK-math drift that the
     /// GS default profile happens to mask.
     use_output_intent: bool,
+    /// `--default-intent`: the rendering intent pages start with, for
+    /// PostScript and PDF alike. Content that selects an intent still wins.
+    default_intent: RenderingIntent,
 }
 
 impl IccCliConfig {
@@ -115,6 +119,8 @@ fn main() {
     let mut output_profile_path: Option<String> = None;
     let mut cmyk_profile_path: Option<String> = None;
     let mut bpc_mode = BpcMode::Auto;
+    let mut default_intent = RenderingIntent::RelativeColorimetric;
+    let mut default_intent_explicit = false;
     let mut bpc_explicit = false;
     // Default: honour the PDF's declared OutputIntent as the CMYK→sRGB
     // source profile. Matches Acrobat's behaviour for PDF/X files and
@@ -273,6 +279,33 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+            "--default-intent" => {
+                if i + 1 < args.len() {
+                    default_intent = match args[i + 1].as_str() {
+                        "relative" => RenderingIntent::RelativeColorimetric,
+                        "perceptual" => RenderingIntent::Perceptual,
+                        "saturation" => RenderingIntent::Saturation,
+                        "absolute" => RenderingIntent::AbsoluteColorimetric,
+                        other => {
+                            eprintln!(
+                                "Error: --default-intent must be one of: relative, perceptual, \
+                                 saturation, absolute (got '{}')",
+                                other
+                            );
+                            std::process::exit(1);
+                        }
+                    };
+                    default_intent_explicit = true;
+                    i += 2;
+                    continue;
+                } else {
+                    eprintln!(
+                        "Error: --default-intent requires a value \
+                         (relative|perceptual|saturation|absolute)"
+                    );
+                    std::process::exit(1);
+                }
+            }
             "--max-vm" => {
                 if i + 1 < args.len() {
                     match args[i + 1].parse::<u64>() {
@@ -391,6 +424,10 @@ fn main() {
         eprintln!("Error: --bpc cannot be combined with --no-icc");
         std::process::exit(1);
     }
+    if no_icc && default_intent_explicit {
+        eprintln!("Error: --default-intent cannot be combined with --no-icc");
+        std::process::exit(1);
+    }
     if (target_width.is_some() || target_height.is_some()) && dpi.is_some() {
         eprintln!("Error: --width/--height cannot be combined with --dpi");
         std::process::exit(1);
@@ -428,6 +465,7 @@ run stet once per file",
         cmyk_profile_path,
         bpc_mode,
         use_output_intent,
+        default_intent,
     };
 
     // Determine the output device. With the viewer compiled in, it is the
@@ -1017,7 +1055,7 @@ fn run_viewer_mode(
                         dpi_override,
                         sender,
                         &ctx.icc_cache,
-                        icc_cfg_thread.use_output_intent,
+                        &icc_cfg_thread,
                         &interrupt_flag_thread,
                         Some(&page_sender_thread),
                         Some(&password_response_rx_thread),
@@ -1097,7 +1135,7 @@ fn run_viewer_mode(
                         established_dpi,
                         &sender,
                         &ctx.icc_cache,
-                        icc_cfg_thread.use_output_intent,
+                        &icc_cfg_thread,
                         &interrupt_flag_thread,
                         Some(&page_sender_thread),
                         Some(&password_response_rx_thread),
@@ -1310,7 +1348,8 @@ Common options:
 Colour management:
     --no-icc                Skip system CMYK profile loading; use the
                             PLRM CMYK→sRGB formulas. Cannot combine
-                            with --cmyk-profile or --bpc.
+                            with --cmyk-profile, --bpc or
+                            --default-intent.
     --cmyk-profile <PATH>   Override the system CMYK source profile.
     --output-profile <PATH> Output ICC profile (forward-compatible
                             with planned PDF/X-4 work).
@@ -1319,6 +1358,12 @@ Colour management:
     --no-output-intent      Ignore the PDF's OutputIntent and fall
                             back to the system CMYK profile.
     --bpc <on|off|auto>     Black-point compensation mode (default auto).
+    --default-intent <relative|perceptual|saturation|absolute>
+                            Rendering intent pages start with (default
+                            relative). Selects which of a CMYK profile's
+                            tables converts CMYK colour; the document's
+                            own intent (ri, /RI, /Intent,
+                            setrenderingintent) still wins.
 
 Subcommands:
     inspect <FILE.pdf>      Print a structural summary of a PDF
@@ -1491,6 +1536,7 @@ fn create_context(
     // This is where `--bpc` lands; commits 2-3 of docs/PLAN-BPC.md will turn
     // the stored mode into actual conversion-time behavior.
     ctx.icc_cache = build_icc_cache(icc_cfg);
+    ctx.set_default_rendering_intent(icc_cfg.default_intent);
     ctx.exec_sync_fn = Some(stet_engine::eval::exec_sync);
     build_system_dict(&mut ctx);
 
@@ -2257,7 +2303,7 @@ fn render_dropped_pdf(
     dpi_override: Option<f64>,
     dl_sender: &std::sync::mpsc::Sender<stet_viewer::DisplayListMsg>,
     icc_cache: &stet_graphics::icc::IccCache,
-    use_output_intent: bool,
+    icc_cfg: &IccCliConfig,
     interrupt_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     page_sender: Option<&std::sync::mpsc::Sender<stet_viewer::ViewerMsg>>,
     password_response_rx: Option<&std::sync::mpsc::Receiver<Option<String>>>,
@@ -2319,7 +2365,8 @@ fn render_dropped_pdf(
             }
         }
     };
-    if use_output_intent && doc.apply_output_intent_as_default_cmyk() {
+    doc.set_default_rendering_intent(icc_cfg.default_intent);
+    if icc_cfg.use_output_intent && doc.apply_output_intent_as_default_cmyk() {
         eprintln!("[ICC] Using PDF OutputIntent profile for {}", path);
     }
     // Snapshot the effective CMYK bytes (post-OI-apply) so the viewer's
@@ -2497,6 +2544,7 @@ fn run_pdf_input_png(
         if let Some(area) = page_area {
             doc.set_page_area(area);
         }
+        doc.set_default_rendering_intent(icc_cfg.default_intent);
         // Opt-in: when `--use-output-intent` is set and the user didn't pin a
         // source CMYK profile via `--cmyk-profile`/`--output-profile`, prefer
         // the PDF's own `/OutputIntents[].DestOutputProfile`. Gated because
@@ -2636,6 +2684,7 @@ fn run_pdf_input_pdf(
         if let Some(area) = page_area {
             doc.set_page_area(area);
         }
+        doc.set_default_rendering_intent(icc_cfg.default_intent);
         if icc_cfg.use_output_intent
             && icc_cfg.source_cmyk_path().is_none()
             && doc.apply_output_intent_as_default_cmyk()

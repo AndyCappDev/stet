@@ -22,7 +22,7 @@ use stet_graphics::device::ImageColorSpace;
 use stet_graphics::display_list::{DisplayElement, DisplayList};
 use stet_graphics::icc::{BpcMode, IccCache, IccCacheOptions};
 use stet_graphics::rendering_intent;
-use stet_pdf_reader::PdfDocument;
+use stet_pdf_reader::{PdfDocument, RenderingIntent};
 
 // ---------------------------------------------------------------- profile
 
@@ -424,6 +424,49 @@ fn device_cmyk_uses_the_paint_time_intent() {
     );
     assert_eq!(c[0], c[1], "the intent in effect at paint time applies");
     assert_eq!(c[3], c[2], "Q restores the colour along with the intent");
+}
+
+/// `set_default_rendering_intent` moves where a page starts; an intent the
+/// content selects itself still wins.
+#[test]
+fn the_default_intent_is_where_pages_start() {
+    let pages = [
+        "0 0 0 1 k 0 0 10 10 re f",
+        "/RelativeColorimetric ri 0 0 0 1 k 0 0 10 10 re f",
+        "/Perceptual ri 0 0 0 1 k 0 0 10 10 re f",
+    ];
+    let pdf = document(&pages, Cmyk::Source);
+    let mut doc = open(&pdf, Cmyk::Source);
+    let render = |doc: &PdfDocument| -> Vec<(Key, u8)> {
+        (0..pages.len())
+            .map(|i| {
+                let list = doc.render_page(i, 72.0).unwrap();
+                let intent = list
+                    .elements()
+                    .iter()
+                    .find_map(|e| match e {
+                        DisplayElement::Fill { params, .. } => Some(params.rendering_intent),
+                        _ => None,
+                    })
+                    .unwrap();
+                (first_color(&list).unwrap(), intent)
+            })
+            .collect()
+    };
+    let before = render(&doc);
+    assert_eq!(
+        doc.default_rendering_intent(),
+        RenderingIntent::RelativeColorimetric
+    );
+    doc.set_default_rendering_intent(RenderingIntent::Perceptual);
+    let after = render(&doc);
+    assert_ne!(before[0], before[2], "the profile's tables must differ");
+    assert_eq!(
+        after[0], before[2],
+        "a page that selects nothing starts Perceptual"
+    );
+    assert_eq!(after[0].1, rendering_intent::PERCEPTUAL);
+    assert_eq!(after[1], before[1], "the content's own intent still wins");
 }
 
 /// In a PDF/X document DeviceCMYK is the output condition: the intent

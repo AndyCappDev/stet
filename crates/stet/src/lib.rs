@@ -99,6 +99,7 @@ pub use stet_graphics::device::{ShownGlyph, TextExtraction, TextRunParams, Unico
 pub use stet_graphics::display_list::{DisplayElement, DisplayList as PsDisplayList};
 pub use stet_graphics::icc::IccCache;
 pub use stet_graphics::layer_set::LayerSet;
+pub use stet_graphics::rendering_intent::RenderingIntent;
 pub use stet_graphics::text::{TextLine, TextWord, text_lines, text_runs};
 
 #[cfg(feature = "render")]
@@ -165,6 +166,7 @@ pub struct InterpreterBuilder {
     use_icc: bool,
     suppress_output: bool,
     text_extraction: TextExtraction,
+    default_rendering_intent: RenderingIntent,
     #[cfg(feature = "render")]
     page_background: PageBackground,
 }
@@ -184,6 +186,7 @@ impl Interpreter {
             use_icc: true,
             suppress_output: false,
             text_extraction: TextExtraction::Off,
+            default_rendering_intent: RenderingIntent::RelativeColorimetric,
             #[cfg(feature = "render")]
             page_background: PageBackground::White,
         }
@@ -590,6 +593,18 @@ impl InterpreterBuilder {
         self
     }
 
+    /// The rendering intent each page starts with, in place of
+    /// RelativeColorimetric. A program's own `setrenderingintent` still
+    /// changes it.
+    ///
+    /// The intent selects which of the CMYK profile's tables converts CMYK
+    /// colour; most press profiles' perceptual tables differ from their
+    /// colorimetric ones.
+    pub fn default_rendering_intent(mut self, intent: RenderingIntent) -> Self {
+        self.default_rendering_intent = intent;
+        self
+    }
+
     /// Leave the unpainted areas of pages from [`Interpreter::render`]
     /// transparent, or keep them on white paper (the default).
     ///
@@ -608,6 +623,7 @@ impl InterpreterBuilder {
         let mut ctx = init::create_initialized_context(self.use_icc, self.suppress_output)
             .expect("interpreter initialization failed");
         ctx.text_extraction = self.text_extraction;
+        ctx.set_default_rendering_intent(self.default_rendering_intent);
         Interpreter {
             ctx,
             use_icc: self.use_icc,
@@ -814,7 +830,7 @@ fn end_job(ctx: &mut Context, save_id: u32) {
     ctx.e_stack.clear();
     ctx.loops.clear();
     ctx.d_stack.truncate(3);
-    ctx.gstate = stet_core::graphics_state::GraphicsState::new();
+    ctx.gstate = ctx.initial_gstate();
     ctx.gstate_stack.clear();
     let _ = ctx.vm_restore(save_id);
     reset_context(ctx);
