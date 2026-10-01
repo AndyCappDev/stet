@@ -7,13 +7,17 @@
 //!
 //! `data/cmyk_intent/` holds generated CMYK profiles — two whose perceptual,
 //! colorimetric and (in one) saturation tables differ, the first again as
-//! `lut8Type`, and one whose perceptual table copies its colorimetric one —
-//! and lcms2's output for each intent with black-point compensation off and
-//! on. `generate.py` there makes every file; re-run it rather than editing
-//! them.
+//! `lut8Type`, one whose perceptual table copies its colorimetric one, and
+//! `inklimit*.icc`, whose perceptual `B2A0` stops short of 400% ink as a
+//! press profile's does — and lcms2's output for each intent with
+//! black-point compensation off and on. `generate.py` there makes every
+//! file; re-run it rather than editing them.
 
 use stet_graphics::icc::{BpcMode, IccCache, IccCacheOptions, IccRenderingIntent};
 
+// The black points and round-trip legs are for the black-point detector's
+// own unit tests; this file reads the sRGB tables.
+#[allow(dead_code)]
 mod reference {
     include!("data/cmyk_intent/reference.rs");
 }
@@ -22,6 +26,9 @@ const SPLIT: &[u8] = include_bytes!("data/cmyk_intent/split.icc");
 const SPLIT_SAT: &[u8] = include_bytes!("data/cmyk_intent/split_sat.icc");
 const SPLIT_LUT8: &[u8] = include_bytes!("data/cmyk_intent/split_lut8.icc");
 const SAME: &[u8] = include_bytes!("data/cmyk_intent/same.icc");
+const INKLIMIT: &[u8] = include_bytes!("data/cmyk_intent/inklimit.icc");
+const INKLIMIT_SCNR: &[u8] = include_bytes!("data/cmyk_intent/inklimit_scnr.icc");
+const INKLIMIT_V4: &[u8] = include_bytes!("data/cmyk_intent/inklimit_v4.icc");
 
 /// Largest per-channel difference allowed from lcms2. stet bakes a 17⁴ table
 /// and interpolates it, and its Lab → sRGB arithmetic is its own.
@@ -96,6 +103,56 @@ fn every_intent_matches_lcms() {
                 bpc,
             );
             assert_matches_lcms("same.icc", SAME, &reference::SAME, intent, bpc);
+        }
+    }
+}
+
+/// lcms2 compensates relative colorimetric from a CMYK output profile's
+/// ink-limited black: Lab L*=0 through the perceptual `B2A0`, then back
+/// through `A2B1`. `inklimit.icc` is `split.icc` with a `B2A0` that stops
+/// near 310% ink, so lcms2 renders the two alike except there.
+#[test]
+fn ink_limit_moves_only_the_relative_colorimetric_black_point() {
+    let (relcol, bpc_on) = (1, 1);
+    for intent in 0..3 {
+        for bpc in 0..2 {
+            let same = reference::INKLIMIT[intent][bpc] == reference::SPLIT[intent][bpc];
+            assert_eq!(
+                same,
+                (intent, bpc) != (relcol, bpc_on),
+                "lcms2 itself, intent {intent}, bpc {bpc}"
+            );
+        }
+    }
+    // Lighter: L* 19.4 against 8 for 400% ink.
+    assert!(reference::INKLIMIT_BLACK_POINT[relcol][1] > reference::SPLIT_BLACK_POINT[relcol][1]);
+    // An input-class profile has no ink limit to discount.
+    assert_eq!(reference::INKLIMIT_SCNR, reference::SPLIT);
+}
+
+/// stet's black point for relative colorimetric is the one lcms2 detects:
+/// the round trip on an output profile, 400% ink on an input-class one, and
+/// for ICC v4 the fixed perceptual black under perceptual and saturation.
+#[test]
+#[ignore = "stet still compensates from 400% ink; lcms2 round-trips L*=0 through B2A0"]
+fn black_point_is_the_one_lcms_detects() {
+    for intent in INTENTS {
+        for bpc in [false, true] {
+            assert_matches_lcms("inklimit.icc", INKLIMIT, &reference::INKLIMIT, intent, bpc);
+            assert_matches_lcms(
+                "inklimit_scnr.icc",
+                INKLIMIT_SCNR,
+                &reference::INKLIMIT_SCNR,
+                intent,
+                bpc,
+            );
+            assert_matches_lcms(
+                "inklimit_v4.icc",
+                INKLIMIT_V4,
+                &reference::INKLIMIT_V4,
+                intent,
+                bpc,
+            );
         }
     }
 }
