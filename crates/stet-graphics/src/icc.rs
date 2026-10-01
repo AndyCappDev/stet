@@ -8,13 +8,12 @@
 //! converts colors to sRGB. Also searches for system CMYK profiles to improve
 //! DeviceCMYK → RGB conversion beyond the naive PLRM formula.
 
+mod black_point;
 pub mod bpc;
 mod cmyk_tables;
 mod hand_rolled;
 
-use bpc::{
-    BpcParams, apply_bpc_f64, apply_bpc_rgb_u8, compute_bpc_params, detect_source_black_point,
-};
+use bpc::{BpcParams, apply_bpc_f64, apply_bpc_rgb_u8};
 use cmyk_tables::CmykTables;
 use moxcms::{
     CmsError, ColorProfile, DataColorSpace, Layout, RenderingIntent, TransformExecutor,
@@ -763,13 +762,15 @@ impl IccCache {
         //    directly, decodes the legacy v2 PCS-Lab encoding, and clips
         //    out-of-gamut colours to the sRGB boundary. Through A2B1 the
         //    output matches lcms2's `cmsDoTransform(RelCol)` to ±1 RGB level.
-        //    Available for v2 mft2 CMYK profiles. BPC is computed inside the
-        //    bake against this sampler's own (1,1,1,1) output so the source
-        //    black-point matches what we're actually producing.
+        //    Available for v2 mft2 CMYK profiles.
         // 2. `bake_clut4` samples moxcms's 8-bit transform for the same
         //    table on a grid; fallback for profiles in a shape we don't yet
-        //    handle (mAB, mft1, XYZ-PCS). BPC is calibrated against that
-        //    transform's output (`detect_source_black_point`).
+        //    handle (mAB, mft1, XYZ-PCS).
+        //
+        // Both compensate from the black point lcms2 detects for the
+        // intent (`black_point`): for relative colorimetric on an output
+        // profile, its ink-limited black. Where that is the darkest
+        // colorant, each path samples it from the table it bakes.
         //
         // The runtime CLUT lookup is identical regardless of which path
         // produced the table.
@@ -789,8 +790,7 @@ impl IccCache {
             // bake on first use.
             let relcol = RenderingIntent::RelativeColorimetric;
             if bpc_enabled && !tables.hand_rolled(relcol) {
-                bpc_params = detect_source_black_point(transform_8bit.as_ref())
-                    .map(|sbp| compute_bpc_params(sbp, [0.0; 3], bpc::WP_D50));
+                bpc_params = tables.moxcms_bpc_params(relcol, transform_8bit.as_ref());
             }
             if let Some(clut) = tables.get(relcol)
                 && std::env::var_os("STET_ICC_VERIFY").is_some()
@@ -2045,11 +2045,11 @@ mod tests {
         });
         let off_rgb = off.convert_cmyk(0.0, 0.0, 0.0, 1.0).unwrap();
 
-        // With BPC: K=1 must land significantly darker. Adobe Acrobat (lcms2)
-        // produces RGB(35, 31, 32). moxcms's sRGB B2A handles very-dark XYZ
-        // slightly differently from lcms2, so our post-correct lands a few
-        // levels brighter than Acrobat — the meaningful invariant is "K=1 is
-        // visibly darker than the no-BPC baseline by a substantial margin."
+        // With BPC: K=1 must land significantly darker. Which profile the
+        // system supplies varies, so the invariant here is "K=1 is visibly
+        // darker than the no-BPC baseline by a substantial margin";
+        // `ghostscript_default_cmyk_black_matches_acrobat` pins the numbers
+        // for one profile.
         let mut on = IccCache::new_with_options(IccCacheOptions {
             bpc_mode: BpcMode::On,
             source_cmyk_profile: Some(cmyk_bytes),
@@ -2080,6 +2080,29 @@ mod tests {
             on_rgb.0 < 0.25 && on_rgb.1 < 0.25 && on_rgb.2 < 0.25,
             "Expected deep gray after BPC, got {on_rgb:?}"
         );
+    }
+
+    /// Through Ghostscript's `default_cmyk.icc` (Artifex CMYK SWOP), K=1
+    /// with BPC is RGB(35, 31, 32) in Adobe Acrobat and lcms2 alike. That
+    /// needs lcms2's black point: the profile's ink-limited black, not 400%
+    /// ink, which left stet at RGB(44, 41, 42).
+    #[test]
+    fn ghostscript_default_cmyk_black_matches_acrobat() {
+        let Ok(icc) = std::fs::read("/usr/share/color/icc/ghostscript/default_cmyk.icc") else {
+            return;
+        };
+        let mut cache = IccCache::new_with_options(IccCacheOptions {
+            bpc_mode: BpcMode::On,
+            source_cmyk_profile: Some(icc),
+        });
+        let (r, g, b) = cache.convert_cmyk(0.0, 0.0, 0.0, 1.0).unwrap();
+        let got = [r, g, b].map(|v| (v * 255.0).round() as i32);
+        for (ch, want) in [35, 31, 32].into_iter().enumerate() {
+            assert!(
+                (got[ch] - want).abs() <= 1,
+                "K=1: {got:?}, Acrobat [35, 31, 32]"
+            );
+        }
     }
 
     #[test]

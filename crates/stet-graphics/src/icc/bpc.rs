@@ -24,14 +24,15 @@
 //!
 //! # Accuracy vs. lcms2
 //!
-//! This implementation closes most of the gap between stet's pre-fix
-//! K=1 → RGB(55, 53, 53) and Adobe Acrobat's K=1 → RGB(35, 31, 32)
-//! (with `default_cmyk.icc` as the source profile). The residual ~8 RGB
-//! levels stems from differences in how moxcms's sRGB B2A handles very
-//! dark XYZ inputs vs. lcms2's reference implementation — the BPC math
-//! itself matches Adobe TN #5188 exactly, and the source-black detection
-//! returns the same XYZ-D50 value either via sRGB round-trip or via a
-//! direct Lab-as-XYZ destination probe.
+//! With `default_cmyk.icc` as the source profile, K=1 goes from
+//! RGB(55, 53, 53) without compensation to RGB(35, 31, 32) with it — Adobe
+//! Acrobat's and lcms2's numbers. The math here matches Adobe TN #5188;
+//! which black it starts from is lcms2's call, which `IccCache` makes for
+//! each profile and intent as lcms2's `cmsDetectBlackPoint` does. A residual of ~8 RGB levels once documented here
+//! was that choice, not this math: stet took 400% ink, where lcms2 takes
+//! an output profile's ink-limited black for relative colorimetric.
+//! [`detect_source_black_point`] remains the darker-colorant black for
+//! profiles baked through moxcms.
 //!
 //! # References
 //! - Adobe Tech Note #5188 — Black Point Compensation

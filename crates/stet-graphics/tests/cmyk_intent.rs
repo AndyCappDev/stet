@@ -27,6 +27,7 @@ const SPLIT_SAT: &[u8] = include_bytes!("data/cmyk_intent/split_sat.icc");
 const SPLIT_LUT8: &[u8] = include_bytes!("data/cmyk_intent/split_lut8.icc");
 const SAME: &[u8] = include_bytes!("data/cmyk_intent/same.icc");
 const INKLIMIT: &[u8] = include_bytes!("data/cmyk_intent/inklimit.icc");
+const INKLIMIT_LUT8: &[u8] = include_bytes!("data/cmyk_intent/inklimit_lut8.icc");
 const INKLIMIT_SCNR: &[u8] = include_bytes!("data/cmyk_intent/inklimit_scnr.icc");
 const INKLIMIT_V4: &[u8] = include_bytes!("data/cmyk_intent/inklimit_v4.icc");
 
@@ -134,7 +135,6 @@ fn ink_limit_moves_only_the_relative_colorimetric_black_point() {
 /// the round trip on an output profile, 400% ink on an input-class one, and
 /// for ICC v4 the fixed perceptual black under perceptual and saturation.
 #[test]
-#[ignore = "stet still compensates from 400% ink; lcms2 round-trips L*=0 through B2A0"]
 fn black_point_is_the_one_lcms_detects() {
     for intent in INTENTS {
         for bpc in [false, true] {
@@ -153,6 +153,37 @@ fn black_point_is_the_one_lcms_detects() {
                 intent,
                 bpc,
             );
+        }
+    }
+}
+
+/// A profile the hand-rolled sampler cannot read is baked from moxcms's
+/// transform, and compensates from the same black point: the ink-limited
+/// one, read from its `lut8Type` tables. moxcms's arithmetic is its own
+/// (4 levels off lcms2 with BPC off too), but 400% ink would leave 400%
+/// ink itself ~20 levels off.
+#[test]
+fn moxcms_fallback_compensates_from_the_ink_limit() {
+    let relcol = IccRenderingIntent::RelativeColorimetric;
+    let samples: Vec<u8> = reference::SAMPLES.iter().flatten().copied().collect();
+    for bpc in [false, true] {
+        let cache = IccCache::new_with_options(IccCacheOptions {
+            bpc_mode: if bpc { BpcMode::On } else { BpcMode::Off },
+            source_cmyk_profile: Some(INKLIMIT_LUT8.to_vec()),
+        });
+        let hash = *cache.default_cmyk_hash().unwrap();
+        let rgb = cache
+            .convert_image_8bit_with_intent(&hash, &samples, reference::SAMPLES.len(), relcol)
+            .unwrap();
+        let want = &reference::INKLIMIT_LUT8[1][bpc as usize];
+        for (i, (cmyk, lcms)) in reference::SAMPLES.iter().zip(want).enumerate() {
+            let got = &rgb[i * 3..i * 3 + 3];
+            for ch in 0..3 {
+                assert!(
+                    got[ch].abs_diff(lcms[ch]) <= 4,
+                    "BPC {bpc}, CMYK {cmyk:?}: stet {got:?}, lcms2 {lcms:?}"
+                );
+            }
         }
     }
 }

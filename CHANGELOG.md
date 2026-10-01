@@ -92,6 +92,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   profile, shadings and images now take the current intent, and
   `setrenderingintent` converts the current colour again, as `ri` does in
   PDF and as Ghostscript does.
+- **Relative colorimetric CMYK rendered lighter than Ghostscript and
+  Acrobat** with black-point compensation on, the default. Compensation
+  maps the profile's black to sRGB black, and stet took that black to be
+  400% ink. lcms2 — inside Ghostscript — takes an output profile's
+  *ink-limited* black for relative colorimetric: Lab L\*=0 through the
+  profile's perceptual `B2A0` table and back through `A2B1`, the darkest
+  colour the press is allowed to make. That is lighter than 400% ink, so
+  stet compensated too little: K=100 through Ghostscript's
+  `default_cmyk.icc` — the CLI's system profile where Ghostscript is
+  installed — came out RGB(44, 41, 42) where Acrobat and Ghostscript give
+  (35, 31, 32), which stet now matches. On a 17⁴ grid of CMYK values stet
+  is now 0.25–0.32 levels from lcms2 on average through ISO Coated v2 300%,
+  FOGRA39, SWOP v2 and Japan Color 2001 (was 0.7–5.9, up to 24), and
+  K=100 matches Ghostscript exactly through each. **Most CMYK content
+  through a press profile renders a little darker**, in PostScript and
+  PDF, including PDF/X documents through their output intent; profiles
+  of input class, such as the library's embedded default, and profiles
+  whose `B2A0` reaches 400% ink are unchanged. lcms2's other black-point
+  rules come with it: an ICC v4 profile's perceptual and saturation
+  intents compensate from the fixed v4 perceptual black, and an output
+  profile with no perceptual table is not compensated under relative
+  colorimetric. A profile whose round-trip tables are v4 `mAB`/`mBA`
+  keeps 400% ink.
 - **`--bpc` did not reach PostScript images.** The PNG device converts
   DeviceCMYK images and overprinted colours as it renders, through a
   colour cache it builds for itself with the default options, so

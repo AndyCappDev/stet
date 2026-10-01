@@ -6,37 +6,40 @@
 //!
 //! Which A2B table an intent reads, and whether its black point is scaled to
 //! sRGB black, follows lcms2 — the engine inside Ghostscript — converting a
-//! v2 CMYK profile to its built-in (v4) sRGB:
+//! CMYK profile to its built-in (v4) sRGB:
 //!
 //! | intent | table | black-point scaling |
 //! |---|---|---|
 //! | relative colorimetric | `A2B1` | as configured (`BpcMode`) |
 //! | perceptual | `A2B0` | always |
 //! | saturation | `A2B2` | always |
-//! | saturation, no `A2B2` | `A2B0` | never |
 //! | absolute colorimetric | as relative colorimetric | |
 //!
 //! "Always" is lcms2 forcing compensation for perceptual and saturation when
-//! either profile is ICC v4. "Never" is its black-point detector declining an
-//! intent the profile has no table for, which leaves nothing to scale. A
-//! missing table is otherwise replaced by `A2B0`, as the ICC specification
-//! says, then by whichever table the profile has. Absolute colorimetric's
-//! white-point adaptation is not applied, as on the RGB paths.
+//! either profile is ICC v4. *Which* black is scaled is lcms2's black-point
+//! detector's call ([`super::black_point`]): for relative colorimetric on an
+//! output profile, the ink-limited black; otherwise 400% ink. It finds none
+//! for an intent the profile has no table for — saturation without `A2B2`,
+//! say — and then nothing is scaled. A missing table is otherwise replaced
+//! by `A2B0`, as the ICC specification says, then by whichever table the
+//! profile has. Absolute colorimetric's white-point adaptation is not
+//! applied, as on the RGB paths.
 //!
 //! `crates/stet-graphics/tests/cmyk_intent.rs` checks these rules against
 //! lcms2's recorded output.
 //!
 //! Each table is a 245 KiB [`Clut4`] baked on first use, so a document that
 //! never asks for an intent never pays for it. Intents that resolve to the
-//! same table bytes and the same scaling share one bake: on a profile whose
-//! `A2B0` and `A2B1` are identical, perceptual and relative colorimetric
-//! (with BPC on) are one table.
+//! same table bytes and the same black point share one bake: on a profile
+//! whose `A2B0` and `A2B1` are identical and whose `B2A0` reaches 400% ink,
+//! perceptual and relative colorimetric (with BPC on) are one table.
 
 use std::sync::{Arc, OnceLock};
 
 use moxcms::{ColorProfile, Layout, LutWarehouse, RenderingIntent, TransformOptions};
 
-use super::bpc::{self, compute_bpc_params, detect_source_black_point};
+use super::black_point::{self, SourceBlack};
+use super::bpc::{self, BpcParams, compute_bpc_params, detect_source_black_point};
 use super::{Clut4, bake_clut4, hand_rolled};
 
 /// Grid points per axis of every baked table.
@@ -80,15 +83,21 @@ impl Table {
 }
 
 /// What one baked table is made from.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 struct Recipe {
     table: Table,
-    scale_black: bool,
+    /// The black point to compensate from; `None` for none.
+    black: Option<SourceBlack>,
 }
 
 /// The recipe `intent` uses (see the module docs). `present` says which
-/// tables the profile has.
-fn recipe(intent: RenderingIntent, present: impl Fn(Table) -> bool, bpc: bool) -> Recipe {
+/// tables the profile has; `detect` is its black point for an intent.
+fn recipe(
+    intent: RenderingIntent,
+    present: impl Fn(Table) -> bool,
+    bpc: bool,
+    detect: impl Fn(RenderingIntent) -> Option<SourceBlack>,
+) -> Recipe {
     let resolve = |wanted: Table| {
         if present(wanted) {
             return wanted;
@@ -100,13 +109,15 @@ fn recipe(intent: RenderingIntent, present: impl Fn(Table) -> bool, bpc: bool) -
     };
     let (table, scale_black) = match intent {
         RenderingIntent::Perceptual => (resolve(Table::A2B0), true),
-        RenderingIntent::Saturation if present(Table::A2B2) => (Table::A2B2, true),
-        RenderingIntent::Saturation => (resolve(Table::A2B0), false),
+        RenderingIntent::Saturation => (resolve(Table::A2B2), true),
         RenderingIntent::RelativeColorimetric | RenderingIntent::AbsoluteColorimetric => {
             (resolve(Table::A2B1), bpc)
         }
     };
-    Recipe { table, scale_black }
+    Recipe {
+        table,
+        black: if scale_black { detect(intent) } else { None },
+    }
 }
 
 /// The bytes of tag `sig` in the ICC profile `icc`.
@@ -151,6 +162,19 @@ impl CmykTables {
                 .find(|&o| present(o) && tag_data(icc, o.signature()) == Some(bytes))
                 .unwrap_or(t)
         };
+        // Detected once per intent: relative colorimetric's is a round trip
+        // through two tables, and absolute colorimetric shares it.
+        let detected = [
+            RenderingIntent::Perceptual,
+            RenderingIntent::RelativeColorimetric,
+            RenderingIntent::Saturation,
+        ]
+        .map(|intent| black_point::detect(&profile, icc, intent));
+        let detect = |intent: RenderingIntent| match intent {
+            RenderingIntent::Perceptual => detected[0],
+            RenderingIntent::Saturation => detected[2],
+            _ => detected[1],
+        };
         let mut recipes: Vec<Recipe> = Vec::with_capacity(4);
         let mut slot_of = [0; 4];
         for intent in [
@@ -159,7 +183,7 @@ impl CmykTables {
             RenderingIntent::Saturation,
             RenderingIntent::AbsoluteColorimetric,
         ] {
-            let mut r = recipe(intent, present, bpc);
+            let mut r = recipe(intent, present, bpc, detect);
             r.table = canonical(r.table);
             slot_of[intent as usize] = match recipes.iter().position(|&x| x == r) {
                 Some(slot) => slot,
@@ -203,13 +227,25 @@ impl CmykTables {
             .is_some_and(|t| hand_rolled::can_sample(&self.profile, t))
     }
 
+    /// Black-point compensation for `intent` on a path that samples the
+    /// moxcms `transform` rather than one of these tables: the per-pixel
+    /// fallback, and the fallback bake. The darker colorant is taken from
+    /// `transform`'s output.
+    pub(super) fn moxcms_bpc_params(
+        &self,
+        intent: RenderingIntent,
+        transform: &dyn moxcms::TransformExecutor<u8>,
+    ) -> Option<BpcParams> {
+        moxcms_bpc_params(self.recipes[self.slot_of[intent as usize]].black, transform)
+    }
+
     fn bake(&self, recipe: Recipe) -> Option<Clut4> {
         if let Some(table) = recipe.table.warehouse(&self.profile)
             && let Some(clut) = hand_rolled::bake_clut4_hand_rolled(
                 &self.profile,
                 table,
                 GRID_N as usize,
-                recipe.scale_black,
+                recipe.black,
             )
         {
             return Some(clut);
@@ -217,14 +253,22 @@ impl CmykTables {
         // Profiles the hand-rolled sampler cannot read (v4 `mAB`, `mft1`,
         // XYZ PCS): sample moxcms's transform for the same table.
         let transform = moxcms_transform(&self.profile, recipe.table.moxcms_intent())?;
-        let params = if recipe.scale_black {
-            detect_source_black_point(transform.as_ref())
-                .map(|sbp| compute_bpc_params(sbp, [0.0; 3], bpc::WP_D50))
-        } else {
-            None
-        };
+        let params = moxcms_bpc_params(recipe.black, transform.as_ref());
         bake_clut4(transform.as_ref(), GRID_N, params.as_ref())
     }
+}
+
+/// Black-point compensation from `black` for output sampled from the
+/// moxcms `transform`, which supplies the darker colorant.
+fn moxcms_bpc_params(
+    black: Option<SourceBlack>,
+    transform: &dyn moxcms::TransformExecutor<u8>,
+) -> Option<BpcParams> {
+    let sbp = match black? {
+        SourceBlack::DarkerColorant => detect_source_black_point(transform)?,
+        SourceBlack::Xyz(xyz) => xyz,
+    };
+    Some(compute_bpc_params(sbp, [0.0; 3], bpc::WP_D50))
 }
 
 /// moxcms's 8-bit CMYK → sRGB transform reading `intent`'s table, or, when
@@ -258,6 +302,7 @@ mod tests {
 
     const SPLIT: &[u8] = include_bytes!("../../tests/data/cmyk_intent/split.icc");
     const SPLIT_SAT: &[u8] = include_bytes!("../../tests/data/cmyk_intent/split_sat.icc");
+    const INKLIMIT: &[u8] = include_bytes!("../../tests/data/cmyk_intent/inklimit.icc");
 
     fn tables(icc: &[u8], bpc: bool) -> CmykTables {
         let profile = Arc::new(ColorProfile::new_from_slice(icc).unwrap());
@@ -299,7 +344,7 @@ mod tests {
             t.recipes[t.slot_of[Saturation as usize]],
             Recipe {
                 table: Table::A2B0,
-                scale_black: false
+                black: None
             }
         );
         assert!(!t.shared(Saturation, Perceptual));
@@ -312,6 +357,20 @@ mod tests {
         let icc = alias_tag(SPLIT, b"A2B0", b"A2B1");
         assert!(tables(&icc, true).shared(Perceptual, RelativeColorimetric));
         assert!(!tables(&icc, false).shared(Perceptual, RelativeColorimetric));
+    }
+
+    /// Identical tables, but a `B2A0` that stops short of 400% ink: relative
+    /// colorimetric compensates from the ink-limited black and perceptual
+    /// from 400%, so they are two tables.
+    #[test]
+    fn an_ink_limit_separates_identical_tables() {
+        let icc = alias_tag(INKLIMIT, b"A2B0", b"A2B1");
+        let t = tables(&icc, true);
+        assert!(!t.shared(Perceptual, RelativeColorimetric));
+        assert!(matches!(
+            t.recipes[t.slot_of[RelativeColorimetric as usize]].black,
+            Some(SourceBlack::Xyz(_))
+        ));
     }
 
     #[test]

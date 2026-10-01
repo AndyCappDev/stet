@@ -37,6 +37,7 @@ use moxcms::{
 };
 
 use super::Clut4;
+use super::black_point::SourceBlack;
 use super::bpc::{WP_D50, apply_bpc_xyz_d50, compute_bpc_params, lab_to_xyz_d50};
 
 /// `0xFF00` — the legacy ICC v2 Lab denominator for L*. Stored values in
@@ -60,13 +61,13 @@ const PCS_LAB_DENOM: f32 = 65280.0;
 /// [`super::bake_clut4`] path.
 ///
 /// `grid_n` controls the output CLUT resolution (the existing path uses
-/// 17). With `scale_black`, black-point compensation is folded into every
-/// grid point, so per-pixel runtime cost stays at zero.
+/// 17). With a `black` point, black-point compensation is folded into
+/// every grid point, so per-pixel runtime cost stays at zero.
 pub(super) fn bake_clut4_hand_rolled(
     profile: &ColorProfile,
     table: &LutWarehouse,
     grid_n: usize,
-    scale_black: bool,
+    black: Option<SourceBlack>,
 ) -> Option<Clut4> {
     if profile.color_space != DataColorSpace::Cmyk || profile.pcs != DataColorSpace::Lab {
         return None;
@@ -77,21 +78,22 @@ pub(super) fn bake_clut4_hand_rolled(
 
     let lut = OwnedLutSampler::from_warehouse(table, 4, 3)?;
 
-    // BPC is computed against this sampler's own (1,1,1,1) output, not
-    // moxcms's transform output, so the source black-point matches what
-    // the bake actually produces. Computing it against moxcms's transform
-    // miscalibrates the post-correction and leaves K-heavy CMYK ~13 RGB
-    // levels lighter than baseline / GS. This is lcms2's "darker colorant"
-    // black point, taken from the same table the bake reads.
-    let bpc = if scale_black {
-        let lab_k = lut.sample_cmyk_to_lab(1.0, 1.0, 1.0, 1.0);
-        let l_star = (lab_k.l as f64 * 100.0).clamp(0.0, 100.0);
-        let neutral = [l_star.min(50.0), 0.0, 0.0];
-        let sbp = lab_to_xyz_d50(neutral);
-        Some(compute_bpc_params(sbp, [0.0; 3], WP_D50))
-    } else {
-        None
-    };
+    // The darker colorant is taken from this sampler's own (1,1,1,1)
+    // output, not moxcms's transform output, so the source black point
+    // matches what the bake actually produces. Computing it against
+    // moxcms's transform miscalibrates the post-correction and leaves
+    // K-heavy CMYK ~13 RGB levels lighter than baseline / GS.
+    let bpc = black.map(|black| {
+        let sbp = match black {
+            SourceBlack::DarkerColorant => {
+                let lab_k = lut.sample_cmyk_to_lab(1.0, 1.0, 1.0, 1.0);
+                let l_star = (lab_k.l as f64 * 100.0).clamp(0.0, 100.0);
+                lab_to_xyz_d50([l_star.min(50.0), 0.0, 0.0])
+            }
+            SourceBlack::Xyz(xyz) => xyz,
+        };
+        compute_bpc_params(sbp, [0.0; 3], WP_D50)
+    });
     let bpc = bpc.as_ref();
 
     let total = grid_n
@@ -131,6 +133,35 @@ pub(super) fn bake_clut4_hand_rolled(
     }
 
     Some(Clut4::from_baked(grid_n as u8, data))
+}
+
+/// lcms2's black-point round trip for a CMYK output profile: Lab `start`
+/// through the perceptual `B2A0`, then back through the colorimetric
+/// `A2B1` (`A2B0` when there is none, as lcms2 reads it). Returns the ink
+/// it passed through and the Lab it landed on; `None` when the profile is
+/// not CMYK with a Lab PCS, or a table is one these evaluators cannot read
+/// (v4 `mAB`/`mBA`).
+pub(super) fn perceptual_round_trip(
+    profile: &ColorProfile,
+    start: [f64; 3],
+) -> Option<([f64; 4], [f64; 3])> {
+    if profile.color_space != DataColorSpace::Cmyk || profile.pcs != DataColorSpace::Lab {
+        return None;
+    }
+    let b2a0 = OwnedLutSampler::for_black_point(profile.lut_b_to_a_perceptual.as_ref()?, 3, 4)?;
+    let a2b = profile
+        .lut_a_to_b_colorimetric
+        .as_ref()
+        .or(profile.lut_a_to_b_perceptual.as_ref())?;
+    let a2b1 = OwnedLutSampler::for_black_point(a2b, 4, 3)?;
+    let ink = b2a0.lab_to_ink(start);
+    Some((ink, a2b1.ink_to_lab(ink)))
+}
+
+/// Lab of 400% ink through a CMYK A2B `table`, as lcms2 evaluates it.
+#[cfg(test)]
+pub(super) fn table_black(table: &LutWarehouse) -> Option<[f64; 3]> {
+    Some(OwnedLutSampler::for_black_point(table, 4, 3)?.ink_to_lab([1.0; 4]))
 }
 
 /// Whether [`bake_clut4_hand_rolled`] can read `table` of `profile`.
@@ -442,13 +473,6 @@ enum LabEncoding {
 
 impl LabEncoding {
     /// Lab (L\* 0–100, a\*/b\* −128–127) → the table's `[0, 1]` axes.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "read by the black-point detector, which lands next"
-        )
-    )]
     fn encode(self, lab: [f64; 3]) -> [f64; 3] {
         let full = [
             lab[0] / 100.0,
@@ -462,13 +486,6 @@ impl LabEncoding {
     }
 
     /// The table's `[0, 1]` outputs → Lab.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "read by the black-point detector, which lands next"
-        )
-    )]
     fn decode(self, v: [f64; 3]) -> [f64; 3] {
         let full = match self {
             LabEncoding::V4 => v,
@@ -515,13 +532,6 @@ impl OwnedLutSampler {
     /// [`Self::ink_to_lab`]. A three-input table must carry the identity
     /// matrix, as the ICC requires of a Lab-indexed one; lcms2 would apply
     /// any other, and these evaluators do not.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "read by the black-point detector, which lands next"
-        )
-    )]
     fn for_black_point(
         warehouse: &LutWarehouse,
         expected_n_in: usize,
@@ -622,13 +632,6 @@ impl OwnedLutSampler {
 
     /// 4-in / 3-out: CMYK ink (each `[0, 1]`) → Lab, interpolated as lcms2
     /// interpolates a four-input table, for the black point it detects.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "read by the black-point detector, which lands next"
-        )
-    )]
     fn ink_to_lab(&self, ink: [f64; 4]) -> [f64; 3] {
         let curved: [f64; 4] = std::array::from_fn(|ch| {
             sample_curve_f32(&self.input_table, ch, self.n_in_entries, ink[ch] as f32) as f64
@@ -643,13 +646,6 @@ impl OwnedLutSampler {
 
     /// 3-in / 4-out: Lab → CMYK ink (each `[0, 1]`), trilinear as lcms2
     /// reads a Lab-indexed output table, for the black point it detects.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "read by the black-point detector, which lands next"
-        )
-    )]
     fn lab_to_ink(&self, lab: [f64; 3]) -> [f64; 4] {
         let pcs = self.encoding.encode(lab).map(|v| v as f32);
         self.sample_pcs_lab_to_cmyk(pcs).map(f64::from)
@@ -733,13 +729,6 @@ fn normalised(store: &LutStore, len: usize) -> Option<Vec<f32>> {
 /// the first input, between tetrahedral interpolations over the other
 /// three in the two grid planes either side of it. `cube` holds the grid
 /// with the last input varying fastest and three outputs per point.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "read by the black-point detector, which lands next"
-    )
-)]
 fn eval4_lcms(cube: &[f32], grid: usize, input: [f64; 4], out: &mut [f64; 3]) {
     // Grid index, fraction and the offset to the next point along one input.
     let axis = |v: f64, stride: usize| {
@@ -765,13 +754,6 @@ fn eval4_lcms(cube: &[f32], grid: usize, input: [f64; 4], out: &mut [f64; 3]) {
 
 /// lcms2's `TetrahedralInterpFloat` over one three-input slice of a grid
 /// starting at `base`; each axis is `(offset, fraction, step)`.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "read by the black-point detector, which lands next"
-    )
-)]
 fn tetrahedral3(
     cube: &[f32],
     base: usize,
