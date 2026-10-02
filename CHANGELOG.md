@@ -63,6 +63,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a bleed renders. For PDF input, with `--device png` or `--device pdf`.
   `PageArea`, `PdfDocument::page_area_rect` and
   `PdfError::EmptyPageArea` (an area that misses the page) are new.
+- **`stet_graphics::image_samples`**: `to_8bit`, the nearest 8-bit value
+  of a sample of any depth, and `ColorKey`, a colour-key mask tested on
+  samples as encoded — what both front ends now use.
 
 ### Deprecated
 
@@ -267,6 +270,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is exactly the colour of its value. Matrix-shaper profiles (sRGB,
   Adobe RGB, Display P3) are unchanged. In the test corpus, one scanner
   image in `2142.pdf` moves by a level.
+- **16- and 12-bit image samples are rounded to 8 bits, not truncated.**
+  stet carries 8 bits per sample and cut deeper ones to their high bits,
+  so every 16-bit image, in PDF and PostScript, and every 12-bit
+  PostScript image came out up to a level dark before conversion, up to 3
+  after a CMYK profile. They now take the nearest 8-bit value, within a
+  level of Ghostscript, which converts them at full precision. 16-bit PDF
+  soft masks are rounded too. Indexed images keep their indices. In the
+  test corpus, `issue6289.pdf` and three pages of the two PDFX output
+  tests move, by up to 2 levels.
+- **Colour-key masks mask the samples the file names.** A PDF image's
+  `/Mask` array and PostScript ImageType 4's `MaskColor` give ranges of
+  samples as encoded: at the image's own bit depth, before `/Decode`.
+  stet tested them on the samples after expansion to 8 bits and
+  `/Decode`, and:
+  - masked the wrong pixels, or none, on a 1-, 2- or 4-bit image or one
+    with a `/Decode`: a 4-bit key of 15 missed samples of 15, which stet
+    held as 255;
+  - kept the low byte of each value of a 16-bit PDF key, so
+    `[32768 33023]` became `[0 255]` and masked every pixel;
+  - scaled a PostScript key on an Indexed image as if its indices were
+    colours;
+  - wrapped a value past the depth: a key of 300 masked 44.
+
+  Keys are now tested on the encoded samples. A PDF key also holds on a
+  multi-input DeviceN image, under a transfer function, and on a gray
+  image painted as K under a CMYK output intent, each of which changed
+  the samples it was tested on. In the test corpus, page 4 of
+  `image-qa.pdf` moves: its DeviceN images now cut out what Ghostscript
+  does.
+- **An image with a stencil `/Mask` painted its masked pixels under a
+  transfer function.** The function was applied to the masked pixels
+  too, so an inverting `/TR` painted them white.
 - **Relative colorimetric CMYK rendered lighter than Ghostscript and
   Acrobat** with black-point compensation on, the default. Compensation
   maps the profile's black to sRGB black, and stet took that black to be

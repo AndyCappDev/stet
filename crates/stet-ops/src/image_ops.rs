@@ -17,6 +17,7 @@ use stet_graphics::device::{ImageColorSpace, ImageParams};
 use stet_graphics::display_list::DisplayElement;
 use stet_graphics::icc::intent_from_byte;
 use stet_graphics::image_limits::{validate_image_dimension, validate_image_size};
+use stet_graphics::image_samples::{ColorKey, to_8bit};
 
 // ---------- image operator ----------
 
@@ -231,31 +232,38 @@ fn image_dict_form(ctx: &mut Context) -> Result<(), PsError> {
         read_image_data(ctx, data_source, total_bytes)?
     };
 
-    // Unpack samples to 8-bit
     let indexed = matches!(ctx.gstate.color_space, ColorSpace::Indexed { .. });
-    let samples = unpack_samples(data, width, height, bps, ncomp, indexed);
+    let needs_decode = !indexed && !is_identity_decode(&decode, ncomp);
 
-    // ImageType 4: extract mask color (raw BPC values scaled to 8-bit)
-    let mask_color_param = if image_type == 4 {
-        dict_get_mask_color(ctx, dict_entity, ncomp).map(|mc| {
-            mc.iter()
-                .map(|&v| scale_mask_value(v, bps) as u8)
-                .collect::<Vec<u8>>()
+    // ImageType 4: MaskColor names samples as encoded, before reduction to
+    // 8 bits or Decode (PLRM 4.10.6), so the key is tested on them here.
+    // Up to 8 bits and with no Decode, every sample keeps a distinct 8-bit
+    // value and the renderer can test the samples it is given against the
+    // key's ranges, reduced alike: an index as it is, any other sample as
+    // `unpack_samples` expands it. Otherwise the image is converted now and
+    // the masked pixels cleared.
+    let key = if image_type == 4 {
+        dict_get_mask_color(ctx, dict_entity, ncomp).and_then(|values| {
+            let values: Vec<i64> = values.into_iter().map(i64::from).collect();
+            ColorKey::new(&values, ncomp as usize, bps)
         })
     } else {
         None
     };
-
-    let needs_decode = !indexed && !is_identity_decode(&decode, ncomp);
-
-    // ImageType 4 with non-identity decode: must compare MaskColor against raw
-    // (un-decoded) samples per PLRM spec. Pre-apply mask and push as RGBA since
-    // the render-time comparison would use decoded samples.
-    if mask_color_param.is_some() && needs_decode {
-        let mut rgba = samples_to_rgba(ctx, &samples, width, height, ncomp, &decode);
-        if let Some(ref mc) = mask_color_param {
-            apply_mask_color_raw(&mut rgba, &samples, width, height, ncomp, mc);
+    let key_alpha = key.as_ref().and_then(|k| k.alpha(&data, width, height));
+    let render_key = match &key {
+        Some(k) if key_alpha.is_some() && bps <= 8 && !needs_decode => {
+            Some(k.ranges_8bit(|v| if indexed { v as u8 } else { to_8bit(v, bps) }))
         }
+        _ => None,
+    };
+
+    // Unpack samples to 8-bit
+    let samples = unpack_samples(data, width, height, bps, ncomp, indexed);
+
+    if let Some(alpha) = key_alpha.as_ref().filter(|_| render_key.is_none()) {
+        let mut rgba = samples_to_rgba(ctx, &samples, width, height, ncomp, &decode);
+        clear_masked_pixels(&mut rgba, alpha);
         draw_image_to_device(
             ctx,
             rgba,
@@ -279,13 +287,13 @@ fn image_dict_form(ctx: &mut Context) -> Result<(), PsError> {
             height,
             img_cs,
             &image_matrix,
-            mask_color_param,
+            render_key,
         );
     } else {
         // CIE DEF/DEFG, Separation, DeviceN: convert to RGB at op time
         let mut rgba = samples_to_rgba(ctx, &samples, width, height, ncomp, &decode);
-        if let Some(ref mc) = mask_color_param {
-            apply_mask_color_raw(&mut rgba, &samples, width, height, ncomp, mc);
+        if let Some(alpha) = &key_alpha {
+            clear_masked_pixels(&mut rgba, alpha);
             draw_image_to_device(
                 ctx,
                 rgba,
@@ -1283,10 +1291,18 @@ fn unpack_samples(
     let mut result = Vec::with_capacity(total_samples);
 
     if bps == 16 {
-        // 16-bit samples are two big-endian bytes; the high byte is the
-        // 8-bit value, which is what the rest of the pipeline works in.
+        // 16-bit samples are two big-endian bytes, reduced to the nearest
+        // 8-bit value, which is what the rest of the pipeline works in. An
+        // index is not scaled: it keeps its high byte, as indices past 255
+        // are beyond the 8-bit pipeline either way.
         for i in 0..total_samples {
-            result.push(raw.get(i * 2).copied().unwrap_or(0));
+            let byte = |j: usize| raw.get(j).copied().unwrap_or(0);
+            let (hi, lo) = (byte(i * 2), byte(i * 2 + 1));
+            result.push(if indexed {
+                hi
+            } else {
+                to_8bit(u16::from_be_bytes([hi, lo]), 16)
+            });
         }
     } else if bps == 12 {
         // 12-bit samples: each sample is 1.5 bytes
@@ -1311,8 +1327,13 @@ fn unpack_samples(
                     ((raw[byte_idx] as u16 & 0x0F) << 8)
                         | raw.get(byte_idx + 1).copied().unwrap_or(0) as u16
                 };
-                // Scale 12-bit to 8-bit
-                result.push((sample >> 4) as u8);
+                // Reduce 12-bit to the nearest 8-bit value; an index keeps
+                // its high bits, as for 16-bit.
+                result.push(if indexed {
+                    (sample >> 4) as u8
+                } else {
+                    to_8bit(sample, 12)
+                });
                 bit_pos += 12;
             }
         }
@@ -1617,44 +1638,12 @@ fn samples_to_rgba(
     rgba
 }
 
-/// Apply ImageType 4 MaskColor against raw (un-decoded) samples, setting
-/// alpha=0 in RGBA output for matching pixels.
-fn apply_mask_color_raw(
-    rgba: &mut [u8],
-    raw_samples: &[u8],
-    width: u32,
-    height: u32,
-    ncomp: u32,
-    mask_color: &[u8],
-) {
-    let pixel_count = width as usize * height as usize;
-    let nc = ncomp as usize;
-    let is_range = mask_color.len() == 2 * nc;
-
-    for i in 0..pixel_count {
-        let si = i * nc;
-        let matched = if is_range {
-            (0..nc).all(|c| {
-                let sample = raw_samples.get(si + c).copied().unwrap_or(0);
-                let min_val = mask_color.get(c * 2).copied().unwrap_or(0);
-                let max_val = mask_color.get(c * 2 + 1).copied().unwrap_or(0);
-                sample >= min_val && sample <= max_val
-            })
-        } else {
-            (0..nc).all(|c| {
-                let sample = raw_samples.get(si + c).copied().unwrap_or(0);
-                let target = mask_color.get(c).copied().unwrap_or(0);
-                sample == target
-            })
-        };
-        if matched {
-            let pi = i * 4;
-            if pi + 3 < rgba.len() {
-                rgba[pi] = 0;
-                rgba[pi + 1] = 0;
-                rgba[pi + 2] = 0;
-                rgba[pi + 3] = 0;
-            }
+/// Clear the RGBA pixels whose `alpha` is 0: a colour key's masked pixels
+/// ([`ColorKey::alpha`]).
+fn clear_masked_pixels(rgba: &mut [u8], alpha: &[u8]) {
+    for (px, &a) in rgba.as_chunks_mut::<4>().0.iter_mut().zip(alpha) {
+        if a == 0 {
+            *px = [0; 4];
         }
     }
 }
@@ -2169,21 +2158,6 @@ fn dict_get_mask_color(
     }
 }
 
-/// Scale a MaskColor value from the raw BPC range to 8-bit,
-/// matching the scaling done by `unpack_samples`.
-fn scale_mask_value(val: i32, bps: u32) -> i32 {
-    match bps {
-        8 => val,
-        16 => val >> 8,
-        12 => val >> 4,
-        1 | 2 | 4 => {
-            let max_val = ((1i32 << bps) - 1) as f64;
-            (val as f64 / max_val * 255.0).round() as i32
-        }
-        _ => val,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2236,13 +2210,34 @@ mod tests {
     }
 
     /// 16-bit samples are big-endian pairs; the pipeline works in 8 bits, so
-    /// the high byte is the value. LanguageLevel 3 allows the depth and
-    /// `pdftops` emits it for 16-bit-per-channel scans.
+    /// each is reduced to the nearest 8-bit value, `v / 257` rounded, not
+    /// cut to its high byte. LanguageLevel 3 allows the depth and `pdftops`
+    /// emits it for 16-bit-per-channel scans.
     #[test]
     fn test_unpack_16bit() {
-        let data = vec![0x00, 0x00, 0x80, 0xFF, 0xFF, 0x01];
-        let result = unpack_samples(data, 3, 1, 16, 1, false);
-        assert_eq!(result, vec![0x00, 0x80, 0xFF]);
+        let data = vec![0x00, 0x00, 0x10, 0xFF, 0x81, 0x00, 0x81, 0x01, 0xFF, 0x01];
+        let result = unpack_samples(data, 5, 1, 16, 1, false);
+        assert_eq!(result, vec![0x00, 0x11, 0x80, 0x81, 0xFE]);
+    }
+
+    /// An index is not scaled: a 16-bit one keeps its high byte.
+    #[test]
+    fn test_unpack_16bit_indexed() {
+        let data = vec![0x10, 0xFF, 0xFF, 0x01];
+        let result = unpack_samples(data, 2, 1, 16, 1, true);
+        assert_eq!(result, vec![0x10, 0xFF]);
+    }
+
+    /// 12-bit samples, two to three bytes, reduce to the nearest 8-bit
+    /// value: `v · 255 / 4095`. 0x10F is 16.88, where its high bits say 16.
+    #[test]
+    fn test_unpack_12bit() {
+        let data = vec![0x10, 0xF1, 0x08];
+        assert_eq!(
+            unpack_samples(data.clone(), 2, 1, 12, 1, false),
+            vec![17, 16]
+        );
+        assert_eq!(unpack_samples(data, 2, 1, 12, 1, true), vec![0x10, 0x10]);
     }
 
     /// A short buffer pads with zero rather than panicking.

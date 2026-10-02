@@ -48,6 +48,7 @@ use stet_graphics::icc::IccCache;
 use stet_graphics::image_limits::{
     validate_bits_per_component, validate_image_dimension, validate_image_size,
 };
+use stet_graphics::image_samples::{self, ColorKey};
 use stet_graphics::rendering_intent::{self, RenderingIntent};
 use stet_graphics::text::GlyphStep;
 
@@ -4532,6 +4533,35 @@ impl<'a> ContentInterpreter<'a> {
                 (resolved_cs, sample_data, None)
             };
 
+        // A colour-key `/Mask` names samples as encoded, before expansion to
+        // 8 bits or `/Decode` (ISO 32000-1 §8.9.6.4), so it is tested here,
+        // on the decoded stream; what it masks is applied below. An
+        // `/SMask`, or alpha in JPX data, overrides it (Table 89). JPEG and
+        // JPEG 2000 data is already 8-bit.
+        let mask_obj = dict.get(b"Mask").and_then(|o| self.resolver.deref(o).ok());
+        let color_key = match (&mask_obj, &resolved_cs) {
+            (Some(PdfObj::Array(arr)), Some(cs))
+                if !is_image_mask
+                    && dict.get(b"SMask").is_none()
+                    && smask_in_data_alpha.is_none() =>
+            {
+                let values: Vec<i64> = arr
+                    .iter()
+                    .filter_map(|o| self.resolver.deref(o).ok()?.as_int())
+                    .collect();
+                let key_bpc = if filter_is_dct || filter_is_jpx {
+                    8
+                } else {
+                    bpc
+                };
+                ColorKey::new(&values, cs.num_components(), key_bpc).and_then(|key| {
+                    let alpha = key.alpha(&sample_data, width, height)?;
+                    Some((key, key_bpc, alpha))
+                })
+            }
+            _ => None,
+        };
+
         // Image matrix: [width 0 0 -height 0 height] maps unit square to image
         let image_matrix =
             Matrix::new(width as f64, 0.0, 0.0, -(height as f64), 0.0, height as f64);
@@ -4812,24 +4842,13 @@ impl<'a> ContentInterpreter<'a> {
             })
             .unwrap_or(false);
 
-        // Mask color (for color-key masking) or explicit stencil mask (stream ref)
-        let (mask_color, explicit_mask_data) = match dict.get(b"Mask") {
-            Some(PdfObj::Array(arr)) => {
-                // Color-key mask: array of component ranges
-                let mc: Vec<u8> = arr
-                    .iter()
-                    .filter_map(|o| o.as_int().map(|n| n as u8))
-                    .collect();
-                (Some(mc), None)
-            }
-            Some(_mask_obj) => {
-                // Explicit stencil mask: indirect reference to 1-bit ImageMask stream
-                let mask_alpha = self
-                    .resolve_explicit_mask(dict, width, height)
-                    .unwrap_or(None);
-                (None, mask_alpha)
-            }
-            None => (None, None),
+        // Explicit stencil mask: a `/Mask` stream, a 1-bit ImageMask. A
+        // colour-key array was taken above.
+        let explicit_mask_data = match mask_obj {
+            Some(PdfObj::Array(_)) | None => None,
+            Some(_) => self
+                .resolve_explicit_mask(dict, width, height)
+                .unwrap_or(None),
         };
 
         // Convert data if BPC != 8 (but NOT for image masks — keep raw 1-bit data).
@@ -4839,14 +4858,25 @@ impl<'a> ContentInterpreter<'a> {
         let is_dct = filter_is_dct;
         let is_indexed = matches!(&color_space, ImageColorSpace::Indexed { .. });
         // Expand sub-byte samples (1/2/4 BPC) to 8-bit since they're packed
-        // with geometry-dependent alignment. Downsample 16-bit to 8-bit (take
-        // high byte) — downstream ICC and color conversion assumes 8-bit data.
+        // with geometry-dependent alignment. Reduce 16-bit samples to the
+        // nearest 8-bit value — downstream ICC and color conversion assumes
+        // 8-bit data. An index is never scaled; 16-bit Indexed is outside
+        // the spec, and keeps its high byte.
         let (sample_data, display_bpc) =
             if is_image_mask || bpc == 8 || bpc == 0 || is_jpx || is_dct {
                 (sample_data, if is_dct || is_jpx { 8 } else { bpc })
             } else if bpc == 16 {
-                // Take high byte of each 16-bit big-endian sample
-                (sample_data.chunks(2).map(|c| c[0]).collect(), 8)
+                let reduce = |c: &[u8; 2]| {
+                    if is_indexed {
+                        c[0]
+                    } else {
+                        image_samples::to_8bit(u16::from_be_bytes(*c), 16)
+                    }
+                };
+                (
+                    sample_data.as_chunks::<2>().0.iter().map(reduce).collect(),
+                    8,
+                )
             } else if bpc > 8 {
                 (sample_data, bpc)
             } else {
@@ -4867,6 +4897,7 @@ impl<'a> ContentInterpreter<'a> {
         // Default for most color spaces is [0 1 0 1 ...] (identity).
         // For Indexed color spaces, default is [0 2^bpc-1] and values are indices.
         // CMYK images may use [1 0 1 0 1 0 1 0] to invert values.
+        let mut decoded = false;
         let sample_data = if !is_image_mask {
             if let Some(decode) = dict.get_array(b"Decode") {
                 let n_comps = color_space.num_components() as usize;
@@ -4888,6 +4919,7 @@ impl<'a> ContentInterpreter<'a> {
                         })
                     };
                     if !is_default {
+                        decoded = true;
                         // After expand_bits_to_bytes: indexed data keeps raw values
                         // (0 to 2^bpc-1), non-indexed data is scaled to 0-255.
                         let max_val = if is_indexed {
@@ -4933,11 +4965,13 @@ impl<'a> ContentInterpreter<'a> {
         // the K plate so they composite equivalently to DeviceCMYK 0/0/0/(1−g).
         // Required by GWG 17.3 (JBIG2 compression) and GWG 23.0's "4 different
         // Grays" test.
+        let mut gray_promoted = false;
         let (sample_data, color_space, resolved_cs) = if !is_image_mask {
             let was_device_gray = matches!(color_space, ImageColorSpace::DeviceGray);
             let (new_cs, new_data) =
                 self.cmyk_group_promote_image(color_space, sample_data, width, height);
-            let new_resolved = if was_device_gray && matches!(new_cs, ImageColorSpace::DeviceCMYK) {
+            gray_promoted = was_device_gray && matches!(new_cs, ImageColorSpace::DeviceCMYK);
+            let new_resolved = if gray_promoted {
                 Some(ResolvedColorSpace::DeviceCMYK)
             } else {
                 resolved_cs
@@ -4945,6 +4979,35 @@ impl<'a> ContentInterpreter<'a> {
             (new_data, new_cs, new_resolved)
         } else {
             (sample_data, color_space, resolved_cs)
+        };
+
+        // The renderer can test a colour key on the samples it is given when
+        // each is its encoded value expanded to 8 bits, which keeps every
+        // value distinct: 8 bits or fewer, an index as it is, and nothing
+        // since — no `/Decode`, no gray carried to CMYK, no transfer
+        // function, no conversion. Otherwise the pixels the key masks are
+        // cleared here, as a stencil `/Mask` stream's are.
+        let (mask_color, explicit_mask_data) = match color_key {
+            Some((key, key_bpc, alpha)) => {
+                let samples_are_encoded = key_bpc <= 8
+                    && !decoded
+                    && !gray_promoted
+                    && !(self.gstate.transfer.has_functions() && color_space.num_components() >= 3)
+                    && !matches!(color_space, ImageColorSpace::PreconvertedRGBA);
+                if samples_are_encoded {
+                    let reduce = |v: u16| {
+                        if is_indexed {
+                            v as u8
+                        } else {
+                            image_samples::to_8bit(v, key_bpc)
+                        }
+                    };
+                    (Some(key.ranges_8bit(reduce)), None)
+                } else {
+                    (None, Some((alpha, width, height)))
+                }
+            }
+            None => (None, explicit_mask_data),
         };
 
         // Register the ICC profile with the cache so the rasterizer can find
@@ -5034,7 +5097,8 @@ impl<'a> ContentInterpreter<'a> {
             let n_comps = color_space.num_components() as usize;
             if n_comps >= 3 {
                 let mut data = sample_data;
-                apply_transfer_to_image(&mut data, &self.gstate.transfer, n_comps);
+                let premultiplied = matches!(color_space, ImageColorSpace::PreconvertedRGBA);
+                apply_transfer_to_image(&mut data, &self.gstate.transfer, n_comps, premultiplied);
                 data
             } else {
                 sample_data
@@ -5469,8 +5533,11 @@ impl<'a> ContentInterpreter<'a> {
         let mut data = if bpc == 8 {
             data
         } else if bpc == 16 {
-            // Take high byte of each 16-bit sample
-            data.chunks(2).map(|c| c[0]).collect()
+            data.as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| image_samples::to_8bit(u16::from_be_bytes(*c), 16))
+                .collect()
         } else if bpc < 8 {
             expand_bits_to_bytes(&data, bpc, sw, sh, 1, false)
         } else {
@@ -7810,6 +7877,20 @@ fn merge_rgb_with_smask(
     icc: Option<&stet_graphics::icc::IccCache>,
     intent: stet_graphics::icc::IccRenderingIntent,
 ) -> Vec<u8> {
+    // Samples converted already (premultiplied RGBA, as from a multi-input
+    // DeviceN image): only their alpha changes.
+    if let ImageColorSpace::PreconvertedRGBA = color_space {
+        let n_pixels = (width * height) as usize;
+        let mut rgba = image_data.to_vec();
+        rgba.resize(n_pixels.saturating_mul(4), 0);
+        for (px, &alpha) in rgba.as_chunks_mut::<4>().0.iter_mut().zip(smask_data) {
+            if alpha != 255 {
+                *px = px.map(|v| ((u16::from(v) * u16::from(alpha) + 127) / 255) as u8);
+            }
+        }
+        return rgba;
+    }
+
     // For Indexed images, expand palette indices to RGB first
     if let ImageColorSpace::Indexed {
         base,
@@ -8098,11 +8179,15 @@ fn sample_transfer_function(func: &crate::resources::function::PdfFunction) -> V
 /// Apply transfer functions to RGB image pixel data (in-place).
 ///
 /// `data` is interleaved RGB (3 bytes per pixel) or RGBA (4 bytes per pixel).
-/// Transfer tables are 256-sample [0,1]→[0,1] lookup tables.
+/// Transfer tables are 256-sample [0,1]→[0,1] lookup tables. With
+/// `premultiplied`, `data` is premultiplied RGBA, and the functions apply to
+/// each pixel's colour, not to its product with alpha: a cleared pixel stays
+/// clear.
 fn apply_transfer_to_image(
     data: &mut [u8],
     transfer: &stet_graphics::device::TransferState,
     components: usize,
+    premultiplied: bool,
 ) {
     // Build 256-entry u8 lookup tables for each RGB channel
     let (r_table, g_table, b_table) = if let Some(ref color) = transfer.color {
@@ -8122,10 +8207,24 @@ fn apply_transfer_to_image(
     // Apply LUT per channel
     let stride = components;
     for pixel in data.chunks_exact_mut(stride) {
-        if pixel.len() >= 3 {
-            pixel[0] = r_table[pixel[0] as usize];
-            pixel[1] = g_table[pixel[1] as usize];
-            pixel[2] = b_table[pixel[2] as usize];
+        if pixel.len() < 3 {
+            continue;
+        }
+        let alpha = if premultiplied && pixel.len() == 4 {
+            u16::from(pixel[3])
+        } else {
+            255
+        };
+        if alpha == 0 {
+            continue;
+        }
+        for (v, table) in pixel.iter_mut().zip([&r_table, &g_table, &b_table]) {
+            if alpha == 255 {
+                *v = table[*v as usize];
+            } else {
+                let colour = ((u16::from(*v) * 255 + alpha / 2) / alpha).min(255);
+                *v = ((u16::from(table[colour as usize]) * alpha + 127) / 255) as u8;
+            }
         }
     }
 }

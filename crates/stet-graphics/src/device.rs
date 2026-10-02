@@ -706,6 +706,13 @@ pub struct ImageParams {
     pub ctm: Matrix,
     pub image_matrix: Matrix,
     pub interpolate: bool,
+    /// A colour-key mask over `sample_data` as it stands: a minimum and a
+    /// maximum for each component (or one exact value each), and a pixel
+    /// whose every sample lies in range is not painted. The samples here
+    /// are already reduced to 8 bits and decoded, so a key the file states
+    /// over deeper or `/Decode`d samples cannot be put here exactly; the
+    /// front ends apply such a key themselves
+    /// ([`ColorKey`](crate::image_samples::ColorKey)).
     pub mask_color: Option<Vec<u8>>,
     pub alpha: f64,
     pub blend_mode: u8,

@@ -272,13 +272,13 @@ fn shading_colours_take_the_intent() {
 fn images_converted_while_painting_take_the_intent() {
     // A masked image with a non-identity Decode is converted to RGB when it
     // is painted, so that MaskColor is compared with the undecoded samples
-    // (PLRM 4.10.6). Other CMYK images keep their samples and record the
-    // intent for the renderer.
+    // (PLRM 4.10.6); the key masks the second pixel. Other CMYK images keep
+    // their samples and record the intent for the renderer.
     let elements = elements(
         "/Perceptual setrenderingintent /DeviceCMYK setcolorspace\n\
-         << /ImageType 4 /Width 1 /Height 1 /BitsPerComponent 8\n\
+         << /ImageType 4 /Width 2 /Height 1 /BitsPerComponent 8\n\
             /Decode [1 0 1 0 1 0 1 0] /MaskColor [0 0 0 0]\n\
-            /ImageMatrix [1 0 0 1 0 0] /DataSource <3399FFE6> >> image",
+            /ImageMatrix [2 0 0 1 0 0] /DataSource <3399FFE6 00000000> >> image",
     );
     let data = elements
         .iter()
@@ -298,6 +298,7 @@ fn images_converted_while_painting_take_the_intent() {
             data[ch]
         );
     }
+    assert_eq!(data[4..8], [0; 4], "the masked pixel");
 }
 
 /// The builder's default intent is where every page starts — including
