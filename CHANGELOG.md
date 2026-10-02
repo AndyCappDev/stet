@@ -218,6 +218,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stet now bakes these tables through the evaluator its proofing chain
   already uses, within half a level of lcms2: the same as `lut16Type`
   profiles, which are unchanged. Nothing in the test corpus moves.
+- **CMYK shown through a profile with an XYZ PCS now matches lcms2.**
+  Such profiles include Ghostscript's own `ps_cmyk.icc` and
+  `gray_to_k.icc`. stet read only Lab-PCS tables itself and left these to
+  moxcms, which was up to 17 levels from lcms2 through `ps_cmyk.icc` and
+  4.4 through the ICCBased CMYK in the test corpus's `5403.pdf`. They are
+  now within half a level, black-point compensation included:
+  - a black point that needs the profile's `B2A0` now uses it;
+  - a three-input table's matrix is now applied, as lcms2 applies it.
+
+  `5403.pdf` moves by up to 3 levels, toward Ghostscript.
 - **Relative colorimetric CMYK rendered lighter than Ghostscript and
   Acrobat** with black-point compensation on, the default. Compensation
   maps the profile's black to sRGB black, and stet took that black to be

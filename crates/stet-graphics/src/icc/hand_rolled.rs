@@ -7,12 +7,12 @@
 //! moxcms's `create_transform` routes CMYK profiles through an internal
 //! Lab→sRGB pipeline that over-saturates light/midtone colours noticeably
 //! relative to lcms2 / Acrobat / Ghostscript. This module bypasses moxcms
-//! for CMYK profiles with a Lab PCS: each grid point goes through one of
-//! the profile's A2B CLUTs (chosen per rendering intent), the PCS-Lab
-//! decode, and a hand-tuned Lab → XYZ-D50 → sRGB pipeline. A `lut16Type`
-//! table has its own sampler ([`bake_clut4_hand_rolled`]); ICC v4
-//! `lutAToBType` and `lut8Type` tables go through the evaluator that
-//! reproduces lcms2 ([`bake_clut4_lcms`]). Through `A2B1` the output
+//! for CMYK profiles: each grid point goes through one of the profile's
+//! A2B CLUTs (chosen per rendering intent), the PCS decode, and a
+//! hand-tuned XYZ-D50 → sRGB pipeline. A `lut16Type` table with a Lab PCS
+//! has its own sampler ([`bake_clut4_hand_rolled`]); ICC v4 `lutAToBType`
+//! and `lut8Type` tables, and any with an XYZ PCS, go through the evaluator
+//! that reproduces lcms2 ([`bake_clut4_lcms`]). Through `A2B1` the output
 //! matches lcms2's `cmsDoTransform(RelCol)` to ±1 RGB level on a 17⁴ sweep
 //! against ISO Coated v2 300% (ECI), which is what GS produces for typical
 //! print imagery (light greens, neutrals, blacks). Out-of-gamut colours
@@ -29,11 +29,12 @@
 //! [`moxcms::TransformExecutor`] for `u8` and `f64` so they slot directly
 //! into the `ChainedTransform` stage-1 slot.
 //!
-//! The evaluators that reproduce lcms2 exactly (`LcmsLut`) also read ICC v4
-//! `lutAToBType`/`lutBToAType` tables, taking their curves from the
-//! profile's own bytes: moxcms 0.8.1 misreads a curve set holding an empty
-//! `curv`, and builds no working transform from a four-input CLUT whose
-//! grid differs per input. `lut8Type` (mft1) tables are read only by those
+//! The evaluators that reproduce lcms2 exactly (`LcmsLut`) read a Lab or an
+//! XYZ PCS, applying a three-input `lut8Type`/`lut16Type` table's matrix as
+//! lcms2 does. They also read ICC v4 `lutAToBType`/`lutBToAType` tables,
+//! taking their curves from the profile's own bytes: moxcms 0.8.1 misreads
+//! a curve set holding an empty `curv`, and builds no working transform
+//! from a four-input CLUT whose grid differs per input. `lut8Type` (mft1) tables are read only by those
 //! evaluators (see [`OwnedLutSampler::lcms_exact`]), wherever stet reads a
 //! table itself: the display bake, the black points lcms2 would detect, and
 //! both sides of the proofing chain's stage 1.
@@ -51,7 +52,8 @@ use moxcms::{
 use super::Clut4;
 use super::black_point::SourceBlack;
 use super::bpc::{
-    BpcParams, WP_D50, apply_bpc_xyz_d50, compute_bpc_params, lab_to_xyz_d50, xyz_d50_to_lab,
+    BpcParams, LCMS_D50, WP_D50, apply_bpc_xyz_d50, compute_bpc_params, lab_to_xyz_d50,
+    lab_to_xyz_white, xyz_d50_to_lab, xyz_to_lab_white,
 };
 
 /// `0xFF00` — the legacy ICC v2 Lab denominator for L*. Stored values in
@@ -116,13 +118,14 @@ pub(super) fn bake_clut4_hand_rolled(
 
 /// Sample one of a CMYK profile's A2B tables into a [`Clut4`] through the
 /// evaluator that reproduces lcms2 (`LcmsLut`): an ICC v4 `lutAToBType`
-/// table, or a `lut8Type` one. `table` is the tag the caller picked for the
-/// rendering intent, with its signature; `icc` is the profile's raw bytes,
-/// which hold the v4 curve sets. Otherwise as [`bake_clut4_hand_rolled`],
-/// darker colorant included: it is this table's own 400% ink.
+/// table, a `lut8Type` one, or any with an XYZ PCS. `table` is the tag the
+/// caller picked for the rendering intent, with its signature; `icc` is the
+/// profile's raw bytes, which hold the v4 curve sets. Otherwise as
+/// [`bake_clut4_hand_rolled`], darker colorant included: it is this table's
+/// own 400% ink.
 ///
-/// `None` when the profile is not CMYK with a Lab PCS or the table is one
-/// the evaluator cannot read; see [`can_bake_lcms`].
+/// `None` when the profile is not CMYK or the table is one the evaluator
+/// cannot read; see [`can_bake_lcms`].
 pub(super) fn bake_clut4_lcms(
     profile: &ColorProfile,
     icc: &[u8],
@@ -130,7 +133,7 @@ pub(super) fn bake_clut4_lcms(
     grid_n: usize,
     black: Option<SourceBlack>,
 ) -> Option<Clut4> {
-    if profile.color_space != DataColorSpace::Cmyk || profile.pcs != DataColorSpace::Lab {
+    if profile.color_space != DataColorSpace::Cmyk {
         return None;
     }
     if !(2..=33).contains(&grid_n) {
@@ -149,16 +152,14 @@ pub(super) fn bake_clut4_lcms(
     });
     let denom = (grid_n - 1) as f64;
     bake_grid(grid_n, bpc.as_ref(), |ink| {
-        lab_to_xyz_d50(lut.ink_to_lab(ink.map(|i| i as f64 / denom)))
+        lut.ink_to_xyz(ink.map(|i| i as f64 / denom))
     })
 }
 
 /// Whether [`bake_clut4_lcms`] can read `table` of `profile`, whose raw
 /// bytes are `icc`.
 pub(super) fn can_bake_lcms(profile: &ColorProfile, icc: &[u8], table: Table) -> bool {
-    profile.color_space == DataColorSpace::Cmyk
-        && profile.pcs == DataColorSpace::Lab
-        && LcmsLut::to_pcs(table, icc, 4).is_some()
+    profile.color_space == DataColorSpace::Cmyk && LcmsLut::to_pcs(table, icc, 4).is_some()
 }
 
 /// A [`Clut4`] of `grid_n` points per axis, each the sRGB of the XYZ-D50
@@ -201,8 +202,8 @@ fn bake_grid(
 /// through the perceptual `B2A0`, then back through the colorimetric
 /// `A2B1` (`A2B0` when there is none, as lcms2 reads it). Returns the ink
 /// it passed through and the Lab it landed on; `None` when the profile,
-/// whose raw bytes are `icc`, is not CMYK with a Lab PCS, or a table is one
-/// these evaluators cannot read.
+/// whose raw bytes are `icc`, is not CMYK, or a table is one these
+/// evaluators cannot read.
 pub(super) fn perceptual_round_trip(
     profile: &ColorProfile,
     icc: &[u8],
@@ -221,11 +222,11 @@ pub(super) struct RoundTrip {
 }
 
 impl RoundTrip {
-    /// `None` when the profile, whose raw bytes are `icc`, is not CMYK
-    /// with a Lab PCS, lacks a table the round trip needs, or carries one
-    /// these evaluators cannot read.
+    /// `None` when the profile, whose raw bytes are `icc`, is not CMYK,
+    /// lacks a table the round trip needs, or carries one these evaluators
+    /// cannot read.
     pub(super) fn new(profile: &ColorProfile, icc: &[u8], intent: RenderingIntent) -> Option<Self> {
-        if profile.color_space != DataColorSpace::Cmyk || profile.pcs != DataColorSpace::Lab {
+        if profile.color_space != DataColorSpace::Cmyk {
             return None;
         }
         let b2a = b2a_table(profile, intent)?;
@@ -535,10 +536,10 @@ impl SourceA2BSampler {
         }
         // lcms2 reads the intent's A2B table, else A2B0, and only when the
         // profile has neither its tone curves and colorant matrix, which
-        // give the same XYZ under every intent. A table these evaluators
-        // cannot read — an XYZ PCS, a `lut16Type` with a non-identity
-        // matrix — has no hand-rolled stage: the caller falls back to moxcms
-        // rather than to a matrix lcms2 would not use.
+        // give the same XYZ under every intent. A table with an XYZ PCS, or
+        // one these evaluators cannot read, has no hand-rolled stage: the
+        // caller falls back to moxcms rather than to a matrix lcms2 would
+        // not use.
         match a2b_table(profile, intent) {
             Some(table) if profile.pcs == DataColorSpace::Lab => {
                 LcmsLut::to_pcs(table, icc, 3).map(SourceA2BSampler::Lut)
@@ -706,7 +707,7 @@ impl LabToCmykSampler {
     /// table takes it as it is; any other goes through Lab.
     fn sample_pcs_lab(&self, pcs_lab: [f32; 3]) -> [f32; 4] {
         match &self.lut {
-            LcmsLut::Legacy(lut) if lut.encoding == LabEncoding::V2 => {
+            LcmsLut::Legacy(lut) if lut.coding == PcsCoding::Lab(LabEncoding::V2) => {
                 lut.sample_pcs_lab_to_cmyk(pcs_lab)
             }
             lut => {
@@ -799,6 +800,75 @@ impl LabEncoding {
     }
 }
 
+/// The PCS of a profile, from its header.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Pcs {
+    Lab,
+    Xyz,
+}
+
+impl Pcs {
+    /// The PCS of the profile whose raw bytes are `icc`; `None` when it is
+    /// neither.
+    fn of(icc: &[u8]) -> Option<Self> {
+        match icc.get(20..24)? {
+            b"Lab " => Some(Pcs::Lab),
+            b"XYZ " => Some(Pcs::Xyz),
+            _ => None,
+        }
+    }
+}
+
+/// lcms2's `MAX_ENCODEABLE_XYZ`: an XYZ PCS value of 1 in a table is this
+/// much XYZ (white Y = 1), whatever the table type.
+const XYZ_MAX: f64 = 1.0 + 32767.0 / 32768.0;
+
+/// How a table encodes its PCS side, each value in `[0, 1]`, as lcms2 reads
+/// it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PcsCoding {
+    Lab(LabEncoding),
+    /// XYZ / [`XYZ_MAX`].
+    Xyz,
+}
+
+impl PcsCoding {
+    /// The coding of a table of type `lut_type`, or of an ICC v4 one when
+    /// `None`, in a profile whose PCS is `pcs`.
+    fn new(pcs: Pcs, lut_type: Option<LutType>) -> Self {
+        match (pcs, lut_type) {
+            (Pcs::Xyz, _) => PcsCoding::Xyz,
+            (Pcs::Lab, Some(LutType::Lut16)) => PcsCoding::Lab(LabEncoding::V2),
+            (Pcs::Lab, _) => PcsCoding::Lab(LabEncoding::V4),
+        }
+    }
+
+    /// Lab (L\* 0–100, a\*/b\* −128–127) → the table's `[0, 1]` axes.
+    /// Between Lab and XYZ the white is lcms2's own D50.
+    fn encode_lab(self, lab: [f64; 3]) -> [f64; 3] {
+        match self {
+            PcsCoding::Lab(e) => e.encode(lab),
+            PcsCoding::Xyz => lab_to_xyz_white(lab, LCMS_D50).map(|v| v / XYZ_MAX),
+        }
+    }
+
+    /// The table's `[0, 1]` outputs → Lab.
+    fn decode_lab(self, v: [f64; 3]) -> [f64; 3] {
+        match self {
+            PcsCoding::Lab(e) => e.decode(v),
+            PcsCoding::Xyz => xyz_to_lab_white(v.map(|x| x * XYZ_MAX), LCMS_D50),
+        }
+    }
+
+    /// The table's `[0, 1]` outputs → XYZ (D50, white Y = 1).
+    fn decode_xyz(self, v: [f64; 3]) -> [f64; 3] {
+        match self {
+            PcsCoding::Lab(e) => lab_to_xyz_d50(e.decode(v)),
+            PcsCoding::Xyz => v.map(|x| x * XYZ_MAX),
+        }
+    }
+}
+
 /// Owned sampler for a profile's `lut16Type` table — and, for the
 /// lcms2-exact evaluators only, its `lut8Type` one — in the `(n_in, n_out)`
 /// shapes stet
@@ -815,38 +885,44 @@ struct OwnedLutSampler {
     n_out_entries: usize,
     cube_data: Vec<f32>,
     cube_grid: usize,
-    encoding: LabEncoding,
+    coding: PcsCoding,
+    /// A three-input table's matrix, applied before its input curves as
+    /// lcms2 does; `None` for the identity.
+    matrix: Option<[[f64; 3]; 3]>,
 }
 
 impl OwnedLutSampler {
-    /// A `lut16Type` table of shape `(expected_n_in, expected_n_out)`.
+    /// A `lut16Type` table of shape `(expected_n_in, expected_n_out)` with
+    /// a Lab PCS.
     fn from_warehouse(
         warehouse: &LutWarehouse,
         expected_n_in: usize,
         expected_n_out: usize,
     ) -> Option<Self> {
-        Self::load(warehouse, expected_n_in, expected_n_out, false)
+        Self::load(warehouse, expected_n_in, expected_n_out, false, Pcs::Lab)
     }
 
-    /// A `lut8Type` or `lut16Type` table, for evaluating it exactly as
-    /// lcms2 does — see [`Self::lab_to_ink`], [`Self::ink_to_lab`] and
-    /// [`Self::rgb_to_pcs_lab`]: the black point lcms2 detects, and the
-    /// CMYK, Gray and RGB-source chain stage 1. A
-    /// three-input table must carry the identity matrix, as the ICC
-    /// requires of a Lab-indexed one; lcms2 would apply any other, and these
-    /// evaluators do not.
+    /// A `lut8Type` or `lut16Type` table of a profile whose PCS is `pcs`,
+    /// for evaluating it exactly as lcms2 does — see [`Self::lab_to_ink`],
+    /// [`Self::ink_to_raw`] and [`Self::rgb_to_pcs_lab`]: the display bake,
+    /// the black point lcms2 detects, and the CMYK, Gray and RGB-source
+    /// chain stage 1. A three-input table's matrix is applied first, as
+    /// lcms2 applies it (`Type_LUT16_Read`), whatever the PCS; the ICC
+    /// expects the identity unless the input is XYZ.
     fn lcms_exact(
         warehouse: &LutWarehouse,
         expected_n_in: usize,
         expected_n_out: usize,
+        pcs: Pcs,
     ) -> Option<Self> {
-        if let LutWarehouse::Lut(lut) = warehouse
+        let mut lut = Self::load(warehouse, expected_n_in, expected_n_out, true, pcs)?;
+        if let LutWarehouse::Lut(table) = warehouse
             && expected_n_in == 3
-            && lut.matrix != Matrix3d::IDENTITY
+            && table.matrix != Matrix3d::IDENTITY
         {
-            return None;
+            lut.matrix = Some(table.matrix.v);
         }
-        Self::load(warehouse, expected_n_in, expected_n_out, true)
+        Some(lut)
     }
 
     fn load(
@@ -854,17 +930,17 @@ impl OwnedLutSampler {
         expected_n_in: usize,
         expected_n_out: usize,
         allow_lut8: bool,
+        pcs: Pcs,
     ) -> Option<Self> {
         let lut = match warehouse {
             LutWarehouse::Lut(l) => l,
             // v4 tables are `MultiLut`'s.
             LutWarehouse::Multidimensional(_) => return None,
         };
-        let encoding = match lut.lut_type {
-            LutType::Lut16 => LabEncoding::V2,
-            LutType::Lut8 if allow_lut8 => LabEncoding::V4,
-            _ => return None,
-        };
+        if lut.lut_type == LutType::Lut8 && !allow_lut8 {
+            return None;
+        }
+        let coding = PcsCoding::new(pcs, Some(lut.lut_type));
         if lut.num_input_channels as usize != expected_n_in
             || lut.num_output_channels as usize != expected_n_out
         {
@@ -889,8 +965,17 @@ impl OwnedLutSampler {
             n_out_entries,
             cube_data: normalised(&lut.clut_table, cube_total)?,
             cube_grid,
-            encoding,
+            coding,
+            matrix: None,
         })
+    }
+
+    /// A three-input table's input, through its matrix when it has one.
+    fn matrixed(&self, v: [f64; 3]) -> [f64; 3] {
+        match &self.matrix {
+            Some(m) => std::array::from_fn(|i| m[i][0] * v[0] + m[i][1] * v[1] + m[i][2] * v[2]),
+            None => v,
+        }
     }
 
     /// 4-in / 3-out: CMYK → moxcms-normalised Lab, through the input
@@ -922,9 +1007,10 @@ impl OwnedLutSampler {
         //   L* = raw_L * 100 / 0xFF00 → l_norm = post_L * 65535 / 0xFF00
         //   a* = raw_a / 256 - 128    → a_norm = post_a * 65535 / 0xFF00
         // and for v4 the raw value itself.
-        let scale = match self.encoding {
-            LabEncoding::V2 => 65535.0 / PCS_LAB_DENOM,
-            LabEncoding::V4 => 1.0,
+        let scale = match self.coding {
+            PcsCoding::Lab(LabEncoding::V2) => 65535.0 / PCS_LAB_DENOM,
+            PcsCoding::Lab(LabEncoding::V4) => 1.0,
+            PcsCoding::Xyz => unreachable!("the display sampler reads only a Lab PCS"),
         };
         Lab::new(
             (l_post * scale).clamp(0.0, 1.0),
@@ -933,9 +1019,9 @@ impl OwnedLutSampler {
         )
     }
 
-    /// 4-in / 3-out: CMYK ink (each `[0, 1]`) → Lab, interpolated as lcms2
-    /// interpolates a four-input table.
-    fn ink_to_lab(&self, ink: [f64; 4]) -> [f64; 3] {
+    /// 4-in / 3-out: CMYK ink (each `[0, 1]`) → the table's `[0, 1]` PCS
+    /// outputs, interpolated as lcms2 interpolates a four-input table.
+    fn ink_to_raw(&self, ink: [f64; 4]) -> [f64; 3] {
         let curved: [f64; 4] = std::array::from_fn(|ch| {
             sample_curve_f32(&self.input_table, ch, self.n_in_entries, ink[ch] as f32) as f64
         });
@@ -944,14 +1030,41 @@ impl OwnedLutSampler {
         let post: [f64; 3] = std::array::from_fn(|ch| {
             sample_curve_f32(&self.output_table, ch, self.n_out_entries, pcs[ch] as f32) as f64
         });
-        self.encoding.decode(post)
+        post
     }
 
-    /// 3-in / 4-out: Lab → CMYK ink (each `[0, 1]`), trilinear as lcms2
-    /// reads a Lab-indexed output table.
+    /// 3-in / 4-out: Lab → CMYK ink (each `[0, 1]`): trilinear as lcms2
+    /// reads a Lab-indexed output table, tetrahedral for an XYZ-indexed one.
     fn lab_to_ink(&self, lab: [f64; 3]) -> [f64; 4] {
-        let pcs = self.encoding.encode(lab).map(|v| v as f32);
-        self.sample_pcs_lab_to_cmyk(pcs).map(f64::from)
+        let pcs = self.coding.encode_lab(lab);
+        if self.coding == PcsCoding::Xyz {
+            return self.sample_pcs_xyz_to_cmyk(pcs);
+        }
+        self.sample_pcs_lab_to_cmyk(pcs.map(|v| v as f32))
+            .map(f64::from)
+    }
+
+    /// 3-in / 4-out: an XYZ-indexed table's `[0, 1]` inputs → CMYK in
+    /// `[0, 1]`: through its matrix, its input curves, lcms2's tetrahedral
+    /// interpolation and its output curves.
+    fn sample_pcs_xyz_to_cmyk(&self, pcs: [f64; 3]) -> [f64; 4] {
+        let v = self.matrixed(pcs);
+        let curved: [f64; 3] = std::array::from_fn(|ch| {
+            let x = v[ch].clamp(0.0, 1.0) as f32;
+            sample_curve_f32(&self.input_table, ch, self.n_in_entries, x) as f64
+        });
+        let mut grid = [0.0; 4];
+        eval3_grids(
+            &self.cube_data,
+            [self.cube_grid; 3],
+            curved,
+            false,
+            &mut grid,
+        );
+        std::array::from_fn(|ch| {
+            let y = sample_curve_f32(&self.output_table, ch, self.n_out_entries, grid[ch] as f32);
+            y.clamp(0.0, 1.0) as f64
+        })
     }
 
     /// 3-in / 3-out: an RGB source's ink → its PCS Lab in the legacy v2
@@ -959,6 +1072,7 @@ impl OwnedLutSampler {
     /// form an OutputIntent's B2A input curves take: through the input
     /// curves, lcms2's tetrahedral interpolation and the output curves.
     fn rgb_to_pcs_lab(&self, rgb: [f64; 3]) -> [f64; 3] {
+        let rgb = self.matrixed(rgb);
         let curved: [f64; 3] = std::array::from_fn(|ch| {
             sample_curve_f32(&self.input_table, ch, self.n_in_entries, rgb[ch] as f32) as f64
         });
@@ -967,9 +1081,10 @@ impl OwnedLutSampler {
         let post: [f64; 3] = std::array::from_fn(|ch| {
             sample_curve_f32(&self.output_table, ch, self.n_out_entries, pcs[ch] as f32) as f64
         });
-        let v2 = match self.encoding {
-            LabEncoding::V2 => post,
-            LabEncoding::V4 => post.map(|v| v * f64::from(PCS_LAB_DENOM) / 65535.0),
+        let v2 = match self.coding {
+            PcsCoding::Lab(LabEncoding::V2) => post,
+            PcsCoding::Lab(LabEncoding::V4) => post.map(|v| v * f64::from(PCS_LAB_DENOM) / 65535.0),
+            PcsCoding::Xyz => LabEncoding::V2.encode(self.coding.decode_lab(post)),
         };
         v2.map(|v| v.clamp(0.0, 1.0))
     }
@@ -978,6 +1093,10 @@ impl OwnedLutSampler {
     /// 65280-denominated form so this composes byte-for-byte with the
     /// `lut16Type` upstream of it.
     fn sample_pcs_lab_to_cmyk(&self, pcs_lab: [f32; 3]) -> [f32; 4] {
+        let pcs_lab = match self.matrix {
+            Some(_) => self.matrixed(pcs_lab.map(f64::from)).map(|v| v as f32),
+            None => pcs_lab,
+        };
         let l_in = sample_curve_f32(
             &self.input_table,
             0,
@@ -1015,8 +1134,10 @@ impl OwnedLutSampler {
 }
 
 /// A profile's A2B or B2A table as lcms2 evaluates it: a `lut8Type` or
-/// `lut16Type` one, or an ICC v4 `lutAToBType`/`lutBToAType` one. Lab on
-/// the PCS side is L\* 0–100, a\*/b\* −128–127.
+/// `lut16Type` one, or an ICC v4 `lutAToBType`/`lutBToAType` one, with a Lab
+/// or an XYZ PCS. Lab on the PCS side is L\* 0–100, a\*/b\* −128–127; XYZ
+/// is D50 with white Y = 1. lcms2 moves between the two in floating point,
+/// so either is exact whatever the table holds.
 enum LcmsLut {
     Legacy(OwnedLutSampler),
     Multi(MultiLut),
@@ -1026,10 +1147,13 @@ impl LcmsLut {
     /// A device-to-PCS (A2B) table of `n_in` inputs and three outputs, of
     /// the profile whose raw bytes are `icc`.
     fn to_pcs((table, sig): Table, icc: &[u8], n_in: usize) -> Option<Self> {
+        let pcs = Pcs::of(icc)?;
         match table {
-            LutWarehouse::Lut(_) => OwnedLutSampler::lcms_exact(table, n_in, 3).map(Self::Legacy),
+            LutWarehouse::Lut(_) => {
+                OwnedLutSampler::lcms_exact(table, n_in, 3, pcs).map(Self::Legacy)
+            }
             LutWarehouse::Multidimensional(t) => {
-                MultiLut::new(t, CurveSets::read(icc, sig)?, n_in, 3, true).map(Self::Multi)
+                MultiLut::new(t, CurveSets::read(icc, sig)?, n_in, 3, true, pcs).map(Self::Multi)
             }
         }
     }
@@ -1037,24 +1161,45 @@ impl LcmsLut {
     /// A PCS-to-device (B2A) table of three inputs and `n_out` outputs, of
     /// the profile whose raw bytes are `icc`.
     fn from_pcs((table, sig): Table, icc: &[u8], n_out: usize) -> Option<Self> {
+        let pcs = Pcs::of(icc)?;
         match table {
-            LutWarehouse::Lut(_) => OwnedLutSampler::lcms_exact(table, 3, n_out).map(Self::Legacy),
+            LutWarehouse::Lut(_) => {
+                OwnedLutSampler::lcms_exact(table, 3, n_out, pcs).map(Self::Legacy)
+            }
             LutWarehouse::Multidimensional(t) => {
-                MultiLut::new(t, CurveSets::read(icc, sig)?, 3, n_out, false).map(Self::Multi)
+                MultiLut::new(t, CurveSets::read(icc, sig)?, 3, n_out, false, pcs).map(Self::Multi)
+            }
+        }
+    }
+
+    /// How the table encodes its PCS side.
+    fn coding(&self) -> PcsCoding {
+        match self {
+            LcmsLut::Legacy(l) => l.coding,
+            LcmsLut::Multi(m) => m.coding,
+        }
+    }
+
+    /// CMYK ink (each `[0, 1]`) → the table's `[0, 1]` PCS outputs.
+    fn ink_to_raw(&self, ink: [f64; 4]) -> [f64; 3] {
+        match self {
+            LcmsLut::Legacy(l) => l.ink_to_raw(ink),
+            LcmsLut::Multi(m) => {
+                let mut out = [0.0; 4];
+                m.eval(&ink, &mut out);
+                [out[0], out[1], out[2]]
             }
         }
     }
 
     /// CMYK ink (each `[0, 1]`) → Lab.
     fn ink_to_lab(&self, ink: [f64; 4]) -> [f64; 3] {
-        match self {
-            LcmsLut::Legacy(l) => l.ink_to_lab(ink),
-            LcmsLut::Multi(m) => {
-                let mut out = [0.0; 4];
-                m.eval(&ink, &mut out);
-                LabEncoding::V4.decode([out[0], out[1], out[2]])
-            }
-        }
+        self.coding().decode_lab(self.ink_to_raw(ink))
+    }
+
+    /// CMYK ink (each `[0, 1]`) → XYZ (D50, white Y = 1).
+    fn ink_to_xyz(&self, ink: [f64; 4]) -> [f64; 3] {
+        self.coding().decode_xyz(self.ink_to_raw(ink))
     }
 
     /// Lab → CMYK ink (each `[0, 1]`).
@@ -1063,7 +1208,7 @@ impl LcmsLut {
             LcmsLut::Legacy(l) => l.lab_to_ink(lab),
             LcmsLut::Multi(m) => {
                 let mut out = [0.0; 4];
-                m.eval(&LabEncoding::V4.encode(lab), &mut out);
+                m.eval(&m.coding.encode_lab(lab), &mut out);
                 out.map(|v| v.clamp(0.0, 1.0))
             }
         }
@@ -1088,7 +1233,7 @@ impl LcmsLut {
             LcmsLut::Multi(m) => {
                 let mut out = [0.0; 4];
                 m.eval(&rgb, &mut out);
-                LabEncoding::V4.decode([out[0], out[1], out[2]])
+                m.coding.decode_lab([out[0], out[1], out[2]])
             }
         }
     }
@@ -1158,6 +1303,7 @@ impl CurveSets {
 /// table (`ChangeInterpolationToTrilinear`). Lab is v4-encoded.
 struct MultiLut {
     to_pcs: bool,
+    coding: PcsCoding,
     n_in: usize,
     n_out: usize,
     a: Vec<LcmsCurve>,
@@ -1169,16 +1315,18 @@ struct MultiLut {
 }
 
 impl MultiLut {
-    /// moxcms's parse of the table `t`, with its curves from `sets`. `None`
-    /// unless the table has `n_in` inputs and `n_out` outputs, one side
-    /// three (the PCS) and the other three or four, a CLUT whenever they
-    /// differ, and a curve per channel in each set it carries.
+    /// moxcms's parse of the table `t`, of a profile whose PCS is `space`,
+    /// with its curves from `sets`. `None` unless the table has `n_in`
+    /// inputs and `n_out` outputs, one side three (the PCS) and the other
+    /// three or four, a CLUT whenever they differ, and a curve per channel
+    /// in each set it carries.
     fn new(
         t: &LutMultidimensionalType,
         sets: CurveSets,
         n_in: usize,
         n_out: usize,
         to_pcs: bool,
+        space: Pcs,
     ) -> Option<Self> {
         let (device, pcs) = if to_pcs { (n_in, n_out) } else { (n_out, n_in) };
         if usize::from(t.num_input_channels) != n_in
@@ -1208,6 +1356,7 @@ impl MultiLut {
         };
         Some(Self {
             to_pcs,
+            coding: PcsCoding::new(space, None),
             n_in,
             n_out,
             a: curves(sets.a, device)?,
@@ -1263,7 +1412,7 @@ impl MultiLut {
                 eval4_grids(data, [g0, g1, g2, g3], *v, &mut out[..self.n_out]);
             }
             [g0, g1, g2] => {
-                let trilinear = !self.to_pcs;
+                let trilinear = !self.to_pcs && self.coding != PcsCoding::Xyz;
                 eval3_grids(
                     data,
                     [g0, g1, g2],
@@ -1788,6 +1937,10 @@ mod tests {
     const SHADOW_V4: &[u8] = include_bytes!("../../tests/data/cmyk_intent/shadow_v4.icc");
     const MAB: &[u8] = include_bytes!("../../tests/data/cmyk_intent/mab.icc");
     const RGB_MAB: &[u8] = include_bytes!("../../tests/data/cmyk_intent/rgb_mab.icc");
+    const XYZ_V4: &[u8] = include_bytes!("../../tests/data/cmyk_intent/xyz_v4.icc");
+    const XYZ_MAB: &[u8] = include_bytes!("../../tests/data/cmyk_intent/xyz_mab.icc");
+    const INKLIMIT_MATRIX: &[u8] =
+        include_bytes!("../../tests/data/cmyk_intent/inklimit_matrix.icc");
 
     /// The two legs of lcms2's black-point round trip: `B2A0` and `A2B1`.
     fn legs(icc: &[u8]) -> (LcmsLut, LcmsLut) {
@@ -1813,6 +1966,9 @@ mod tests {
     // 100/65280 L* on a `lut16Type` table.
     const INK_TOLERANCE: f64 = 1e-4;
     const LAB_TOLERANCE: f64 = 0.005;
+    // One 16-bit step of an XYZ PCS. Near black that is several hundredths
+    // of an a\* or b\*, so XYZ tables are compared in XYZ.
+    const XYZ_TOLERANCE: f64 = XYZ_MAX / 65535.0;
 
     #[test]
     fn perceptual_output_table_matches_lcms() {
@@ -1822,6 +1978,12 @@ mod tests {
                 "inklimit_lut8",
                 INKLIMIT_LUT8,
                 &reference::INKLIMIT_LUT8_B2A0,
+            ),
+            // A matrix that lcms2 applies to the table's input first.
+            (
+                "inklimit_matrix",
+                INKLIMIT_MATRIX,
+                &reference::INKLIMIT_MATRIX_B2A0,
             ),
         ] {
             let (b2a0, _) = legs(icc);
@@ -1886,6 +2048,96 @@ mod tests {
         }
     }
 
+    /// Tables with an XYZ PCS evaluate as lcms2's do: the PCS side holds
+    /// XYZ / (1 + 32767/32768); an XYZ-indexed B2A table is tetrahedral,
+    /// through its matrix first (`lut16Type`, as Ghostscript's
+    /// `ps_cmyk.icc` has one) or its `mBA` matrix element.
+    #[test]
+    fn xyz_tables_match_lcms() {
+        let relcol = RenderingIntent::RelativeColorimetric;
+        for (name, icc, b2a1_want, a2b1_want) in [
+            (
+                "xyz_v4",
+                XYZ_V4,
+                &reference::XYZ_V4_B2A1,
+                &reference::XYZ_V4_A2B1,
+            ),
+            (
+                "xyz_mab",
+                XYZ_MAB,
+                &reference::XYZ_MAB_B2A1,
+                &reference::XYZ_MAB_A2B1,
+            ),
+        ] {
+            let profile = ColorProfile::new_from_slice(icc).unwrap();
+            let b2a1 = LcmsLut::from_pcs(b2a_table(&profile, relcol).unwrap(), icc, 4).unwrap();
+            let a2b1 = LcmsLut::to_pcs(a2b_table(&profile, relcol).unwrap(), icc, 4).unwrap();
+            assert_eq!(b2a1.coding(), PcsCoding::Xyz);
+            for (lab, want) in reference::LAB_SAMPLES.iter().zip(b2a1_want) {
+                let got = b2a1.lab_to_ink(*lab);
+                assert_near(
+                    &format!("{name} B2A1 at {lab:?}"),
+                    got,
+                    *want,
+                    INK_TOLERANCE,
+                );
+            }
+            for (cmyk, want) in reference::SAMPLES.iter().zip(a2b1_want) {
+                let got = a2b1.ink_to_xyz(cmyk.map(|v| f64::from(v) / 255.0));
+                let want = lab_to_xyz_white(*want, LCMS_D50);
+                assert_near(
+                    &format!("{name} A2B1 at {cmyk:?}"),
+                    got,
+                    want,
+                    XYZ_TOLERANCE,
+                );
+            }
+        }
+    }
+
+    /// A Lab-PCS table's XYZ is its Lab through stet's own Lab → XYZ, white
+    /// [`WP_D50`], as the display bake has always taken it: the XYZ PCS,
+    /// which converts with lcms2's D50, leaves every Lab table's bytes as
+    /// they were.
+    #[test]
+    fn a_lab_tables_xyz_is_unchanged() {
+        let relcol = RenderingIntent::RelativeColorimetric;
+        for icc in [MAB, INKLIMIT_LUT8] {
+            let profile = ColorProfile::new_from_slice(icc).unwrap();
+            let a2b1 = LcmsLut::to_pcs(a2b_table(&profile, relcol).unwrap(), icc, 4).unwrap();
+            for cmyk in reference::SAMPLES {
+                let ink = cmyk.map(|v| f64::from(v) / 255.0);
+                assert_eq!(a2b1.ink_to_xyz(ink), lab_to_xyz_d50(a2b1.ink_to_lab(ink)));
+            }
+        }
+    }
+
+    /// The black of an XYZ-PCS table is its XYZ, not its bytes read as
+    /// Lab: `split_xyz.icc`'s 400% ink through `A2B1` is lcms2's.
+    #[test]
+    fn an_xyz_tables_black_is_its_xyz() {
+        let profile = ColorProfile::new_from_slice(SPLIT_XYZ).unwrap();
+        let relcol = RenderingIntent::RelativeColorimetric;
+        let a2b1 = LcmsLut::to_pcs(a2b_table(&profile, relcol).unwrap(), SPLIT_XYZ, 4).unwrap();
+        let xyz = |lab| lab_to_xyz_white(lab, LCMS_D50);
+        for (cmyk, want) in reference::SAMPLES.iter().zip(&reference::SPLIT_XYZ_A2B1) {
+            let got = a2b1.ink_to_xyz(cmyk.map(|v| f64::from(v) / 255.0));
+            assert_near(
+                &format!("split_xyz A2B1 at {cmyk:?}"),
+                got,
+                xyz(*want),
+                XYZ_TOLERANCE,
+            );
+        }
+        let black = reference::SAMPLES
+            .iter()
+            .position(|s| *s == [255; 4])
+            .unwrap();
+        let got = xyz(table_black(&profile, SPLIT_XYZ, relcol).unwrap());
+        let want = xyz(reference::SPLIT_XYZ_A2B1[black]);
+        assert_near("table black", got, want, XYZ_TOLERANCE);
+    }
+
     /// A four-input grid with its own number of points per input is
     /// indexed by each input's own size: an affine table, which any
     /// interpolation reproduces, comes back exactly only if the strides
@@ -1940,6 +2192,11 @@ mod tests {
                 INKLIMIT_LUT8,
                 reference::INKLIMIT_LUT8_ROUND_TRIP,
             ),
+            (
+                "inklimit_matrix",
+                INKLIMIT_MATRIX,
+                reference::INKLIMIT_MATRIX_ROUND_TRIP,
+            ),
         ] {
             let (b2a0, a2b1) = legs(icc);
             let got = a2b1.ink_to_lab(b2a0.lab_to_ink([0.0; 3]));
@@ -1973,8 +2230,8 @@ mod tests {
     }
 
     /// `lut8Type` tables are read only by the lcms2-exact evaluators (the
-    /// black point and the chain stage 1, including the output-intent side
-    /// of RGB and Lab): the bake still passes them to moxcms.
+    /// display bake through `LcmsLut`, the black point and the chain stage
+    /// 1), not by the `lut16Type` display sampler.
     #[test]
     fn lut8_tables_are_for_the_lcms_exact_evaluators_only() {
         let profile = ColorProfile::new_from_slice(INKLIMIT_LUT8).unwrap();
@@ -1985,8 +2242,8 @@ mod tests {
         assert!(!can_sample(&profile, a2b1));
         let perceptual = RenderingIntent::Perceptual;
         assert!(LabToCmykSampler::new(&profile, INKLIMIT_LUT8, perceptual, None).is_some());
-        assert!(OwnedLutSampler::lcms_exact(a2b1, 4, 3).is_some());
-        assert!(OwnedLutSampler::lcms_exact(b2a0, 3, 4).is_some());
+        assert!(OwnedLutSampler::lcms_exact(a2b1, 4, 3, Pcs::Lab).is_some());
+        assert!(OwnedLutSampler::lcms_exact(b2a0, 3, 4, Pcs::Lab).is_some());
     }
 
     const INTENTS: [RenderingIntent; 3] = [

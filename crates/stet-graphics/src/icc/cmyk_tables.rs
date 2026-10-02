@@ -244,10 +244,12 @@ impl CmykTables {
     }
 
     /// Bake `recipe`, by the first of these that reads its table:
-    /// 1. the `lut16Type` sampler ([`hand_rolled::bake_clut4_hand_rolled`]);
+    /// 1. the `lut16Type` sampler for a Lab PCS
+    ///    ([`hand_rolled::bake_clut4_hand_rolled`]);
     /// 2. the evaluator that reproduces lcms2, for ICC v4 `lutAToBType` and
-    ///    `lut8Type` tables ([`hand_rolled::bake_clut4_lcms`]);
-    /// 3. moxcms's transform for the same table, now only for an XYZ PCS.
+    ///    `lut8Type` tables, and any with an XYZ PCS
+    ///    ([`hand_rolled::bake_clut4_lcms`]);
+    /// 3. moxcms's transform for the same table ([`Self::bake_moxcms`]).
     ///
     /// `lut16Type` keeps its own sampler, though the second would read it
     /// too, so that those profiles' tables do not move.
@@ -269,6 +271,13 @@ impl CmykTables {
                 return Some(clut);
             }
         }
+        self.bake_moxcms(recipe)
+    }
+
+    /// Bake `recipe` from moxcms's transform for its table: the last resort,
+    /// for a table stet's own evaluators cannot read, so that the profile
+    /// keeps its colour management.
+    fn bake_moxcms(&self, recipe: Recipe) -> Option<Clut4> {
         let transform = moxcms_transform(&self.profile, recipe.table.moxcms_intent())?;
         let params = moxcms_bpc_params(recipe.black, transform.as_ref());
         bake_clut4(transform.as_ref(), GRID_N, params.as_ref())
@@ -323,6 +332,14 @@ mod tests {
     const SPLIT_LUT8: &[u8] = include_bytes!("../../tests/data/cmyk_intent/split_lut8.icc");
     const SPLIT_XYZ: &[u8] = include_bytes!("../../tests/data/cmyk_intent/split_xyz.icc");
     const MAB: &[u8] = include_bytes!("../../tests/data/cmyk_intent/mab.icc");
+    const XYZ_V4: &[u8] = include_bytes!("../../tests/data/cmyk_intent/xyz_v4.icc");
+    const XYZ_MAB: &[u8] = include_bytes!("../../tests/data/cmyk_intent/xyz_mab.icc");
+
+    // lcms2's sRGB for the generated profiles.
+    #[allow(dead_code)]
+    mod reference {
+        include!("../../tests/data/cmyk_intent/reference.rs");
+    }
 
     fn tables(icc: &[u8], bpc: bool) -> CmykTables {
         let profile = Arc::new(ColorProfile::new_from_slice(icc).unwrap());
@@ -402,11 +419,11 @@ mod tests {
         assert_eq!(baked, 1);
     }
 
-    /// Each table shape has its own bake: `lut16Type` keeps its sampler,
-    /// byte for byte, though lcms2's evaluator reads it too; `lut8Type` and
-    /// ICC v4 go to that evaluator. Both count as stet's own, so `IccCache`
-    /// takes no compensation from moxcms for them. An XYZ PCS is left to
-    /// moxcms.
+    /// Each table shape has its own bake: `lut16Type` with a Lab PCS keeps
+    /// its sampler, byte for byte, though lcms2's evaluator reads it too;
+    /// `lut8Type`, ICC v4 and an XYZ PCS go to that evaluator. Both count
+    /// as stet's own, so `IccCache` takes no compensation from moxcms for
+    /// them.
     #[test]
     fn each_table_shape_has_its_bake() {
         let grid_n = GRID_N as usize;
@@ -414,6 +431,9 @@ mod tests {
             ("split_sat", SPLIT_SAT, true),
             ("split_lut8", SPLIT_LUT8, false),
             ("mab", MAB, false),
+            ("split_xyz", SPLIT_XYZ, false),
+            ("xyz_v4", XYZ_V4, false),
+            ("xyz_mab", XYZ_MAB, false),
         ] {
             let t = tables(icc, true);
             for intent in [Perceptual, RelativeColorimetric, Saturation] {
@@ -430,9 +450,42 @@ mod tests {
                 assert!(t.hand_rolled(intent), "{name} {intent:?}");
             }
         }
-        let xyz = tables(SPLIT_XYZ, true);
-        assert!(xyz.get(RelativeColorimetric).is_some());
-        assert!(!xyz.hand_rolled(RelativeColorimetric));
+    }
+
+    /// The moxcms bake, kept for a table stet's evaluators cannot read,
+    /// reads the recipe's own table: relative colorimetric within two
+    /// levels of lcms2 (moxcms's arithmetic is its own), and perceptual
+    /// another table. No generated profile reaches it through `bake`, so it
+    /// is baked directly. Compensation is off: `split_xyz.icc`'s perceptual
+    /// black is lighter than L* 50, which lcms2 2.16 takes as zero and
+    /// Ghostscript's copy of it, and stet, clip.
+    #[test]
+    fn moxcms_bake_reads_the_recipes_table() {
+        let t = tables(SPLIT_XYZ, false);
+        let bake = |intent: RenderingIntent| {
+            let clut = t
+                .bake_moxcms(t.recipes[t.slot_of[intent as usize]])
+                .unwrap();
+            reference::SAMPLES.map(|cmyk| {
+                let [c, m, y, k] = cmyk.map(|v| f64::from(v) / 255.0);
+                let (r, g, b) = super::super::sample_clut4_single_f64(&clut, c, m, y, k);
+                [r, g, b].map(|v| (v * 255.0).round() as u8)
+            })
+        };
+        let relcol = bake(RelativeColorimetric);
+        for ((got, want), cmyk) in relcol
+            .iter()
+            .zip(&reference::SPLIT_XYZ[1][0])
+            .zip(reference::SAMPLES)
+        {
+            for ch in 0..3 {
+                assert!(
+                    got[ch].abs_diff(want[ch]) <= 2,
+                    "{cmyk:?}: moxcms {got:?}, lcms2 {want:?}"
+                );
+            }
+        }
+        assert_ne!(bake(Perceptual), relcol);
     }
 
     #[test]

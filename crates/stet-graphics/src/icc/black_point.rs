@@ -106,7 +106,7 @@ pub(super) fn detect_gray(profile: &ColorProfile, icc: &[u8]) -> Option<[f64; 3]
 }
 
 /// [`detect`] as the XYZ it stands for. `None` is lcms2's zero black point,
-/// or a table that black needs which stet cannot read (an XYZ PCS).
+/// or a table that black needs which stet cannot read.
 pub(super) fn detect_xyz(
     profile: &ColorProfile,
     icc: &[u8],
@@ -208,8 +208,8 @@ pub(super) fn chain_compensation(
 ///   is that black point; otherwise a quadratic fitted to the shadows finds
 ///   where the round trip leaves black.
 ///
-/// A profile whose round-trip tables stet cannot read (an XYZ PCS) has no
-/// destination black point here.
+/// A profile whose round-trip tables stet cannot read has no destination
+/// black point here.
 pub(super) fn detect_destination(
     profile: &ColorProfile,
     icc: &[u8],
@@ -422,7 +422,7 @@ mod tests {
     /// intent.
     type Reference = (&'static str, &'static [u8], [[f64; 3]; 3]);
 
-    const PROFILES: [Reference; 10] = [
+    const PROFILES: [Reference; 13] = [
         ("split", profile!("split"), reference::SPLIT_BLACK_POINT),
         (
             "split_sat",
@@ -463,6 +463,20 @@ mod tests {
         // ICC v4 `lutAToBType` / `lutBToAType`: relative colorimetric's
         // black is the round trip through them.
         ("mab", profile!("mab"), reference::MAB_BLACK_POINT),
+        // An XYZ PCS, whose round trip goes through an XYZ-indexed `B2A0`
+        // with a matrix (`lut16Type`) or a matrix element (`mBA`).
+        ("xyz_v4", profile!("xyz_v4"), reference::XYZ_V4_BLACK_POINT),
+        (
+            "xyz_mab",
+            profile!("xyz_mab"),
+            reference::XYZ_MAB_BLACK_POINT,
+        ),
+        // A Lab-indexed `B2A0` with a matrix, which lcms2 applies too.
+        (
+            "inklimit_matrix",
+            profile!("inklimit_matrix"),
+            reference::INKLIMIT_MATRIX_BLACK_POINT,
+        ),
     ];
 
     /// Every generated profile, every intent: the black point is lcms2's,

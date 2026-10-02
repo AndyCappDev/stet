@@ -45,6 +45,11 @@ use moxcms::TransformExecutor;
 /// Matches the ICC PCS illuminant.
 pub const WP_D50: [f64; 3] = [0.96422, 1.0, 0.82521];
 
+/// lcms2's D50 (`cmsD50_XYZ`), the white of every Lab ↔ XYZ conversion it
+/// makes, including between a Lab and an XYZ PCS. It differs from
+/// [`WP_D50`] in the fifth decimal.
+pub(crate) const LCMS_D50: [f64; 3] = [0.9642, 1.0, 0.8249];
+
 /// Linear-sRGB → XYZ-D65 (sRGB primaries with D65 white point).
 const RGB_TO_XYZ_D65: [[f64; 3]; 3] = [
     [0.4124564, 0.3575761, 0.1804375],
@@ -235,21 +240,31 @@ pub fn linear_to_srgb(c: f64) -> f64 {
 
 /// XYZ-D50 → CIE Lab using the ICC PCS reference white.
 pub fn xyz_d50_to_lab(xyz: [f64; 3]) -> [f64; 3] {
-    let fx = lab_f(xyz[0] / WP_D50[0]);
-    let fy = lab_f(xyz[1] / WP_D50[1]);
-    let fz = lab_f(xyz[2] / WP_D50[2]);
-    [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
+    xyz_to_lab_white(xyz, WP_D50)
 }
 
 /// CIE Lab → XYZ-D50 (inverse of [`xyz_d50_to_lab`]).
 pub fn lab_to_xyz_d50(lab: [f64; 3]) -> [f64; 3] {
+    lab_to_xyz_white(lab, WP_D50)
+}
+
+/// XYZ → CIE Lab relative to `white`.
+pub(crate) fn xyz_to_lab_white(xyz: [f64; 3], white: [f64; 3]) -> [f64; 3] {
+    let fx = lab_f(xyz[0] / white[0]);
+    let fy = lab_f(xyz[1] / white[1]);
+    let fz = lab_f(xyz[2] / white[2]);
+    [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
+}
+
+/// CIE Lab relative to `white` → XYZ (inverse of [`xyz_to_lab_white`]).
+pub(crate) fn lab_to_xyz_white(lab: [f64; 3], white: [f64; 3]) -> [f64; 3] {
     let fy = (lab[0] + 16.0) / 116.0;
     let fx = lab[1] / 500.0 + fy;
     let fz = fy - lab[2] / 200.0;
     [
-        WP_D50[0] * lab_f_inv(fx),
-        WP_D50[1] * lab_f_inv(fy),
-        WP_D50[2] * lab_f_inv(fz),
+        white[0] * lab_f_inv(fx),
+        white[1] * lab_f_inv(fy),
+        white[2] * lab_f_inv(fz),
     ]
 }
 

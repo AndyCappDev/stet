@@ -899,9 +899,10 @@ impl IccCache {
         //    colours to the sRGB boundary: within ±1 RGB level of lcms2.
         // 2. `bake_clut4_lcms` does the same through the evaluator that
         //    reproduces lcms2, for ICC v4 `lutAToBType` and `lut8Type`
-        //    tables.
+        //    tables, and any with an XYZ PCS.
         // 3. `bake_clut4` samples moxcms's 8-bit transform for the same
-        //    table on a grid: only an XYZ PCS is left to it.
+        //    table on a grid: the last resort, for a table stet cannot
+        //    read.
         //
         // All compensate from the black point lcms2 detects for the intent
         // (`black_point`): for relative colorimetric on an output profile,

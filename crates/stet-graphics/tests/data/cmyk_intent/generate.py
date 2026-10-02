@@ -111,12 +111,13 @@ def u16(v):
     return struct.pack(">H", v)
 
 
-def lut(bits, n_in, n_out, clut, grid=2):
+def lut(bits, n_in, n_out, clut, grid=2, matrix=(1, 0, 0, 0, 1, 0, 0, 0, 1)):
     """An `mft2` (bits=16) or `mft1` (bits=8) tag on a `grid`-point grid with
     identity curves. `clut` maps grid coordinates (each in 0.0–1.0, first
-    channel slowest) to normalised outputs."""
+    channel slowest) to normalised outputs. lcms2 applies `matrix`, row by
+    row, to a three-input table's input before anything else."""
     t = (b"mft2" if bits == 16 else b"mft1") + bytes(4) + bytes([n_in, n_out, grid, 0])
-    for v in (1, 0, 0, 0, 1, 0, 0, 0, 1):
+    for v in matrix:
         t += s15f16(v)
     if bits == 16:
         t += u16(2) + u16(2)
@@ -597,6 +598,127 @@ def mab_profile(description):
     return assemble(tags, b"prtr", b"CMYK", b"Lab ", 0x04200000)
 
 
+# ------------------------------------------------------- XYZ PCS
+
+D50 = (0.9642, 1.0, 0.8249)
+# lcms2's MAX_ENCODEABLE_XYZ: a table's XYZ PCS value 1 is this much XYZ.
+XYZ_MAX = 1 + 32767 / 32768
+
+
+def lab_to_xyz(lab):
+    l, a, b = lab
+    fy = (l + 16) / 116
+    fx, fz = fy + a / 500, fy - b / 200
+
+    def f_inv(t):
+        return t**3 if t > 6 / 29 else 3 * (6 / 29) ** 2 * (t - 4 / 29)
+
+    return [w * f_inv(t) for w, t in zip(D50, (fx, fy, fz))]
+
+
+def xyz_to_lab(xyz):
+    def f(t):
+        return t ** (1 / 3) if t > (6 / 29) ** 3 else t / (3 * (6 / 29) ** 2) + 4 / 29
+
+    fx, fy, fz = (f(v / w) for v, w in zip(xyz, D50))
+    return [116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)]
+
+
+def xyz_a2b(lab_of):
+    """CMYK → XYZ PCS on a 5⁴ grid, from a CMYK → Lab function."""
+    return lambda coords: [v / XYZ_MAX for v in lab_to_xyz(lab_of(*coords))]
+
+
+# CMYK → Lab bent in C·M, with 400% ink at L* `black`; perceptual has a
+# lighter black (L* 22) and less chroma.
+def xyz_lab(black, chroma):
+    return lambda c, m, y, k: (
+        100 - 18 * c - 14 * m - 6 * y - (68 - black) * k + 6 * c * m,
+        chroma * (-32 * c + 62 * m - 6 * y),
+        chroma * (-42 * c - 6 * m + 72 * y),
+    )
+
+
+def xyz_ink(limit, gamma):
+    """White-relative XYZ grid coordinates → ink: equal ink easing into
+    `limit` from L*, CMY shifted by a* and b* in proportion to the ink."""
+    softness = 0.03
+
+    def fn(coords):
+        l_star, a_star, b_star = xyz_to_lab([c * w for c, w in zip(coords, D50)])
+        ink = max((100 - l_star) / 92, 0.0) ** gamma
+        ink = limit - softness * math.log1p(math.exp((limit - ink) / softness))
+        return [
+            ink - 0.003 * a_star * ink,
+            ink + 0.004 * a_star * ink - 0.002 * b_star * ink,
+            ink + 0.005 * b_star * ink,
+            ink,
+        ]
+
+    return fn
+
+
+# A B2A table's matrix as Ghostscript's `ps_cmyk.icc` has it: the PCS value
+# → XYZ relative to white, so the grid spans 0–1 on every axis.
+XYZ_B2A_MATRIX = (XYZ_MAX / D50[0], 0, 0, 0, XYZ_MAX / D50[1], 0, 0, 0, XYZ_MAX / D50[2])
+
+
+def xyz_v4_profile(description):
+    """An output-class ICC v4 CMYK profile with an XYZ PCS and `lut16Type`
+    tables, as Ghostscript's `ps_cmyk.icc` is, ink-limited in `B2A0` so the
+    black-point round trip matters."""
+    tags = [
+        (b"desc", desc_tag(description)),
+        (b"wtpt", xyz_tag(*D50)),
+        (b"A2B0", lut(16, 4, 3, xyz_a2b(xyz_lab(22, 0.8)), grid=5)),
+        (b"A2B1", lut(16, 4, 3, xyz_a2b(xyz_lab(8, 1.0)), grid=5)),
+        (b"B2A0", lut(16, 3, 4, xyz_ink(0.8, 1.0), grid=9, matrix=XYZ_B2A_MATRIX)),
+        (b"B2A1", lut(16, 3, 4, xyz_ink(0.9, 0.85), grid=9, matrix=XYZ_B2A_MATRIX)),
+    ]
+    return assemble(tags, b"prtr", b"CMYK", b"XYZ ", 0x04200000)
+
+
+def xyz_mab_profile(description):
+    """`xyz_v4.icc` as ICC v4 `lutAToBType` / `lutBToAType` tables, the
+    B2A matrix in the `mBA` matrix element."""
+
+    def a2b(black, chroma):
+        fn = xyz_a2b(xyz_lab(black, chroma))
+        return multi_tag(
+            True,
+            4,
+            3,
+            a=MAB_A_CURVES,
+            clut=([4, 4, 4, 4], 2, fn),
+            m=[para_tag(0, [1.1]), gamma_curv_tag(0.95), curv_tag([])],
+            matrix=([[0.97, 0.02, 0.0], [0.01, 0.98, 0.0], [0.0, 0.01, 0.97]], [0.005, 0.0, 0.01]),
+            b=[curv_tag([]), curv_tag([]), curv_tag([])],
+        )
+
+    def b2a(limit, gamma):
+        m = XYZ_B2A_MATRIX
+        return multi_tag(
+            False,
+            3,
+            4,
+            b=[curv_tag([]), curv_tag([]), curv_tag([])],
+            matrix=([m[0:3], m[3:6], m[6:9]], [0.0, 0.0, 0.0]),
+            m=[para_tag(0, [1.0]), curv_tag([0, 0.5, 1]), curv_tag([])],
+            clut=([9, 7, 5], 2, xyz_ink(limit, gamma)),
+            a=[curv_tag([]), para_tag(0, [1.05]), curv_tag([]), curv_tag([])],
+        )
+
+    tags = [
+        (b"desc", desc_tag(description)),
+        (b"wtpt", xyz_tag(*D50)),
+        (b"A2B0", a2b(22, 0.8)),
+        (b"A2B1", a2b(8, 1.0)),
+        (b"B2A0", b2a(0.8, 1.0)),
+        (b"B2A1", b2a(0.9, 0.85)),
+    ]
+    return assemble(tags, b"prtr", b"CMYK", b"XYZ ", 0x04200000)
+
+
 def mab_grid_profile(description):
     """`mab.icc` with A2B tables on a 3×4×5×3 grid whose A curves hold an
     empty `curv` before two more: the two shapes moxcms 0.8.1 misreads."""
@@ -895,6 +1017,22 @@ def rust_round_trip(name, icc):
             f"/// lcms2's black-point round trip of `{lower}.icc` from Lab 0/0/0,",
             "/// before it sets a* = b* = 0 and clips L* to 50.",
             f"pub const {name}_ROUND_TRIP: [f64; 3] = {f64_array(trip)};",
+        ]
+    )
+
+
+def rust_a2b1(name, icc):
+    """A profile's `A2B1` alone, as lcms2 reads it."""
+    lcms = Lcms(icc)
+    ink = [v / 255 for v in (c for sample in SAMPLES for c in sample)]
+    labs = lcms.a2b1([ink[i : i + 4] for i in range(0, len(ink), 4)])
+    lcms.close()
+    return "\n".join(
+        [
+            f"/// lcms2's `A2B1` of `{name.lower()}.icc` at each of `SAMPLES`, Lab.",
+            f"pub const {name}_A2B1: [[f64; 3]; {len(SAMPLES)}] = [",
+            *(f"    {f64_array(l)}," for l in labs),
+            "];",
         ]
     )
 
@@ -1376,6 +1514,18 @@ def main():
         ("MAB", mab_profile("stet test: ICC v4 lutAToBType / lutBToAType")),
         ("RGB_MAB", rgb_mab_profile("stet test: ICC v4 RGB lutAToBType")),
         ("MAB_GRID", mab_grid_profile("stet test: mab.icc, A2B grid 3x4x5x3")),
+        ("XYZ_V4", xyz_v4_profile("stet test: CMYK, XYZ PCS, ICC v4 lut16")),
+        ("XYZ_MAB", xyz_mab_profile("stet test: CMYK, XYZ PCS, ICC v4 mAB/mBA")),
+        (
+            "INKLIMIT_MATRIX",
+            profile(
+                "stet test: inklimit.icc, B2A0 with a matrix",
+                with_saturation=False,
+                perceptual_b2a=lambda bits: lut(
+                    bits, 3, 4, inklimited_b2a, matrix=(1, 0, 0, 0, 0.9, 0, 0, 0, 1.1)
+                ),
+            ),
+        ),
     ]
     for name, icc in profiles:
         (HERE / f"{name.lower()}.icc").write_bytes(icc)
@@ -1417,6 +1567,9 @@ def main():
             "MAB",
             "RGB_MAB",
             "MAB_GRID",
+            "XYZ_V4",
+            "XYZ_MAB",
+            "INKLIMIT_MATRIX",
         ):
             out += [rust_black_point(name, icc[name]), ""]
     for name in ["INKLIMIT", "INKLIMIT_LUT8"]:
@@ -1455,6 +1608,13 @@ def main():
     out += [rust_gray_chain("MAB", icc), ""]
     for name in ["MAB", "MAB_GRID", "SPLIT_XYZ"]:
         out += [rust_table(name, icc[name]), ""]
+    for name in ["XYZ_V4", "XYZ_MAB", "INKLIMIT_MATRIX"]:
+        out += [rust_table(name, icc[name]), ""]
+        out += [rust_black_point(name, icc[name]), ""]
+    for name in ["XYZ_V4", "XYZ_MAB"]:
+        out += [rust_v4_legs(name, icc[name]), ""]
+    out += [rust_round_trip("INKLIMIT_MATRIX", icc["INKLIMIT_MATRIX"]), ""]
+    out += [rust_a2b1("SPLIT_XYZ", icc["SPLIT_XYZ"]), ""]
     (HERE / "reference.rs").write_text("\n".join(out))
 
 

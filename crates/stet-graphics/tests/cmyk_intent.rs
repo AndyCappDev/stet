@@ -9,8 +9,9 @@
 //! colorimetric and (in one) saturation tables differ, the first again as
 //! `lut8Type`, one whose perceptual table copies its colorimetric one,
 //! `inklimit*.icc`, whose perceptual `B2A0` stops short of 400% ink as a
-//! press profile's does, and `mab*.icc`, whose tables are ICC v4
-//! `lutAToBType`/`lutBToAType` — and lcms2's output for each intent with
+//! press profile's does, `mab*.icc`, whose tables are ICC v4
+//! `lutAToBType`/`lutBToAType`, and `*xyz*.icc`, with an XYZ PCS — and
+//! lcms2's output for each intent with
 //! black-point compensation off and on, and lcms2's proofing-chain stage 1
 //! (a CMYK or Gray source into an output-intent CMYK) for each intent.
 //! `generate.py` there makes every file; re-run it rather than editing
@@ -43,6 +44,9 @@ const RGB_LUT_V4: &[u8] = include_bytes!("data/cmyk_intent/rgb_lut_v4.icc");
 const SRGB: &[u8] = include_bytes!("data/cmyk_intent/srgb.icc");
 const MAB: &[u8] = include_bytes!("data/cmyk_intent/mab.icc");
 const MAB_GRID: &[u8] = include_bytes!("data/cmyk_intent/mab_grid.icc");
+const XYZ_V4: &[u8] = include_bytes!("data/cmyk_intent/xyz_v4.icc");
+const XYZ_MAB: &[u8] = include_bytes!("data/cmyk_intent/xyz_mab.icc");
+const INKLIMIT_MATRIX: &[u8] = include_bytes!("data/cmyk_intent/inklimit_matrix.icc");
 const RGB_MAB: &[u8] = include_bytes!("data/cmyk_intent/rgb_mab.icc");
 
 /// Largest per-channel difference allowed from lcms2. stet bakes a 17⁴ table
@@ -192,6 +196,14 @@ fn black_point_is_the_one_lcms_detects() {
                 "inklimit_lut8.icc",
                 INKLIMIT_LUT8,
                 &reference::INKLIMIT_LUT8,
+                intent,
+                bpc,
+            );
+            // A `B2A0` with a matrix, which lcms2 applies to its input.
+            assert_matches_lcms(
+                "inklimit_matrix.icc",
+                INKLIMIT_MATRIX,
+                &reference::INKLIMIT_MATRIX,
                 intent,
                 bpc,
             );
@@ -371,41 +383,31 @@ fn identical_tables_show_perceptual_as_relative_colorimetric() {
     );
 }
 
-/// A profile stet's own evaluators cannot read (an XYZ PCS) is baked from
-/// moxcms's transform instead, and that bake follows the intent too:
-/// relative colorimetric used to be baked from the perceptual table.
-/// Relative colorimetric matches lcms2. Perceptual only reads a table of
-/// its own: moxcms 0.8.1 gets this profile's `A2B0` wrong (400% ink shows
-/// as `[59, 0, 23]`, lcms2's `[129, 118, 121]`), so it is not compared.
-/// Compensation is off: lcms2 2.16 takes a black lighter than L* 50, as
-/// this profile's perceptual one is, as zero, where Ghostscript's copy of
-/// it, and stet, clip it to L* 50.
+/// Profiles with an XYZ PCS show as lcms2 shows them, black points
+/// included: the ink-limited round trip goes through an XYZ-indexed `B2A0`
+/// with a matrix, as in Ghostscript's `ps_cmyk.icc`. moxcms, which used to
+/// bake them, was up to 17 levels off on that profile.
+///
+/// `split_xyz.icc`'s perceptual intent is left out: its black is lighter
+/// than L* 50, which lcms2 2.16 takes as zero and Ghostscript's copy of
+/// lcms2, and stet, clip to L* 50.
 #[test]
-fn moxcms_fallback_follows_the_intent() {
-    let cache = IccCache::new_with_options(IccCacheOptions {
-        bpc_mode: BpcMode::Off,
-        source_cmyk_profile: Some(SPLIT_XYZ.to_vec()),
-    });
-    let hash = *cache.default_cmyk_hash().unwrap();
-    let samples: Vec<u8> = reference::SAMPLES.iter().flatten().copied().collect();
-    let n = reference::SAMPLES.len();
-    let image = |intent| {
-        cache
-            .convert_image_8bit_with_intent(&hash, &samples, n, intent)
-            .unwrap()
-    };
-    let relcol = image(IccRenderingIntent::RelativeColorimetric);
-    let want = &reference::SPLIT_XYZ[1][0];
-    for (i, (cmyk, lcms)) in reference::SAMPLES.iter().zip(want).enumerate() {
-        let got = &relcol[i * 3..i * 3 + 3];
-        for ch in 0..3 {
-            assert!(
-                got[ch].abs_diff(lcms[ch]) <= TOLERANCE,
-                "CMYK {cmyk:?}: stet {got:?}, lcms2 {lcms:?}"
-            );
+fn xyz_pcs_shows_as_lcms() {
+    for intent in INTENTS {
+        for bpc in [false, true] {
+            assert_matches_lcms("xyz_v4.icc", XYZ_V4, &reference::XYZ_V4, intent, bpc);
+            assert_matches_lcms("xyz_mab.icc", XYZ_MAB, &reference::XYZ_MAB, intent, bpc);
+            if intent != IccRenderingIntent::Perceptual {
+                assert_matches_lcms(
+                    "split_xyz.icc",
+                    SPLIT_XYZ,
+                    &reference::SPLIT_XYZ,
+                    intent,
+                    bpc,
+                );
+            }
         }
     }
-    assert_ne!(image(IccRenderingIntent::Perceptual), relcol);
 }
 
 /// An ICC v4 output intent shows its CMYK as lcms2 does: through its
