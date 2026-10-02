@@ -140,6 +140,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answer without compensation. Gray profiles with a LUT or a Lab PCS keep
   the old conversion; every Gray profile under an output intent in the
   test corpus is the usual tone-curve kind.
+- **ICCBased RGB colours with a pure-gamma profile went wrong in a PDF/X
+  document wherever a channel was zero.** Converting an RGB colour into
+  the output intent runs it through its profile's tone curves. When a
+  curve is a single gamma, as in Apple RGB, ColorMatch RGB or any other
+  γ 1.8 profile, stet evaluated it with moxcms's approximate power
+  function, which returns garbage at 0. Pure red or a saturated green then
+  collapsed, up to 240 ink levels from lcms2 (42 on average) on the γ 1.8
+  profiles GWG 13.0 embeds; no page in the test corpus happens to paint
+  such a colour. Tone curves now evaluate as lcms2 does: a pure gamma
+  exactly, a table with lcms2's 16-bit interpolation, and parametric
+  curves by lcms2's own formulas. The table change moves a few hundred
+  pixels of sRGB and eciRGB content in the corpus by one level.
+
+  RGB profiles built on tables also follow lcms2 now: the table comes from
+  the intent's tag, else `A2B0`, else the tone curves and matrix (rather
+  than any table the profile has), and it is interpolated tetrahedrally
+  rather than trilinearly. ICC v2 `lut8Type` tables are read too.
 - **Relative colorimetric CMYK rendered lighter than Ghostscript and
   Acrobat** with black-point compensation on, the default. Compensation
   maps the profile's black to sRGB black, and stet took that black to be

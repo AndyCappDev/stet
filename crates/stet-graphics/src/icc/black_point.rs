@@ -534,17 +534,28 @@ mod tests {
     #[test]
     fn gray_chain_stage1_matches_lcms() {
         use crate::icc::bpc::{WP_D50, compute_bpc_params};
-        let gray_icc = profile!("gray_trc");
-        let gray = ColorProfile::new_from_slice(gray_icc).unwrap();
-        let gray_black = detect_gray(&gray, gray_icc).unwrap();
-        for (name, icc, want) in [
-            ("shadow", profile!("shadow"), &reference::GRAY_CHAIN_SHADOW),
+        for (name, gray_icc, icc, want) in [
+            (
+                "shadow",
+                profile!("gray_trc"),
+                profile!("shadow"),
+                &reference::GRAY_CHAIN_SHADOW,
+            ),
             (
                 "inklimit",
+                profile!("gray_trc"),
                 profile!("inklimit"),
                 &reference::GRAY_CHAIN_INKLIMIT,
             ),
+            (
+                "pure gamma",
+                profile!("gray_gamma"),
+                profile!("inklimit"),
+                &reference::CHAIN_GRAY_GAMMA_INKLIMIT,
+            ),
         ] {
+            let gray = ColorProfile::new_from_slice(gray_icc).unwrap();
+            let gray_black = detect_gray(&gray, gray_icc).unwrap();
             let oi = ColorProfile::new_from_slice(icc).unwrap();
             for (i, intent) in [Perceptual, RelativeColorimetric, Saturation]
                 .into_iter()

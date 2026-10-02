@@ -31,10 +31,18 @@ script runs it once and records what it produces. It writes, next to itself:
                  B2A1 does not, and the first as ICC v4.
   gray_trc.icc   A TRC-only Gray profile with an XYZ PCS and a black of
                  L* 20, like a press's black-ink profile.
+  gray_gamma.icc A Gray profile whose tone curve is a pure gamma (1.8).
+  rgb_gamma.icc  A matrix RGB profile (`mntr`, XYZ PCS) whose tone curves are
+                 pure gammas (1.8), like Apple RGB or ColorMatch.
+  rgb_lut.icc    An RGB profile with Lab `lut16Type` A2B1 and A2B2 tables that
+                 are not affine, so tetrahedral and trilinear interpolation
+                 differ, and no A2B0; it also carries rgb_gamma.icc's curves
+                 and colorants, which lcms2 reads for perceptual.
   reference.rs   lcms2's sRGB output for each profile, intent and BPC setting,
                  its black points as a source and as a destination, the
                  round trip behind them, and its proofing-chain stage 1
-                 (CMYK or Gray source → output-intent CMYK) for each intent;
+                 (CMYK, RGB or Gray source → output-intent CMYK) for each
+                 intent, and its tone-curve evaluation for each curve kind;
                  included by `tests/cmyk_intent.rs`.
 
 The profiles are ICC v2 output (`prtr`) profiles with a Lab PCS unless named
@@ -113,20 +121,21 @@ def lut(bits, n_in, n_out, clut, grid=2):
     return t
 
 
-def lab_table(bits, l, a, b):
-    """A2B clut: CMYK → legacy v2 Lab. 16-bit: L* 0..100 → 0..0xFF00, a*/b*
-    → (v + 128) × 256. 8-bit: L* 0..100 → 0..255, a*/b* → v + 128."""
+def lab_table(bits, l, a, b, n_in=4, grid=2):
+    """A2B clut: device (CMYK unless `n_in` says otherwise) → legacy v2 Lab.
+    16-bit: L* 0..100 → 0..0xFF00, a*/b* → (v + 128) × 256. 8-bit: L*
+    0..100 → 0..255, a*/b* → v + 128."""
 
-    def clut(cmyk):
-        L = l(*cmyk)
-        A = a(*cmyk)
-        B = b(*cmyk)
+    def clut(device):
+        L = l(*device)
+        A = a(*device)
+        B = b(*device)
         assert 0 <= L <= 100 and -128 <= A < 128 and -128 <= B < 128
         if bits == 16:
             return [L * 652.8 / 65535, (A + 128) * 256 / 65535, (B + 128) * 256 / 65535]
         return [L / 100, (A + 128) / 255, (B + 128) / 255]
 
-    return lut(bits, 4, 3, clut)
+    return lut(bits, n_in, 3, clut, grid)
 
 
 # A2B1, colorimetric: paper white L*=100, 400% black L*=8.
@@ -329,6 +338,73 @@ def gray_profile(description):
     return assemble(tags, b"prtr", b"GRAY", b"XYZ ", 0x02100000)
 
 
+def gamma_curv_tag(gamma):
+    """A `curv` with one entry: a pure gamma, u8Fixed8."""
+    return b"curv" + bytes(4) + struct.pack(">I", 1) + u16(round(gamma * 256))
+
+
+def gray_gamma_profile(description):
+    tags = [
+        (b"desc", desc_tag(description)),
+        (b"wtpt", xyz_tag(0.9642, 1.0, 0.8249)),
+        (b"kTRC", gamma_curv_tag(1.8)),
+    ]
+    return assemble(tags, b"mntr", b"GRAY", b"XYZ ", 0x02100000)
+
+
+# Colorants of a wide-gamut RGB, D50-adapted, each column summing to the
+# white: ColorMatch RGB's.
+RGB_COLORANTS = [
+    (b"rXYZ", (0.5094, 0.2749, 0.0243)),
+    (b"gXYZ", (0.3208, 0.6581, 0.1087)),
+    (b"bXYZ", (0.1339, 0.0670, 0.6919)),
+]
+
+
+def matrix_tags(gamma):
+    tags = [(sig, xyz_tag(*xyz)) for sig, xyz in RGB_COLORANTS]
+    tags += [(sig, gamma_curv_tag(gamma)) for sig in (b"rTRC", b"gTRC", b"bTRC")]
+    return tags
+
+
+def rgb_gamma_profile(description):
+    tags = [
+        (b"desc", desc_tag(description)),
+        (b"wtpt", xyz_tag(0.9642, 1.0, 0.8249)),
+        *matrix_tags(1.8),
+    ]
+    return assemble(tags, b"mntr", b"RGB ", b"XYZ ", 0x02100000)
+
+
+def rgb_lut_profile(description):
+    """A2B1 and A2B2 on a 5-point grid, curved in every input so tetrahedral
+    and trilinear interpolation land apart; no A2B0."""
+    a2b1 = lab_table(
+        16,
+        lambda r, g, b: 100 * (0.25 * r + 0.62 * g + 0.13 * b) ** 0.6,
+        lambda r, g, b: 90 * (r * r - g) * (1 - 0.4 * b),
+        lambda r, g, b: 80 * (0.7 * r * g - b * b) + 10 * r,
+        n_in=3,
+        grid=5,
+    )
+    a2b2 = lab_table(
+        16,
+        lambda r, g, b: 100 * (0.3 * r + 0.55 * g + 0.15 * b) ** 0.7,
+        lambda r, g, b: 110 * (r - g * g) * (1 - 0.3 * b * r),
+        lambda r, g, b: 95 * (r * g - b) * (1 - 0.2 * r),
+        n_in=3,
+        grid=5,
+    )
+    tags = [
+        (b"desc", desc_tag(description)),
+        (b"wtpt", xyz_tag(0.9642, 1.0, 0.8249)),
+        *matrix_tags(1.8),
+        (b"A2B1", a2b1),
+        (b"A2B2", a2b2),
+    ]
+    return assemble(tags, b"mntr", b"RGB ", b"Lab ", 0x02100000)
+
+
 # ------------------------------------------------------------------ lcms2
 
 # CMYK samples, 0–255: paper, primaries, secondaries, black ramps, rich and
@@ -421,6 +497,7 @@ LCMS.cmsDetectDestinationBlackPoint.argtypes = [
 TYPE_LAB_DBL = (1 << 22) | (10 << 16) | (3 << 3)
 TYPE_CMYK_DBL = (1 << 22) | (6 << 16) | (4 << 3)
 TYPE_GRAY_DBL = (1 << 22) | (3 << 16) | (1 << 3)
+TYPE_RGB_DBL = (1 << 22) | (4 << 16) | (3 << 3)
 FLAGS_NOCACHE_NOOPTIMIZE = 0x0040 | 0x0100
 PERCEPTUAL, RELATIVE_COLORIMETRIC, SATURATION = 0, 1, 2
 
@@ -655,15 +732,16 @@ def rust_destination(name, icc):
     )
 
 
-def rust_gray_chain(oi, icc):
-    src = Lcms(icc["GRAY_TRC"])
+def rust_gray_chain(oi, icc, source="GRAY_TRC"):
+    src = Lcms(icc[source])
     out = Lcms(icc[oi])
+    name = "GRAY_CHAIN" if source == "GRAY_TRC" else f"CHAIN_{source}"
     lines = [
-        f"/// lcms2's proofing-chain stage 1, `gray_trc.icc` into `{oi.lower()}.icc`,",
+        f"/// lcms2's proofing-chain stage 1, `{source.lower()}.icc` into `{oi.lower()}.icc`,",
         "/// at each of `GRAY_SAMPLES`; ink 0–1, indexed `[intent][bpc]`: intent",
         "/// 0 perceptual, 1 relative colorimetric, 2 saturation; black-point",
         "/// compensation 0 off, 1 on.",
-        f"pub const GRAY_CHAIN_{oi}: [[[[f64; 4]; {len(GRAY_SAMPLES)}]; 2]; 3] = [",
+        f"pub const {name}_{oi}: [[[[f64; 4]; {len(GRAY_SAMPLES)}]; 2]; 3] = [",
     ]
     for intent in (PERCEPTUAL, RELATIVE_COLORIMETRIC, SATURATION):
         lines.append("    [")
@@ -696,6 +774,159 @@ def rust_gray_chain(oi, icc):
     lines.append("];")
     src.close()
     out.close()
+    return "\n".join(lines)
+
+
+# RGB inputs, 0–255: black, the primaries and secondaries, where a channel is
+# zero, and colours between.
+RGB_SAMPLES = [
+    (0, 0, 0),
+    (255, 0, 0),
+    (0, 255, 0),
+    (0, 0, 255),
+    (255, 255, 0),
+    (0, 255, 255),
+    (255, 0, 255),
+    (255, 255, 255),
+    (128, 128, 128),
+    (255, 128, 0),
+    (64, 0, 192),
+    (10, 200, 90),
+    (230, 30, 140),
+    (0, 0, 64),
+    (37, 181, 222),
+]
+
+# RGB chains: each RGB profile into `inklimit.icc`.
+RGB_CHAINS = ["RGB_GAMMA", "RGB_LUT"]
+
+
+def rust_rgb_chain(source, oi, icc):
+    src = Lcms(icc[source])
+    out = Lcms(icc[oi])
+    lines = [
+        f"/// lcms2's proofing-chain stage 1, `{source.lower()}.icc` into",
+        f"/// `{oi.lower()}.icc` without black-point compensation, at each of",
+        "/// `RGB_SAMPLES`; ink 0–1, indexed by intent: 0 perceptual, 1 relative",
+        "/// colorimetric, 2 saturation.",
+        f"pub const CHAIN_{source}_{oi}: [[[f64; 4]; {len(RGB_SAMPLES)}]; 3] = [",
+    ]
+    for intent in (PERCEPTUAL, RELATIVE_COLORIMETRIC, SATURATION):
+        inks = lcms_chain(
+            [src.profile, out.profile],
+            [intent, intent],
+            TYPE_RGB_DBL,
+            TYPE_CMYK_DBL,
+            [[v / 255 for v in sample] for sample in RGB_SAMPLES],
+            4,
+        )
+        lines.append("    [")
+        lines += [
+            "        " + f64_array([min(max(v / 100, 0.0), 1.0) for v in ink]) + ","
+            for ink in inks
+        ]
+        lines.append("    ],")
+    lines.append("];")
+    src.close()
+    out.close()
+    return "\n".join(lines)
+
+
+LCMS.cmsBuildParametricToneCurve.restype = ctypes.c_void_p
+LCMS.cmsBuildParametricToneCurve.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_int32,
+    ctypes.POINTER(ctypes.c_double),
+]
+LCMS.cmsBuildTabulatedToneCurve16.restype = ctypes.c_void_p
+LCMS.cmsBuildTabulatedToneCurve16.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_uint32,
+    ctypes.POINTER(ctypes.c_uint16),
+]
+LCMS.cmsEvalToneCurveFloat.restype = ctypes.c_float
+LCMS.cmsEvalToneCurveFloat.argtypes = [ctypes.c_void_p, ctypes.c_float]
+LCMS.cmsFreeToneCurve.argtypes = [ctypes.c_void_p]
+
+
+def f32(v):
+    """`v` rounded to the nearest `f32`, as moxcms holds a curve parameter."""
+    return struct.unpack("<f", struct.pack("<f", v))[0]
+
+
+def f32_literal(v):
+    """The shortest decimal that is the `f32` `v`."""
+    for digits in range(1, 10):
+        text = f"{v:.{digits}g}"
+        if f32(float(text)) == v:
+            return text
+    raise AssertionError(v)
+
+
+# Where the curves are evaluated: the ends, the first 8-bit step, and either
+# side of each curve's break.
+CURVE_X = [0.0, 1 / 255, 0.02, 0.04045, 0.0625, 0.1, 0.2, 0.25, 0.3, 0.5, 0.75, 0.999, 1.0]
+
+# Parametric curves of each ICC function type (lcms2 type 1–5) as moxcms
+# reads them: `[g, a, b, c, d, e, f]`, as many as the type takes.
+CURVE_PARAMETRIC = [
+    [2.2],
+    [2.4, 1.25, -0.25],
+    [1.8, 1.5, -0.375, 0.0625],
+    [2.4, 1 / 1.055, 0.055 / 1.055, 1 / 12.92, 0.04045],
+    [2.2, 0.9, 0.08, 0.2, 0.1, 0.02, 0.01],
+]
+# A `curv` table and a `curv` pure gamma (u8Fixed8 461 = 1.80078125).
+CURVE_TABLE = [round(65535 * (i / 36) ** 2.2) for i in range(37)]
+CURVE_GAMMA = 461
+
+
+def rust_curves():
+    xs = [f32(x) for x in CURVE_X]
+
+    def evaluate(curve):
+        assert curve
+        ys = [LCMS.cmsEvalToneCurveFloat(curve, x) for x in xs]
+        LCMS.cmsFreeToneCurve(curve)
+        return ys
+
+    parametric = []
+    for params in CURVE_PARAMETRIC:
+        params = [f32(p) for p in params]
+        kind = {1: 1, 3: 2, 4: 3, 5: 4, 7: 5}[len(params)]
+        ys = evaluate(
+            LCMS.cmsBuildParametricToneCurve(
+                None, kind, (ctypes.c_double * len(params))(*params)
+            )
+        )
+        parametric.append((params, ys))
+    table = evaluate(
+        LCMS.cmsBuildTabulatedToneCurve16(
+            None, len(CURVE_TABLE), (ctypes.c_uint16 * len(CURVE_TABLE))(*CURVE_TABLE)
+        )
+    )
+    gamma = (ctypes.c_double * 1)(CURVE_GAMMA / 256)
+    pure = evaluate(LCMS.cmsBuildParametricToneCurve(None, 1, gamma))
+    n = len(xs)
+    lines = [
+        "/// Where the curves below are evaluated (each an `f32`).",
+        f"pub const CURVE_X: [f64; {n}] = {f64_array(xs)};",
+        "/// Parametric curves, `[g, a, b, c, d, e, f]` as far as each ICC",
+        "/// function type takes, and lcms2's `cmsEvalToneCurveFloat` of each at",
+        "/// `CURVE_X`.",
+        f"pub const CURVE_PARAMETRIC: [(&[f32], [f64; {n}]); {len(parametric)}] = [",
+        *(
+            f"    (&[{', '.join(f32_literal(p) for p in params)}], {f64_array(ys)}),"
+            for params, ys in parametric
+        ),
+        "];",
+        "/// A `curv` table, and lcms2's evaluation of it at `CURVE_X`.",
+        f"pub const CURVE_TABLE: [u16; {len(CURVE_TABLE)}] = [{', '.join(map(str, CURVE_TABLE))}];",
+        f"pub const CURVE_TABLE_EVAL: [f64; {n}] = {f64_array(table)};",
+        "/// A `curv` pure gamma (u8Fixed8), and lcms2's evaluation of it.",
+        f"pub const CURVE_GAMMA: u16 = {CURVE_GAMMA};",
+        f"pub const CURVE_GAMMA_EVAL: [f64; {n}] = {f64_array(pure)};",
+    ]
     return "\n".join(lines)
 
 
@@ -760,6 +991,9 @@ def main():
         ),
         ("SHADOW_V4", shadow_profile("stet test: shadow.icc as ICC v4", version=0x04200000)),
         ("GRAY_TRC", gray_profile("stet test: Gray TRC, XYZ PCS, black L* 20")),
+        ("GRAY_GAMMA", gray_gamma_profile("stet test: Gray, pure gamma 1.8")),
+        ("RGB_GAMMA", rgb_gamma_profile("stet test: matrix RGB, pure gamma 1.8")),
+        ("RGB_LUT", rgb_lut_profile("stet test: RGB A2B1 + A2B2, no A2B0")),
     ]
     for name, icc in profiles:
         (HERE / f"{name.lower()}.icc").write_bytes(icc)
@@ -787,7 +1021,15 @@ def main():
     for name in ["SPLIT", "SPLIT_SAT", "SPLIT_LUT8", "SAME", "INKLIMIT", "INKLIMIT_LUT8", "INKLIMIT_SCNR", "INKLIMIT_V4"]:
         out += [rust_table(name, icc[name]), ""]
     for name, _ in profiles:
-        if name not in ("SPLIT_XYZ", "SHADOW", "SHADOW_STRAIGHT", "SHADOW_V4"):
+        if name not in (
+            "SPLIT_XYZ",
+            "SHADOW",
+            "SHADOW_STRAIGHT",
+            "SHADOW_V4",
+            "GRAY_GAMMA",
+            "RGB_GAMMA",
+            "RGB_LUT",
+        ):
             out += [rust_black_point(name, icc[name]), ""]
     for name in ["INKLIMIT", "INKLIMIT_LUT8"]:
         out += [rust_round_trip(name, icc[name]), ""]
@@ -803,6 +1045,16 @@ def main():
         out += [rust_destination(name, icc[name]), ""]
     for oi in GRAY_CHAINS:
         out += [rust_gray_chain(oi, icc), ""]
+    rgbs = ", ".join(f"[{r}, {g}, {b}]" for r, g, b in RGB_SAMPLES)
+    out += [
+        "/// RGB inputs, 0–255, in the order of the RGB chain tables below.",
+        f"pub const RGB_SAMPLES: [[u8; 3]; {len(RGB_SAMPLES)}] = [{rgbs}];",
+        "",
+    ]
+    for source in RGB_CHAINS:
+        out += [rust_rgb_chain(source, "INKLIMIT", icc), ""]
+    out += [rust_gray_chain("INKLIMIT", icc, source="GRAY_GAMMA"), ""]
+    out += [rust_curves(), ""]
     (HERE / "reference.rs").write_text("\n".join(out))
 
 

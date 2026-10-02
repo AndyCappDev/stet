@@ -31,13 +31,18 @@
 //! back to moxcms; callers detect the `None` return and use the existing
 //! path. `lut8Type` (mft1) tables are read only by the evaluators that
 //! reproduce lcms2 exactly (see [`OwnedLutSampler::lcms_exact`]): the
-//! black points lcms2 would detect, and the CMYK and Gray chain stage 1.
-//! Widening the bake or the RGB chain to them would move every colour
-//! through those profiles.
+//! black points lcms2 would detect, the CMYK and Gray chain stage 1, and an
+//! RGB source's table in the RGB chain stage 1. Widening the bake, or the
+//! RGB chain's output-intent side, to them would move every colour through
+//! those profiles.
+//!
+//! Tone curves — an RGB source's and a Gray source's — evaluate as lcms2
+//! does (`LcmsCurve`), not through moxcms's evaluator, whose pure gamma is
+//! garbage at 0.
 
 use moxcms::{
     CmsError, ColorProfile, Cube, DataColorSpace, Hypercube, Lab, LutStore, LutType, LutWarehouse,
-    Matrix3d, RenderingIntent, ToneCurveEvaluator, TransformExecutor, Xyz,
+    Matrix3d, RenderingIntent, ToneReprCurve, TransformExecutor, Xyz,
 };
 
 use super::Clut4;
@@ -203,7 +208,7 @@ impl RoundTrip {
 /// The tone curve of a TRC-only Gray profile with an XYZ PCS — the usual
 /// kind — which lcms2 treats as a matrix-shaper: gray → Y relative to the
 /// white, the colour neutral.
-pub(super) struct GrayTrc(Box<dyn ToneCurveEvaluator + Send + Sync>);
+pub(super) struct GrayTrc(LcmsCurve);
 
 impl GrayTrc {
     /// `None` for anything else: a Gray profile with a LUT or a Lab PCS.
@@ -216,14 +221,117 @@ impl GrayTrc {
         {
             return None;
         }
-        Some(Self(
-            profile.gray_trc.as_ref()?.make_linear_evaluator().ok()?,
-        ))
+        Some(Self(LcmsCurve::new(profile.gray_trc.as_ref()?)?))
     }
 
     /// Y of `gray` (`[0, 1]`), relative to the white.
     pub(super) fn y(&self, gray: f64) -> f64 {
-        f64::from(self.0.evaluate_value(gray.clamp(0.0, 1.0) as f32)).clamp(0.0, 1.0)
+        self.0.eval(gray.clamp(0.0, 1.0)).clamp(0.0, 1.0)
+    }
+}
+
+/// A profile's tone curve as lcms2 evaluates it in a floating-point
+/// transform (`cmsEvalToneCurveFloat`). moxcms's own evaluator computes a
+/// pure gamma with an approximate power that is garbage at 0 — about
+/// −1.7 × 10⁸ for γ 1.8 — which, through an RGB profile's matrix, wrecks
+/// every colour with a zero channel.
+enum LcmsCurve {
+    /// A `curv` with one entry, `x^γ`: lcms2 builds it as a parametric
+    /// curve. No entries is γ 1.
+    Gamma(f64),
+    /// A `curv` table, which lcms2 evaluates with 16-bit integer
+    /// interpolation (`LinLerp1D`) even in a floating-point transform.
+    Table(Vec<u16>),
+    /// A `para` curve: lcms2's type (1–5, the ICC's function type + 1) and
+    /// its parameters `[g, a, b, c, d, e, f]`.
+    Parametric(u8, [f64; 7]),
+}
+
+impl LcmsCurve {
+    /// `None` for a parametric curve of an unknown type.
+    fn new(curve: &ToneReprCurve) -> Option<Self> {
+        Some(match curve {
+            ToneReprCurve::Lut(table) => match table.as_slice() {
+                [] => LcmsCurve::Gamma(1.0),
+                [gamma] => LcmsCurve::Gamma(f64::from(*gamma) / 256.0),
+                _ => LcmsCurve::Table(table.clone()),
+            },
+            ToneReprCurve::Parametric(params) => {
+                let kind = match params.len() {
+                    1 => 1,
+                    3 => 2,
+                    4 => 3,
+                    5 => 4,
+                    7 => 5,
+                    _ => return None,
+                };
+                let mut p = [0.0; 7];
+                for (dst, &src) in p.iter_mut().zip(params) {
+                    *dst = f64::from(src);
+                }
+                LcmsCurve::Parametric(kind, p)
+            }
+        })
+    }
+
+    /// The curve at `x`, as lcms2's `DefaultEvalParametricFn` and
+    /// `LinLerp1D` compute it.
+    fn eval(&self, x: f64) -> f64 {
+        // lcms2's MATRIX_DET_TOLERANCE.
+        const TOLERANCE: f64 = 0.0001;
+        match self {
+            LcmsCurve::Gamma(g) => Self::gamma(*g, x),
+            LcmsCurve::Table(table) => Self::table(table, x),
+            &LcmsCurve::Parametric(kind, [g, a, b, c, d, e, f]) => match kind {
+                1 => Self::gamma(g, x),
+                // (ax + b)^g for x ≥ −b/a, else 0.
+                2 if a.abs() < TOLERANCE => 0.0,
+                2 if x >= -b / a && a * x + b > 0.0 => (a * x + b).powf(g),
+                2 => 0.0,
+                // (ax + b)^g + c for x ≥ −b/a (at least 0), else c.
+                3 if a.abs() < TOLERANCE => 0.0,
+                3 if x >= (-b / a).max(0.0) => {
+                    let base = a * x + b;
+                    if base > 0.0 { base.powf(g) + c } else { 0.0 }
+                }
+                3 => c,
+                // (ax + b)^g for x ≥ d, else cx.
+                4 if x >= d && a * x + b > 0.0 => (a * x + b).powf(g),
+                4 if x >= d => 0.0,
+                4 => c * x,
+                // (ax + b)^g + e for x ≥ d, else cx + f.
+                _ if x >= d && a * x + b > 0.0 => (a * x + b).powf(g) + e,
+                _ if x >= d => e,
+                _ => c * x + f,
+            },
+        }
+    }
+
+    fn gamma(g: f64, x: f64) -> f64 {
+        if x >= 0.0 {
+            x.powf(g)
+        } else if (g - 1.0).abs() < 0.0001 {
+            x
+        } else {
+            0.0
+        }
+    }
+
+    /// lcms2's 16-bit table lookup: the input saturated to a 16-bit word,
+    /// then interpolated in 16.16 fixed point.
+    fn table(table: &[u16], x: f64) -> f64 {
+        let input = (x * 65535.0 + 0.5).floor().clamp(0.0, 65535.0) as u64;
+        let domain = (table.len() - 1) as u64;
+        if input == 0xFFFF || domain == 0 {
+            return f64::from(table[domain as usize]) / 65535.0;
+        }
+        let v = domain * input;
+        let v = v + (v + 0x7FFF) / 0xFFFF;
+        let cell = (v >> 16) as usize;
+        let rest = (v & 0xFFFF) as i64;
+        let (y0, y1) = (i64::from(table[cell]), i64::from(table[cell + 1]));
+        let out = (((y1 - y0) * rest + 0x8000) >> 16) + y0;
+        out as f64 / 65535.0
     }
 }
 
@@ -307,10 +415,12 @@ fn linear_to_srgb(v: f64) -> f64 {
 //
 // To close that gap we re-build stage 1 from scratch using the same
 // primitives moxcms exposes:
-//   1. Source RGB → linear RGB via the profile's TRC evaluators (or a
-//      LUT-based A2B `lut16Type` table when the profile carries one).
-//   2. The post-output-curve values pass directly into the OutputIntent's
-//      B2A `lut16Type` input curves — both are in mft2 PCS-Lab encoding.
+//   1. Source RGB → PCS Lab through the profile's A2B table for the intent,
+//      else its A2B0, interpolated tetrahedrally as lcms2 does; only a
+//      profile with neither goes through its tone curves and colorant
+//      matrix, the curves evaluated as lcms2 evaluates them.
+//   2. That Lab, in mft2 PCS-Lab encoding, passes directly into the
+//      OutputIntent's B2A `lut16Type` input curves.
 //   3. CLUT trilinear → output curves on the OI side → CMYK in `[0, 1]`.
 //
 // The composition is evaluated **per pixel** rather than baked into an
@@ -321,13 +431,14 @@ fn linear_to_srgb(v: f64) -> f64 {
 // and to match its byte-level accuracy we do the same.
 //
 // Both legs take the rendering intent and read that intent's tables
-// (A2B0/B2A0 perceptual, A2B1/B2A1 colorimetric, A2B2/B2A2 saturation),
-// falling back to whichever table the profile carries. Absolute
-// colorimetric reads the colorimetric tables; its white-point adaptation
-// is not applied.
+// (A2B0/B2A0 perceptual, A2B1/B2A1 colorimetric, A2B2/B2A2 saturation).
+// The source falls back as lcms2 reads it (see step 1); the output intent
+// to whichever B2A table the profile carries. Absolute colorimetric reads
+// the colorimetric tables; its white-point adaptation is not applied.
 
-/// Source RGB profile A2B sampler: either an owned `lut16Type` table or a
-/// shaper-matrix (TRC + colorant matrix) fallback. Held by value inside
+/// Source RGB profile A2B sampler: either an owned `lut16Type` or
+/// `lut8Type` table, or a shaper-matrix (TRC + colorant matrix). Held by
+/// value inside
 /// [`HandRolledChainStage1Rgb`] so the chain can outlive the source
 /// `ColorProfile` it was built from.
 enum SourceA2BSampler {
@@ -340,54 +451,47 @@ impl SourceA2BSampler {
         if profile.color_space != DataColorSpace::Rgb {
             return None;
         }
-        // Pick the requested intent's A2B table; fall back to A2B0
-        // (perceptual) and then to whichever table is available so
-        // step 3's intent plumbing degrades gracefully on profiles
-        // that ship only one table.
-        let primary = match intent {
-            RenderingIntent::Perceptual => profile.lut_a_to_b_perceptual.as_ref(),
-            // AbsoluteColorimetric uses the colorimetric (A2B1) table —
-            // the white-point shift specific to absolute colorimetric is
-            // a runtime adjustment we defer to step 4 (BPC + AbsCol).
-            RenderingIntent::RelativeColorimetric | RenderingIntent::AbsoluteColorimetric => {
-                profile.lut_a_to_b_colorimetric.as_ref()
+        // lcms2 reads the intent's A2B table, else A2B0, and only when the
+        // profile has neither its tone curves and colorant matrix, which
+        // give the same XYZ under every intent. A table these evaluators
+        // cannot read — v4 `mAB`, an XYZ PCS, a non-identity matrix — has
+        // no hand-rolled stage: the caller falls back to moxcms rather than
+        // to a matrix lcms2 would not use.
+        let table = lcms_table(
+            [
+                profile.lut_a_to_b_perceptual.as_ref(),
+                profile.lut_a_to_b_colorimetric.as_ref(),
+                profile.lut_a_to_b_saturation.as_ref(),
+            ],
+            intent,
+        );
+        match table {
+            Some(table) if profile.pcs == DataColorSpace::Lab => {
+                OwnedLutSampler::lcms_exact(table, 3, 3).map(SourceA2BSampler::Lut)
             }
-            RenderingIntent::Saturation => profile.lut_a_to_b_saturation.as_ref(),
-        };
-        let warehouse = primary
-            .or(profile.lut_a_to_b_perceptual.as_ref())
-            .or(profile.lut_a_to_b_colorimetric.as_ref())
-            .or(profile.lut_a_to_b_saturation.as_ref());
-        if let Some(wh) = warehouse
-            && profile.pcs == DataColorSpace::Lab
-            && let Some(lut) = OwnedLutSampler::from_warehouse(wh, 3, 3)
-        {
-            return Some(SourceA2BSampler::Lut(lut));
+            Some(_) => None,
+            None => ShaperMatrix::new(profile).map(SourceA2BSampler::Shaper),
         }
-
-        // Shaper-matrix fallback for sRGB-style profiles (TRCs +
-        // colorant matrix → XYZ-D50 → Lab). Shaper-matrix profiles
-        // produce the same XYZ regardless of intent, so the same
-        // sampler is reused for every requested intent.
-        ShaperMatrix::new(profile).map(SourceA2BSampler::Shaper)
     }
 
     /// Returns the source profile's A2B output as `[L, a, b]` in mft2
     /// PCS-Lab encoding (each component in `[0, 1]`, `0xFF00`-denominated).
-    /// LUT-based profiles return their post-output-curve values verbatim;
-    /// shaper-matrix profiles compute Lab via TRC + colorant matrix and
-    /// re-encode to mft2.
+    /// LUT-based profiles return their post-output-curve values, re-encoded
+    /// from a `lut8Type` table's full scale; shaper-matrix profiles compute
+    /// Lab via TRC + colorant matrix and re-encode to mft2.
     fn sample_pcs_lab(&self, r: f32, g: f32, b: f32) -> [f32; 3] {
         match self {
-            SourceA2BSampler::Lut(lut) => lut.sample_rgb_to_pcs_lab_raw(r, g, b),
+            SourceA2BSampler::Lut(lut) => lut
+                .rgb_to_pcs_lab([r, g, b].map(f64::from))
+                .map(|v| v as f32),
             SourceA2BSampler::Shaper(sm) => sm.sample_pcs_lab(r, g, b),
         }
     }
 }
 
-/// Shaper-matrix RGB profile sampler. Linearises with the per-channel TRC
-/// evaluators, multiplies through the colorant matrix, and converts the
-/// resulting XYZ-D50 to moxcms-encoded Lab.
+/// Shaper-matrix RGB profile sampler. Linearises with the per-channel tone
+/// curves as lcms2 evaluates them, multiplies through the colorant matrix,
+/// and converts the resulting XYZ-D50 to moxcms-encoded Lab.
 ///
 /// `Lab::from_pcs_xyz` expects PCS-encoded XYZ (the ICC PCS encoding
 /// where the white point lands at ≈ 0.5, equal to absolute XYZ divided
@@ -396,9 +500,9 @@ impl SourceA2BSampler {
 /// fold the encoding factor into the matrix once at construction time
 /// rather than dividing per pixel.
 struct ShaperMatrix {
-    trc_r: Box<dyn ToneCurveEvaluator + Send + Sync>,
-    trc_g: Box<dyn ToneCurveEvaluator + Send + Sync>,
-    trc_b: Box<dyn ToneCurveEvaluator + Send + Sync>,
+    trc_r: LcmsCurve,
+    trc_g: LcmsCurve,
+    trc_b: LcmsCurve,
     /// 3×3 colorant matrix (linear-RGB → PCS-encoded XYZ-D50), row-major.
     /// Pre-scaled by `1 / (1 + 32767/32768)` so its output feeds straight
     /// into [`Lab::from_pcs_xyz`].
@@ -416,9 +520,9 @@ impl ShaperMatrix {
         let green_trc = profile.green_trc.as_ref()?;
         let blue_trc = profile.blue_trc.as_ref()?;
 
-        let trc_r = red_trc.make_linear_evaluator().ok()?;
-        let trc_g = green_trc.make_linear_evaluator().ok()?;
-        let trc_b = blue_trc.make_linear_evaluator().ok()?;
+        let trc_r = LcmsCurve::new(red_trc)?;
+        let trc_g = LcmsCurve::new(green_trc)?;
+        let trc_b = LcmsCurve::new(blue_trc)?;
 
         let m = profile.colorant_matrix();
         let s = 1.0 / PCS_XYZ_DENOM;
@@ -437,9 +541,9 @@ impl ShaperMatrix {
     }
 
     fn sample_pcs_lab(&self, r: f32, g: f32, b: f32) -> [f32; 3] {
-        let lin_r = self.trc_r.evaluate_value(r) as f64;
-        let lin_g = self.trc_g.evaluate_value(g) as f64;
-        let lin_b = self.trc_b.evaluate_value(b) as f64;
+        let lin_r = self.trc_r.eval(f64::from(r));
+        let lin_g = self.trc_g.eval(f64::from(g));
+        let lin_b = self.trc_b.eval(f64::from(b));
 
         let x = self.matrix[0][0] * lin_r + self.matrix[0][1] * lin_g + self.matrix[0][2] * lin_b;
         let y = self.matrix[1][0] * lin_r + self.matrix[1][1] * lin_g + self.matrix[1][2] * lin_b;
@@ -567,8 +671,9 @@ impl LabEncoding {
     }
 }
 
-/// Owned sampler for a profile's `lut16Type` table — and, for the black
-/// point only, its `lut8Type` one — in the `(n_in, n_out)` shapes stet
+/// Owned sampler for a profile's `lut16Type` table — and, for the
+/// lcms2-exact evaluators only, its `lut8Type` one — in the `(n_in, n_out)`
+/// shapes stet
 /// reads: `(4, 3)` for a CMYK A2B → Lab, `(3, 3)` for an RGB-source A2B →
 /// Lab and `(3, 4)` for an OutputIntent B2A → CMYK. Stores its own copies
 /// of the table data so the sampler outlives the source `ColorProfile`.
@@ -596,8 +701,9 @@ impl OwnedLutSampler {
     }
 
     /// A `lut8Type` or `lut16Type` table, for evaluating it exactly as
-    /// lcms2 does — see [`Self::lab_to_ink`] and [`Self::ink_to_lab`]: the
-    /// black point lcms2 detects, and the CMYK chain stage 1. A
+    /// lcms2 does — see [`Self::lab_to_ink`], [`Self::ink_to_lab`] and
+    /// [`Self::rgb_to_pcs_lab`]: the black point lcms2 detects, and the
+    /// CMYK, Gray and RGB-source chain stage 1. A
     /// three-input table must carry the identity matrix, as the ICC
     /// requires of a Lab-indexed one; lcms2 would apply any other, and these
     /// evaluators do not.
@@ -720,29 +826,24 @@ impl OwnedLutSampler {
         self.sample_pcs_lab_to_cmyk(pcs).map(f64::from)
     }
 
-    /// 3-in / 3-out: RGB source → mft2 PCS-Lab encoded `[L, a, b]`.
-    ///
-    /// Returns the post-output-curve values directly (each in `[0, 1]`,
-    /// 65280-denominated) so they slot straight into a downstream B2A
-    /// LUT's input curves without an intervening Lab decode/encode
-    /// round-trip.
-    fn sample_rgb_to_pcs_lab_raw(&self, r: f32, g: f32, b: f32) -> [f32; 3] {
-        let r_in = sample_curve_f32(&self.input_table, 0, self.n_in_entries, r);
-        let g_in = sample_curve_f32(&self.input_table, 1, self.n_in_entries, g);
-        let b_in = sample_curve_f32(&self.input_table, 2, self.n_in_entries, b);
-        let cube = match Cube::new(&self.cube_data, self.cube_grid, 3) {
-            Ok(c) => c,
-            Err(_) => return [0.0, 0.5, 0.5],
+    /// 3-in / 3-out: an RGB source's ink → its PCS Lab in the legacy v2
+    /// `lut16Type` encoding (each in `[0, 1]`, `0xFF00`-denominated), the
+    /// form an OutputIntent's B2A input curves take: through the input
+    /// curves, lcms2's tetrahedral interpolation and the output curves.
+    fn rgb_to_pcs_lab(&self, rgb: [f64; 3]) -> [f64; 3] {
+        let curved: [f64; 3] = std::array::from_fn(|ch| {
+            sample_curve_f32(&self.input_table, ch, self.n_in_entries, rgb[ch] as f32) as f64
+        });
+        let mut pcs = [0.0; 3];
+        eval3_lcms(&self.cube_data, self.cube_grid, curved, &mut pcs);
+        let post: [f64; 3] = std::array::from_fn(|ch| {
+            sample_curve_f32(&self.output_table, ch, self.n_out_entries, pcs[ch] as f32) as f64
+        });
+        let v2 = match self.encoding {
+            LabEncoding::V2 => post,
+            LabEncoding::V4 => post.map(|v| v * f64::from(PCS_LAB_DENOM) / 65535.0),
         };
-        let pcs = cube.trilinear_vec3(r_in, g_in, b_in);
-        let l_post = sample_curve_f32(&self.output_table, 0, self.n_out_entries, pcs.v[0]);
-        let a_post = sample_curve_f32(&self.output_table, 1, self.n_out_entries, pcs.v[1]);
-        let b_post = sample_curve_f32(&self.output_table, 2, self.n_out_entries, pcs.v[2]);
-        [
-            l_post.clamp(0.0, 1.0),
-            a_post.clamp(0.0, 1.0),
-            b_post.clamp(0.0, 1.0),
-        ]
+        v2.map(|v| v.clamp(0.0, 1.0))
     }
 
     /// 3-in / 4-out: mft2 PCS-Lab → CMYK in `[0, 1]`. Input is the raw
@@ -799,14 +900,7 @@ fn normalised(store: &LutStore, len: usize) -> Option<Vec<f32>> {
 /// three in the two grid planes either side of it. `cube` holds the grid
 /// with the last input varying fastest and three outputs per point.
 fn eval4_lcms(cube: &[f32], grid: usize, input: [f64; 4], out: &mut [f64; 3]) {
-    // Grid index, fraction and the offset to the next point along one input.
-    let axis = |v: f64, stride: usize| {
-        let v = v.clamp(0.0, 1.0);
-        let p = v * (grid - 1) as f64;
-        let i = (p.floor() as usize).min(grid - 1);
-        let step = if v >= 1.0 { 0 } else { stride };
-        (i * stride, p - i as f64, step)
-    };
+    let axis = |v, stride| grid_axis(v, grid, stride);
     let n_out = 3;
     let (k0, rk, k_step) = axis(input[0], n_out * grid * grid * grid);
     let x = axis(input[1], n_out * grid * grid);
@@ -819,6 +913,28 @@ fn eval4_lcms(cube: &[f32], grid: usize, input: [f64; 4], out: &mut [f64; 3]) {
     for ch in 0..n_out {
         out[ch] = lo[ch] + (hi[ch] - lo[ch]) * rk;
     }
+}
+
+/// lcms2's interpolation of a three-input table (`TetrahedralInterp16`):
+/// tetrahedral. `cube` holds the grid with the last input varying fastest
+/// and three outputs per point.
+fn eval3_lcms(cube: &[f32], grid: usize, input: [f64; 3], out: &mut [f64; 3]) {
+    let n_out = 3;
+    let x = grid_axis(input[0], grid, n_out * grid * grid);
+    let y = grid_axis(input[1], grid, n_out * grid);
+    let z = grid_axis(input[2], grid, n_out);
+    tetrahedral3(cube, 0, x, y, z, out);
+}
+
+/// One input's grid offset, fraction and the offset to the next grid
+/// point, for an input in `[0, 1]` on a `grid`-point axis whose points are
+/// `stride` apart.
+fn grid_axis(v: f64, grid: usize, stride: usize) -> (usize, f64, usize) {
+    let v = v.clamp(0.0, 1.0);
+    let p = v * (grid - 1) as f64;
+    let i = (p.floor() as usize).min(grid - 1);
+    let step = if v >= 1.0 { 0 } else { stride };
+    (i * stride, p - i as f64, step)
 }
 
 /// lcms2's `TetrahedralInterpFloat` over one three-input slice of a grid
@@ -894,8 +1010,8 @@ fn sample_curve_f32(table: &[f32], ch: usize, n_entries: usize, x: f32) -> f32 {
 }
 
 /// Source-RGB → OutputIntent-CMYK chain stage 1, evaluated per pixel by
-/// composing two ICC `lut16Type` tables (or a shaper-matrix source +
-/// LUT-based OI). Wraps cleanly into the
+/// composing the source's A2B table (or its tone curves and colorant
+/// matrix) with the OI's B2A `lut16Type` table. Wraps cleanly into the
 /// `Arc<dyn TransformExecutor<{u8,f64}> + Send + Sync>` slot that the
 /// `ChainedTransform` in `super::IccCache` expects.
 pub(super) struct HandRolledChainStage1Rgb {
@@ -907,9 +1023,10 @@ impl HandRolledChainStage1Rgb {
     /// Build the chain stage-1 sampler from the source RGB profile and
     /// the OutputIntent CMYK profile, picking the source's A2B table
     /// and the OI's B2A table for the given rendering intent. Returns
-    /// `None` when either side has an unsupported tag layout (mAB /
-    /// mft1 / non-Lab PCS / no shaper-matrix fallback) — the caller
-    /// falls back to the moxcms-driven chain in that case.
+    /// `None` when either side has a table these evaluators cannot read
+    /// (v4 `mAB`/`mBA`, an XYZ PCS, a `lut8Type` B2A) or the source has
+    /// neither table nor matrix — the caller falls back to the
+    /// moxcms-driven chain in that case.
     pub(super) fn new(
         source: &ColorProfile,
         output_intent: &ColorProfile,
@@ -1186,6 +1303,8 @@ mod tests {
     const SPLIT_SAT: &[u8] = include_bytes!("../../tests/data/cmyk_intent/split_sat.icc");
     const SPLIT_LUT8: &[u8] = include_bytes!("../../tests/data/cmyk_intent/split_lut8.icc");
     const SPLIT_XYZ: &[u8] = include_bytes!("../../tests/data/cmyk_intent/split_xyz.icc");
+    const RGB_GAMMA: &[u8] = include_bytes!("../../tests/data/cmyk_intent/rgb_gamma.icc");
+    const RGB_LUT: &[u8] = include_bytes!("../../tests/data/cmyk_intent/rgb_lut.icc");
 
     /// The two legs of lcms2's black-point round trip: `B2A0` and `A2B1`.
     fn legs(icc: &[u8]) -> (OwnedLutSampler, OwnedLutSampler) {
@@ -1303,8 +1422,8 @@ mod tests {
     }
 
     /// `lut8Type` tables are read only by the lcms2-exact evaluators (the
-    /// black point and the CMYK chain stage 1): the bake and the RGB chain
-    /// still pass them to moxcms.
+    /// black point and the chain stage 1's source side): the bake and the
+    /// RGB chain's output-intent side still pass them to moxcms.
     #[test]
     fn lut8_tables_are_for_the_lcms_exact_evaluators_only() {
         let profile = ColorProfile::new_from_slice(INKLIMIT_LUT8).unwrap();
@@ -1354,6 +1473,73 @@ mod tests {
                     assert_near(
                         &format!("{name} {intent:?} at {cmyk:?}"),
                         got,
+                        *want,
+                        INK_TOLERANCE,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every kind of tone curve evaluates as lcms2's
+    /// `cmsEvalToneCurveFloat` does, to its `f32` precision: the five
+    /// parametric types, a table, and a pure gamma — which moxcms's own
+    /// evaluator gets wrong at 0.
+    #[test]
+    fn tone_curves_are_lcms2s() {
+        let check = |what: &str, curve: ToneReprCurve, want: &[f64]| {
+            let curve = LcmsCurve::new(&curve).unwrap();
+            for (x, want) in reference::CURVE_X.iter().zip(want) {
+                let got = curve.eval(*x);
+                assert!(
+                    (got - want).abs() < 1e-6,
+                    "{what} at {x}: {got} vs lcms2 {want}"
+                );
+            }
+        };
+        for (params, want) in reference::CURVE_PARAMETRIC {
+            check(
+                &format!("parametric {params:?}"),
+                ToneReprCurve::Parametric(params.to_vec()),
+                &want,
+            );
+        }
+        check(
+            "table",
+            ToneReprCurve::Lut(reference::CURVE_TABLE.to_vec()),
+            &reference::CURVE_TABLE_EVAL,
+        );
+        check(
+            "pure gamma",
+            ToneReprCurve::Lut(vec![reference::CURVE_GAMMA]),
+            &reference::CURVE_GAMMA_EVAL,
+        );
+        check(
+            "no entries",
+            ToneReprCurve::Lut(Vec::new()),
+            &reference::CURVE_X,
+        );
+    }
+
+    /// The RGB chain stage 1 is lcms2's: a matrix profile with pure-gamma
+    /// curves, whose zero channels moxcms's evaluator wrecks, and a LUT
+    /// profile, interpolated tetrahedrally, whose missing `A2B0` sends
+    /// perceptual to its matrix as lcms2 does.
+    #[test]
+    fn rgb_chain_stage1_matches_lcms() {
+        let oi = ColorProfile::new_from_slice(INKLIMIT).unwrap();
+        for (name, source, want) in [
+            ("rgb_gamma", RGB_GAMMA, &reference::CHAIN_RGB_GAMMA_INKLIMIT),
+            ("rgb_lut", RGB_LUT, &reference::CHAIN_RGB_LUT_INKLIMIT),
+        ] {
+            let source = ColorProfile::new_from_slice(source).unwrap();
+            for (intent, want) in INTENTS.into_iter().zip(want) {
+                let stage1 = HandRolledChainStage1Rgb::new(&source, &oi, intent).unwrap();
+                for (rgb, want) in reference::RGB_SAMPLES.iter().zip(want) {
+                    let [r, g, b] = rgb.map(|v| f64::from(v) / 255.0);
+                    assert_near(
+                        &format!("{name} {intent:?} at {rgb:?}"),
+                        stage1.sample_cmyk_f64(r, g, b),
                         *want,
                         INK_TOLERANCE,
                     );
