@@ -203,26 +203,34 @@ impl Interpreter {
     /// automatically and rendered using their bounding box.
     ///
     /// The interpreter state is isolated via save/restore between calls.
+    ///
+    /// Colour is converted through the context's [`IccCache`]
+    /// (`context().icc_cache`), with its CMYK profile and black-point
+    /// compensation — the colours converted as the page renders, such as
+    /// CMYK images and overprint, as well as those converted as it is built.
     #[cfg(feature = "render")]
     pub fn render(&mut self, ps_data: &[u8], dpi: f64) -> Result<Vec<RenderedPage>, StetError> {
         let dl_pages = self.render_to_display_list(ps_data, dpi)?;
 
-        let icc_cache = if self.use_icc {
-            let mut cache = IccCache::new();
-            cache.load_cmyk_profile_bytes(embedded_resources::DEFAULT_CMYK_ICC);
-            Some(cache)
-        } else {
-            None
-        };
-
         let mut pages = Vec::with_capacity(dl_pages.len());
         for p in dl_pages {
+            // Images and overprint are converted as the page renders. The
+            // cache that does it is set up like the context's, which built
+            // the display list, or they would disagree with the fills
+            // beside them once a caller reconfigures `context().icc_cache`.
+            let bake = &self.ctx.icc_cache;
+            let icc_cache = build_icc_cache_for_list_with_bpc(
+                &p.display_list,
+                bake.system_cmyk_bytes(),
+                false,
+                bake.bpc_mode(),
+            );
             let rgba = stet_render::render_to_rgba_with_background(
                 &p.display_list,
                 p.width,
                 p.height,
                 p.dpi,
-                icc_cache.as_ref(),
+                Some(&icc_cache),
                 false,
                 &LayerSet::new(),
                 self.page_background,

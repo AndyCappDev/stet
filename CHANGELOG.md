@@ -154,6 +154,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   compensation, so those images stayed compensated beside fills that were
   not — up to ~20 levels darker for K=100 through Ghostscript's default
   CMYK profile.
+- **`Interpreter::render` ignored a reconfigured `context().icc_cache` for
+  images.** It converted DeviceCMYK images and overprint through the
+  embedded CMYK profile with the default black-point compensation, so a
+  caller who set their own profile or compensation got images unlike the
+  fills beside them. It now converts them as the context does. The default
+  configuration renders the same as before.
 - **A PostScript program ending in `quit` failed in the `stet` library.**
   `Interpreter::render`, `render_to_display_list`, `render_to_pdf` and
   `exec` returned "PostScript error: stop" and discarded the job's pages,
