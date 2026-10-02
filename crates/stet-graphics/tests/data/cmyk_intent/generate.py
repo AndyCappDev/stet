@@ -719,6 +719,47 @@ def xyz_mab_profile(description):
     return assemble(tags, b"prtr", b"CMYK", b"XYZ ", 0x04200000)
 
 
+def rgb_xyz_lab(scale):
+    """The RGB → Lab of `rgb_lut.icc`'s A2B1, black lifted to L* 4 so the
+    black point is not zero, chroma scaled by `scale`."""
+    return lambda r, g, b: (
+        4 + 96 * (0.25 * r + 0.62 * g + 0.13 * b) ** 0.6,
+        scale * 90 * (r * r - g) * (1 - 0.4 * b),
+        scale * (80 * (0.7 * r * g - b * b) + 10 * r),
+    )
+
+
+def rgb_xyz_profile(description):
+    """An input-class RGB profile with an XYZ PCS and `lut16Type` A2B0 and
+    A2B1 only, as camera profiles are."""
+    tags = [
+        (b"desc", desc_tag(description)),
+        (b"wtpt", xyz_tag(*D50)),
+        (b"A2B0", lut(16, 3, 3, xyz_a2b(rgb_xyz_lab(0.85)), grid=5)),
+        (b"A2B1", lut(16, 3, 3, xyz_a2b(rgb_xyz_lab(1.0)), grid=5)),
+    ]
+    return assemble(tags, b"scnr", b"RGB ", b"XYZ ", 0x02100000)
+
+
+def rgb_xyz_mab_profile(description):
+    """An input-class ICC v4 RGB profile with an XYZ PCS and a
+    `lutAToBType` A2B0 only, as `2142.pdf`'s scanner profiles are."""
+    a2b0 = multi_tag(
+        True,
+        3,
+        3,
+        a=[para_tag(0, [2.2]), para_tag(0, [1.8]), curv_tag([(i / 32) ** 2 for i in range(33)])],
+        clut=([5, 6, 7], 2, xyz_a2b(rgb_xyz_lab(0.85))),
+        b=[curv_tag([]), curv_tag([]), curv_tag([])],
+    )
+    tags = [
+        (b"desc", desc_tag(description)),
+        (b"wtpt", xyz_tag(*D50)),
+        (b"A2B0", a2b0),
+    ]
+    return assemble(tags, b"scnr", b"RGB ", b"XYZ ", 0x04200000)
+
+
 def mab_grid_profile(description):
     """`mab.icc` with A2B tables on a 3×4×5×3 grid whose A curves hold an
     empty `curv` before two more: the two shapes moxcms 0.8.1 misreads."""
@@ -1017,6 +1058,29 @@ def rust_round_trip(name, icc):
             f"/// lcms2's black-point round trip of `{lower}.icc` from Lab 0/0/0,",
             "/// before it sets a* = b* = 0 and clips L* to 50.",
             f"pub const {name}_ROUND_TRIP: [f64; 3] = {f64_array(trip)};",
+        ]
+    )
+
+
+def rust_rgb_lab(name, icc):
+    """An RGB profile's relative colorimetric Lab, as lcms2 computes it."""
+    lcms = Lcms(icc)
+    labs = lcms_chain(
+        [lcms.profile, lcms.lab],
+        [RELATIVE_COLORIMETRIC, RELATIVE_COLORIMETRIC],
+        TYPE_RGB_DBL,
+        TYPE_LAB_DBL,
+        [[v / 255 for v in rgb] for rgb in RGB_SAMPLES],
+        3,
+    )
+    lcms.close()
+    return "\n".join(
+        [
+            f"/// lcms2's relative colorimetric Lab of `{name.lower()}.icc` at each of",
+            "/// `RGB_SAMPLES`.",
+            f"pub const {name}_LAB: [[f64; 3]; {len(RGB_SAMPLES)}] = [",
+            *(f"    {f64_array(l)}," for l in labs),
+            "];",
         ]
     )
 
@@ -1340,6 +1404,21 @@ BPC_CHAINS = [
 ]
 
 
+# Stage 1 with an XYZ PCS on either side.
+XYZ_BPC_CHAINS = [
+    ("XYZ_V4", "SHADOW", "CMYK"),
+    ("XYZ_MAB", "SHADOW", "CMYK"),
+    ("SPLIT", "XYZ_V4", "CMYK"),
+    ("SPLIT", "XYZ_MAB", "CMYK"),
+    ("XYZ_V4", "XYZ_MAB", "CMYK"),
+    ("RGB_XYZ", "SHADOW", "RGB"),
+    ("RGB_XYZ_MAB", "SHADOW", "RGB"),
+    ("RGB_GAMMA", "XYZ_V4", "RGB"),
+    ("LAB", "XYZ_V4", "LAB"),
+    ("LAB", "XYZ_MAB", "LAB"),
+]
+
+
 def rust_bpc_chain(source, oi, kind, icc):
     out = Lcms(icc[oi])
     src = Lcms(icc[source]) if kind != "LAB" else None
@@ -1516,6 +1595,8 @@ def main():
         ("MAB_GRID", mab_grid_profile("stet test: mab.icc, A2B grid 3x4x5x3")),
         ("XYZ_V4", xyz_v4_profile("stet test: CMYK, XYZ PCS, ICC v4 lut16")),
         ("XYZ_MAB", xyz_mab_profile("stet test: CMYK, XYZ PCS, ICC v4 mAB/mBA")),
+        ("RGB_XYZ", rgb_xyz_profile("stet test: RGB, XYZ PCS, lut16 A2B0/A2B1")),
+        ("RGB_XYZ_MAB", rgb_xyz_mab_profile("stet test: RGB, XYZ PCS, ICC v4 mAB A2B0")),
         (
             "INKLIMIT_MATRIX",
             profile(
@@ -1570,6 +1651,8 @@ def main():
             "XYZ_V4",
             "XYZ_MAB",
             "INKLIMIT_MATRIX",
+            "RGB_XYZ",
+            "RGB_XYZ_MAB",
         ):
             out += [rust_black_point(name, icc[name]), ""]
     for name in ["INKLIMIT", "INKLIMIT_LUT8"]:
@@ -1615,6 +1698,14 @@ def main():
         out += [rust_v4_legs(name, icc[name]), ""]
     out += [rust_round_trip("INKLIMIT_MATRIX", icc["INKLIMIT_MATRIX"]), ""]
     out += [rust_a2b1("SPLIT_XYZ", icc["SPLIT_XYZ"]), ""]
+    for name in ["RGB_XYZ", "RGB_XYZ_MAB"]:
+        out += [rust_black_point(name, icc[name]), ""]
+    for source, oi, kind in XYZ_BPC_CHAINS:
+        out += [rust_bpc_chain(source, oi, kind, icc), ""]
+    for oi in ["XYZ_V4", "XYZ_MAB"]:
+        out += [rust_gray_chain(oi, icc), ""]
+    for name in ["RGB_GAMMA", "SRGB"]:
+        out += [rust_rgb_lab(name, icc[name]), ""]
     (HERE / "reference.rs").write_text("\n".join(out))
 
 

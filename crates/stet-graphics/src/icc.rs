@@ -711,8 +711,8 @@ impl IccCache {
             // builds it: the source's A2B and the OI's B2A for the intent,
             // composed per pixel with lcms2's interpolation, compensated in
             // XYZ between them; ICC v4 `lutAToBType`/`lutBToAType` tables
-            // included. Where either profile is a shape those evaluators
-            // cannot read (an XYZ PCS), moxcms's
+            // included, and an XYZ PCS on either side. Where either profile
+            // is a shape those evaluators cannot read, moxcms's
             // transform built for the same intent from copies whose missing
             // tags are filled as lcms2 reads them, about one ink level from
             // lcms2 without compensation, and uncompensated: moxcms offers

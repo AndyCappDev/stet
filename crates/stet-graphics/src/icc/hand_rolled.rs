@@ -46,7 +46,6 @@
 use moxcms::{
     CmsError, ColorProfile, Cube, DataColorSpace, Hypercube, Lab, LutMultidimensionalType,
     LutStore, LutType, LutWarehouse, Matrix3d, RenderingIntent, ToneReprCurve, TransformExecutor,
-    Xyz,
 };
 
 use super::Clut4;
@@ -536,15 +535,11 @@ impl SourceA2BSampler {
         }
         // lcms2 reads the intent's A2B table, else A2B0, and only when the
         // profile has neither its tone curves and colorant matrix, which
-        // give the same XYZ under every intent. A table with an XYZ PCS, or
-        // one these evaluators cannot read, has no hand-rolled stage: the
-        // caller falls back to moxcms rather than to a matrix lcms2 would
-        // not use.
+        // give the same XYZ under every intent. A table these evaluators
+        // cannot read has no hand-rolled stage: the caller falls back to
+        // moxcms rather than to a matrix lcms2 would not use.
         match a2b_table(profile, intent) {
-            Some(table) if profile.pcs == DataColorSpace::Lab => {
-                LcmsLut::to_pcs(table, icc, 3).map(SourceA2BSampler::Lut)
-            }
-            Some(_) => None,
+            Some(table) => LcmsLut::to_pcs(table, icc, 3).map(SourceA2BSampler::Lut),
             None => ShaperMatrix::new(profile).map(SourceA2BSampler::Shaper),
         }
     }
@@ -575,28 +570,15 @@ impl SourceA2BSampler {
 
 /// Shaper-matrix RGB profile sampler. Linearises with the per-channel tone
 /// curves as lcms2 evaluates them, multiplies through the colorant matrix,
-/// and converts the resulting XYZ-D50 to moxcms-encoded Lab.
-///
-/// `Lab::from_pcs_xyz` expects PCS-encoded XYZ (the ICC PCS encoding
-/// where the white point lands at ≈ 0.5, equal to absolute XYZ divided
-/// by `1 + 32767/32768` ≈ 2.0). The colorant matrix
-/// (`ColorProfile::colorant_matrix`) returns absolute XYZ-D50, so we
-/// fold the encoding factor into the matrix once at construction time
-/// rather than dividing per pixel.
+/// and takes the resulting XYZ-D50 to Lab relative to lcms2's own D50
+/// ([`LCMS_D50`]), the frame the colorants are in.
 struct ShaperMatrix {
     trc_r: LcmsCurve,
     trc_g: LcmsCurve,
     trc_b: LcmsCurve,
-    /// 3×3 colorant matrix (linear-RGB → PCS-encoded XYZ-D50), row-major.
-    /// Pre-scaled by `1 / (1 + 32767/32768)` so its output feeds straight
-    /// into [`Lab::from_pcs_xyz`].
+    /// 3×3 colorant matrix (linear-RGB → absolute XYZ-D50), row-major.
     matrix: [[f64; 3]; 3],
 }
-
-/// `1 + 32767/32768` — the PCS XYZ encoding scale moxcms's
-/// [`Lab::to_pcs_xyz`] / [`Lab::from_pcs_xyz`] apply. PCS-encoded XYZ
-/// equals absolute XYZ divided by this factor.
-const PCS_XYZ_DENOM: f64 = 1.0 + 32767.0 / 32768.0;
 
 impl ShaperMatrix {
     /// `None` unless the profile has all three colorants and tone curves,
@@ -613,23 +595,16 @@ impl ShaperMatrix {
         let trc_g = LcmsCurve::new(green_trc)?;
         let trc_b = LcmsCurve::new(blue_trc)?;
 
-        let m = profile.colorant_matrix();
-        let s = 1.0 / PCS_XYZ_DENOM;
-        let matrix = [
-            [m.v[0][0] * s, m.v[0][1] * s, m.v[0][2] * s],
-            [m.v[1][0] * s, m.v[1][1] * s, m.v[1][2] * s],
-            [m.v[2][0] * s, m.v[2][1] * s, m.v[2][2] * s],
-        ];
-
         Some(ShaperMatrix {
             trc_r,
             trc_g,
             trc_b,
-            matrix,
+            matrix: profile.colorant_matrix().v,
         })
     }
 
-    /// Absolute XYZ-D50 (white Y = 1) for RGB in `[0, 1]`, in `f64`.
+    /// Absolute XYZ-D50 (white Y = 1) for RGB in `[0, 1]`, in `f64`, in
+    /// stet's frame (see [`PcsCoding`]): the colorants are in lcms2's.
     fn sample_xyz(&self, rgb: [f64; 3]) -> [f64; 3] {
         let lin = [
             self.trc_r.eval(rgb[0]),
@@ -638,7 +613,8 @@ impl ShaperMatrix {
         ];
         let m = &self.matrix;
         std::array::from_fn(|i| {
-            PCS_XYZ_DENOM * (m[i][0] * lin[0] + m[i][1] * lin[1] + m[i][2] * lin[2])
+            let xyz = m[i][0] * lin[0] + m[i][1] * lin[1] + m[i][2] * lin[2];
+            xyz * WP_D50[i] / LCMS_D50[i]
         })
     }
 
@@ -651,15 +627,13 @@ impl ShaperMatrix {
         let y = self.matrix[1][0] * lin_r + self.matrix[1][1] * lin_g + self.matrix[1][2] * lin_b;
         let z = self.matrix[2][0] * lin_r + self.matrix[2][1] * lin_g + self.matrix[2][2] * lin_b;
 
-        let lab = Lab::from_pcs_xyz(Xyz::new(x as f32, y as f32, z as f32));
-        // Re-encode moxcms-Lab to mft2 PCS-Lab format (denom 65280) so
-        // the value lines up with the OI B2A input curves' grid axis.
-        let scale = PCS_LAB_DENOM / 65535.0;
-        [
-            (lab.l * scale).clamp(0.0, 1.0),
-            (lab.a * scale).clamp(0.0, 1.0),
-            (lab.b * scale).clamp(0.0, 1.0),
-        ]
+        // The colorants' XYZ is in lcms2's frame, so Lab is relative to its
+        // D50, encoded as mft2 PCS-Lab (denom 65280) so the value lines up
+        // with the OI B2A input curves' grid axis.
+        let lab = xyz_to_lab_white([x, y, z], LCMS_D50);
+        LabEncoding::V2
+            .encode(lab)
+            .map(|v| v.clamp(0.0, 1.0) as f32)
     }
 }
 
@@ -687,16 +661,15 @@ impl LabToCmykSampler {
     /// The output intent's B2A table for `intent` as lcms2 reads it (the
     /// intent's, else `B2A0`; absolute colorimetric reads `B2A1`), with
     /// `bpc` applied to the Lab that [`Self::sample_pdf_lab`] converts.
-    /// `None` when the profile, whose raw bytes are `icc`, is not CMYK
-    /// with a Lab PCS, or the table is missing or one these evaluators
-    /// cannot read.
+    /// `None` when the profile, whose raw bytes are `icc`, is not CMYK, or
+    /// the table is missing or one these evaluators cannot read.
     pub(super) fn new(
         profile: &ColorProfile,
         icc: &[u8],
         intent: RenderingIntent,
         bpc: Option<BpcParams>,
     ) -> Option<Self> {
-        if profile.color_space != DataColorSpace::Cmyk || profile.pcs != DataColorSpace::Lab {
+        if profile.color_space != DataColorSpace::Cmyk {
             return None;
         }
         let lut = LcmsLut::from_pcs(b2a_table(profile, intent)?, icc, 4)?;
@@ -735,7 +708,7 @@ impl LabToCmykSampler {
                 b_star.clamp(-128.0, 127.0),
             ];
             let xyz = apply_bpc_xyz_d50(lab_to_xyz_d50(lab), p);
-            return self.lut.lab_to_ink(xyz_d50_to_lab(xyz));
+            return self.lut.xyz_to_ink(xyz);
         }
         let l_norm = (l_star / 100.0).clamp(0.0, 1.0) as f32;
         let a_norm = ((a_star + 128.0) / 255.0).clamp(0.0, 1.0) as f32;
@@ -825,6 +798,11 @@ const XYZ_MAX: f64 = 1.0 + 32767.0 / 32768.0;
 
 /// How a table encodes its PCS side, each value in `[0, 1]`, as lcms2 reads
 /// it.
+///
+/// XYZ comes out in stet's frame, white [`WP_D50`], which its Lab, its
+/// black points and its sRGB matrix all use. lcms2's frame has white
+/// [`LCMS_D50`], and Lab is the same in both, so moving between them scales
+/// each channel by the ratio of the whites.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum PcsCoding {
     Lab(LabEncoding),
@@ -864,7 +842,15 @@ impl PcsCoding {
     fn decode_xyz(self, v: [f64; 3]) -> [f64; 3] {
         match self {
             PcsCoding::Lab(e) => lab_to_xyz_d50(e.decode(v)),
-            PcsCoding::Xyz => v.map(|x| x * XYZ_MAX),
+            PcsCoding::Xyz => std::array::from_fn(|i| v[i] * XYZ_MAX * WP_D50[i] / LCMS_D50[i]),
+        }
+    }
+
+    /// XYZ (D50, white Y = 1) → the table's `[0, 1]` axes.
+    fn encode_xyz(self, xyz: [f64; 3]) -> [f64; 3] {
+        match self {
+            PcsCoding::Lab(e) => e.encode(xyz_d50_to_lab(xyz)),
+            PcsCoding::Xyz => std::array::from_fn(|i| xyz[i] * LCMS_D50[i] / WP_D50[i] / XYZ_MAX),
         }
     }
 }
@@ -1200,6 +1186,25 @@ impl LcmsLut {
     /// CMYK ink (each `[0, 1]`) → XYZ (D50, white Y = 1).
     fn ink_to_xyz(&self, ink: [f64; 4]) -> [f64; 3] {
         self.coding().decode_xyz(self.ink_to_raw(ink))
+    }
+
+    /// XYZ (D50, white Y = 1) → CMYK ink (each `[0, 1]`): straight into an
+    /// XYZ-indexed table, as lcms2 joins two XYZ stages, and through Lab
+    /// into a Lab-indexed one.
+    fn xyz_to_ink(&self, xyz: [f64; 3]) -> [f64; 4] {
+        let coding = self.coding();
+        if coding != PcsCoding::Xyz {
+            return self.lab_to_ink(xyz_d50_to_lab(xyz));
+        }
+        let pcs = coding.encode_xyz(xyz);
+        match self {
+            LcmsLut::Legacy(l) => l.sample_pcs_xyz_to_cmyk(pcs),
+            LcmsLut::Multi(m) => {
+                let mut out = [0.0; 4];
+                m.eval(&pcs, &mut out);
+                out.map(|v| v.clamp(0.0, 1.0))
+            }
+        }
     }
 
     /// Lab → CMYK ink (each `[0, 1]`).
@@ -1624,7 +1629,7 @@ impl HandRolledChainStage1Rgb {
     /// and the OI's B2A table for the given rendering intent, with
     /// black-point compensation `bpc` in XYZ between them. Returns
     /// `source_icc` and `oi_icc` are the profiles' raw bytes. `None` when
-    /// either side has a table these evaluators cannot read (an XYZ PCS)
+    /// either side has a table these evaluators cannot read
     /// or the source has neither table nor matrix — the caller falls back
     /// to the moxcms-driven chain in that case.
     pub(super) fn new(
@@ -1649,8 +1654,11 @@ impl HandRolledChainStage1Rgb {
     fn sample(&self, r: f32, g: f32, b: f32) -> [f32; 4] {
         if let Some(p) = &self.bpc {
             let xyz = self.src.sample_xyz([r, g, b].map(f64::from));
-            let lab = xyz_d50_to_lab(apply_bpc_xyz_d50(xyz, p));
-            return self.oi.lut.lab_to_ink(lab).map(|v| v as f32);
+            return self
+                .oi
+                .lut
+                .xyz_to_ink(apply_bpc_xyz_d50(xyz, p))
+                .map(|v| v as f32);
         }
         let pcs = self.src.sample_pcs_lab(r, g, b);
         self.oi.sample_pcs_lab(pcs)
@@ -1785,9 +1793,8 @@ pub(super) struct HandRolledChainStage1Cmyk {
 
 impl HandRolledChainStage1Cmyk {
     /// `source_icc` and `oi_icc` are the profiles' raw bytes. `None` when
-    /// either profile is not CMYK with a Lab PCS, or carries tables these
-    /// evaluators cannot read; the caller then builds moxcms's transform
-    /// for the same intent.
+    /// either profile is not CMYK, or carries tables these evaluators cannot
+    /// read; the caller then builds moxcms's transform for the same intent.
     pub(super) fn new(
         source: &ColorProfile,
         source_icc: &[u8],
@@ -1796,10 +1803,9 @@ impl HandRolledChainStage1Cmyk {
         intent: RenderingIntent,
         bpc: Option<BpcParams>,
     ) -> Option<Self> {
-        let cmyk_lab = |p: &ColorProfile| {
-            p.color_space == DataColorSpace::Cmyk && p.pcs == DataColorSpace::Lab
-        };
-        if !cmyk_lab(source) || !cmyk_lab(output_intent) {
+        if source.color_space != DataColorSpace::Cmyk
+            || output_intent.color_space != DataColorSpace::Cmyk
+        {
             return None;
         }
         Some(Self {
@@ -1811,12 +1817,12 @@ impl HandRolledChainStage1Cmyk {
 
     /// Source ink (each `[0, 1]`) → OutputIntent ink.
     pub(super) fn sample(&self, ink: [f64; 4]) -> [f64; 4] {
-        let lab = self.a2b.ink_to_lab(ink);
-        let lab = match &self.bpc {
-            Some(p) => xyz_d50_to_lab(apply_bpc_xyz_d50(lab_to_xyz_d50(lab), p)),
-            None => lab,
-        };
-        self.b2a.lab_to_ink(lab)
+        match &self.bpc {
+            Some(p) => self
+                .b2a
+                .xyz_to_ink(apply_bpc_xyz_d50(self.a2b.ink_to_xyz(ink), p)),
+            None => self.b2a.lab_to_ink(self.a2b.ink_to_lab(ink)),
+        }
     }
 }
 
@@ -1861,8 +1867,8 @@ pub(super) struct HandRolledChainStage1Gray {
 
 impl HandRolledChainStage1Gray {
     /// `None` when the source is not a TRC-only Gray ([`GrayTrc`]), or the
-    /// output intent, whose raw bytes are `oi_icc`, not CMYK with a Lab PCS
-    /// and a B2A table these evaluators read.
+    /// output intent, whose raw bytes are `oi_icc`, not CMYK with a B2A
+    /// table these evaluators read.
     pub(super) fn new(
         source: &ColorProfile,
         output_intent: &ColorProfile,
@@ -1870,9 +1876,7 @@ impl HandRolledChainStage1Gray {
         intent: RenderingIntent,
         bpc: Option<BpcParams>,
     ) -> Option<Self> {
-        if output_intent.color_space != DataColorSpace::Cmyk
-            || output_intent.pcs != DataColorSpace::Lab
-        {
+        if output_intent.color_space != DataColorSpace::Cmyk {
             return None;
         }
         Some(Self {
@@ -1889,7 +1893,7 @@ impl HandRolledChainStage1Gray {
         if let Some(p) = &self.bpc {
             xyz = apply_bpc_xyz_d50(xyz, p);
         }
-        self.b2a.lab_to_ink(xyz_d50_to_lab(xyz))
+        self.b2a.xyz_to_ink(xyz)
     }
 }
 
@@ -1941,6 +1945,8 @@ mod tests {
     const XYZ_MAB: &[u8] = include_bytes!("../../tests/data/cmyk_intent/xyz_mab.icc");
     const INKLIMIT_MATRIX: &[u8] =
         include_bytes!("../../tests/data/cmyk_intent/inklimit_matrix.icc");
+    const RGB_XYZ: &[u8] = include_bytes!("../../tests/data/cmyk_intent/rgb_xyz.icc");
+    const RGB_XYZ_MAB: &[u8] = include_bytes!("../../tests/data/cmyk_intent/rgb_xyz_mab.icc");
 
     /// The two legs of lcms2's black-point round trip: `B2A0` and `A2B1`.
     fn legs(icc: &[u8]) -> (LcmsLut, LcmsLut) {
@@ -2084,7 +2090,7 @@ mod tests {
             }
             for (cmyk, want) in reference::SAMPLES.iter().zip(a2b1_want) {
                 let got = a2b1.ink_to_xyz(cmyk.map(|v| f64::from(v) / 255.0));
-                let want = lab_to_xyz_white(*want, LCMS_D50);
+                let want = lab_to_xyz_d50(*want);
                 assert_near(
                     &format!("{name} A2B1 at {cmyk:?}"),
                     got,
@@ -2112,6 +2118,36 @@ mod tests {
         }
     }
 
+    /// A matrix-shaper RGB source's Lab is lcms2's: its XYZ is in lcms2's
+    /// frame, white [`LCMS_D50`], so taking it to Lab with moxcms's or
+    /// stet's own D50 tints white by 0.02 b\* and moves every colour.
+    #[test]
+    fn a_matrix_shapers_lab_is_lcms2s() {
+        let relcol = RenderingIntent::RelativeColorimetric;
+        for (name, icc, want) in [
+            ("rgb_gamma", RGB_GAMMA, &reference::RGB_GAMMA_LAB),
+            ("srgb", SRGB, &reference::SRGB_LAB),
+        ] {
+            let profile = ColorProfile::new_from_slice(icc).unwrap();
+            let shaper = SourceA2BSampler::new(&profile, icc, relcol).unwrap();
+            assert!(matches!(shaper, SourceA2BSampler::Shaper(_)));
+            for (rgb, want) in reference::RGB_SAMPLES.iter().zip(want) {
+                let rgb = rgb.map(|v| f64::from(v) / 255.0);
+                let got = xyz_d50_to_lab(shaper.sample_xyz(rgb));
+                assert_near(&format!("{name} at {rgb:?}"), got, *want, 1e-4);
+                let encoded = rgb.map(|v| v as f32);
+                let got = shaper.sample_pcs_lab(encoded[0], encoded[1], encoded[2]);
+                let got = LabEncoding::V2.decode(got.map(f64::from));
+                assert_near(
+                    &format!("{name} encoded at {rgb:?}"),
+                    got,
+                    *want,
+                    LAB_TOLERANCE,
+                );
+            }
+        }
+    }
+
     /// The black of an XYZ-PCS table is its XYZ, not its bytes read as
     /// Lab: `split_xyz.icc`'s 400% ink through `A2B1` is lcms2's.
     #[test]
@@ -2119,7 +2155,7 @@ mod tests {
         let profile = ColorProfile::new_from_slice(SPLIT_XYZ).unwrap();
         let relcol = RenderingIntent::RelativeColorimetric;
         let a2b1 = LcmsLut::to_pcs(a2b_table(&profile, relcol).unwrap(), SPLIT_XYZ, 4).unwrap();
-        let xyz = |lab| lab_to_xyz_white(lab, LCMS_D50);
+        let xyz = lab_to_xyz_d50;
         for (cmyk, want) in reference::SAMPLES.iter().zip(&reference::SPLIT_XYZ_A2B1) {
             let got = a2b1.ink_to_xyz(cmyk.map(|v| f64::from(v) / 255.0));
             assert_near(
@@ -2255,7 +2291,7 @@ mod tests {
     /// The CMYK chain stage 1 is lcms2's, ink for ink, under each intent:
     /// the intent's table on each side, or table 0 where a profile has
     /// none (`split.icc` has no `A2B2`, `inklimit.icc` no `B2A2`), and
-    /// `lut8Type` tables too.
+    /// `lut8Type` tables and an XYZ PCS too.
     #[test]
     fn cmyk_chain_stage1_matches_lcms() {
         for (name, source, oi, want) in [
@@ -2272,6 +2308,7 @@ mod tests {
                 INKLIMIT_LUT8,
                 &reference::CHAIN_SPLIT_LUT8_INKLIMIT_LUT8,
             ),
+            ("xyz", SPLIT_XYZ, SPLIT, &reference::CHAIN_SPLIT_XYZ_SPLIT),
         ] {
             let (source_icc, oi_icc) = (source, oi);
             let source = ColorProfile::new_from_slice(source_icc).unwrap();
@@ -2375,7 +2412,7 @@ mod tests {
             let profile = ColorProfile::new_from_slice(oi).unwrap();
             chain_compensation(source_black, &profile, oi, intent, bpc == 1)
         };
-        let cmyk: [(&str, &[u8], &[u8], &Chain<16>); 5] = [
+        let cmyk: [(&str, &[u8], &[u8], &Chain<16>); 10] = [
             ("split", SPLIT, SHADOW, &reference::CHAIN_BPC_SPLIT_SHADOW),
             (
                 "split_sat v4",
@@ -2391,6 +2428,37 @@ mod tests {
             ),
             ("mab", MAB, SHADOW, &reference::CHAIN_BPC_MAB_SHADOW),
             ("into mab", SPLIT, MAB, &reference::CHAIN_BPC_SPLIT_MAB),
+            // An XYZ PCS, as a source, as the output intent, and both.
+            (
+                "xyz_v4",
+                XYZ_V4,
+                SHADOW,
+                &reference::CHAIN_BPC_XYZ_V4_SHADOW,
+            ),
+            (
+                "xyz_mab",
+                XYZ_MAB,
+                SHADOW,
+                &reference::CHAIN_BPC_XYZ_MAB_SHADOW,
+            ),
+            (
+                "into xyz_v4",
+                SPLIT,
+                XYZ_V4,
+                &reference::CHAIN_BPC_SPLIT_XYZ_V4,
+            ),
+            (
+                "into xyz_mab",
+                SPLIT,
+                XYZ_MAB,
+                &reference::CHAIN_BPC_SPLIT_XYZ_MAB,
+            ),
+            (
+                "xyz to xyz",
+                XYZ_V4,
+                XYZ_MAB,
+                &reference::CHAIN_BPC_XYZ_V4_XYZ_MAB,
+            ),
         ];
         for (name, source_icc, oi_icc, want) in cmyk {
             let source = ColorProfile::new_from_slice(source_icc).unwrap();
@@ -2413,7 +2481,7 @@ mod tests {
                 }
             }
         }
-        let rgb: [(&str, &[u8], &[u8], &Chain<15>); 7] = [
+        let rgb: [(&str, &[u8], &[u8], &Chain<15>); 10] = [
             (
                 "rgb_gamma",
                 RGB_GAMMA,
@@ -2451,6 +2519,24 @@ mod tests {
                 MAB,
                 &reference::CHAIN_BPC_RGB_GAMMA_MAB,
             ),
+            (
+                "rgb_xyz",
+                RGB_XYZ,
+                SHADOW,
+                &reference::CHAIN_BPC_RGB_XYZ_SHADOW,
+            ),
+            (
+                "rgb_xyz_mab",
+                RGB_XYZ_MAB,
+                SHADOW,
+                &reference::CHAIN_BPC_RGB_XYZ_MAB_SHADOW,
+            ),
+            (
+                "rgb into xyz_v4",
+                RGB_GAMMA,
+                XYZ_V4,
+                &reference::CHAIN_BPC_RGB_GAMMA_XYZ_V4,
+            ),
         ];
         for (name, source_icc, oi_icc, want) in rgb {
             let source = ColorProfile::new_from_slice(source_icc).unwrap();
@@ -2474,10 +2560,16 @@ mod tests {
                 }
             }
         }
-        let lab: [(&str, &[u8], &Chain<6>); 3] = [
+        let lab: [(&str, &[u8], &Chain<6>); 5] = [
             ("lab", SHADOW, &reference::CHAIN_BPC_LAB_SHADOW),
             ("lab v4", SHADOW_V4, &reference::CHAIN_BPC_LAB_SHADOW_V4),
             ("lab into mab", MAB, &reference::CHAIN_BPC_LAB_MAB),
+            ("lab into xyz_v4", XYZ_V4, &reference::CHAIN_BPC_LAB_XYZ_V4),
+            (
+                "lab into xyz_mab",
+                XYZ_MAB,
+                &reference::CHAIN_BPC_LAB_XYZ_MAB,
+            ),
         ];
         for (name, oi_icc, want) in lab {
             let oi = ColorProfile::new_from_slice(oi_icc).unwrap();
@@ -2495,20 +2587,6 @@ mod tests {
                     }
                 }
             }
-        }
-    }
-
-    /// A source with an XYZ PCS is left to moxcms.
-    #[test]
-    fn cmyk_chain_stage1_needs_lab_tables() {
-        let source = ColorProfile::new_from_slice(SPLIT_XYZ).unwrap();
-        let oi = ColorProfile::new_from_slice(INKLIMIT).unwrap();
-        for intent in INTENTS {
-            let into =
-                HandRolledChainStage1Cmyk::new(&source, SPLIT_XYZ, &oi, INKLIMIT, intent, None);
-            let from =
-                HandRolledChainStage1Cmyk::new(&oi, INKLIMIT, &source, SPLIT_XYZ, intent, None);
-            assert!(into.is_none() && from.is_none());
         }
     }
 }

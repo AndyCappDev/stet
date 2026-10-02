@@ -47,6 +47,8 @@ const MAB_GRID: &[u8] = include_bytes!("data/cmyk_intent/mab_grid.icc");
 const XYZ_V4: &[u8] = include_bytes!("data/cmyk_intent/xyz_v4.icc");
 const XYZ_MAB: &[u8] = include_bytes!("data/cmyk_intent/xyz_mab.icc");
 const INKLIMIT_MATRIX: &[u8] = include_bytes!("data/cmyk_intent/inklimit_matrix.icc");
+const RGB_XYZ: &[u8] = include_bytes!("data/cmyk_intent/rgb_xyz.icc");
+const RGB_XYZ_MAB: &[u8] = include_bytes!("data/cmyk_intent/rgb_xyz_mab.icc");
 const RGB_MAB: &[u8] = include_bytes!("data/cmyk_intent/rgb_mab.icc");
 
 /// Largest per-channel difference allowed from lcms2. stet bakes a 17⁴ table
@@ -507,6 +509,13 @@ fn cmyk_sources_chain_through_the_output_intent_by_intent() {
             (INKLIMIT_LUT8, SPLIT_LUT8),
             &reference::CHAIN_SPLIT_LUT8_INKLIMIT_LUT8,
         ),
+        // An XYZ PCS, which moxcms used to convert. Neither profile has a
+        // saturation table, which lcms2 reads as perceptual.
+        (
+            "split_xyz",
+            (SPLIT, SPLIT_XYZ),
+            &reference::CHAIN_SPLIT_XYZ_SPLIT,
+        ),
     ] {
         assert_chain_matches_lcms(name, profiles, expected, 1);
     }
@@ -525,19 +534,6 @@ fn the_chain_references_tell_the_intents_apart() {
     assert_ne!(
         reference::CHAIN_SPLIT_SAT_INKLIMIT[2],
         reference::CHAIN_SPLIT_SAT_INKLIMIT[0]
-    );
-}
-
-/// A profile the hand-rolled stage 1 cannot read (here an XYZ PCS) chains
-/// through moxcms's transform built for the intent. Neither profile has a
-/// saturation table, which moxcms refuses and lcms2 reads as perceptual.
-#[test]
-fn moxcms_fallback_chains_by_intent() {
-    assert_chain_matches_lcms(
-        "split_xyz",
-        (SPLIT, SPLIT_XYZ),
-        &reference::CHAIN_SPLIT_XYZ_SPLIT,
-        1,
     );
 }
 
@@ -595,6 +591,8 @@ fn gray_sources_chain_with_compensation() {
         ),
         ("inklimit", INKLIMIT, &reference::GRAY_CHAIN_INKLIMIT, false),
         ("mab", MAB, &reference::GRAY_CHAIN_MAB, true),
+        ("xyz_v4", XYZ_V4, &reference::GRAY_CHAIN_XYZ_V4, true),
+        ("xyz_mab", XYZ_MAB, &reference::GRAY_CHAIN_XYZ_MAB, true),
     ] {
         for mode in [BpcMode::On, BpcMode::Off, BpcMode::Auto] {
             let (cache, hash) = proofing(oi, GRAY_TRC, mode);
@@ -685,7 +683,7 @@ fn compensated(mode: BpcMode, v4: bool, intent: IccRenderingIntent) -> usize {
 /// whatever `--bpc` said.
 #[test]
 fn rgb_and_cmyk_sources_chain_with_compensation() {
-    let cmyk: [Case<16>; 5] = [
+    let cmyk: [Case<16>; 10] = [
         (
             "split",
             SHADOW,
@@ -717,8 +715,45 @@ fn rgb_and_cmyk_sources_chain_with_compensation() {
             true,
             &reference::CHAIN_BPC_SPLIT_MAB,
         ),
+        // An XYZ PCS, which moxcms used to convert, uncompensated: as the
+        // source, as the output intent, and both.
+        (
+            "xyz_v4",
+            SHADOW,
+            XYZ_V4,
+            false,
+            &reference::CHAIN_BPC_XYZ_V4_SHADOW,
+        ),
+        (
+            "xyz_mab",
+            SHADOW,
+            XYZ_MAB,
+            false,
+            &reference::CHAIN_BPC_XYZ_MAB_SHADOW,
+        ),
+        (
+            "into xyz_v4",
+            XYZ_V4,
+            SPLIT,
+            true,
+            &reference::CHAIN_BPC_SPLIT_XYZ_V4,
+        ),
+        (
+            "into xyz_mab",
+            XYZ_MAB,
+            SPLIT,
+            true,
+            &reference::CHAIN_BPC_SPLIT_XYZ_MAB,
+        ),
+        (
+            "xyz to xyz",
+            XYZ_MAB,
+            XYZ_V4,
+            true,
+            &reference::CHAIN_BPC_XYZ_V4_XYZ_MAB,
+        ),
     ];
-    let rgb: [Case<15>; 7] = [
+    let rgb: [Case<15>; 10] = [
         (
             "rgb_gamma",
             SHADOW,
@@ -767,6 +802,27 @@ fn rgb_and_cmyk_sources_chain_with_compensation() {
             RGB_GAMMA,
             true,
             &reference::CHAIN_BPC_RGB_GAMMA_MAB,
+        ),
+        (
+            "rgb_xyz",
+            SHADOW,
+            RGB_XYZ,
+            false,
+            &reference::CHAIN_BPC_RGB_XYZ_SHADOW,
+        ),
+        (
+            "rgb_xyz_mab",
+            SHADOW,
+            RGB_XYZ_MAB,
+            false,
+            &reference::CHAIN_BPC_RGB_XYZ_MAB_SHADOW,
+        ),
+        (
+            "rgb into xyz_v4",
+            XYZ_V4,
+            RGB_GAMMA,
+            true,
+            &reference::CHAIN_BPC_RGB_GAMMA_XYZ_V4,
         ),
     ];
     let inputs_cmyk: Vec<Vec<f64>> = reference::SAMPLES
@@ -882,6 +938,18 @@ fn lab_ink_is_compensated_as_lcms() {
             &reference::CHAIN_BPC_LAB_SHADOW_V4,
         ),
         ("lab into mab", MAB, true, &reference::CHAIN_BPC_LAB_MAB),
+        (
+            "lab into xyz_v4",
+            XYZ_V4,
+            true,
+            &reference::CHAIN_BPC_LAB_XYZ_V4,
+        ),
+        (
+            "lab into xyz_mab",
+            XYZ_MAB,
+            true,
+            &reference::CHAIN_BPC_LAB_XYZ_MAB,
+        ),
     ] {
         for mode in [BpcMode::On, BpcMode::Off, BpcMode::Auto] {
             let mut cache = IccCache::new_with_options(IccCacheOptions {

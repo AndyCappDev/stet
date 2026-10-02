@@ -228,6 +228,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - a three-input table's matrix is now applied, as lcms2 applies it.
 
   `5403.pdf` moves by up to 3 levels, toward Ghostscript.
+- **Profiles with an XYZ PCS now convert into a PDF/X output intent as
+  lcms2 does, and serve as one.** This covers CMYK, RGB (camera and
+  scanner profiles are usually XYZ-based) and Gray sources, and Lab. They
+  used to go through moxcms, with no black-point compensation.
+- **Matrix RGB colours (sRGB, Adobe RGB and the like) in a PDF/X document
+  convert into the output intent as lcms2 does.** stet took their XYZ to
+  Lab with a D50 white 0.0003 off lcms2's in Z, which tinted every colour
+  by a few hundredths of a b\*. In the test corpus, two pages of the PDFX
+  output test and one GWG transparency page move by up to 4 levels, on
+  0.1% of pixels at most.
+- **An RGB profile with only some of its A2B tables, and no colorant
+  matrix, is no longer compensated under an intent it has no table for.**
+  This is common in camera profiles, which carry `A2B0` alone. lcms2
+  treats such an intent as unsupported and its black as zero; stet took
+  `A2B0`'s darkest colour instead.
 - **Relative colorimetric CMYK rendered lighter than Ghostscript and
   Acrobat** with black-point compensation on, the default. Compensation
   maps the profile's black to sRGB black, and stet took that black to be

@@ -147,6 +147,17 @@ pub(super) fn detect_rgb(
         }
         intent = RenderingIntent::RelativeColorimetric;
     }
+    // lcms2 assumes black is zero when the profile supports the intent
+    // neither by a table of its own nor as a matrix-shaper
+    // (`cmsIsIntentSupported`), though the chain then reads `A2B0`.
+    let own_table = match intent {
+        RenderingIntent::Perceptual => &profile.lut_a_to_b_perceptual,
+        RenderingIntent::Saturation => &profile.lut_a_to_b_saturation,
+        _ => &profile.lut_a_to_b_colorimetric,
+    };
+    if own_table.is_none() && !profile.is_matrix_shaper() {
+        return None;
+    }
     let lab = hand_rolled::rgb_to_lab(profile, icc, intent, [0.0; 3])?;
     Some(lab_to_xyz_d50([lab[0].min(50.0), 0.0, 0.0]))
 }
@@ -670,6 +681,19 @@ mod tests {
                 profile!("mab"),
                 &reference::GRAY_CHAIN_MAB,
             ),
+            // Into an XYZ PCS.
+            (
+                "xyz_v4",
+                profile!("gray_trc"),
+                profile!("xyz_v4"),
+                &reference::GRAY_CHAIN_XYZ_V4,
+            ),
+            (
+                "xyz_mab",
+                profile!("gray_trc"),
+                profile!("xyz_mab"),
+                &reference::GRAY_CHAIN_XYZ_MAB,
+            ),
             // Compensating this black to zero is an empty layer to lcms2.
             (
                 "near black",
@@ -734,6 +758,18 @@ mod tests {
                 "rgb_mab",
                 profile!("rgb_mab"),
                 reference::RGB_MAB_BLACK_POINT,
+            ),
+            // An XYZ PCS: `lut16Type`, and ICC v4 `lutAToBType` with no
+            // `A2B1`, which lcms2 finds no relative colorimetric black in.
+            (
+                "rgb_xyz",
+                profile!("rgb_xyz"),
+                reference::RGB_XYZ_BLACK_POINT,
+            ),
+            (
+                "rgb_xyz_mab",
+                profile!("rgb_xyz_mab"),
+                reference::RGB_XYZ_MAB_BLACK_POINT,
             ),
         ] {
             let profile = ColorProfile::new_from_slice(icc).unwrap();
