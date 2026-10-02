@@ -2,19 +2,21 @@
 // Copyright (c) 2026 Scott Bowman
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Hand-rolled samplers for ICC `lut16Type` tables.
+//! Hand-rolled samplers for ICC LUT-based tables.
 //!
 //! moxcms's `create_transform` routes CMYK profiles through an internal
 //! Lab→sRGB pipeline that over-saturates light/midtone colours noticeably
 //! relative to lcms2 / Acrobat / Ghostscript. This module bypasses moxcms
-//! for v2 `lut16Type` CMYK profiles: each grid point goes through one of
-//! the profile's A2B CLUTs (chosen per rendering intent), the legacy v2
-//! PCS-Lab decode, and a hand-tuned Lab → XYZ-D50 → sRGB pipeline. Through
-//! `A2B1` the output matches lcms2's `cmsDoTransform(RelCol)` to ±1 RGB
-//! level on a 17⁴ sweep against ISO Coated v2 300% (ECI), which is what GS
-//! produces for
-//! typical print imagery (light greens, neutrals, blacks). Out-of-gamut
-//! colours clip to the sRGB boundary (also matching lcms2 / GS).
+//! for CMYK profiles with a Lab PCS: each grid point goes through one of
+//! the profile's A2B CLUTs (chosen per rendering intent), the PCS-Lab
+//! decode, and a hand-tuned Lab → XYZ-D50 → sRGB pipeline. A `lut16Type`
+//! table has its own sampler ([`bake_clut4_hand_rolled`]); ICC v4
+//! `lutAToBType` and `lut8Type` tables go through the evaluator that
+//! reproduces lcms2 ([`bake_clut4_lcms`]). Through `A2B1` the output
+//! matches lcms2's `cmsDoTransform(RelCol)` to ±1 RGB level on a 17⁴ sweep
+//! against ISO Coated v2 300% (ECI), which is what GS produces for typical
+//! print imagery (light greens, neutrals, blacks). Out-of-gamut colours
+//! clip to the sRGB boundary (also matching lcms2 / GS).
 //!
 //! The same building blocks are reused for the PDF/X **proofing chain**
 //! (`source → OutputIntent CMYK`, the first leg of the source-through-OI
@@ -30,14 +32,11 @@
 //! The evaluators that reproduce lcms2 exactly (`LcmsLut`) also read ICC v4
 //! `lutAToBType`/`lutBToAType` tables, taking their curves from the
 //! profile's own bytes: moxcms 0.8.1 misreads a curve set holding an empty
-//! `curv`. The display bake still leaves those tables to moxcms; callers
-//! detect the `None` return and use the existing path. `lut8Type` (mft1)
-//! tables are read only by the evaluators that
-//! reproduce lcms2 exactly (see [`OwnedLutSampler::lcms_exact`]): the
-//! black points lcms2 would detect, the CMYK and Gray chain stage 1, and an
-//! RGB source's table in the RGB chain stage 1. Widening the bake, or the
-//! RGB chain's output-intent side, to them would move every colour through
-//! those profiles.
+//! `curv`, and builds no working transform from a four-input CLUT whose
+//! grid differs per input. `lut8Type` (mft1) tables are read only by those
+//! evaluators (see [`OwnedLutSampler::lcms_exact`]), wherever stet reads a
+//! table itself: the display bake, the black points lcms2 would detect, and
+//! both sides of the proofing chain's stage 1.
 //!
 //! Tone curves — an RGB source's and a Gray source's — evaluate as lcms2
 //! does (`LcmsCurve`), not through moxcms's evaluator, whose pure gamma is
@@ -70,10 +69,9 @@ const PCS_LAB_DENOM: f32 = 65280.0;
 /// produces on pure process primaries (e.g. CMYK yellow → washed-out
 /// lemon).
 ///
-/// Returns `None` when the profile or table is a shape we currently defer
-/// (mAB / mft1 / non-Lab PCS / non-CMYK input). In every `None` case the
-/// caller is expected to fall back to the moxcms-driven
-/// [`super::bake_clut4`] path.
+/// Returns `None` when the table is not `lut16Type`, or the profile is not
+/// CMYK with a Lab PCS. The caller then tries [`bake_clut4_lcms`], and
+/// after it the moxcms-driven [`super::bake_clut4`].
 ///
 /// `grid_n` controls the output CLUT resolution (the existing path uses
 /// 17). With a `black` point, black-point compensation is folded into
@@ -109,44 +107,93 @@ pub(super) fn bake_clut4_hand_rolled(
         };
         compute_bpc_params(sbp, [0.0; 3], WP_D50)
     });
-    let bpc = bpc.as_ref();
+    let denom = (grid_n - 1) as f32;
+    bake_grid(grid_n, bpc.as_ref(), |[c_i, m_i, y_i, k_i]| {
+        let [c, m, y, k] = [c_i, m_i, y_i, k_i].map(|i| i as f32 / denom);
+        lab_to_xyz_d50_abs(lut.sample_cmyk_to_lab(c, m, y, k))
+    })
+}
 
+/// Sample one of a CMYK profile's A2B tables into a [`Clut4`] through the
+/// evaluator that reproduces lcms2 (`LcmsLut`): an ICC v4 `lutAToBType`
+/// table, or a `lut8Type` one. `table` is the tag the caller picked for the
+/// rendering intent, with its signature; `icc` is the profile's raw bytes,
+/// which hold the v4 curve sets. Otherwise as [`bake_clut4_hand_rolled`],
+/// darker colorant included: it is this table's own 400% ink.
+///
+/// `None` when the profile is not CMYK with a Lab PCS or the table is one
+/// the evaluator cannot read; see [`can_bake_lcms`].
+pub(super) fn bake_clut4_lcms(
+    profile: &ColorProfile,
+    icc: &[u8],
+    table: Table,
+    grid_n: usize,
+    black: Option<SourceBlack>,
+) -> Option<Clut4> {
+    if profile.color_space != DataColorSpace::Cmyk || profile.pcs != DataColorSpace::Lab {
+        return None;
+    }
+    if !(2..=33).contains(&grid_n) {
+        return None;
+    }
+    let lut = LcmsLut::to_pcs(table, icc, 4)?;
+    let bpc = black.map(|black| {
+        let sbp = match black {
+            SourceBlack::DarkerColorant => {
+                let l_star = lut.ink_to_lab([1.0; 4])[0].clamp(0.0, 100.0);
+                lab_to_xyz_d50([l_star.min(50.0), 0.0, 0.0])
+            }
+            SourceBlack::Xyz(xyz) => xyz,
+        };
+        compute_bpc_params(sbp, [0.0; 3], WP_D50)
+    });
+    let denom = (grid_n - 1) as f64;
+    bake_grid(grid_n, bpc.as_ref(), |ink| {
+        lab_to_xyz_d50(lut.ink_to_lab(ink.map(|i| i as f64 / denom)))
+    })
+}
+
+/// Whether [`bake_clut4_lcms`] can read `table` of `profile`, whose raw
+/// bytes are `icc`.
+pub(super) fn can_bake_lcms(profile: &ColorProfile, icc: &[u8], table: Table) -> bool {
+    profile.color_space == DataColorSpace::Cmyk
+        && profile.pcs == DataColorSpace::Lab
+        && LcmsLut::to_pcs(table, icc, 4).is_some()
+}
+
+/// A [`Clut4`] of `grid_n` points per axis, each the sRGB of the XYZ-D50
+/// (`Y_white = 1.0`) that `xyz_at` gives for its grid indices `[c, m, y,
+/// k]`, compensated by `bpc`.
+fn bake_grid(
+    grid_n: usize,
+    bpc: Option<&BpcParams>,
+    xyz_at: impl Fn([usize; 4]) -> [f64; 3],
+) -> Option<Clut4> {
     let total = grid_n
         .checked_mul(grid_n)?
         .checked_mul(grid_n)?
         .checked_mul(grid_n)?;
     let mut data = vec![0u8; total * 3];
-
-    let denom = (grid_n - 1) as f32;
     for k_i in 0..grid_n {
         for y_i in 0..grid_n {
             for m_i in 0..grid_n {
                 for c_i in 0..grid_n {
-                    let c = c_i as f32 / denom;
-                    let m = m_i as f32 / denom;
-                    let y = y_i as f32 / denom;
-                    let k = k_i as f32 / denom;
-
                     // Black-point compensation scales XYZ before the sRGB
                     // gamut clip, as lcms2 does. Scaling the clipped sRGB
                     // instead moves out-of-gamut colours: one channel is
                     // already pinned, so the others shift (6 levels on a
                     // saturated cyan).
-                    let mut xyz = lab_to_xyz_d50_abs(lut.sample_cmyk_to_lab(c, m, y, k));
+                    let mut xyz = xyz_at([c_i, m_i, y_i, k_i]);
                     if let Some(p) = bpc {
                         xyz = apply_bpc_xyz_d50(xyz, p);
                     }
                     let rgb = encode_linear_srgb(xyz_d50_to_linear_srgb_d65(xyz));
-
                     let off = (((k_i * grid_n + y_i) * grid_n + m_i) * grid_n + c_i) * 3;
-                    data[off] = rgb[0];
-                    data[off + 1] = rgb[1];
-                    data[off + 2] = rgb[2];
+                    data[off..off + 3].copy_from_slice(&rgb);
                 }
             }
         }
     }
-
     Some(Clut4::from_baked(grid_n as u8, data))
 }
 
@@ -1532,7 +1579,7 @@ fn lcms_table(tables: [Option<&LutWarehouse>; 3], intent: RenderingIntent) -> Op
 
 /// A table of a profile chosen as [`lcms_table`] chooses it, with its tag
 /// signature.
-type Table<'a> = (&'a LutWarehouse, &'static [u8; 4]);
+pub(super) type Table<'a> = (&'a LutWarehouse, &'static [u8; 4]);
 
 /// The profile's A2B table for `intent` as lcms2 reads it.
 fn a2b_table(profile: &ColorProfile, intent: RenderingIntent) -> Option<Table<'_>> {

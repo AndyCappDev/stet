@@ -7,9 +7,10 @@
 //!
 //! `data/cmyk_intent/` holds generated CMYK profiles — two whose perceptual,
 //! colorimetric and (in one) saturation tables differ, the first again as
-//! `lut8Type`, one whose perceptual table copies its colorimetric one, and
+//! `lut8Type`, one whose perceptual table copies its colorimetric one,
 //! `inklimit*.icc`, whose perceptual `B2A0` stops short of 400% ink as a
-//! press profile's does — and lcms2's output for each intent with
+//! press profile's does, and `mab*.icc`, whose tables are ICC v4
+//! `lutAToBType`/`lutBToAType` — and lcms2's output for each intent with
 //! black-point compensation off and on, and lcms2's proofing-chain stage 1
 //! (a CMYK or Gray source into an output-intent CMYK) for each intent.
 //! `generate.py` there makes every file; re-run it rather than editing
@@ -41,11 +42,12 @@ const RGB_LUT: &[u8] = include_bytes!("data/cmyk_intent/rgb_lut.icc");
 const RGB_LUT_V4: &[u8] = include_bytes!("data/cmyk_intent/rgb_lut_v4.icc");
 const SRGB: &[u8] = include_bytes!("data/cmyk_intent/srgb.icc");
 const MAB: &[u8] = include_bytes!("data/cmyk_intent/mab.icc");
+const MAB_GRID: &[u8] = include_bytes!("data/cmyk_intent/mab_grid.icc");
 const RGB_MAB: &[u8] = include_bytes!("data/cmyk_intent/rgb_mab.icc");
 
 /// Largest per-channel difference allowed from lcms2. stet bakes a 17⁴ table
 /// and interpolates it, and its Lab → sRGB arithmetic is its own.
-const TOLERANCE: u8 = 2;
+const TOLERANCE: u8 = 1;
 
 /// Row of the reference tables for `intent`.
 fn reference_row(intent: IccRenderingIntent) -> usize {
@@ -116,6 +118,27 @@ fn every_intent_matches_lcms() {
                 bpc,
             );
             assert_matches_lcms("same.icc", SAME, &reference::SAME, intent, bpc);
+            assert_matches_lcms(
+                "split_lut8.icc",
+                SPLIT_LUT8,
+                &reference::SPLIT_LUT8,
+                intent,
+                bpc,
+            );
+        }
+    }
+}
+
+/// ICC v4 `lutAToBType` tables show as lcms2 shows them. moxcms, which used
+/// to bake them, was ~150 levels off on `mab.icc`; and on `mab_grid.icc`,
+/// whose grid differs per input, it built no transform at all, leaving the
+/// profile's CMYK to the uncalibrated PostScript formula.
+#[test]
+fn v4_tables_show_as_lcms() {
+    for intent in INTENTS {
+        for bpc in [false, true] {
+            assert_matches_lcms("mab.icc", MAB, &reference::MAB, intent, bpc);
+            assert_matches_lcms("mab_grid.icc", MAB_GRID, &reference::MAB_GRID, intent, bpc);
         }
     }
 }
@@ -165,37 +188,13 @@ fn black_point_is_the_one_lcms_detects() {
                 intent,
                 bpc,
             );
-        }
-    }
-}
-
-/// A profile the hand-rolled sampler cannot read is baked from moxcms's
-/// transform, and compensates from the same black point: the ink-limited
-/// one, read from its `lut8Type` tables. moxcms's arithmetic is its own
-/// (4 levels off lcms2 with BPC off too), but 400% ink would leave 400%
-/// ink itself ~20 levels off.
-#[test]
-fn moxcms_fallback_compensates_from_the_ink_limit() {
-    let relcol = IccRenderingIntent::RelativeColorimetric;
-    let samples: Vec<u8> = reference::SAMPLES.iter().flatten().copied().collect();
-    for bpc in [false, true] {
-        let cache = IccCache::new_with_options(IccCacheOptions {
-            bpc_mode: if bpc { BpcMode::On } else { BpcMode::Off },
-            source_cmyk_profile: Some(INKLIMIT_LUT8.to_vec()),
-        });
-        let hash = *cache.default_cmyk_hash().unwrap();
-        let rgb = cache
-            .convert_image_8bit_with_intent(&hash, &samples, reference::SAMPLES.len(), relcol)
-            .unwrap();
-        let want = &reference::INKLIMIT_LUT8[1][bpc as usize];
-        for (i, (cmyk, lcms)) in reference::SAMPLES.iter().zip(want).enumerate() {
-            let got = &rgb[i * 3..i * 3 + 3];
-            for ch in 0..3 {
-                assert!(
-                    got[ch].abs_diff(lcms[ch]) <= 4,
-                    "BPC {bpc}, CMYK {cmyk:?}: stet {got:?}, lcms2 {lcms:?}"
-                );
-            }
+            assert_matches_lcms(
+                "inklimit_lut8.icc",
+                INKLIMIT_LUT8,
+                &reference::INKLIMIT_LUT8,
+                intent,
+                bpc,
+            );
         }
     }
 }
@@ -372,39 +371,67 @@ fn identical_tables_show_perceptual_as_relative_colorimetric() {
     );
 }
 
-/// A profile the hand-rolled sampler cannot read (here `lut8Type`) is baked
-/// from moxcms's transform instead, and that bake follows the intent too.
-/// moxcms's arithmetic is its own, so this asserts only which of lcms2's
-/// tables each result is nearer: relative colorimetric used to be baked
-/// from the perceptual table.
+/// A profile stet's own evaluators cannot read (an XYZ PCS) is baked from
+/// moxcms's transform instead, and that bake follows the intent too:
+/// relative colorimetric used to be baked from the perceptual table.
+/// Relative colorimetric matches lcms2. Perceptual only reads a table of
+/// its own: moxcms 0.8.1 gets this profile's `A2B0` wrong (400% ink shows
+/// as `[59, 0, 23]`, lcms2's `[129, 118, 121]`), so it is not compared.
+/// Compensation is off: lcms2 2.16 takes a black lighter than L* 50, as
+/// this profile's perceptual one is, as zero, where Ghostscript's copy of
+/// it, and stet, clip it to L* 50.
 #[test]
 fn moxcms_fallback_follows_the_intent() {
-    let cache = cache(SPLIT_LUT8);
+    let cache = IccCache::new_with_options(IccCacheOptions {
+        bpc_mode: BpcMode::Off,
+        source_cmyk_profile: Some(SPLIT_XYZ.to_vec()),
+    });
     let hash = *cache.default_cmyk_hash().unwrap();
     let samples: Vec<u8> = reference::SAMPLES.iter().flatten().copied().collect();
     let n = reference::SAMPLES.len();
-    let distance = |rgb: &[u8], want: &[[u8; 3]; 16]| -> u32 {
-        want.iter()
-            .flatten()
-            .zip(rgb)
-            .map(|(a, b)| a.abs_diff(*b) as u32)
-            .sum()
-    };
-    let bpc_on = 1;
-    let perceptual = &reference::SPLIT_LUT8[0][bpc_on];
-    let relcol = &reference::SPLIT_LUT8[1][bpc_on];
-    for (intent, want, other) in [
-        (IccRenderingIntent::RelativeColorimetric, relcol, perceptual),
-        (IccRenderingIntent::Perceptual, perceptual, relcol),
-    ] {
-        let rgb = cache
+    let image = |intent| {
+        cache
             .convert_image_8bit_with_intent(&hash, &samples, n, intent)
-            .unwrap();
-        let (near, far) = (distance(&rgb, want), distance(&rgb, other));
-        assert!(
-            near < far,
-            "{intent:?}: {near} levels from lcms2's {intent:?}, {far} from the other intent"
-        );
+            .unwrap()
+    };
+    let relcol = image(IccRenderingIntent::RelativeColorimetric);
+    let want = &reference::SPLIT_XYZ[1][0];
+    for (i, (cmyk, lcms)) in reference::SAMPLES.iter().zip(want).enumerate() {
+        let got = &relcol[i * 3..i * 3 + 3];
+        for ch in 0..3 {
+            assert!(
+                got[ch].abs_diff(lcms[ch]) <= TOLERANCE,
+                "CMYK {cmyk:?}: stet {got:?}, lcms2 {lcms:?}"
+            );
+        }
+    }
+    assert_ne!(image(IccRenderingIntent::Perceptual), relcol);
+}
+
+/// An ICC v4 output intent shows its CMYK as lcms2 does: through its
+/// relative colorimetric table under every intent, compensated as `--bpc`
+/// says, with no forcing (that is for perceptual and saturation). The
+/// chain tests below compare stet with lcms2's ink as stet shows it, so
+/// they cannot see this.
+#[test]
+fn a_v4_output_intent_is_shown_as_lcms() {
+    for (name, oi, expected) in [
+        ("mab", MAB, &reference::MAB),
+        ("mab_grid", MAB_GRID, &reference::MAB_GRID),
+    ] {
+        for mode in [BpcMode::On, BpcMode::Off, BpcMode::Auto] {
+            let (cache, _) = proofing(oi, SRGB, mode);
+            let want = &expected[1][mode.is_enabled() as usize];
+            for (cmyk, lcms) in reference::SAMPLES.iter().zip(want) {
+                let got = shown(&cache, ink(*cmyk));
+                for ch in 0..3 {
+                    assert!(
+                        got[ch].abs_diff(lcms[ch]) <= TOLERANCE,
+                        "{name} {mode:?} {cmyk:?}: shown {got:?}, lcms2 {lcms:?}"
+                    );
+                }
+            }
+        }
     }
 }
 

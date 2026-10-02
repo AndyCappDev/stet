@@ -201,6 +201,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   identity (empty) curve before another: every curve after it comes back
   as identity. stet reads them from the profile's bytes. Only GWG 20.5's
   image moves in the test corpus, by up to 5 levels, toward Ghostscript.
+- **CMYK shown through an ICC v4 or 8-bit (`lut8Type`) profile now matches
+  lcms2.** This covers such a profile as `--cmyk-profile`, as a PDF/X
+  output intent, or as ICCBased CMYK. stet used to bake its display
+  tables from moxcms, which was:
+  - up to 3.5 levels from lcms2 (0.9 on average) through the Ghent
+    suite's v4 estprofile.icc;
+  - up to 14.7 levels (2.0 on average, 41% of colours more than 2 off)
+    through an 8-bit profile built from FOGRA39;
+  - wrong altogether on some v4 tables, 150 levels off on average on one
+    of stet's test profiles;
+  - unable to build a transform from a v4 table whose grid differs per
+    input, so the profile's CMYK fell back to the uncalibrated PostScript
+    formula.
+
+  stet now bakes these tables through the evaluator its proofing chain
+  already uses, within half a level of lcms2: the same as `lut16Type`
+  profiles, which are unchanged. Nothing in the test corpus moves.
 - **Relative colorimetric CMYK rendered lighter than Ghostscript and
   Acrobat** with black-point compensation on, the default. Compensation
   maps the profile's black to sRGB black, and stet took that black to be
@@ -233,10 +250,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ICCBased image with a stencil `/Mask` showed its raw samples (RGB) or
   went through the default CMYK profile instead of its own (CMYK); both
   now convert through their profile, with the image's intent.
-- **CMYK profiles stet's own sampler cannot read** (ICC v4 `mAB` tables,
-  8-bit `lut8Type`) were converted through their perceptual table even for
-  relative colorimetric, the default intent. They now use the colorimetric
-  table, like every other profile, so their colours change.
+- **CMYK profiles with ICC v4 `mAB` or 8-bit `lut8Type` tables** were
+  converted through their perceptual table even for relative
+  colorimetric, the default intent. They now use the colorimetric table,
+  like every other profile, so their colours change.
 - **Black-point compensation for CMYK is applied before the sRGB gamut
   clip**, as lcms2 does, rather than after. Colours outside sRGB, such as
   saturated cyans, move by up to 2 levels.

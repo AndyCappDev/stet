@@ -510,11 +510,20 @@ def v4_lab(l, a, b):
     return [l / 100, (a + 128) / 255, (b + 128) / 255]
 
 
-def mab_a2b(precision, chroma):
+MAB_A_CURVES = [
+    curv_tag([(i / 32) ** 1.15 for i in range(33)]),
+    para_tag(0, [0.9]),
+    para_tag(3, [2.4, 1 / 1.055, 0.055 / 1.055, 1 / 12.92, 0.04045]),
+    curv_tag([]),
+]
+
+
+def mab_a2b(precision, chroma, grids=(4, 4, 4, 4), a=MAB_A_CURVES):
     """CMYK → Lab: the A2B1 tables' Lab, curved in every input and bent in
-    C·M so tetrahedral interpolation matters, on a 4⁴ grid. (moxcms, which
-    shows this profile's CMYK, refuses a four-input grid that differs per
-    input; the B2A tables and rgb_mab.icc have one.)"""
+    C·M so tetrahedral interpolation matters, on a grid of `grids`. (moxcms
+    0.8.1 refuses a four-input grid that differs per input; `mab.icc` keeps
+    an even one so stage 1 can chain into it, and `mab_grid.icc` has the
+    other.)"""
 
     def fn(cmyk):
         c, m, y, k = cmyk
@@ -528,13 +537,8 @@ def mab_a2b(precision, chroma):
         True,
         4,
         3,
-        a=[
-            curv_tag([(i / 32) ** 1.15 for i in range(33)]),
-            para_tag(0, [0.9]),
-            para_tag(3, [2.4, 1 / 1.055, 0.055 / 1.055, 1 / 12.92, 0.04045]),
-            curv_tag([]),
-        ],
-        clut=([4, 4, 4, 4], precision, fn),
+        a=a,
+        clut=(list(grids), precision, fn),
         m=[para_tag(0, [1.1]), gamma_curv_tag(0.95), curv_tag([])],
         matrix=(
             [[0.95, 0.02, 0.01], [0.01, 0.97, 0.0], [0.0, 0.02, 0.96]],
@@ -586,6 +590,24 @@ def mab_profile(description):
         (b"A2B0", mab_a2b(2, 0.8)),
         (b"A2B1", mab_a2b(2, 1.0)),
         (b"A2B2", mab_a2b(1, 1.15)),
+        (b"B2A0", mab_b2a(0.8, 1.0, 2)),
+        (b"B2A1", mab_b2a(0.85, 0.85, 2)),
+        (b"B2A2", mab_b2a(0.9, 1.0, 1, with_m=False)),
+    ]
+    return assemble(tags, b"prtr", b"CMYK", b"Lab ", 0x04200000)
+
+
+def mab_grid_profile(description):
+    """`mab.icc` with A2B tables on a 3×4×5×3 grid whose A curves hold an
+    empty `curv` before two more: the two shapes moxcms 0.8.1 misreads."""
+    a = [MAB_A_CURVES[0], curv_tag([]), MAB_A_CURVES[2], MAB_A_CURVES[1]]
+    grids = (3, 4, 5, 3)
+    tags = [
+        (b"desc", desc_tag(description)),
+        (b"wtpt", xyz_tag(0.9642, 1.0, 0.8249)),
+        (b"A2B0", mab_a2b(2, 0.8, grids, a)),
+        (b"A2B1", mab_a2b(2, 1.0, grids, a)),
+        (b"A2B2", mab_a2b(1, 1.15, grids, a)),
         (b"B2A0", mab_b2a(0.8, 1.0, 2)),
         (b"B2A1", mab_b2a(0.85, 0.85, 2)),
         (b"B2A2", mab_b2a(0.9, 1.0, 1, with_m=False)),
@@ -1353,6 +1375,7 @@ def main():
         ("GRAY_NEAR_BLACK", gray_near_black_profile("stet test: Gray, black Y 0.0002")),
         ("MAB", mab_profile("stet test: ICC v4 lutAToBType / lutBToAType")),
         ("RGB_MAB", rgb_mab_profile("stet test: ICC v4 RGB lutAToBType")),
+        ("MAB_GRID", mab_grid_profile("stet test: mab.icc, A2B grid 3x4x5x3")),
     ]
     for name, icc in profiles:
         (HERE / f"{name.lower()}.icc").write_bytes(icc)
@@ -1393,6 +1416,7 @@ def main():
             "GRAY_NEAR_BLACK",
             "MAB",
             "RGB_MAB",
+            "MAB_GRID",
         ):
             out += [rust_black_point(name, icc[name]), ""]
     for name in ["INKLIMIT", "INKLIMIT_LUT8"]:
@@ -1429,6 +1453,8 @@ def main():
     out += [rust_destination("MAB", icc["MAB"]), ""]
     out += [rust_v4_legs("MAB", icc["MAB"]), ""]
     out += [rust_gray_chain("MAB", icc), ""]
+    for name in ["MAB", "MAB_GRID", "SPLIT_XYZ"]:
+        out += [rust_table(name, icc[name]), ""]
     (HERE / "reference.rs").write_text("\n".join(out))
 
 

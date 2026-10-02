@@ -139,6 +139,8 @@ fn tag_data<'a>(icc: &'a [u8], sig: &[u8; 4]) -> Option<&'a [u8]> {
 /// proofing chain that ends in this profile.
 pub(super) struct CmykTables {
     profile: Arc<ColorProfile>,
+    /// The profile's raw bytes, which hold a v4 table's curve sets.
+    icc: Arc<[u8]>,
     /// The slot each intent uses, indexed by the moxcms discriminant.
     slot_of: [usize; 4],
     /// What each slot is baked from; no two are equal.
@@ -196,6 +198,7 @@ impl CmykTables {
         let slots = recipes.iter().map(|_| OnceLock::new()).collect();
         Self {
             profile,
+            icc: icc.into(),
             slot_of,
             recipes,
             slots,
@@ -217,14 +220,15 @@ impl CmykTables {
         self.slot_of[a as usize] == self.slot_of[b as usize]
     }
 
-    /// Whether the hand-rolled sampler reads `intent`'s table. When it does
-    /// not, the table is sampled from a moxcms transform instead.
+    /// Whether stet's own evaluators bake `intent`'s table, compensating
+    /// its black point themselves. When they do not, the table is sampled
+    /// from a moxcms transform instead.
     pub(super) fn hand_rolled(&self, intent: RenderingIntent) -> bool {
-        let recipe = self.recipes[self.slot_of[intent as usize]];
-        recipe
-            .table
-            .warehouse(&self.profile)
-            .is_some_and(|t| hand_rolled::can_sample(&self.profile, t))
+        let table = self.recipes[self.slot_of[intent as usize]].table;
+        table.warehouse(&self.profile).is_some_and(|t| {
+            hand_rolled::can_sample(&self.profile, t)
+                || hand_rolled::can_bake_lcms(&self.profile, &self.icc, (t, table.signature()))
+        })
     }
 
     /// Black-point compensation for `intent` on a path that samples the
@@ -239,19 +243,32 @@ impl CmykTables {
         moxcms_bpc_params(self.recipes[self.slot_of[intent as usize]].black, transform)
     }
 
+    /// Bake `recipe`, by the first of these that reads its table:
+    /// 1. the `lut16Type` sampler ([`hand_rolled::bake_clut4_hand_rolled`]);
+    /// 2. the evaluator that reproduces lcms2, for ICC v4 `lutAToBType` and
+    ///    `lut8Type` tables ([`hand_rolled::bake_clut4_lcms`]);
+    /// 3. moxcms's transform for the same table, now only for an XYZ PCS.
+    ///
+    /// `lut16Type` keeps its own sampler, though the second would read it
+    /// too, so that those profiles' tables do not move.
     fn bake(&self, recipe: Recipe) -> Option<Clut4> {
-        if let Some(table) = recipe.table.warehouse(&self.profile)
-            && let Some(clut) = hand_rolled::bake_clut4_hand_rolled(
+        if let Some(table) = recipe.table.warehouse(&self.profile) {
+            let grid_n = GRID_N as usize;
+            if let Some(clut) =
+                hand_rolled::bake_clut4_hand_rolled(&self.profile, table, grid_n, recipe.black)
+            {
+                return Some(clut);
+            }
+            if let Some(clut) = hand_rolled::bake_clut4_lcms(
                 &self.profile,
-                table,
-                GRID_N as usize,
+                &self.icc,
+                (table, recipe.table.signature()),
+                grid_n,
                 recipe.black,
-            )
-        {
-            return Some(clut);
+            ) {
+                return Some(clut);
+            }
         }
-        // Profiles the hand-rolled sampler cannot read (v4 `mAB`, `mft1`,
-        // XYZ PCS): sample moxcms's transform for the same table.
         let transform = moxcms_transform(&self.profile, recipe.table.moxcms_intent())?;
         let params = moxcms_bpc_params(recipe.black, transform.as_ref());
         bake_clut4(transform.as_ref(), GRID_N, params.as_ref())
@@ -303,6 +320,9 @@ mod tests {
     const SPLIT: &[u8] = include_bytes!("../../tests/data/cmyk_intent/split.icc");
     const SPLIT_SAT: &[u8] = include_bytes!("../../tests/data/cmyk_intent/split_sat.icc");
     const INKLIMIT: &[u8] = include_bytes!("../../tests/data/cmyk_intent/inklimit.icc");
+    const SPLIT_LUT8: &[u8] = include_bytes!("../../tests/data/cmyk_intent/split_lut8.icc");
+    const SPLIT_XYZ: &[u8] = include_bytes!("../../tests/data/cmyk_intent/split_xyz.icc");
+    const MAB: &[u8] = include_bytes!("../../tests/data/cmyk_intent/mab.icc");
 
     fn tables(icc: &[u8], bpc: bool) -> CmykTables {
         let profile = Arc::new(ColorProfile::new_from_slice(icc).unwrap());
@@ -380,6 +400,39 @@ mod tests {
         assert!(t.get(Perceptual).is_some());
         let baked = t.slots.iter().filter(|s| s.get().is_some()).count();
         assert_eq!(baked, 1);
+    }
+
+    /// Each table shape has its own bake: `lut16Type` keeps its sampler,
+    /// byte for byte, though lcms2's evaluator reads it too; `lut8Type` and
+    /// ICC v4 go to that evaluator. Both count as stet's own, so `IccCache`
+    /// takes no compensation from moxcms for them. An XYZ PCS is left to
+    /// moxcms.
+    #[test]
+    fn each_table_shape_has_its_bake() {
+        let grid_n = GRID_N as usize;
+        for (name, icc, lut16) in [
+            ("split_sat", SPLIT_SAT, true),
+            ("split_lut8", SPLIT_LUT8, false),
+            ("mab", MAB, false),
+        ] {
+            let t = tables(icc, true);
+            for intent in [Perceptual, RelativeColorimetric, Saturation] {
+                let recipe = t.recipes[t.slot_of[intent as usize]];
+                let table = recipe.table.warehouse(&t.profile).unwrap();
+                let want = if lut16 {
+                    hand_rolled::bake_clut4_hand_rolled(&t.profile, table, grid_n, recipe.black)
+                } else {
+                    let table = (table, recipe.table.signature());
+                    hand_rolled::bake_clut4_lcms(&t.profile, icc, table, grid_n, recipe.black)
+                };
+                let got = t.get(intent).unwrap();
+                assert!(got.data == want.unwrap().data, "{name} {intent:?}");
+                assert!(t.hand_rolled(intent), "{name} {intent:?}");
+            }
+        }
+        let xyz = tables(SPLIT_XYZ, true);
+        assert!(xyz.get(RelativeColorimetric).is_some());
+        assert!(!xyz.hand_rolled(RelativeColorimetric));
     }
 
     #[test]

@@ -223,10 +223,11 @@ impl<T: Copy + Default + Send + Sync + 'static> TransformExecutor<T> for Chained
 /// Pre-baked 4D CLUT sampling a CMYK ICC transform on a regular grid.
 ///
 /// At profile-registration time we evaluate the profile at `grid_n^4`
-/// evenly-spaced CMYK points and store the sRGB output — through
-/// [`hand_rolled::bake_clut4_hand_rolled`] (the profile's `A2B1` table)
-/// where it can read the profile, else through a moxcms transform
-/// ([`bake_clut4`]). At image-conversion time we do K-slice plus 3D
+/// evenly-spaced CMYK points and store the sRGB output — through one of the
+/// profile's A2B tables, chosen per rendering intent (`cmyk_tables`), with
+/// [`hand_rolled::bake_clut4_hand_rolled`] or
+/// [`hand_rolled::bake_clut4_lcms`] where they can read it, else through a
+/// moxcms transform ([`bake_clut4`]). At image-conversion time we do K-slice plus 3D
 /// tetrahedral interpolation inside each slice. This is ~30× faster than
 /// direct moxcms for LUT-based CMYK profiles (e.g., SWOP) while staying well
 /// inside imperceptible ΔE for typical print-workflow inputs.
@@ -499,12 +500,11 @@ impl IccCache {
         // Try multiple rendering intents and keep the first that builds,
         // Perceptual first: ICC v4 profiles may carry only A2B0. For a CMYK
         // profile this transform is *not* what conversions normally use —
-        // they prefer the CLUT4 baked below, which `bake_clut4_hand_rolled`
-        // samples from A2B1 (relative colorimetric). The transform is reached
-        // only when that bake returns `None` (it then also feeds the
-        // fallback `bake_clut4`, so the fallback table reads A2B0), in chain
-        // mode, and from `round_trip_rgb_via_cmyk`. On a profile whose A2B0
-        // and A2B1 differ, those paths disagree with the CLUT4 path.
+        // they prefer the per-intent CLUT4 tables baked below
+        // (`cmyk_tables`). The transform is reached only when no table can
+        // be baked, in chain mode, and from `round_trip_rgb_via_cmyk`. On a
+        // profile whose A2B0 and A2B1 differ, those paths disagree with the
+        // CLUT4 path.
         let intents = [
             RenderingIntent::Perceptual,
             RenderingIntent::RelativeColorimetric,
@@ -891,31 +891,31 @@ impl IccCache {
         };
 
         // For 4-channel (CMYK) profiles, 17^4 CLUTs for fast conversion, one
-        // per rendering intent (`cmyk_tables`). Two paths produce the same
-        // Clut4 layout:
+        // per rendering intent (`cmyk_tables`). Three paths produce the same
+        // Clut4 layout, the first that reads the intent's A2B table:
         //
-        // 1. `bake_clut4_hand_rolled` samples the intent's A2B table
-        //    directly, decodes the legacy v2 PCS-Lab encoding, and clips
-        //    out-of-gamut colours to the sRGB boundary. Through A2B1 the
-        //    output matches lcms2's `cmsDoTransform(RelCol)` to ±1 RGB level.
-        //    Available for v2 mft2 CMYK profiles.
-        // 2. `bake_clut4` samples moxcms's 8-bit transform for the same
-        //    table on a grid; fallback for profiles in a shape we don't yet
-        //    handle (mAB, mft1, XYZ-PCS).
+        // 1. `bake_clut4_hand_rolled` samples a `lut16Type` table directly,
+        //    decodes the legacy v2 PCS-Lab encoding, and clips out-of-gamut
+        //    colours to the sRGB boundary: within ±1 RGB level of lcms2.
+        // 2. `bake_clut4_lcms` does the same through the evaluator that
+        //    reproduces lcms2, for ICC v4 `lutAToBType` and `lut8Type`
+        //    tables.
+        // 3. `bake_clut4` samples moxcms's 8-bit transform for the same
+        //    table on a grid: only an XYZ PCS is left to it.
         //
-        // Both compensate from the black point lcms2 detects for the
-        // intent (`black_point`): for relative colorimetric on an output
-        // profile, its ink-limited black. Where that is the darkest
-        // colorant, each path samples it from the table it bakes.
+        // All compensate from the black point lcms2 detects for the intent
+        // (`black_point`): for relative colorimetric on an output profile,
+        // its ink-limited black. Where that is the darkest colorant, each
+        // path samples it from the table it bakes.
         //
         // The runtime CLUT lookup is identical regardless of which path
         // produced the table.
         //
         // `bpc_params` is stored on `CachedTransform` for the paths that
         // bypass the tables and use `transform_*` (Perceptual-first moxcms)
-        // directly, when the hand-rolled sampler cannot read the profile.
-        // The hand-rolled sampler folds BPC in directly and leaves this
-        // `None`, so the cached `transform_f64` Arc doesn't double-apply BPC.
+        // directly, when stet's own bakes cannot read the profile. Those
+        // fold BPC in directly and leave this `None`, so the cached
+        // `transform_f64` Arc doesn't double-apply BPC.
         let bpc_enabled = n == 4 && self.bpc_mode.is_enabled();
         let mut bpc_params: Option<BpcParams> = None;
         let profile = Arc::new(profile);
