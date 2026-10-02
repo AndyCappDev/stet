@@ -188,8 +188,16 @@ pub(super) fn chain_compensation(
     if !enabled && !forced {
         return None;
     }
-    let source = source_black.unwrap_or([0.0; 3]);
-    let destination = detect_destination(oi, oi_icc, intent).unwrap_or([0.0; 3]);
+    compensation(
+        source_black.unwrap_or([0.0; 3]),
+        detect_destination(oi, oi_icc, intent).unwrap_or([0.0; 3]),
+    )
+}
+
+/// The black-point compensation lcms2 applies between a `source` and a
+/// `destination` black point, XYZ-D50: none when they are equal, or so
+/// close that lcms2 drops the matrix as an empty layer (`IsEmptyLayer`).
+pub(super) fn compensation(source: [f64; 3], destination: [f64; 3]) -> Option<BpcParams> {
     if source == destination {
         return None;
     }

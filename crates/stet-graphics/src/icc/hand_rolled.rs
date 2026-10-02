@@ -33,6 +33,10 @@
 //! backwards ([`display_srgb_to_lab`]) into a `LabToCmykSampler`, so it is
 //! lcms2's built-in sRGB → profile.
 //!
+//! A table-based RGB profile outside a proofing chain is shown through
+//! [`RgbToXyz`]: the same evaluators to XYZ, exactly, for colours and
+//! images alike ([`super::rgb_display`]).
+//!
 //! The evaluators that reproduce lcms2 exactly (`LcmsLut`) read a Lab or an
 //! XYZ PCS, applying a three-input `lut8Type`/`lut16Type` table's matrix as
 //! lcms2 does. They also read ICC v4 `lutAToBType`/`lutBToAType` tables,
@@ -351,6 +355,7 @@ impl LcmsCurve {
 
     /// The curve at `x`, as lcms2's `DefaultEvalParametricFn` and
     /// `LinLerp1D` compute it.
+    #[inline]
     fn eval(&self, x: f64) -> f64 {
         // lcms2's MATRIX_DET_TOLERANCE.
         const TOLERANCE: f64 = 0.0001;
@@ -382,6 +387,15 @@ impl LcmsCurve {
         }
     }
 
+    /// Whether the curve leaves every value as it is: a gamma of exactly 1,
+    /// which `powf` returns unchanged and lcms2 passes negatives through.
+    fn is_identity(&self) -> bool {
+        matches!(
+            *self,
+            LcmsCurve::Gamma(g) | LcmsCurve::Parametric(1, [g, ..]) if g == 1.0
+        )
+    }
+
     fn gamma(g: f64, x: f64) -> f64 {
         if x >= 0.0 {
             x.powf(g)
@@ -394,8 +408,11 @@ impl LcmsCurve {
 
     /// lcms2's 16-bit table lookup: the input saturated to a 16-bit word,
     /// then interpolated in 16.16 fixed point.
+    #[inline]
     fn table(table: &[u16], x: f64) -> f64 {
-        let input = (x * 65535.0 + 0.5).floor().clamp(0.0, 65535.0) as u64;
+        // The cast truncates, which is the floor once clamped to ≥ 0;
+        // `floor` itself is a libm call on baseline x86-64.
+        let input = (x * 65535.0 + 0.5).clamp(0.0, 65535.0) as u64;
         let domain = (table.len() - 1) as u64;
         if input == 0xFFFF || domain == 0 {
             return f64::from(table[domain as usize]) / 65535.0;
@@ -501,7 +518,7 @@ const fn invert3(a: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
 
 /// XYZ-D50 → linear sRGB-D65 through [`XYZ_D50_TO_LINEAR_SRGB_D65`].
 #[inline]
-fn xyz_d50_to_linear_srgb_d65(xyz: [f64; 3]) -> [f64; 3] {
+pub(super) fn xyz_d50_to_linear_srgb_d65(xyz: [f64; 3]) -> [f64; 3] {
     matmul3(&XYZ_D50_TO_LINEAR_SRGB_D65, xyz)
 }
 
@@ -518,7 +535,7 @@ pub(super) fn display_srgb_to_lab(rgb: [f64; 3]) -> [f64; 3] {
 
 /// Linear → gamma-encoded sRGB. Standard sRGB EOTF.
 #[inline]
-fn linear_to_srgb(v: f64) -> f64 {
+pub(super) fn linear_to_srgb(v: f64) -> f64 {
     if v <= 0.003_130_8 {
         12.92 * v
     } else {
@@ -609,6 +626,26 @@ impl SourceA2BSampler {
             SourceA2BSampler::Shaper(sm) => sm.sample_pcs_lab(r, g, b),
         }
     }
+
+    /// Channel `ch` at `x` through the curves before the first stage that
+    /// mixes channels; see [`RgbToXyz`].
+    #[inline]
+    fn leading_curve(&self, ch: usize, x: f64) -> f64 {
+        match self {
+            SourceA2BSampler::Lut(lut) => lut.leading_curve(ch, x),
+            SourceA2BSampler::Shaper(sm) => sm.trc(ch).eval(x),
+        }
+    }
+
+    /// XYZ-D50 (white Y = 1) of the values [`Self::leading_curve`] gives,
+    /// through the rest of the conversion, in stet's frame.
+    #[inline]
+    fn xyz_after_curves(&self, u: [f64; 3]) -> [f64; 3] {
+        match self {
+            SourceA2BSampler::Lut(lut) => lut.xyz_after_curves(u),
+            SourceA2BSampler::Shaper(sm) => sm.xyz_of_linear(u),
+        }
+    }
 }
 
 /// Shaper-matrix RGB profile sampler. Linearises with the per-channel tone
@@ -649,11 +686,21 @@ impl ShaperMatrix {
     /// Absolute XYZ-D50 (white Y = 1) for RGB in `[0, 1]`, in `f64`, in
     /// stet's frame (see [`PcsCoding`]): the colorants are in lcms2's.
     fn sample_xyz(&self, rgb: [f64; 3]) -> [f64; 3] {
-        let lin = [
-            self.trc_r.eval(rgb[0]),
-            self.trc_g.eval(rgb[1]),
-            self.trc_b.eval(rgb[2]),
-        ];
+        self.xyz_of_linear(std::array::from_fn(|ch| self.trc(ch).eval(rgb[ch])))
+    }
+
+    /// Channel `ch`'s tone curve.
+    fn trc(&self, ch: usize) -> &LcmsCurve {
+        match ch {
+            0 => &self.trc_r,
+            1 => &self.trc_g,
+            _ => &self.trc_b,
+        }
+    }
+
+    /// [`Self::sample_xyz`] of the tone curves' output `lin`.
+    #[inline]
+    fn xyz_of_linear(&self, lin: [f64; 3]) -> [f64; 3] {
         let m = &self.matrix;
         std::array::from_fn(|i| {
             let xyz = m[i][0] * lin[0] + m[i][1] * lin[1] + m[i][2] * lin[2];
@@ -691,6 +738,76 @@ pub(super) fn rgb_to_lab(
 ) -> Option<[f64; 3]> {
     let source = SourceA2BSampler::new(profile, icc, intent)?;
     Some(xyz_d50_to_lab(source.sample_xyz(rgb)))
+}
+
+/// An RGB profile's conversion to XYZ under one rendering intent, exactly as
+/// lcms2 evaluates it: the intent's A2B table, else `A2B0`, else the tone
+/// curves and colorant matrix ([`SourceA2BSampler`]). XYZ is D50 with white
+/// Y = 1, in stet's frame, and unclipped. What stet shows a table-based
+/// ICCBased RGB colour or image through outside a proofing chain
+/// ([`super::rgb_display`]).
+///
+/// The evaluation is split where the profile first mixes its channels — a
+/// CLUT, or a matrix — into the per-channel curves before it and the rest.
+/// An 8-bit image has 256 values a channel, so [`Self::each_xyz8`] takes
+/// the curves' output at each from a table filled once by the same function
+/// [`Self::xyz`] calls, and a pixel comes out exactly as the colour of the
+/// same value does, at a fraction of the cost.
+pub(super) struct RgbToXyz {
+    source: SourceA2BSampler,
+    /// The leading curves at each 8-bit code, `[channel][code]`.
+    codes: Box<[[f64; 256]; 3]>,
+}
+
+impl RgbToXyz {
+    /// `None` when the profile is not RGB, or its table for `intent` is one
+    /// stet's evaluators cannot read.
+    pub(super) fn new(profile: &ColorProfile, icc: &[u8], intent: RenderingIntent) -> Option<Self> {
+        let source = SourceA2BSampler::new(profile, icc, intent)?;
+        let mut codes = Box::new([[0.0; 256]; 3]);
+        for (ch, row) in codes.iter_mut().enumerate() {
+            for (code, v) in row.iter_mut().enumerate() {
+                *v = source.leading_curve(ch, f64::from(code as u8) / 255.0);
+            }
+        }
+        Some(Self { source, codes })
+    }
+
+    /// XYZ of `rgb`, each in `[0, 1]`.
+    #[inline]
+    pub(super) fn xyz(&self, rgb: [f64; 3]) -> [f64; 3] {
+        self.source.xyz_after_curves(std::array::from_fn(|ch| {
+            self.source.leading_curve(ch, rgb[ch])
+        }))
+    }
+
+    /// [`Self::xyz`] of each 8-bit pixel of `pixels` (`px / 255`), handed
+    /// to `f` with its index. The profile's shape is matched once, not per
+    /// pixel, so each shape's loop compiles on its own, at twice the speed
+    /// of one loop for all; each calls the functions [`Self::xyz`] does
+    /// after the leading curves, and gives the same XYZ.
+    pub(super) fn each_xyz8(&self, pixels: &[[u8; 3]], mut f: impl FnMut(usize, [f64; 3])) {
+        let curved = |px: &[u8; 3]| -> [f64; 3] {
+            std::array::from_fn(|ch| self.codes[ch][usize::from(px[ch])])
+        };
+        match &self.source {
+            SourceA2BSampler::Lut(LcmsLut::Legacy(l)) => {
+                for (i, px) in pixels.iter().enumerate() {
+                    f(i, l.coding.decode_xyz(l.raw_after_curves(curved(px))));
+                }
+            }
+            SourceA2BSampler::Lut(LcmsLut::Multi(m)) => {
+                for (i, px) in pixels.iter().enumerate() {
+                    f(i, m.coding.decode_xyz(m.raw_after_curves(curved(px))));
+                }
+            }
+            SourceA2BSampler::Shaper(sm) => {
+                for (i, px) in pixels.iter().enumerate() {
+                    f(i, sm.xyz_of_linear(curved(px)));
+                }
+            }
+        }
+    }
 }
 
 /// OutputIntent CMYK profile B2A sampler (Lab → CMYK), owned variant, with
@@ -882,6 +999,7 @@ impl PcsCoding {
     }
 
     /// The table's `[0, 1]` outputs → XYZ (D50, white Y = 1).
+    #[inline]
     fn decode_xyz(self, v: [f64; 3]) -> [f64; 3] {
         match self {
             PcsCoding::Lab(e) => lab_to_xyz_d50(e.decode(v)),
@@ -1096,6 +1214,53 @@ impl OwnedLutSampler {
         })
     }
 
+    /// A three-input table's channel `ch` at `x` through its input curve,
+    /// or unchanged when the table has a matrix, which comes first and
+    /// mixes the channels.
+    #[inline]
+    fn leading_curve(&self, ch: usize, x: f64) -> f64 {
+        if self.matrix.is_some() {
+            return x;
+        }
+        f64::from(sample_curve_f32(
+            &self.input_table,
+            ch,
+            self.n_in_entries,
+            x as f32,
+        ))
+    }
+
+    /// A three-input table's `[0, 1]` PCS outputs for the values
+    /// [`Self::leading_curve`] gives: the matrix and input curves when it
+    /// has a matrix, then the grid and the output curves.
+    #[inline]
+    fn raw_after_curves(&self, u: [f64; 3]) -> [f64; 3] {
+        let curved = match self.matrix {
+            Some(_) => {
+                let v = self.matrixed(u);
+                std::array::from_fn(|ch| {
+                    f64::from(sample_curve_f32(
+                        &self.input_table,
+                        ch,
+                        self.n_in_entries,
+                        v[ch] as f32,
+                    ))
+                })
+            }
+            None => u,
+        };
+        let mut pcs = [0.0; 3];
+        eval3_lcms(&self.cube_data, self.cube_grid, curved, &mut pcs);
+        std::array::from_fn(|ch| {
+            f64::from(sample_curve_f32(
+                &self.output_table,
+                ch,
+                self.n_out_entries,
+                pcs[ch] as f32,
+            ))
+        })
+    }
+
     /// 3-in / 3-out: an RGB source's ink → its PCS Lab in the legacy v2
     /// `lut16Type` encoding (each in `[0, 1]`, `0xFF00`-denominated), the
     /// form an OutputIntent's B2A input curves take: through the input
@@ -1202,6 +1367,7 @@ impl LcmsLut {
     }
 
     /// How the table encodes its PCS side.
+    #[inline]
     fn coding(&self) -> PcsCoding {
         match self {
             LcmsLut::Legacy(l) => l.coding,
@@ -1284,6 +1450,27 @@ impl LcmsLut {
                 m.coding.decode_lab([out[0], out[1], out[2]])
             }
         }
+    }
+
+    /// A three-input table's channel `ch` at `x` through the curves before
+    /// its first stage that mixes channels; see [`RgbToXyz`].
+    #[inline]
+    fn leading_curve(&self, ch: usize, x: f64) -> f64 {
+        match self {
+            LcmsLut::Legacy(l) => l.leading_curve(ch, x),
+            LcmsLut::Multi(m) => m.leading_curve(ch, x),
+        }
+    }
+
+    /// XYZ (D50, white Y = 1) of the values [`Self::leading_curve`] gives,
+    /// through the rest of the table; unclipped, as lcms2 carries it.
+    #[inline]
+    fn xyz_after_curves(&self, u: [f64; 3]) -> [f64; 3] {
+        let raw = match self {
+            LcmsLut::Legacy(l) => l.raw_after_curves(u),
+            LcmsLut::Multi(m) => m.raw_after_curves(u),
+        };
+        self.coding().decode_xyz(raw)
     }
 }
 
@@ -1384,8 +1571,14 @@ impl MultiLut {
         {
             return None;
         }
+        // A set of identity curves (an empty `curv` each, the usual filler)
+        // is dropped: evaluating it changes nothing and costs a `powf` a
+        // channel.
         let curves = |set: Vec<LcmsCurve>, n: usize| -> Option<Vec<LcmsCurve>> {
-            (set.is_empty() || set.len() == n).then_some(set)
+            if set.iter().all(LcmsCurve::is_identity) {
+                return Some(Vec::new());
+            }
+            (set.len() == n).then_some(set)
         };
         let clut = match &t.clut {
             Some(store) => {
@@ -1436,12 +1629,45 @@ impl MultiLut {
         out[..self.n_out].copy_from_slice(&v[..self.n_out]);
     }
 
+    /// A device-to-PCS table's channel `ch` at `x` through the curves
+    /// before its first stage that mixes channels: the A curves, then the
+    /// M curves when there is no CLUT between them.
+    #[inline]
+    fn leading_curve(&self, ch: usize, x: f64) -> f64 {
+        let mut v = x;
+        if let Some(curve) = self.a.get(ch) {
+            v = curve.eval(v);
+        }
+        if self.clut.is_none()
+            && let Some(curve) = self.m.get(ch)
+        {
+            v = curve.eval(v);
+        }
+        v
+    }
+
+    /// A three-input device-to-PCS table's `[0, 1]` PCS outputs for the
+    /// values [`Self::leading_curve`] gives: [`Self::eval`] after them.
+    #[inline]
+    fn raw_after_curves(&self, u: [f64; 3]) -> [f64; 3] {
+        let mut v = [u[0], u[1], u[2], 0.0];
+        if self.clut.is_some() {
+            self.clut(&mut v);
+            Self::curves(&self.m, &mut v);
+        }
+        self.matrix(&mut v);
+        Self::curves(&self.b, &mut v);
+        [v[0], v[1], v[2]]
+    }
+
+    #[inline]
     fn curves(set: &[LcmsCurve], v: &mut [f64; 4]) {
         for (curve, x) in set.iter().zip(v.iter_mut()) {
             *x = curve.eval(*x);
         }
     }
 
+    #[inline]
     fn matrix(&self, v: &mut [f64; 4]) {
         let m = &self.matrix;
         let x = [v[0], v[1], v[2]];
@@ -1450,6 +1676,7 @@ impl MultiLut {
         }
     }
 
+    #[inline]
     fn clut(&self, v: &mut [f64; 4]) {
         let Some((data, grids)) = &self.clut else {
             return;
@@ -1458,6 +1685,10 @@ impl MultiLut {
         match *grids.as_slice() {
             [g0, g1, g2, g3] => {
                 eval4_grids(data, [g0, g1, g2, g3], *v, &mut out[..self.n_out]);
+            }
+            [g0, g1, g2] if self.n_out == 3 && self.to_pcs => {
+                let [a, b, c] = tetrahedral3_rgb(data, [g0, g1, g2], [v[0], v[1], v[2]]);
+                out[..3].copy_from_slice(&[a, b, c]);
             }
             [g0, g1, g2] => {
                 let trilinear = !self.to_pcs && self.coding != PcsCoding::Xyz;
@@ -1513,13 +1744,15 @@ fn eval4_grids(cube: &[f32], grids: [usize; 4], input: [f64; 4], out: &mut [f64]
 /// lcms2's interpolation of a three-input table (`TetrahedralInterp16`):
 /// tetrahedral. `cube` holds the grid with the last input varying fastest
 /// and three outputs per point.
+#[inline]
 fn eval3_lcms(cube: &[f32], grid: usize, input: [f64; 3], out: &mut [f64; 3]) {
-    eval3_grids(cube, [grid; 3], input, false, out);
+    *out = tetrahedral3_rgb(cube, [grid; 3], input);
 }
 
 /// [`eval3_lcms`] on a grid with its own number of points per input, and
 /// `out.len()` outputs per point; `trilinear` as lcms2 reads a Lab-indexed
 /// output table.
+#[inline]
 fn eval3_grids(cube: &[f32], grids: [usize; 3], input: [f64; 3], trilinear: bool, out: &mut [f64]) {
     let [s0, s1, s2] = strides(grids, out.len());
     let x = grid_axis(input[0], grids[0], s0);
@@ -1535,6 +1768,7 @@ fn eval3_grids(cube: &[f32], grids: [usize; 3], input: [f64; 3], trilinear: bool
 /// The distance between neighbouring points along each input of a grid
 /// with `grids` points per input, the last varying fastest, and `n_out`
 /// outputs per point.
+#[inline]
 fn strides<const N: usize>(grids: [usize; N], n_out: usize) -> [usize; N] {
     let mut s = [0; N];
     let mut stride = n_out;
@@ -1575,16 +1809,20 @@ fn trilinear3(
 /// One input's grid offset, fraction and the offset to the next grid
 /// point, for an input in `[0, 1]` on a `grid`-point axis whose points are
 /// `stride` apart.
+#[inline]
 fn grid_axis(v: f64, grid: usize, stride: usize) -> (usize, f64, usize) {
     let v = v.clamp(0.0, 1.0);
     let p = v * (grid - 1) as f64;
-    let i = (p.floor() as usize).min(grid - 1);
+    // `p` is not negative, so the cast is its floor (NaN casts to 0, as
+    // its floor would); `floor` itself is a libm call on baseline x86-64.
+    let i = (p as usize).min(grid - 1);
     let step = if v >= 1.0 { 0 } else { stride };
     (i * stride, p - i as f64, step)
 }
 
 /// lcms2's `TetrahedralInterpFloat` over one three-input slice of a grid
 /// starting at `base`; each axis is `(offset, fraction, step)`.
+#[inline]
 fn tetrahedral3(
     cube: &[f32],
     base: usize,
@@ -1640,6 +1878,51 @@ fn tetrahedral3(
     }
 }
 
+/// [`tetrahedral3`] over a whole three-output grid, as a per-pixel path
+/// wants it: the tetrahedron is chosen once and all three outputs taken
+/// inside the branch that chose it, with the same arithmetic in the same
+/// order, so the results are the same to the bit.
+#[inline]
+fn tetrahedral3_rgb(cube: &[f32], grids: [usize; 3], input: [f64; 3]) -> [f64; 3] {
+    let s2 = 3;
+    let s1 = s2 * grids[2];
+    let s0 = s1 * grids[1];
+    let (x0, rx, x) = grid_axis(input[0], grids[0], s0);
+    let (y0, ry, y) = grid_axis(input[1], grids[1], s1);
+    let (z0, rz, z) = grid_axis(input[2], grids[2], s2);
+    let cell = &cube[x0 + y0 + z0..];
+    // `[minuend, subtrahend]` corner offsets of c1, c2 and c3.
+    let outputs = |[d1, d2, d3]: [[usize; 2]; 3]| -> [f64; 3] {
+        std::array::from_fn(|ch| {
+            let d = |offset: usize| f64::from(cell[offset + ch]);
+            let c0 = d(0);
+            let (c1, c2, c3) = (
+                d(d1[0]) - d(d1[1]),
+                d(d2[0]) - d(d2[1]),
+                d(d3[0]) - d(d3[1]),
+            );
+            c0 + c1 * rx + c2 * ry + c3 * rz
+        })
+    };
+    if rx >= ry && ry >= rz {
+        outputs([[x, 0], [x + y, x], [x + y + z, x + y]])
+    } else if rx >= rz && rz >= ry {
+        outputs([[x, 0], [x + y + z, x + z], [x + z, x]])
+    } else if rz >= rx && rx >= ry {
+        outputs([[x + z, z], [x + y + z, x + z], [z, 0]])
+    } else if ry >= rx && rx >= rz {
+        outputs([[x + y, y], [y, 0], [x + y + z, x + y]])
+    } else if ry >= rz && rz >= rx {
+        outputs([[x + y + z, y + z], [y, 0], [y + z, y]])
+    } else if rz >= ry && ry >= rx {
+        outputs([[x + y + z, y + z], [y + z, z], [z, 0]])
+    } else {
+        // A NaN fraction: lcms2 leaves the differences zero.
+        let c0: [f64; 3] = std::array::from_fn(|ch| f64::from(cell[ch]));
+        std::array::from_fn(|ch| c0[ch] + 0.0 * rx + 0.0 * ry + 0.0 * rz)
+    }
+}
+
 /// 1D curve lookup over a pre-`/65535`-converted `f32` table, so per-pixel
 /// runtime cost stays low.
 #[inline]
@@ -1647,7 +1930,8 @@ fn sample_curve_f32(table: &[f32], ch: usize, n_entries: usize, x: f32) -> f32 {
     let base = ch * n_entries;
     let scale = (n_entries - 1) as f32;
     let pos = x.clamp(0.0, 1.0) * scale;
-    let i0 = pos.floor() as usize;
+    // `pos` is not negative: the cast is its floor, without a libm call.
+    let i0 = pos as usize;
     let i1 = (i0 + 1).min(n_entries - 1);
     let t = pos - i0 as f32;
     let v0 = table[base + i0];

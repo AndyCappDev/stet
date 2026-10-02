@@ -256,6 +256,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   says, within 0.1 ink levels of lcms2, and the page group shows that ink
   as DeviceCMYK is shown. In the test corpus, three PDFs with a DeviceCMYK
   page group move by up to 14 levels, their flat colours now Ghostscript's.
+- **ICCBased RGB colours and images whose profile has A2B tables honour
+  the rendering intent and black-point compensation, and display as lcms2
+  does.** Scanner, camera and RGB printer profiles carry a table per
+  intent. stet used the perceptual table whatever the document asked
+  for, though PDF's default is relative colorimetric, and compensated
+  nothing. It went through moxcms, which also misreads some ICC v4
+  tables: up to 92 levels off. These profiles now go through stet's own
+  evaluators, within a quarter of a level of lcms2, and each image pixel
+  is exactly the colour of its value. Matrix-shaper profiles (sRGB,
+  Adobe RGB, Display P3) are unchanged. In the test corpus, one scanner
+  image in `2142.pdf` moves by a level.
 - **Relative colorimetric CMYK rendered lighter than Ghostscript and
   Acrobat** with black-point compensation on, the default. Compensation
   maps the profile's black to sRGB black, and stet took that black to be

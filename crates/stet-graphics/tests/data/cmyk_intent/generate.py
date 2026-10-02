@@ -53,13 +53,20 @@ script runs it once and records what it produces. It writes, next to itself:
                  others in a set (which moxcms 0.8.1 misreads), and elements
                  left out.
   rgb_mab.icc    An ICC v4 RGB profile with `lutAToBType` A2B0 and A2B1.
+  rgb_mixed.icc  An ICC v4 input-class RGB profile with an XYZ PCS and a
+                 `lutAToBType` A2B0 with no CLUT: tone curves, a matrix that
+                 mixes the channels, then curves flat near zero, as
+                 `2142.pdf`'s second scanner profile has — the shape no
+                 grid of RGB inputs samples well.
   reference.rs   lcms2's sRGB output for each profile, intent and BPC setting,
                  its black points as a source and as a destination, the
                  round trip behind them, and its proofing-chain stage 1
                  (CMYK, RGB, Gray or Lab source → output-intent CMYK) for each
                  intent, with and without black-point compensation, and its
-                 tone-curve evaluation for each curve kind;
-                 included by `tests/cmyk_intent.rs`.
+                 tone-curve evaluation for each curve kind, and its
+                 built-in sRGB output for each RGB profile with an A2B
+                 table; included by `tests/cmyk_intent.rs` and
+                 `tests/rgb_display.rs`.
 
 The profiles are ICC v2 output (`prtr`) profiles with a Lab PCS unless named
 otherwise. Most use `lut16Type` tables — the shape of FOGRA39, ISO Coated v2
@@ -805,6 +812,42 @@ def rgb_mab_profile(description):
         (b"A2B1", a2b(1.0)),
     ]
     return assemble(tags, b"mntr", b"RGB ", b"Lab ", 0x04200000)
+
+
+def rgb_mixed_profile(description):
+    """An input-class ICC v4 RGB profile, XYZ PCS, whose `lutAToBType` A2B0
+    has no CLUT: M curves, a matrix with an offset that mixes the channels,
+    and B curves flat below 0.012 then steep."""
+    # sRGB's colorants adapted to D50, in the XYZ encoding (1.0 ↦ 0x8000).
+    rows = [
+        [0.4360747, 0.3850649, 0.1430804],
+        [0.2225045, 0.7168786, 0.0606169],
+        [0.0139322, 0.0971045, 0.7141733],
+    ]
+    rows = [[v * 32768 / 65535 for v in row] for row in rows]
+
+    def flat_then_steep(x):
+        return 0.0 if x < 0.012 else min(1.0, 0.5 * ((x - 0.012) / 0.488) ** 1.1)
+
+    b = curv_tag([flat_then_steep(i / 511) for i in range(512)])
+    a2b0 = multi_tag(
+        True,
+        3,
+        3,
+        m=[
+            para_tag(0, [2.2]),
+            curv_tag([(i / 63) ** 1.8 for i in range(64)]),
+            para_tag(3, [2.4, 1 / 1.055, 0.055 / 1.055, 1 / 12.92, 0.04045]),
+        ],
+        matrix=(rows, [0.006, 0.006, 0.006]),
+        b=[b, b, b],
+    )
+    tags = [
+        (b"desc", desc_tag(description)),
+        (b"wtpt", xyz_tag(*D50)),
+        (b"A2B0", a2b0),
+    ]
+    return assemble(tags, b"scnr", b"RGB ", b"XYZ ", 0x04200000)
 
 
 # ------------------------------------------------------------------ lcms2
@@ -1625,6 +1668,61 @@ def rust_reverse(name, icc):
     )
 
 
+# RGB inputs for the display tables, 0–255: `RGB_SAMPLES`, then a 5×5×5 grid.
+DISPLAY_LEVELS = [0, 50, 128, 200, 255]
+DISPLAY_SAMPLES = list(RGB_SAMPLES) + [
+    (r, g, b) for r in DISPLAY_LEVELS for g in DISPLAY_LEVELS for b in DISPLAY_LEVELS
+]
+
+# RGB profiles with A2B tables, whose display tables the tests check.
+DISPLAY = ["RGB_LUT", "RGB_LUT_V4", "RGB_MAB", "RGB_XYZ", "RGB_XYZ_MAB", "RGB_MIXED"]
+
+
+def rust_rgb_display(name, icc):
+    """lcms2's built-in sRGB output for an RGB profile, unoptimised, in
+    doubles, for each intent and black-point compensation setting."""
+    src = Lcms(icc[name])
+    dst = Lcms(icc["SRGB"])
+    lines = [
+        f"/// lcms2's built-in sRGB of `{name.lower()}.icc` at each of",
+        "/// `DISPLAY_SAMPLES`, 0–1, indexed `[intent][bpc]`: intent 0",
+        "/// perceptual, 1 relative colorimetric, 2 saturation; black-point",
+        "/// compensation 0 off, 1 on.",
+        f"pub static DISPLAY_{name}: [[[[f64; 3]; {len(DISPLAY_SAMPLES)}]; 2]; 3] = [",
+    ]
+    for intent in (PERCEPTUAL, RELATIVE_COLORIMETRIC, SATURATION):
+        lines.append("    [")
+        for bpc in (False, True):
+            xform = LCMS.cmsCreateExtendedTransform(
+                None,
+                2,
+                (ctypes.c_void_p * 2)(src.profile, dst.profile),
+                (ctypes.c_int * 2)(int(bpc), int(bpc)),
+                (ctypes.c_uint32 * 2)(intent, intent),
+                (ctypes.c_double * 2)(1.0, 1.0),
+                None,
+                0,
+                TYPE_RGB_DBL,
+                TYPE_RGB_DBL,
+                FLAGS_NOCACHE_NOOPTIMIZE,
+            )
+            assert xform, f"lcms2 could not build {name}'s sRGB transform"
+            lines.append("        [")
+            for rgb in DISPLAY_SAMPLES:
+                s_ = (ctypes.c_double * 3)(*(v / 255 for v in rgb))
+                d = (ctypes.c_double * 3)()
+                LCMS.cmsDoTransform(xform, s_, d, 1)
+                values = ", ".join(repr(round(min(max(v, 0.0), 1.0), 6)) for v in d)
+                lines.append(f"            [{values}],")
+            LCMS.cmsDeleteTransform(xform)
+            lines.append("        ],")
+        lines.append("    ],")
+    lines.append("];")
+    src.close()
+    dst.close()
+    return "\n".join(lines)
+
+
 def main():
     profiles = [
         ("SPLIT", profile("stet test: A2B0 != A2B1, no A2B2", with_saturation=False)),
@@ -1680,6 +1778,7 @@ def main():
         ("XYZ_MAB", xyz_mab_profile("stet test: CMYK, XYZ PCS, ICC v4 mAB/mBA")),
         ("RGB_XYZ", rgb_xyz_profile("stet test: RGB, XYZ PCS, lut16 A2B0/A2B1")),
         ("RGB_XYZ_MAB", rgb_xyz_mab_profile("stet test: RGB, XYZ PCS, ICC v4 mAB A2B0")),
+        ("RGB_MIXED", rgb_mixed_profile("stet test: RGB, XYZ PCS, mAB with no CLUT")),
         (
             "INKLIMIT_A2B",
             profile(
@@ -1745,6 +1844,7 @@ def main():
             "INKLIMIT_MATRIX",
             "RGB_XYZ",
             "RGB_XYZ_MAB",
+            "RGB_MIXED",
             "INKLIMIT_A2B",
         ):
             out += [rust_black_point(name, icc[name]), ""]
@@ -1801,6 +1901,14 @@ def main():
         out += [rust_rgb_lab(name, icc[name]), ""]
     for name in REVERSE:
         out += [rust_reverse(name, icc), ""]
+    displays = ", ".join(f"[{r}, {g}, {b}]" for r, g, b in DISPLAY_SAMPLES)
+    out += [
+        "/// RGB inputs, 0–255, in the order of the display tables below.",
+        f"pub const DISPLAY_SAMPLES: [[u8; 3]; {len(DISPLAY_SAMPLES)}] = [{displays}];",
+        "",
+    ]
+    for name in DISPLAY:
+        out += [rust_rgb_display(name, icc), ""]
     (HERE / "reference.rs").write_text("\n".join(out))
 
 

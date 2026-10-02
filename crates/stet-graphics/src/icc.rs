@@ -12,6 +12,7 @@ mod black_point;
 pub mod bpc;
 mod cmyk_tables;
 mod hand_rolled;
+mod rgb_display;
 
 use bpc::{BpcParams, apply_bpc_f64, apply_bpc_rgb_u8};
 use cmyk_tables::CmykTables;
@@ -19,6 +20,7 @@ use moxcms::{
     CmsError, ColorProfile, DataColorSpace, Layout, RenderingIntent, TransformExecutor,
     TransformOptions,
 };
+use rgb_display::RgbDisplay;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -262,7 +264,8 @@ const OUTPUT_INTENT_DISPLAY: RenderingIntent = RenderingIntent::RelativeColorime
 #[derive(Clone)]
 struct CachedTransform {
     /// 8-bit transform for image data, used by callers that pass no
-    /// intent and by intents whose chain slot is empty. When proofing is
+    /// intent and by intents whose chain slot is empty, except on a
+    /// table-based RGB profile outside a chain (`rgb_display`). When proofing is
     /// enabled and the source is RGB, CMYK or TRC-only Gray, this is the
     /// relative colorimetric chain. Otherwise it is moxcms's transform for the first
     /// intent that builds, Perceptual first — so for a CMYK profile outside
@@ -301,6 +304,11 @@ struct CachedTransform {
     /// intent. Only for `n == 4` profiles outside proofing chains; `None`
     /// otherwise.
     cmyk_tables: Option<Arc<CmykTables>>,
+    /// A table-based RGB profile's conversions to sRGB, one per rendering
+    /// intent, outside a proofing chain: what its colours and images use
+    /// in place of `transform_*`. `None` for a matrix-shaper, which moxcms
+    /// converts exactly.
+    rgb_display: Option<Arc<RgbDisplay>>,
     /// Cached Black Point Compensation parameters for this profile. Computed
     /// when `n == 4` and `IccCache::bpc_mode` is enabled. Applied as a
     /// post-correction on the moxcms output (sRGB → XYZ-D50 → BPC shift →
@@ -312,6 +320,17 @@ impl CachedTransform {
     /// The baked CMYK table for `intent`, baking it on first use.
     fn clut4(&self, intent: RenderingIntent) -> Option<&Clut4> {
         self.cmyk_tables.as_ref()?.get(intent)
+    }
+
+    /// A table-based RGB profile's sRGB for `src` (three components in
+    /// `[0, 1]`) under `intent`; `None` for any other profile, or a table
+    /// stet cannot read, which keep `transform_f64`.
+    fn rgb_display(&self, src: &[f64], intent: RenderingIntent) -> Option<(f64, f64, f64)> {
+        let [r, g, b] = self
+            .rgb_display
+            .as_ref()?
+            .convert(intent, [src[0], src[1], src[2]])?;
+        Some((r, g, b))
     }
 }
 
@@ -961,6 +980,18 @@ impl IccCache {
             None
         };
 
+        // A table-based RGB profile outside a proofing chain: exact
+        // conversions per intent, built on first use, in place of moxcms's
+        // transform, which reads the perceptual table whatever the intent
+        // and compensates nothing (see `rgb_display`). Not when any intent
+        // has a chain, which that intent's conversions take.
+        let no_chain = !chain_active && chain_per_intent_f64.iter().all(Option::is_none);
+        let rgb_display = if n == 3 && no_chain {
+            RgbDisplay::new(profile.clone(), bytes, self.bpc_mode.is_enabled()).map(Arc::new)
+        } else {
+            None
+        };
+
         self.profiles.insert(hash, profile);
         self.transforms.insert(
             hash,
@@ -973,6 +1004,7 @@ impl IccCache {
                 n,
                 is_lab,
                 cmyk_tables,
+                rgb_display,
                 bpc_params,
             },
         );
@@ -1000,6 +1032,7 @@ impl IccCache {
                 n: 1,
                 is_lab: false,
                 cmyk_tables: None,
+                rgb_display: None,
                 bpc_params: None,
             },
         );
@@ -1105,6 +1138,8 @@ impl IccCache {
             // stops byte-for-byte. BPC is already folded into the CLUT.
             let (r, g, b) = sample_clut4_single_f64(clut, src[0], src[1], src[2], src[3]);
             (r, g, b)
+        } else if let Some(rgb) = cached.rgb_display(&src, RenderingIntent::RelativeColorimetric) {
+            rgb
         } else {
             let mut dst = [0.0f64; 3];
             if cached.transform_f64.transform(&src, &mut dst).is_err() {
@@ -1175,10 +1210,12 @@ impl IccCache {
     /// perceptual `A2B0`, saturation `A2B2`, with black-point compensation
     /// as lcms2 applies it — except the output intent of a PDF/X document,
     /// which is always shown relative colorimetric (see `cmyk_intent`);
-    /// profiles in a proofing chain through that intent's chain.
-    /// Otherwise this falls back to the cached default transform, which
-    /// matches [`Self::convert_color_readonly`] byte-for-byte and is the
-    /// common case for non-PDF/X RGB, Gray and Lab profiles.
+    /// RGB profiles with A2B tables through `intent`'s table, evaluated as
+    /// lcms2 evaluates it, with its black-point compensation; profiles in a
+    /// proofing chain through that intent's chain. Otherwise this falls
+    /// back to the cached default transform, which matches
+    /// [`Self::convert_color_readonly`] byte-for-byte and is the common
+    /// case for matrix-shaper RGB, Gray and Lab profiles outside PDF/X.
     pub fn convert_color_readonly_with_intent(
         &self,
         hash: &ProfileHash,
@@ -1208,6 +1245,9 @@ impl IccCache {
         {
             let (r, g, b) = sample_clut4_single_f64(clut, src[0], src[1], src[2], src[3]);
             return Some((r, g, b));
+        }
+        if let Some(rgb) = cached.rgb_display(&src, intent) {
+            return Some(rgb);
         }
 
         let transform = cached.chain_per_intent_f64[intent as usize]
@@ -1258,6 +1298,9 @@ impl IccCache {
             let (r, g, b) = sample_clut4_single_f64(clut, src[0], src[1], src[2], src[3]);
             return Some((r, g, b));
         }
+        if let Some(rgb) = cached.rgb_display(&src, RenderingIntent::RelativeColorimetric) {
+            return Some(rgb);
+        }
 
         let mut dst = [0.0f64; 3];
         if cached.transform_f64.transform(&src, &mut dst).is_err() {
@@ -1275,7 +1318,9 @@ impl IccCache {
     /// Bulk-convert 8-bit image samples through an ICC profile to RGB
     /// using a specific rendering intent: CMYK profiles through the baked
     /// table for `intent` (the output intent of a PDF/X document always
-    /// relative colorimetric), profiles in a proofing chain through that
+    /// relative colorimetric), RGB profiles with A2B tables through
+    /// `intent`'s table as single colours convert (each pixel is the colour
+    /// of its value, rounded), profiles in a proofing chain through that
     /// intent's chain. Otherwise this falls back to the cached default
     /// 8-bit transform, which matches [`Self::convert_image_8bit`]
     /// byte-for-byte.
@@ -1300,6 +1345,12 @@ impl IccCache {
                 &samples[..expected_len],
                 pixel_count,
             ));
+        }
+
+        if let Some(display) = cached.rgb_display.as_ref()
+            && let Some(rgb) = display.convert_image(intent, &samples[..expected_len])
+        {
+            return Some(rgb);
         }
 
         let transform = cached.chain_per_intent_8bit[intent as usize]
@@ -1351,6 +1402,15 @@ impl IccCache {
                 &samples[..expected_len],
                 pixel_count,
             ));
+        }
+
+        if let Some(display) = cached.rgb_display.as_ref()
+            && let Some(rgb) = display.convert_image(
+                RenderingIntent::RelativeColorimetric,
+                &samples[..expected_len],
+            )
+        {
+            return Some(rgb);
         }
 
         let src = &samples[..expected_len];
