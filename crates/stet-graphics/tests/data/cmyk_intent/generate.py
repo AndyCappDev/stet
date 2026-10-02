@@ -21,9 +21,13 @@ script runs it once and records what it produces. It writes, next to itself:
                  inklimit.icc as `lut8Type` (the shape of Adobe's profiles),
                  as an input-class profile, as ICC v4, and without A2B0: each
                  changes which black point lcms2 picks.
+  split_xyz.icc  A CMYK profile with an XYZ PCS, A2B0 != A2B1, which stet's
+                 hand-rolled evaluators do not read: the proofing chain's
+                 moxcms fallback.
   reference.rs   lcms2's sRGB output for each profile, intent and BPC setting,
-                 its black points, and the round trip behind them; included
-                 by `tests/cmyk_intent.rs`.
+                 its black points, the round trip behind them, and its
+                 proofing-chain stage 1 (CMYK source → output-intent CMYK) for
+                 each intent; included by `tests/cmyk_intent.rs`.
 
 The profiles are ICC v2 output (`prtr`) profiles with a Lab PCS unless named
 otherwise. Most use `lut16Type` tables — the shape of FOGRA39, ISO Coated v2
@@ -202,7 +206,10 @@ def profile(
     ]
     if with_saturation:
         tags += [(b"A2B2", A2B2(bits)), (b"B2A2", B2A(bits))]
+    return assemble(tags, device_class, b"CMYK", b"Lab ", version)
 
+
+def assemble(tags, device_class, colour_space, pcs, version):
     table_len = 4 + 12 * len(tags)
     table = struct.pack(">I", len(tags))
     data = b""
@@ -216,11 +223,48 @@ def profile(
     header[0:4] = struct.pack(">I", total)
     header[8:12] = struct.pack(">I", version)
     header[12:16] = device_class
-    header[16:20] = b"CMYK"
-    header[20:24] = b"Lab "
+    header[16:20] = colour_space
+    header[20:24] = pcs
     header[36:40] = b"acsp"
     header[68:80] = xyz_tag(0.9642, 1.0, 0.8249)[8:]
     return bytes(header) + table + data
+
+
+def xyz_table(x, y, z):
+    """A2B clut: CMYK → XYZ, each affine in CMYK so every interpolation
+    reproduces it. `lut16Type` XYZ is u1Fixed15: 1.0 at 0x8000."""
+
+    def clut(cmyk):
+        out = [x(*cmyk), y(*cmyk), z(*cmyk)]
+        assert all(0 < v <= 1 for v in out)
+        return [v * 32768 / 65535 for v in out]
+
+    return lut(16, 4, 3, clut)
+
+
+# Cyan absorbs mostly X, magenta Y, yellow Z; 400% ink keeps 5% of each.
+XYZ_A2B1 = xyz_table(
+    lambda c, m, y, k: 0.9642 * (1 - 0.36 * c - 0.16 * m - 0.03 * y - 0.40 * k),
+    lambda c, m, y, k: 1 - 0.14 * c - 0.38 * m - 0.06 * y - 0.37 * k,
+    lambda c, m, y, k: 0.8249 * (1 - 0.10 * c - 0.22 * m - 0.45 * y - 0.18 * k),
+)
+# A2B0: a lighter black and less contrast.
+XYZ_A2B0 = xyz_table(
+    lambda c, m, y, k: 0.9642 * (1 - 0.30 * c - 0.13 * m - 0.03 * y - 0.34 * k),
+    lambda c, m, y, k: 1 - 0.12 * c - 0.32 * m - 0.05 * y - 0.32 * k,
+    lambda c, m, y, k: 0.8249 * (1 - 0.08 * c - 0.18 * m - 0.40 * y - 0.15 * k),
+)
+
+
+def xyz_profile(description):
+    """A source-only CMYK profile with an XYZ PCS: A2B0 and A2B1."""
+    tags = [
+        (b"desc", desc_tag(description)),
+        (b"wtpt", xyz_tag(0.9642, 1.0, 0.8249)),
+        (b"A2B0", XYZ_A2B0),
+        (b"A2B1", XYZ_A2B1),
+    ]
+    return assemble(tags, b"prtr", b"CMYK", b"XYZ ", 0x02100000)
 
 
 # ------------------------------------------------------------------ lcms2
@@ -456,6 +500,52 @@ def rust_round_trip(name, icc):
     )
 
 
+# Proofing-chain stage 1: source → output-intent CMYK. `inklimit.icc` is the
+# output intent: its B2A0 differs from its B2A1 and it has no B2A2, so
+# saturation reads B2A0. `split.icc` has no A2B2, so saturation reads its
+# A2B0 too; `split_sat.icc` has one. `split_xyz.icc` goes into `split.icc`,
+# whose B2A tables are affine in L*: moxcms interpolates a Lab-indexed table
+# its own way, and the ink-limited B2A0 is built to tell interpolations
+# apart.
+CHAIN_PAIRS = [
+    ("SPLIT", "INKLIMIT"),
+    ("SPLIT_SAT", "INKLIMIT"),
+    ("SPLIT_LUT8", "INKLIMIT_LUT8"),
+    ("SPLIT_XYZ", "SPLIT"),
+]
+
+
+def rust_chain(source, oi, icc):
+    src = Lcms(icc[source])
+    out = Lcms(icc[oi])
+    lines = [
+        f"/// lcms2's proofing-chain stage 1, `{source.lower()}.icc` into",
+        f"/// `{oi.lower()}.icc` without black-point compensation, at each of",
+        "/// `SAMPLES`; ink 0–1, indexed by intent: 0 perceptual, 1 relative",
+        "/// colorimetric, 2 saturation.",
+        f"pub const CHAIN_{source}_{oi}: [[[f64; 4]; {len(SAMPLES)}]; 3] = [",
+    ]
+    for intent in (PERCEPTUAL, RELATIVE_COLORIMETRIC, SATURATION):
+        inks = lcms_chain(
+            [src.profile, out.profile],
+            [intent, intent],
+            TYPE_CMYK_DBL,
+            TYPE_CMYK_DBL,
+            [[v * 100 / 255 for v in sample] for sample in SAMPLES],
+            4,
+        )
+        lines.append("    [")
+        lines += [
+            "        " + f64_array([min(max(v / 100, 0.0), 1.0) for v in ink]) + ","
+            for ink in inks
+        ]
+        lines.append("    ],")
+    lines.append("];")
+    src.close()
+    out.close()
+    return "\n".join(lines)
+
+
 def rust_table(name, icc):
     lines = [
         f"/// lcms2's sRGB output for `{name.lower()}.icc`, indexed",
@@ -508,6 +598,7 @@ def main():
             profile("stet test: inklimit.icc without A2B0", perceptual=None, **inklimit),
         ),
     ]
+    profiles.append(("SPLIT_XYZ", xyz_profile("stet test: CMYK, XYZ PCS, A2B0 != A2B1")))
     for name, icc in profiles:
         (HERE / f"{name.lower()}.icc").write_bytes(icc)
     icc = dict(profiles)
@@ -534,9 +625,12 @@ def main():
     for name in ["SPLIT", "SPLIT_SAT", "SPLIT_LUT8", "SAME", "INKLIMIT", "INKLIMIT_LUT8", "INKLIMIT_SCNR", "INKLIMIT_V4"]:
         out += [rust_table(name, icc[name]), ""]
     for name, _ in profiles:
-        out += [rust_black_point(name, icc[name]), ""]
+        if name != "SPLIT_XYZ":
+            out += [rust_black_point(name, icc[name]), ""]
     for name in ["INKLIMIT", "INKLIMIT_LUT8"]:
         out += [rust_round_trip(name, icc[name]), ""]
+    for source, oi in CHAIN_PAIRS:
+        out += [rust_chain(source, oi, icc), ""]
     (HERE / "reference.rs").write_text("\n".join(out))
 
 

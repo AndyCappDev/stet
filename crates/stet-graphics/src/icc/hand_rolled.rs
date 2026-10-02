@@ -17,19 +17,21 @@
 //! colours clip to the sRGB boundary (also matching lcms2 / GS).
 //!
 //! The same building blocks are reused for the PDF/X **proofing chain**
-//! (`source RGB → OutputIntent CMYK`, used as the first leg of the
-//! source-through-OI chain in `register_profile_with_n`).
-//! [`HandRolledChainStage1Rgb`] composes a `SourceA2BSampler` and a
-//! `LabToCmykSampler` per pixel and implements
-//! [`moxcms::TransformExecutor`] for both `u8` and `f64` so it slots
-//! directly into the `ChainedTransform` stage-1 slot.
+//! (`source → OutputIntent CMYK`, the first leg of the source-through-OI
+//! chain in `register_profile_with_n`). [`HandRolledChainStage1Rgb`]
+//! composes a `SourceA2BSampler` and a `LabToCmykSampler` per pixel;
+//! [`HandRolledChainStage1Cmyk`] composes a CMYK source's A2B table and the
+//! OutputIntent's B2A table with lcms2's own interpolation. Both implement
+//! [`moxcms::TransformExecutor`] for `u8` and `f64` so they slot directly
+//! into the `ChainedTransform` stage-1 slot.
 //!
-//! Profiles whose tables are `mAB`/`mBA` (v4 multi-process elements) or
-//! `lut8Type` (mft1) fall back to the moxcms-based bake; callers detect
-//! the `None` return and use the existing path. `lut8Type` tables are read
-//! for one purpose only, the black point lcms2 would detect (see
-//! [`OwnedLutSampler::for_black_point`]): widening the bake or the
-//! proofing chain to them would move every colour through those profiles.
+//! Profiles whose tables are `mAB`/`mBA` (v4 multi-process elements) fall
+//! back to moxcms; callers detect the `None` return and use the existing
+//! path. `lut8Type` (mft1) tables are read only by the evaluators that
+//! reproduce lcms2 exactly (see [`OwnedLutSampler::lcms_exact`]): the
+//! black point lcms2 would detect, and the CMYK chain stage 1. Widening
+//! the bake or the RGB chain to them would move every colour through those
+//! profiles.
 
 use moxcms::{
     CmsError, ColorProfile, Cube, DataColorSpace, Hypercube, Lab, LutStore, LutType, LutWarehouse,
@@ -148,12 +150,12 @@ pub(super) fn perceptual_round_trip(
     if profile.color_space != DataColorSpace::Cmyk || profile.pcs != DataColorSpace::Lab {
         return None;
     }
-    let b2a0 = OwnedLutSampler::for_black_point(profile.lut_b_to_a_perceptual.as_ref()?, 3, 4)?;
+    let b2a0 = OwnedLutSampler::lcms_exact(profile.lut_b_to_a_perceptual.as_ref()?, 3, 4)?;
     let a2b = profile
         .lut_a_to_b_colorimetric
         .as_ref()
         .or(profile.lut_a_to_b_perceptual.as_ref())?;
-    let a2b1 = OwnedLutSampler::for_black_point(a2b, 4, 3)?;
+    let a2b1 = OwnedLutSampler::lcms_exact(a2b, 4, 3)?;
     let ink = b2a0.lab_to_ink(start);
     Some((ink, a2b1.ink_to_lab(ink)))
 }
@@ -161,7 +163,7 @@ pub(super) fn perceptual_round_trip(
 /// Lab of 400% ink through a CMYK A2B `table`, as lcms2 evaluates it.
 #[cfg(test)]
 pub(super) fn table_black(table: &LutWarehouse) -> Option<[f64; 3]> {
-    Some(OwnedLutSampler::for_black_point(table, 4, 3)?.ink_to_lab([1.0; 4]))
+    Some(OwnedLutSampler::lcms_exact(table, 4, 3)?.ink_to_lab([1.0; 4]))
 }
 
 /// Whether [`bake_clut4_hand_rolled`] can read `table` of `profile`.
@@ -527,12 +529,13 @@ impl OwnedLutSampler {
         Self::load(warehouse, expected_n_in, expected_n_out, false)
     }
 
-    /// A `lut8Type` or `lut16Type` table, for finding a profile's black
-    /// point the way lcms2 does — see [`Self::lab_to_ink`] and
-    /// [`Self::ink_to_lab`]. A three-input table must carry the identity
-    /// matrix, as the ICC requires of a Lab-indexed one; lcms2 would apply
-    /// any other, and these evaluators do not.
-    fn for_black_point(
+    /// A `lut8Type` or `lut16Type` table, for evaluating it exactly as
+    /// lcms2 does — see [`Self::lab_to_ink`] and [`Self::ink_to_lab`]: the
+    /// black point lcms2 detects, and the CMYK chain stage 1. A
+    /// three-input table must carry the identity matrix, as the ICC
+    /// requires of a Lab-indexed one; lcms2 would apply any other, and these
+    /// evaluators do not.
+    fn lcms_exact(
         warehouse: &LutWarehouse,
         expected_n_in: usize,
         expected_n_out: usize,
@@ -631,7 +634,7 @@ impl OwnedLutSampler {
     }
 
     /// 4-in / 3-out: CMYK ink (each `[0, 1]`) → Lab, interpolated as lcms2
-    /// interpolates a four-input table, for the black point it detects.
+    /// interpolates a four-input table.
     fn ink_to_lab(&self, ink: [f64; 4]) -> [f64; 3] {
         let curved: [f64; 4] = std::array::from_fn(|ch| {
             sample_curve_f32(&self.input_table, ch, self.n_in_entries, ink[ch] as f32) as f64
@@ -645,7 +648,7 @@ impl OwnedLutSampler {
     }
 
     /// 3-in / 4-out: Lab → CMYK ink (each `[0, 1]`), trilinear as lcms2
-    /// reads a Lab-indexed output table, for the black point it detects.
+    /// reads a Lab-indexed output table.
     fn lab_to_ink(&self, lab: [f64; 3]) -> [f64; 4] {
         let pcs = self.encoding.encode(lab).map(|v| v as f32);
         self.sample_pcs_lab_to_cmyk(pcs).map(f64::from)
@@ -911,6 +914,125 @@ impl TransformExecutor<f64> for HandRolledChainStage1Rgb {
     }
 }
 
+/// The table lcms2 reads for `intent` from a profile's three LUT tags,
+/// `[perceptual, colorimetric, saturation]`: `_cmsReadInputLUT` and
+/// `_cmsReadOutputLUT` take the intent's tag, or tag 0 when the profile has
+/// none, each profile on its own. Absolute colorimetric reads the
+/// colorimetric table; its white-point adaptation is not applied, as on
+/// every other CMYK path.
+fn lcms_table(
+    tables: [Option<&LutWarehouse>; 3],
+    intent: RenderingIntent,
+) -> Option<&LutWarehouse> {
+    let i = match intent {
+        RenderingIntent::Perceptual => 0,
+        RenderingIntent::RelativeColorimetric | RenderingIntent::AbsoluteColorimetric => 1,
+        RenderingIntent::Saturation => 2,
+    };
+    tables[i].or(tables[0])
+}
+
+/// A copy of `profile` whose missing colorimetric and saturation LUT tags
+/// are its perceptual ones, as [`lcms_table`] reads them. moxcms refuses an
+/// intent whose tag is missing, so a transform it builds from these copies
+/// reads the tables lcms2 would, even where source and output intent each
+/// fall back differently.
+pub(super) fn with_lcms_tables(profile: &ColorProfile) -> ColorProfile {
+    let mut p = profile.clone();
+    for table in [&mut p.lut_a_to_b_colorimetric, &mut p.lut_a_to_b_saturation] {
+        if table.is_none() {
+            table.clone_from(&profile.lut_a_to_b_perceptual);
+        }
+    }
+    for table in [&mut p.lut_b_to_a_colorimetric, &mut p.lut_b_to_a_saturation] {
+        if table.is_none() {
+            table.clone_from(&profile.lut_b_to_a_perceptual);
+        }
+    }
+    p
+}
+
+/// Source-CMYK → OutputIntent-CMYK chain stage 1 for one rendering intent,
+/// as lcms2 converts without black-point compensation: the source's A2B
+/// table for the intent to Lab, then the OutputIntent's B2A table for the
+/// intent, composed per pixel so no intermediate table quantises it.
+pub(super) struct HandRolledChainStage1Cmyk {
+    a2b: OwnedLutSampler,
+    b2a: OwnedLutSampler,
+}
+
+impl HandRolledChainStage1Cmyk {
+    /// `None` when either profile is not CMYK with a Lab PCS, or carries
+    /// tables these evaluators cannot read (v4 `mAB`/`mBA`); the caller
+    /// then builds moxcms's transform for the same intent.
+    pub(super) fn new(
+        source: &ColorProfile,
+        output_intent: &ColorProfile,
+        intent: RenderingIntent,
+    ) -> Option<Self> {
+        let cmyk_lab = |p: &ColorProfile| {
+            p.color_space == DataColorSpace::Cmyk && p.pcs == DataColorSpace::Lab
+        };
+        if !cmyk_lab(source) || !cmyk_lab(output_intent) {
+            return None;
+        }
+        let a2b = lcms_table(
+            [
+                source.lut_a_to_b_perceptual.as_ref(),
+                source.lut_a_to_b_colorimetric.as_ref(),
+                source.lut_a_to_b_saturation.as_ref(),
+            ],
+            intent,
+        )?;
+        let b2a = lcms_table(
+            [
+                output_intent.lut_b_to_a_perceptual.as_ref(),
+                output_intent.lut_b_to_a_colorimetric.as_ref(),
+                output_intent.lut_b_to_a_saturation.as_ref(),
+            ],
+            intent,
+        )?;
+        Some(Self {
+            a2b: OwnedLutSampler::lcms_exact(a2b, 4, 3)?,
+            b2a: OwnedLutSampler::lcms_exact(b2a, 3, 4)?,
+        })
+    }
+
+    /// Source ink (each `[0, 1]`) → OutputIntent ink.
+    pub(super) fn sample(&self, ink: [f64; 4]) -> [f64; 4] {
+        self.b2a.lab_to_ink(self.a2b.ink_to_lab(ink))
+    }
+}
+
+impl TransformExecutor<u8> for HandRolledChainStage1Cmyk {
+    fn transform(&self, src: &[u8], dst: &mut [u8]) -> Result<(), CmsError> {
+        for (s, d) in src
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(dst.as_chunks_mut::<4>().0)
+        {
+            let ink = self.sample(s.map(|v| f64::from(v) / 255.0));
+            *d = ink.map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8);
+        }
+        Ok(())
+    }
+}
+
+impl TransformExecutor<f64> for HandRolledChainStage1Cmyk {
+    fn transform(&self, src: &[f64], dst: &mut [f64]) -> Result<(), CmsError> {
+        for (s, d) in src
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(dst.as_chunks_mut::<4>().0)
+        {
+            *d = self.sample(*s);
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -924,6 +1046,10 @@ mod tests {
 
     const INKLIMIT: &[u8] = include_bytes!("../../tests/data/cmyk_intent/inklimit.icc");
     const INKLIMIT_LUT8: &[u8] = include_bytes!("../../tests/data/cmyk_intent/inklimit_lut8.icc");
+    const SPLIT: &[u8] = include_bytes!("../../tests/data/cmyk_intent/split.icc");
+    const SPLIT_SAT: &[u8] = include_bytes!("../../tests/data/cmyk_intent/split_sat.icc");
+    const SPLIT_LUT8: &[u8] = include_bytes!("../../tests/data/cmyk_intent/split_lut8.icc");
+    const SPLIT_XYZ: &[u8] = include_bytes!("../../tests/data/cmyk_intent/split_xyz.icc");
 
     /// The two legs of lcms2's black-point round trip: `B2A0` and `A2B1`.
     fn legs(icc: &[u8]) -> (OwnedLutSampler, OwnedLutSampler) {
@@ -931,8 +1057,8 @@ mod tests {
         let b2a0 = profile.lut_b_to_a_perceptual.as_ref().unwrap();
         let a2b1 = profile.lut_a_to_b_colorimetric.as_ref().unwrap();
         (
-            OwnedLutSampler::for_black_point(b2a0, 3, 4).unwrap(),
-            OwnedLutSampler::for_black_point(a2b1, 4, 3).unwrap(),
+            OwnedLutSampler::lcms_exact(b2a0, 3, 4).unwrap(),
+            OwnedLutSampler::lcms_exact(a2b1, 4, 3).unwrap(),
         )
     }
 
@@ -1040,10 +1166,11 @@ mod tests {
         assert_near("corner", out, [1.0; 3], 1e-12);
     }
 
-    /// `lut8Type` tables are read for the black point only: the bake and
-    /// the proofing chain still pass them to moxcms.
+    /// `lut8Type` tables are read only by the lcms2-exact evaluators (the
+    /// black point and the CMYK chain stage 1): the bake and the RGB chain
+    /// still pass them to moxcms.
     #[test]
-    fn lut8_tables_are_for_the_black_point_only() {
+    fn lut8_tables_are_for_the_lcms_exact_evaluators_only() {
         let profile = ColorProfile::new_from_slice(INKLIMIT_LUT8).unwrap();
         let a2b1 = profile.lut_a_to_b_colorimetric.as_ref().unwrap();
         let b2a0 = profile.lut_b_to_a_perceptual.as_ref().unwrap();
@@ -1051,7 +1178,62 @@ mod tests {
         assert!(OwnedLutSampler::from_warehouse(b2a0, 3, 4).is_none());
         assert!(!can_sample(&profile, a2b1));
         assert!(LabToCmykSampler::new(&profile, RenderingIntent::Perceptual).is_none());
-        assert!(OwnedLutSampler::for_black_point(a2b1, 4, 3).is_some());
-        assert!(OwnedLutSampler::for_black_point(b2a0, 3, 4).is_some());
+        assert!(OwnedLutSampler::lcms_exact(a2b1, 4, 3).is_some());
+        assert!(OwnedLutSampler::lcms_exact(b2a0, 3, 4).is_some());
+    }
+
+    const INTENTS: [RenderingIntent; 3] = [
+        RenderingIntent::Perceptual,
+        RenderingIntent::RelativeColorimetric,
+        RenderingIntent::Saturation,
+    ];
+
+    /// The CMYK chain stage 1 is lcms2's, ink for ink, under each intent:
+    /// the intent's table on each side, or table 0 where a profile has
+    /// none (`split.icc` has no `A2B2`, `inklimit.icc` no `B2A2`), and
+    /// `lut8Type` tables too.
+    #[test]
+    fn cmyk_chain_stage1_matches_lcms() {
+        for (name, source, oi, want) in [
+            ("split", SPLIT, INKLIMIT, &reference::CHAIN_SPLIT_INKLIMIT),
+            (
+                "split_sat",
+                SPLIT_SAT,
+                INKLIMIT,
+                &reference::CHAIN_SPLIT_SAT_INKLIMIT,
+            ),
+            (
+                "lut8",
+                SPLIT_LUT8,
+                INKLIMIT_LUT8,
+                &reference::CHAIN_SPLIT_LUT8_INKLIMIT_LUT8,
+            ),
+        ] {
+            let source = ColorProfile::new_from_slice(source).unwrap();
+            let oi = ColorProfile::new_from_slice(oi).unwrap();
+            for (intent, want) in INTENTS.into_iter().zip(want) {
+                let stage1 = HandRolledChainStage1Cmyk::new(&source, &oi, intent).unwrap();
+                for (cmyk, want) in reference::SAMPLES.iter().zip(want) {
+                    let got = stage1.sample(cmyk.map(|v| f64::from(v) / 255.0));
+                    assert_near(
+                        &format!("{name} {intent:?} at {cmyk:?}"),
+                        got,
+                        *want,
+                        INK_TOLERANCE,
+                    );
+                }
+            }
+        }
+    }
+
+    /// A source with an XYZ PCS is left to moxcms.
+    #[test]
+    fn cmyk_chain_stage1_needs_lab_tables() {
+        let source = ColorProfile::new_from_slice(SPLIT_XYZ).unwrap();
+        let oi = ColorProfile::new_from_slice(INKLIMIT).unwrap();
+        for intent in INTENTS {
+            assert!(HandRolledChainStage1Cmyk::new(&source, &oi, intent).is_none());
+            assert!(HandRolledChainStage1Cmyk::new(&oi, &source, intent).is_none());
+        }
     }
 }

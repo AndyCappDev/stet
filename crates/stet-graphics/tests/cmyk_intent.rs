@@ -10,8 +10,10 @@
 //! `lut8Type`, one whose perceptual table copies its colorimetric one, and
 //! `inklimit*.icc`, whose perceptual `B2A0` stops short of 400% ink as a
 //! press profile's does — and lcms2's output for each intent with
-//! black-point compensation off and on. `generate.py` there makes every
-//! file; re-run it rather than editing them.
+//! black-point compensation off and on, and lcms2's proofing-chain stage 1
+//! (a CMYK source into an output-intent CMYK) for each intent.
+//! `generate.py` there makes every file; re-run it rather than editing
+//! them.
 
 use stet_graphics::icc::{BpcMode, IccCache, IccCacheOptions, IccRenderingIntent};
 
@@ -25,6 +27,7 @@ mod reference {
 const SPLIT: &[u8] = include_bytes!("data/cmyk_intent/split.icc");
 const SPLIT_SAT: &[u8] = include_bytes!("data/cmyk_intent/split_sat.icc");
 const SPLIT_LUT8: &[u8] = include_bytes!("data/cmyk_intent/split_lut8.icc");
+const SPLIT_XYZ: &[u8] = include_bytes!("data/cmyk_intent/split_xyz.icc");
 const SAME: &[u8] = include_bytes!("data/cmyk_intent/same.icc");
 const INKLIMIT: &[u8] = include_bytes!("data/cmyk_intent/inklimit.icc");
 const INKLIMIT_LUT8: &[u8] = include_bytes!("data/cmyk_intent/inklimit_lut8.icc");
@@ -393,5 +396,142 @@ fn moxcms_fallback_follows_the_intent() {
             near < far,
             "{intent:?}: {near} levels from lcms2's {intent:?}, {far} from the other intent"
         );
+    }
+}
+
+/// A PDF/X cache: `oi` is the output intent, and `source` is registered
+/// after proofing is on, so its colours chain through the output intent.
+fn proofing(oi: &[u8], source: &[u8]) -> (IccCache, [u8; 32]) {
+    let mut cache = cache(oi);
+    cache.set_proofing_enabled(true);
+    let hash = cache.register_profile(source).unwrap();
+    (cache, hash)
+}
+
+/// The output intent's CMYK as a DeviceCMYK paint shows it.
+fn shown(cache: &IccCache, [c, m, y, k]: [f64; 4]) -> [u8; 3] {
+    to_u8(cache.convert_cmyk_readonly(c, m, y, k).unwrap())
+}
+
+fn ink(cmyk: [u8; 4]) -> [f64; 4] {
+    cmyk.map(|v| v as f64 / 255.0)
+}
+
+/// Check every sample of `source` chained into `oi` under `intent` against
+/// lcms2's stage 1 shown through the output intent: at most `tolerance`
+/// levels per channel, from the stage-1 ink alone, since both sides share
+/// stage 2.
+fn assert_chain_matches_lcms(
+    name: &str,
+    (oi, source): (&[u8], &[u8]),
+    expected: &[[[f64; 4]; 16]; 3],
+    tolerance: u8,
+) {
+    let (cache, hash) = proofing(oi, source);
+    for intent in INTENTS {
+        let want = &expected[reference_row(intent)];
+        for (cmyk, want) in reference::SAMPLES.iter().zip(want) {
+            let got = to_u8(
+                cache
+                    .convert_color_readonly_with_intent(&hash, &ink(*cmyk), intent)
+                    .unwrap(),
+            );
+            let want = shown(&cache, *want);
+            for ch in 0..3 {
+                assert!(
+                    got[ch].abs_diff(want[ch]) <= tolerance,
+                    "{name} {intent:?} {cmyk:?}: chain {got:?}, lcms2's ink shown {want:?}"
+                );
+            }
+        }
+    }
+}
+
+/// In a PDF/X document an ICCBased CMYK colour converts into the output
+/// condition through its own intent's tables on both sides, as lcms2 does
+/// without black-point compensation. It used to take moxcms's perceptual
+/// transform whatever the intent.
+#[test]
+fn cmyk_sources_chain_through_the_output_intent_by_intent() {
+    for (name, profiles, expected) in [
+        ("split", (INKLIMIT, SPLIT), &reference::CHAIN_SPLIT_INKLIMIT),
+        (
+            "split_sat",
+            (INKLIMIT, SPLIT_SAT),
+            &reference::CHAIN_SPLIT_SAT_INKLIMIT,
+        ),
+        (
+            "lut8",
+            (INKLIMIT_LUT8, SPLIT_LUT8),
+            &reference::CHAIN_SPLIT_LUT8_INKLIMIT_LUT8,
+        ),
+    ] {
+        assert_chain_matches_lcms(name, profiles, expected, 1);
+    }
+}
+
+/// The intents land on different ink, or the test above proves nothing.
+#[test]
+fn the_chain_references_tell_the_intents_apart() {
+    for expected in [
+        &reference::CHAIN_SPLIT_INKLIMIT,
+        &reference::CHAIN_SPLIT_SAT_INKLIMIT,
+        &reference::CHAIN_SPLIT_XYZ_SPLIT,
+    ] {
+        assert_ne!(expected[0], expected[1]);
+    }
+    assert_ne!(
+        reference::CHAIN_SPLIT_SAT_INKLIMIT[2],
+        reference::CHAIN_SPLIT_SAT_INKLIMIT[0]
+    );
+}
+
+/// A profile the hand-rolled stage 1 cannot read (here an XYZ PCS) chains
+/// through moxcms's transform built for the intent. Neither profile has a
+/// saturation table, which moxcms refuses and lcms2 reads as perceptual.
+#[test]
+fn moxcms_fallback_chains_by_intent() {
+    assert_chain_matches_lcms(
+        "split_xyz",
+        (SPLIT, SPLIT_XYZ),
+        &reference::CHAIN_SPLIT_XYZ_SPLIT,
+        1,
+    );
+}
+
+/// Absolute colorimetric chains as relative colorimetric, and so does a
+/// conversion that names no intent; an image converts as its single
+/// colours do.
+#[test]
+fn chain_defaults_and_images() {
+    for (oi, source) in [(INKLIMIT, SPLIT), (SPLIT, SPLIT_XYZ)] {
+        let (cache, hash) = proofing(oi, source);
+        let relcol = IccRenderingIntent::RelativeColorimetric;
+        let samples: Vec<u8> = reference::SAMPLES.iter().flatten().copied().collect();
+        let n = reference::SAMPLES.len();
+        for intent in INTENTS {
+            let image = cache
+                .convert_image_8bit_with_intent(&hash, &samples, n, intent)
+                .unwrap();
+            for (cmyk, px) in reference::SAMPLES.iter().zip(image.as_chunks::<3>().0) {
+                let single = to_u8(
+                    cache
+                        .convert_color_readonly_with_intent(&hash, &ink(*cmyk), intent)
+                        .unwrap(),
+                );
+                // The 8-bit chain rounds the intermediate ink to 8 bits.
+                for ch in 0..3 {
+                    assert!(
+                        px[ch].abs_diff(single[ch]) <= 2,
+                        "{intent:?} {cmyk:?}: image {px:?}, single colour {single:?}"
+                    );
+                }
+            }
+        }
+        for cmyk in reference::SAMPLES {
+            let at = |intent| cache.convert_color_readonly_with_intent(&hash, &ink(cmyk), intent);
+            assert_eq!(at(IccRenderingIntent::AbsoluteColorimetric), at(relcol));
+            assert_eq!(cache.convert_color_readonly(&hash, &ink(cmyk)), at(relcol));
+        }
     }
 }

@@ -610,6 +610,16 @@ pub fn components_to_device_color_icc_with_intent(
                 {
                     // For 4-component (CMYK) ICC profiles, preserve the
                     // source CMYK values in native_cmyk for overprint simulation.
+                    //
+                    // Even in a PDF/X document these are the source's numbers,
+                    // not the OutputIntent ink the proofing chain converts them
+                    // to, unlike RGB below. The Ghent Workgroup's tests blend
+                    // ICCBased CMYK as DeviceCMYK numbers: GWG 16.4's
+                    // Luminosity X is FOGRA39 `1 .49 0 0` over a DeviceCMYK
+                    // magenta whose luminosity it matches only unconverted.
+                    // Recording the converted ink (`.9962 .4801 0 0` into ISO
+                    // Coated v2 300%) shows a 6-level X, as Ghostscript does
+                    // with `-dUsePDFX3Profile`.
                     if *n == 4 {
                         let c = components.first().copied().unwrap_or(0.0);
                         let m = components.get(1).copied().unwrap_or(0.0);

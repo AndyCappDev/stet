@@ -261,23 +261,25 @@ const OUTPUT_INTENT_DISPLAY: RenderingIntent = RenderingIntent::RelativeColorime
 #[derive(Clone)]
 struct CachedTransform {
     /// 8-bit transform for image data, used by callers that pass no
-    /// intent. When proofing is enabled and the source is RGB, this is the
-    /// Perceptual-intent chain, which keeps the GWG 13.0 baseline
-    /// byte-for-byte. Otherwise it is moxcms's transform for the first
-    /// intent that builds, Perceptual first — so for a CMYK profile it
-    /// reads `A2B0`, while `clut4` (which CMYK conversions prefer) reads
-    /// `A2B1`. The two agree only on profiles whose tables are equal.
+    /// intent and by intents whose chain slot is empty. When proofing is
+    /// enabled and the source is RGB or CMYK, this is the relative
+    /// colorimetric chain. Otherwise it is moxcms's transform for the first
+    /// intent that builds, Perceptual first — so for a CMYK profile outside
+    /// a chain it reads `A2B0`, while `clut4` (which CMYK conversions
+    /// prefer) reads `A2B1`. The two agree only on profiles whose tables
+    /// are equal.
     transform_8bit: Arc<dyn TransformExecutor<u8> + Send + Sync>,
     /// f64 transform for single-color conversions. Same intent default
     /// as `transform_8bit`.
     transform_f64: Arc<dyn TransformExecutor<f64> + Send + Sync>,
     /// Per-intent proofing chains, indexed by ICC `RenderingIntent`
     /// discriminant: `[Perceptual=0, RelCol=1, Saturation=2, AbsCol=3]`.
-    /// Populated only for n=3 RGB sources when proofing is enabled and
-    /// the source has a viable A2B / OI B2A pair; `None` slots fall back
-    /// to `transform_*bit` / `transform_*_f64` at lookup time. Every chain
-    /// ends in the OutputIntent's display table. AbsCol uses the RelCol
-    /// tables, without white-point adaptation.
+    /// Populated for RGB and CMYK sources when proofing is enabled: RGB
+    /// where the source has a viable A2B / OI B2A pair, CMYK through the
+    /// hand-rolled stage 1 or moxcms's transform for the intent. `None`
+    /// slots fall back to `transform_*bit` / `transform_*_f64` at lookup
+    /// time. Every chain ends in the OutputIntent's display table. AbsCol
+    /// uses the RelCol tables, without white-point adaptation.
     chain_per_intent_8bit: [Option<Arc<dyn TransformExecutor<u8> + Send + Sync>>; 4],
     chain_per_intent_f64: [Option<Arc<dyn TransformExecutor<f64> + Send + Sync>>; 4],
     /// Per-intent stage-1 only sampler (source RGB → OutputIntent CMYK,
@@ -640,9 +642,7 @@ impl IccCache {
             // `source.A2B[i] → OI.B2A[i]` per-pixel using the same
             // primitives moxcms exposes. Per-pixel composition (vs. an
             // intermediate 17³ CLUT bake) avoids the quantization layer
-            // that drifts GWG 13.0's BG-vs-X match by ~6 RGB levels. Only
-            // n=3 (RGB) sources go through this path; CMYK sources keep
-            // using moxcms (no diagnostic shows that leg drifting).
+            // that drifts GWG 13.0's BG-vs-X match by ~6 RGB levels.
             //
             // For each of the four ICC rendering intents we try to build
             // a chain using that intent's tables on both sides. Intents
@@ -682,52 +682,118 @@ impl IccCache {
                 }
             }
 
-            // Default stage 1: the Perceptual hand-rolled chain's when there
-            // is one; otherwise moxcms's transform-driven build, which is the
-            // n=4 CMYK source path.
-            let perceptual_idx = RenderingIntent::Perceptual as usize;
-            let default_stage1: Option<Stage2> =
-                if let Some(s1) = chain_stage1_per_intent[perceptual_idx].clone() {
-                    Some((s1.clone(), s1))
-                } else {
-                    let mut stage1_8bit_opt: Option<Arc<dyn TransformExecutor<u8> + Send + Sync>> =
-                        None;
-                    let mut stage1_f64_opt: Option<Arc<dyn TransformExecutor<f64> + Send + Sync>> =
-                        None;
-                    for &intent in &intents {
+            // Chain stage 1 for CMYK sources, one per intent, as lcms2
+            // builds it without black-point compensation: the source's A2B
+            // and the OI's B2A for the intent, composed per pixel with
+            // lcms2's interpolation. Where either profile is a shape those
+            // evaluators cannot read (v4 `mAB`/`mBA`, an XYZ PCS), moxcms's
+            // transform built for the same intent from copies whose missing
+            // tags are filled as lcms2 reads them, about one ink level from
+            // lcms2. A slot neither can build stays empty and falls back to
+            // the default chain below, the relative colorimetric one; so
+            // does absolute colorimetric, which reads the relative
+            // colorimetric tables on every other CMYK path too.
+            //
+            // Gray sources keep the default chain: lcms2 converts them
+            // as GWG 18.3 expects only with black-point compensation on
+            // this leg, which the chain does not apply yet.
+            if n == 4 {
+                let mut moxcms_pair: Option<(ColorProfile, ColorProfile)> = None;
+                for intent in [
+                    RenderingIntent::Perceptual,
+                    RenderingIntent::RelativeColorimetric,
+                    RenderingIntent::Saturation,
+                ] {
+                    let stage1: Option<Stage2> = if let Some(s) =
+                        hand_rolled::HandRolledChainStage1Cmyk::new(&profile, &oi_profile, intent)
+                    {
+                        let s = Arc::new(s);
+                        Some((s.clone(), s))
+                    } else {
+                        let (source, oi) = moxcms_pair.get_or_insert_with(|| {
+                            (
+                                hand_rolled::with_lcms_tables(&profile),
+                                hand_rolled::with_lcms_tables(&oi_profile),
+                            )
+                        });
                         let options = TransformOptions {
                             rendering_intent: intent,
                             ..TransformOptions::default()
                         };
-                        if let Ok(t) = profile.create_transform_8bit(
-                            src_layout_8,
-                            &oi_profile,
-                            oi_layout_8,
-                            options,
-                        ) {
-                            stage1_8bit_opt = Some(t);
-                            break;
-                        }
-                    }
-                    for &intent in &intents {
-                        let options = TransformOptions {
-                            rendering_intent: intent,
-                            ..TransformOptions::default()
-                        };
-                        if let Ok(t) = profile.create_transform_f64(
-                            src_layout_f64,
-                            &oi_profile,
-                            oi_layout_f64,
-                            options,
-                        ) {
-                            stage1_f64_opt = Some(t);
-                            break;
-                        }
-                    }
-                    stage1_8bit_opt.zip(stage1_f64_opt)
-                };
+                        let s8 =
+                            source.create_transform_8bit(src_layout_8, oi, oi_layout_8, options);
+                        let sf =
+                            source.create_transform_f64(src_layout_f64, oi, oi_layout_f64, options);
+                        s8.ok().zip(sf.ok())
+                    };
+                    let Some((s1_8, s1_f)) = stage1 else {
+                        continue;
+                    };
+                    let i = intent as usize;
+                    chain_per_intent_8bit[i] = Some(Arc::new(ChainedTransform {
+                        stage1: s1_8,
+                        stage2: stage2_8bit.clone(),
+                        intermediate_n: 4,
+                    }));
+                    chain_per_intent_f64[i] = Some(Arc::new(ChainedTransform {
+                        stage1: s1_f,
+                        stage2: stage2_f64.clone(),
+                        intermediate_n: 4,
+                    }));
+                }
+            }
 
-            default_stage1.map(|(s1_8, s1_f)| -> ChainPair {
+            // The default chain, for callers that pass no intent and for
+            // intents whose slot is empty: relative colorimetric, the PDF
+            // default, when there is a chain for it. Otherwise — Gray and
+            // Lab sources, or a profile no relative colorimetric chain
+            // could be built for — moxcms's transform for the first intent
+            // that builds, Perceptual first.
+            let relcol = RenderingIntent::RelativeColorimetric as usize;
+            let relcol_chain = chain_per_intent_8bit[relcol]
+                .clone()
+                .zip(chain_per_intent_f64[relcol].clone());
+            let default_stage1: Option<Stage2> = if relcol_chain.is_some() {
+                None
+            } else {
+                let mut stage1_8bit_opt: Option<Arc<dyn TransformExecutor<u8> + Send + Sync>> =
+                    None;
+                let mut stage1_f64_opt: Option<Arc<dyn TransformExecutor<f64> + Send + Sync>> =
+                    None;
+                for &intent in &intents {
+                    let options = TransformOptions {
+                        rendering_intent: intent,
+                        ..TransformOptions::default()
+                    };
+                    if let Ok(t) = profile.create_transform_8bit(
+                        src_layout_8,
+                        &oi_profile,
+                        oi_layout_8,
+                        options,
+                    ) {
+                        stage1_8bit_opt = Some(t);
+                        break;
+                    }
+                }
+                for &intent in &intents {
+                    let options = TransformOptions {
+                        rendering_intent: intent,
+                        ..TransformOptions::default()
+                    };
+                    if let Ok(t) = profile.create_transform_f64(
+                        src_layout_f64,
+                        &oi_profile,
+                        oi_layout_f64,
+                        options,
+                    ) {
+                        stage1_f64_opt = Some(t);
+                        break;
+                    }
+                }
+                stage1_8bit_opt.zip(stage1_f64_opt)
+            };
+
+            relcol_chain.or(default_stage1.map(|(s1_8, s1_f)| -> ChainPair {
                 (
                     Arc::new(ChainedTransform {
                         stage1: s1_8,
@@ -740,7 +806,7 @@ impl IccCache {
                         intermediate_n: 4,
                     }),
                 )
-            })
+            }))
         } else {
             None
         };
@@ -882,8 +948,8 @@ impl IccCache {
     /// caller should leave `DeviceColor::native_cmyk` as `None` and the
     /// renderer falls back to its sRGB-derived approximation. The
     /// `intent` parameter selects which per-intent chain to use; falls
-    /// back to the Perceptual chain when the requested intent slot is
-    /// empty.
+    /// back to the relative colorimetric chain when the requested intent
+    /// slot is empty.
     pub fn convert_to_oi_cmyk(
         &self,
         hash: &ProfileHash,
@@ -896,7 +962,10 @@ impl IccCache {
         }
         let stage1 = cached.chain_stage1_per_intent[intent as usize]
             .as_ref()
-            .or(cached.chain_stage1_per_intent[RenderingIntent::Perceptual as usize].as_ref())?;
+            .or(
+                cached.chain_stage1_per_intent[RenderingIntent::RelativeColorimetric as usize]
+                    .as_ref(),
+            )?;
         let r = components.first().copied().unwrap_or(0.0).clamp(0.0, 1.0);
         let g = components.get(1).copied().unwrap_or(0.0).clamp(0.0, 1.0);
         let b = components.get(2).copied().unwrap_or(0.0).clamp(0.0, 1.0);

@@ -104,6 +104,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   profile, shadings and images now take the current intent, and
   `setrenderingintent` converts the current colour again, as `ri` does in
   PDF and as Ghostscript does.
+- **ICCBased CMYK colours in a PDF/X document ignored the rendering
+  intent.** In a document with an output intent, an ICCBased CMYK colour,
+  image or shading — FOGRA39 content in an ISO Coated v2 document, say —
+  is converted into the output intent and shown through it, and that
+  conversion is where the intent applies. stet made it with moxcms's
+  perceptual transform whatever the content asked for, including at the
+  default, relative colorimetric. It now reads the intent's tables on both
+  sides as lcms2 does without black-point compensation — within 0.06 of
+  255 ink levels on the press profiles in the corpus — so relative
+  colorimetric content moves by 3–12 levels on average and up to 69, and
+  saturation by about 30. A profile stet cannot read itself (ICC v4
+  `mAB`) goes through moxcms's transform for the intent, about one ink
+  level from lcms2. `IccCache::convert_color` and `convert_image_8bit`,
+  which take no intent, now convert RGB and CMYK sources in a proofing
+  chain relative colorimetric rather than perceptual. Gray sources are
+  unchanged for now: the Ghent Workgroup's gray test (GWG 18.3) expects
+  black-point compensation on that conversion, which stet does not yet
+  apply. Overprint and CMYK blending still use an ICCBased CMYK colour's
+  own numbers, as GWG 16.4 expects.
 - **Relative colorimetric CMYK rendered lighter than Ghostscript and
   Acrobat** with black-point compensation on, the default. Compensation
   maps the profile's black to sRGB black, and stet took that black to be
