@@ -12,8 +12,10 @@
 //! press profile's does, `mab*.icc`, whose tables are ICC v4
 //! `lutAToBType`/`lutBToAType`, and `*xyz*.icc`, with an XYZ PCS — and
 //! lcms2's output for each intent with
-//! black-point compensation off and on, and lcms2's proofing-chain stage 1
-//! (a CMYK or Gray source into an output-intent CMYK) for each intent.
+//! black-point compensation off and on, lcms2's proofing-chain stage 1
+//! (a CMYK or Gray source into an output-intent CMYK) for each intent, and
+//! lcms2's built-in sRGB into a CMYK profile and back, which RGB composited
+//! in CMYK takes. `inklimit_a2b.icc` has no B2A table at all.
 //! `generate.py` there makes every file; re-run it rather than editing
 //! them.
 
@@ -50,6 +52,7 @@ const INKLIMIT_MATRIX: &[u8] = include_bytes!("data/cmyk_intent/inklimit_matrix.
 const RGB_XYZ: &[u8] = include_bytes!("data/cmyk_intent/rgb_xyz.icc");
 const RGB_XYZ_MAB: &[u8] = include_bytes!("data/cmyk_intent/rgb_xyz_mab.icc");
 const RGB_MAB: &[u8] = include_bytes!("data/cmyk_intent/rgb_mab.icc");
+const INKLIMIT_A2B: &[u8] = include_bytes!("data/cmyk_intent/inklimit_a2b.icc");
 
 /// Largest per-channel difference allowed from lcms2. stet bakes a 17⁴ table
 /// and interpolates it, and its Lab → sRGB arithmetic is its own.
@@ -974,4 +977,164 @@ fn lab_ink_is_compensated_as_lcms() {
             }
         }
     }
+}
+
+/// lcms2's ink for each of `RGB_SAMPLES`, by black-point compensation.
+type ReverseInks = [[[f64; 4]; 15]; 2];
+/// lcms2's round trip of each of `RGB_SAMPLES`, by black-point compensation.
+type RoundTrips = [[[f64; 3]; 15]; 2];
+
+/// The profiles the reverse transform is checked through, with lcms2's
+/// built-in sRGB → profile and its round trip back: an ink-limited black,
+/// one compensation moves, `lut8Type`, ICC v4 `lutBToAType`, and an XYZ
+/// PCS.
+const REVERSE: [(&str, &[u8], &ReverseInks, &RoundTrips); 5] = [
+    (
+        "inklimit",
+        INKLIMIT,
+        &reference::REVERSE_INKLIMIT,
+        &reference::ROUND_TRIP_RGB_INKLIMIT,
+    ),
+    (
+        "shadow",
+        SHADOW,
+        &reference::REVERSE_SHADOW,
+        &reference::ROUND_TRIP_RGB_SHADOW,
+    ),
+    (
+        "split_lut8",
+        SPLIT_LUT8,
+        &reference::REVERSE_SPLIT_LUT8,
+        &reference::ROUND_TRIP_RGB_SPLIT_LUT8,
+    ),
+    (
+        "mab",
+        MAB,
+        &reference::REVERSE_MAB,
+        &reference::ROUND_TRIP_RGB_MAB,
+    ),
+    (
+        "xyz_v4",
+        XYZ_V4,
+        &reference::REVERSE_XYZ_V4,
+        &reference::ROUND_TRIP_RGB_XYZ_V4,
+    ),
+];
+
+const BPC_MODES: [BpcMode; 3] = [BpcMode::On, BpcMode::Off, BpcMode::Auto];
+
+fn reverse_cache(profile: &[u8], mode: BpcMode) -> IccCache {
+    let mut cache = IccCache::new_with_options(IccCacheOptions {
+        bpc_mode: mode,
+        source_cmyk_profile: Some(profile.to_vec()),
+    });
+    cache.prepare_reverse_cmyk();
+    cache
+}
+
+/// RGB composited in CMYK converts to lcms2's ink, its built-in sRGB into
+/// the profile, relative colorimetric, compensated as `--bpc` says. It used
+/// to go through moxcms, which has no black-point compensation and misreads
+/// v4 and XYZ tables.
+#[test]
+fn rgb_converts_to_cmyk_as_lcms() {
+    for (name, profile, expected, _) in REVERSE {
+        for mode in BPC_MODES {
+            let cache = reverse_cache(profile, mode);
+            let want = &expected[mode.is_enabled() as usize];
+            for (rgb, want) in reference::RGB_SAMPLES.iter().zip(want) {
+                let [r, g, b] = rgb.map(|v| v as f64 / 255.0);
+                let got = cache.convert_rgb_to_cmyk_readonly(r, g, b).unwrap();
+                for (g, w) in got.iter().zip(want) {
+                    assert!(
+                        (g - w).abs() < 1e-4,
+                        "{name} {mode:?} {rgb:?}: {got:?}, lcms2 {want:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// RGB colour in a DeviceCMYK page group goes to lcms2's ink and comes
+/// back shown as DeviceCMYK is: the round trip is the reverse, then the
+/// display, with nothing else between.
+#[test]
+fn rgb_round_trips_through_cmyk_shown_as_device_cmyk() {
+    for (name, profile, inks, _) in REVERSE {
+        for mode in BPC_MODES {
+            let mut cache = reverse_cache(profile, mode);
+            let inks = &inks[mode.is_enabled() as usize];
+            for (rgb, ink) in reference::RGB_SAMPLES.iter().zip(inks) {
+                let [r, g, b] = rgb.map(|v| v as f64 / 255.0);
+                let got = to_u8(cache.round_trip_rgb_via_cmyk(r, g, b).unwrap());
+                // stet's ink is within 1e-4 of lcms2's, which can still round
+                // to the next level.
+                let want = shown(&cache, *ink);
+                for ch in 0..3 {
+                    assert!(
+                        got[ch].abs_diff(want[ch]) <= 1,
+                        "{name} {mode:?} {rgb:?}: {got:?}, lcms2's ink shown {want:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Largest per-channel difference of the round trip from lcms2's. The
+/// reverse is lcms2's; the display table shows lcms2's own ink up to 2
+/// levels from lcms2 at some of these colours, which `SAMPLES` does not
+/// reach.
+const ROUND_TRIP_TOLERANCE: u8 = 2;
+
+/// The round trip against lcms2's own, sRGB → profile → sRGB.
+///
+/// A colour whose ink lcms2 shows outside sRGB is skipped: the display
+/// table clips it, and interpolating that table in gamma-encoded sRGB, where
+/// a channel climbs steeply off 0, is a limit of the table rather than of
+/// the reverse.
+#[test]
+fn rgb_round_trips_through_cmyk_as_lcms() {
+    for (name, profile, _, expected) in REVERSE {
+        for mode in BPC_MODES {
+            let mut cache = reverse_cache(profile, mode);
+            let want = &expected[mode.is_enabled() as usize];
+            let mut compared = 0;
+            for (rgb, want) in reference::RGB_SAMPLES.iter().zip(want) {
+                if want.iter().any(|v| !(0.0..=1.0).contains(v)) {
+                    continue;
+                }
+                let [r, g, b] = rgb.map(|v| v as f64 / 255.0);
+                let got = to_u8(cache.round_trip_rgb_via_cmyk(r, g, b).unwrap());
+                let want = want.map(|v| (v * 255.0).round() as u8);
+                for ch in 0..3 {
+                    assert!(
+                        got[ch].abs_diff(want[ch]) <= ROUND_TRIP_TOLERANCE,
+                        "{name} {mode:?} {rgb:?}: {got:?}, lcms2 {want:?}"
+                    );
+                }
+                compared += 1;
+            }
+            assert!(compared >= 8, "{name} {mode:?}: only {compared} compared");
+        }
+    }
+}
+
+/// A CMYK profile with no B2A table (an input-class profile) cannot be
+/// inverted from its own tables: lcms2 refuses it, and moxcms, the
+/// fallback, builds no reverse either. RGB then has no ink, so the renderer
+/// falls back to the PostScript formula, and a DeviceCMYK page group leaves
+/// RGB as it is.
+#[test]
+fn a_profile_without_b2a_has_no_reverse() {
+    let mut cache = reverse_cache(INKLIMIT_A2B, BpcMode::On);
+    assert!(
+        cache
+            .convert_rgb_to_cmyk_readonly(0.5, 0.25, 0.75)
+            .is_none()
+    );
+    assert!(cache.round_trip_rgb_via_cmyk(0.5, 0.25, 0.75).is_none());
+    // It still shows as CMYK.
+    assert!(cache.convert_cmyk_readonly(0.2, 0.4, 0.6, 0.1).is_some());
 }

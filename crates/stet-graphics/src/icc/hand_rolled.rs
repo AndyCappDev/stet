@@ -29,6 +29,10 @@
 //! [`moxcms::TransformExecutor`] for `u8` and `f64` so they slot directly
 //! into the `ChainedTransform` stage-1 slot.
 //!
+//! The reverse transform, sRGB → the default CMYK profile, runs the display
+//! backwards ([`display_srgb_to_lab`]) into a `LabToCmykSampler`, so it is
+//! lcms2's built-in sRGB → profile.
+//!
 //! The evaluators that reproduce lcms2 exactly (`LcmsLut`) read a Lab or an
 //! XYZ PCS, applying a three-input `lut8Type`/`lut16Type` table's matrix as
 //! lcms2 does. They also read ICC v4 `lutAToBType`/`lutBToAType` tables,
@@ -52,7 +56,7 @@ use super::Clut4;
 use super::black_point::SourceBlack;
 use super::bpc::{
     BpcParams, LCMS_D50, WP_D50, apply_bpc_xyz_d50, compute_bpc_params, lab_to_xyz_d50,
-    lab_to_xyz_white, xyz_d50_to_lab, xyz_to_lab_white,
+    lab_to_xyz_white, matmul3, srgb_to_linear, xyz_d50_to_lab, xyz_to_lab_white,
 };
 
 /// `0xFF00` — the legacy ICC v2 Lab denominator for L*. Stored values in
@@ -456,21 +460,60 @@ fn encode_linear_srgb(lin: [f64; 3]) -> [u8; 3] {
     ]
 }
 
-/// XYZ-D50 → linear sRGB-D65 via the combined Bradford-CAT × sRGB inverse
-/// matrix. Coefficients lifted from the ICC reference: identical to what
+/// The combined Bradford-CAT × sRGB inverse matrix, XYZ-D50 → linear
+/// sRGB-D65. Coefficients lifted from the ICC reference: identical to what
 /// lcms2 produces under default settings.
+const XYZ_D50_TO_LINEAR_SRGB_D65: [[f64; 3]; 3] = [
+    [3.133_856_1, -1.616_866_7, -0.490_614_6],
+    [-0.978_768_4, 1.916_141_5, 0.033_454_0],
+    [0.071_945_3, -0.228_991_4, 1.405_242_7],
+];
+
+/// Linear sRGB-D65 → XYZ-D50: the inverse of
+/// [`XYZ_D50_TO_LINEAR_SRGB_D65`] itself, not the textbook sRGB matrix, so
+/// that [`display_srgb_to_lab`] undoes the display exactly.
+const LINEAR_SRGB_D65_TO_XYZ_D50: [[f64; 3]; 3] = invert3(XYZ_D50_TO_LINEAR_SRGB_D65);
+
+/// The inverse of a 3×3 matrix, by cofactors.
+const fn invert3(a: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    let c00 = a[1][1] * a[2][2] - a[1][2] * a[2][1];
+    let c01 = a[1][2] * a[2][0] - a[1][0] * a[2][2];
+    let c02 = a[1][0] * a[2][1] - a[1][1] * a[2][0];
+    let det = a[0][0] * c00 + a[0][1] * c01 + a[0][2] * c02;
+    [
+        [
+            c00 / det,
+            (a[0][2] * a[2][1] - a[0][1] * a[2][2]) / det,
+            (a[0][1] * a[1][2] - a[0][2] * a[1][1]) / det,
+        ],
+        [
+            c01 / det,
+            (a[0][0] * a[2][2] - a[0][2] * a[2][0]) / det,
+            (a[0][2] * a[1][0] - a[0][0] * a[1][2]) / det,
+        ],
+        [
+            c02 / det,
+            (a[0][1] * a[2][0] - a[0][0] * a[2][1]) / det,
+            (a[0][0] * a[1][1] - a[0][1] * a[1][0]) / det,
+        ],
+    ]
+}
+
+/// XYZ-D50 → linear sRGB-D65 through [`XYZ_D50_TO_LINEAR_SRGB_D65`].
 #[inline]
 fn xyz_d50_to_linear_srgb_d65(xyz: [f64; 3]) -> [f64; 3] {
-    const M: [[f64; 3]; 3] = [
-        [3.133_856_1, -1.616_866_7, -0.490_614_6],
-        [-0.978_768_4, 1.916_141_5, 0.033_454_0],
-        [0.071_945_3, -0.228_991_4, 1.405_242_7],
-    ];
-    [
-        M[0][0] * xyz[0] + M[0][1] * xyz[1] + M[0][2] * xyz[2],
-        M[1][0] * xyz[0] + M[1][1] * xyz[1] + M[1][2] * xyz[2],
-        M[2][0] * xyz[0] + M[2][1] * xyz[1] + M[2][2] * xyz[2],
-    ]
+    matmul3(&XYZ_D50_TO_LINEAR_SRGB_D65, xyz)
+}
+
+/// The Lab that stet displays as the sRGB colour `rgb` (each `[0, 1]`):
+/// the sRGB transfer function decoded, then the display matrix inverted.
+/// The display matrix is lcms2's built-in sRGB, so this is also lcms2's
+/// sRGB → Lab. The reverse transform (`IccCache::convert_rgb_to_cmyk_readonly`)
+/// takes it into a CMYK profile's `B2A1`, so that a colour stet displays
+/// converts to the ink that displays as it.
+pub(super) fn display_srgb_to_lab(rgb: [f64; 3]) -> [f64; 3] {
+    let linear = rgb.map(srgb_to_linear);
+    xyz_d50_to_lab(matmul3(&LINEAR_SRGB_D65_TO_XYZ_D50, linear))
 }
 
 /// Linear → gamma-encoded sRGB. Standard sRGB EOTF.
@@ -2115,6 +2158,35 @@ mod tests {
                 let ink = cmyk.map(|v| f64::from(v) / 255.0);
                 assert_eq!(a2b1.ink_to_xyz(ink), lab_to_xyz_d50(a2b1.ink_to_lab(ink)));
             }
+        }
+    }
+
+    /// [`display_srgb_to_lab`] undoes the display: every sRGB colour on a
+    /// grid comes back from its Lab through the display matrix and transfer
+    /// function to rounding error. It is also lcms2's built-in sRGB, to the
+    /// display matrix's eight-digit coefficients and stet's D50 white: within
+    /// 0.014 at a saturated primary.
+    #[test]
+    fn display_srgb_to_lab_inverts_the_display() {
+        let steps = (0..=16).map(|i| f64::from(i) / 16.0);
+        for r in steps.clone() {
+            for g in steps.clone() {
+                for b in steps.clone() {
+                    let lab = display_srgb_to_lab([r, g, b]);
+                    let linear = xyz_d50_to_linear_srgb_d65(lab_to_xyz_d50(lab));
+                    let back = linear.map(linear_to_srgb);
+                    assert_near(&format!("{:?}", [r, g, b]), back, [r, g, b], 1e-12);
+                }
+            }
+        }
+        for (rgb, want) in reference::RGB_SAMPLES.iter().zip(&reference::SRGB_LAB) {
+            let rgb = rgb.map(|v| f64::from(v) / 255.0);
+            assert_near(
+                &format!("lcms2 at {rgb:?}"),
+                display_srgb_to_lab(rgb),
+                *want,
+                0.02,
+            );
         }
     }
 

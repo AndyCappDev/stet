@@ -339,8 +339,10 @@ pub struct IccCache {
     raw_bytes: HashMap<ProfileHash, Arc<Vec<u8>>>,
     /// sRGB output profile (created once).
     srgb_profile: ColorProfile,
-    /// Cached sRGB→CMYK reverse transform (for RGB round-trip through CMYK page groups).
-    reverse_cmyk_f64: Option<Arc<dyn TransformExecutor<f64> + Send + Sync>>,
+    /// sRGB → default CMYK, built by [`Self::prepare_reverse_cmyk`]. Used
+    /// for the renderer's parallel CMYK buffer and the round trip through a
+    /// DeviceCMYK page group.
+    reverse_cmyk: Option<ReverseCmyk>,
     /// Black Point Compensation mode for CMYK→sRGB conversion. Set at
     /// construction time via [`IccCacheOptions`]; consulted by future BPC
     /// apply paths (commit 2 of `docs/PLAN-BPC.md`).
@@ -369,6 +371,19 @@ impl Default for IccCache {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The sRGB → CMYK reverse transform into the default CMYK profile.
+#[derive(Clone)]
+enum ReverseCmyk {
+    /// The inverse of stet's display, then the profile's `B2A1` with the
+    /// black-point compensation lcms2 applies to an sRGB source: lcms2's
+    /// built-in sRGB → profile, relative colorimetric.
+    Lcms(Arc<hand_rolled::LabToCmykSampler>),
+    /// moxcms's sRGB → profile, for a B2A table stet does not read, when
+    /// moxcms builds one. It has no black-point compensation. A profile with
+    /// no B2A table at all (an input-class profile) has no reverse in either.
+    Moxcms(Arc<dyn TransformExecutor<f64> + Send + Sync>),
 }
 
 /// Apply BPC to an sRGB triple if `params` is `Some`; otherwise return the
@@ -405,7 +420,7 @@ impl IccCache {
             system_cmyk_bytes: None,
             raw_bytes: HashMap::new(),
             srgb_profile: ColorProfile::new_srgb(),
-            reverse_cmyk_f64: None,
+            reverse_cmyk: None,
             bpc_mode: opts.bpc_mode,
             proofing_enabled: false,
             lab_to_oi_per_intent: [None, None, None, None],
@@ -1521,12 +1536,30 @@ impl IccCache {
     /// Returns `Some(())` if the transform is now present (built or already
     /// cached). Returns `None` if no system CMYK profile is registered or no
     /// rendering intent could create a transform.
+    ///
+    /// The reverse is relative colorimetric, compensated as the cache's
+    /// `--bpc` mode says (sRGB's black is zero). Only a B2A table stet does
+    /// not read falls back to moxcms, which tries each intent in turn.
     fn ensure_reverse_cmyk_transform(&mut self) -> Option<()> {
-        if self.reverse_cmyk_f64.is_some() {
+        if self.reverse_cmyk.is_some() {
             return Some(());
         }
         let hash = *self.default_cmyk_hash.as_ref()?;
         let cmyk_profile = self.profiles.get(&hash)?.clone();
+        let icc = self.raw_bytes.get(&hash).cloned().unwrap_or_default();
+        let relcol = RenderingIntent::RelativeColorimetric;
+        let bpc = black_point::chain_compensation(
+            None,
+            &cmyk_profile,
+            &icc,
+            relcol,
+            self.bpc_mode.is_enabled(),
+        );
+        if let Some(sampler) = hand_rolled::LabToCmykSampler::new(&cmyk_profile, &icc, relcol, bpc)
+        {
+            self.reverse_cmyk = Some(ReverseCmyk::Lcms(Arc::new(sampler)));
+            return Some(());
+        }
         let intents = [
             RenderingIntent::RelativeColorimetric,
             RenderingIntent::Perceptual,
@@ -1544,7 +1577,7 @@ impl IccCache {
                 Layout::Rgba,
                 options,
             ) {
-                self.reverse_cmyk_f64 = Some(t);
+                self.reverse_cmyk = Some(ReverseCmyk::Moxcms(t));
                 return Some(());
             }
         }
@@ -1635,44 +1668,43 @@ impl IccCache {
     /// system CMYK profile is registered.
     ///
     /// The returned components are clamped to `[0, 1]`.
+    ///
+    /// The colour is taken as stet displays it: converted to the Lab stet
+    /// shows as that sRGB, then through the profile's `B2A1` as lcms2
+    /// converts its built-in sRGB, relative colorimetric, with black-point
+    /// compensation when the cache's mode enables it. The renderer converts
+    /// what it has already displayed, so the ink it gets back displays as
+    /// the same colour wherever the profile can make it. A B2A table stet
+    /// does not read converts through moxcms instead, and a profile with no
+    /// B2A table has no reverse (`None`).
     pub fn convert_rgb_to_cmyk_readonly(&self, r: f64, g: f64, b: f64) -> Option<[f64; 4]> {
-        let reverse = self.reverse_cmyk_f64.as_ref()?;
-        let src_rgb = [r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0)];
-        let mut cmyk = [0.0f64; 4];
-        reverse.transform(&src_rgb, &mut cmyk).ok()?;
-        Some([
-            cmyk[0].clamp(0.0, 1.0),
-            cmyk[1].clamp(0.0, 1.0),
-            cmyk[2].clamp(0.0, 1.0),
-            cmyk[3].clamp(0.0, 1.0),
-        ])
+        let rgb = [r, g, b].map(|v| v.clamp(0.0, 1.0));
+        let cmyk = match self.reverse_cmyk.as_ref()? {
+            ReverseCmyk::Lcms(sampler) => {
+                let [l, a, b] = hand_rolled::display_srgb_to_lab(rgb);
+                sampler.sample_pdf_lab(l, a, b)
+            }
+            ReverseCmyk::Moxcms(reverse) => {
+                let mut cmyk = [0.0f64; 4];
+                reverse.transform(&rgb, &mut cmyk).ok()?;
+                cmyk
+            }
+        };
+        Some(cmyk.map(|v| v.clamp(0.0, 1.0)))
     }
 
     /// Round-trip an RGB color through the system CMYK profile: sRGB→CMYK→sRGB.
     /// Used when compositing in a DeviceCMYK page group — saturated RGB colors
     /// become more muted after passing through the CMYK gamut.
     /// Returns None if no CMYK profile is loaded.
+    ///
+    /// The first leg is [`Self::convert_rgb_to_cmyk_readonly`]; the second
+    /// shows the ink as DeviceCMYK is shown
+    /// ([`Self::convert_cmyk_readonly`]).
     pub fn round_trip_rgb_via_cmyk(&mut self, r: f64, g: f64, b: f64) -> Option<(f64, f64, f64)> {
         self.ensure_reverse_cmyk_transform()?;
-        let hash = *self.default_cmyk_hash.as_ref()?;
-        let reverse = self.reverse_cmyk_f64.as_ref()?;
-
-        // sRGB → CMYK
-        let src_rgb = [r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0)];
-        let mut cmyk = [0.0f64; 4];
-        reverse.transform(&src_rgb, &mut cmyk).ok()?;
-
-        // CMYK → sRGB (via existing forward transform)
-        let forward = self.transforms.get(&hash)?;
-        let mut dst = [0.0f64; 3];
-        forward.transform_f64.transform(&cmyk, &mut dst).ok()?;
-
-        let dst = bpc_post_correct(dst, forward.bpc_params.as_ref());
-        Some((
-            dst[0].clamp(0.0, 1.0),
-            dst[1].clamp(0.0, 1.0),
-            dst[2].clamp(0.0, 1.0),
-        ))
+        let [c, m, y, k] = self.convert_rgb_to_cmyk_readonly(r, g, b)?;
+        self.convert_cmyk_readonly(c, m, y, k)
     }
 
     /// Disable all ICC color management — clears all profiles, transforms,
@@ -1684,7 +1716,7 @@ impl IccCache {
         self.raw_bytes.clear();
         self.default_cmyk_hash = None;
         self.system_cmyk_bytes = None;
-        self.reverse_cmyk_f64 = None;
+        self.reverse_cmyk = None;
     }
 }
 

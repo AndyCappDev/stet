@@ -243,6 +243,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   This is common in camera profiles, which carry `A2B0` alone. lcms2
   treats such an intent as unsupported and its black as zero; stet took
   `A2B0`'s darkest colour instead.
+- **RGB composited in CMYK, and RGB colour in a DeviceCMYK page group,
+  convert to CMYK as lcms2 does.** Both take the colour stet displays back
+  to the CMYK profile: the renderer's CMYK buffer, which CMYK blend modes,
+  non-isolated CMYK groups and overprint simulation read, for a paint with
+  no CMYK of its own; and a PDF page whose transparency group is
+  DeviceCMYK, where an `rg` colour goes to CMYK and back. moxcms did it,
+  with no black-point compensation, so with `--bpc` on (the default)
+  black landed on 400% ink rather than the profile's black, and it was up
+  to 150 ink levels wrong through ICC v4 and XYZ-PCS profiles. It now
+  inverts stet's display into the profile's `B2A1`, compensated as `--bpc`
+  says, within 0.1 ink levels of lcms2, and the page group shows that ink
+  as DeviceCMYK is shown. In the test corpus, three PDFs with a DeviceCMYK
+  page group move by up to 14 levels, their flat colours now Ghostscript's.
 - **Relative colorimetric CMYK rendered lighter than Ghostscript and
   Acrobat** with black-point compensation on, the default. Compensation
   maps the profile's black to sRGB black, and stet took that black to be

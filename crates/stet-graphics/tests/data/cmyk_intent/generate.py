@@ -227,6 +227,7 @@ def profile(
     perceptual_b2a=B2A,
     device_class=b"prtr",
     version=0x02100000,
+    with_b2a=True,
 ):
     tags = [
         (b"desc", desc_tag(description)),
@@ -234,13 +235,13 @@ def profile(
     ]
     if perceptual is not None:
         tags.append((b"A2B0", perceptual(bits)))
-    tags += [
-        (b"A2B1", A2B1(bits)),
-        (b"B2A0", perceptual_b2a(bits)),
-        (b"B2A1", B2A(bits)),
-    ]
+    tags.append((b"A2B1", A2B1(bits)))
+    if with_b2a:
+        tags += [(b"B2A0", perceptual_b2a(bits)), (b"B2A1", B2A(bits))]
     if with_saturation:
-        tags += [(b"A2B2", A2B2(bits)), (b"B2A2", B2A(bits))]
+        tags.append((b"A2B2", A2B2(bits)))
+        if with_b2a:
+            tags.append((b"B2A2", B2A(bits)))
     return assemble(tags, device_class, b"CMYK", b"Lab ", version)
 
 
@@ -1542,6 +1543,88 @@ def rust_table(name, icc):
     return "\n".join(lines)
 
 
+# The reverse transform: lcms2's built-in sRGB into each profile, relative
+# colorimetric, and back out through the profile's display.
+REVERSE = ["INKLIMIT", "SHADOW", "SPLIT_LUT8", "MAB", "XYZ_V4"]
+
+
+def lcms_pair(source, dest, bpc, in_format, out_format, inputs, n_out):
+    """`inputs` through `source` → `dest`, relative colorimetric, with
+    black-point compensation `bpc`, unoptimised, in doubles."""
+    xform = LCMS.cmsCreateExtendedTransform(
+        None,
+        2,
+        (ctypes.c_void_p * 2)(source, dest),
+        (ctypes.c_int * 2)(int(bpc), int(bpc)),
+        (ctypes.c_uint32 * 2)(RELATIVE_COLORIMETRIC, RELATIVE_COLORIMETRIC),
+        (ctypes.c_double * 2)(1.0, 1.0),
+        None,
+        0,
+        in_format,
+        out_format,
+        FLAGS_NOCACHE_NOOPTIMIZE,
+    )
+    assert xform, "lcms2 could not build the transform"
+    out = []
+    for v in inputs:
+        src = (ctypes.c_double * len(v))(*v)
+        dst = (ctypes.c_double * n_out)()
+        LCMS.cmsDoTransform(xform, src, dst, 1)
+        out.append(list(dst))
+    LCMS.cmsDeleteTransform(xform)
+    return out
+
+
+def rust_reverse(name, icc):
+    srgb = Lcms(icc["SRGB"])
+    out = Lcms(icc[name])
+    rgbs = [[v / 255 for v in sample] for sample in RGB_SAMPLES]
+    inks, trips = [], []
+    for bpc in (False, True):
+        ink = lcms_pair(srgb.profile, out.profile, bpc, TYPE_RGB_DBL, TYPE_CMYK_DBL, rgbs, 4)
+        ink = [[min(max(v / 100, 0.0), 1.0) for v in cmyk] for cmyk in ink]
+        inks.append(ink)
+        trips.append(
+            lcms_pair(
+                out.profile,
+                srgb.profile,
+                bpc,
+                TYPE_CMYK_DBL,
+                TYPE_RGB_DBL,
+                [[v * 100 for v in cmyk] for cmyk in ink],
+                3,
+            )
+        )
+    srgb.close()
+    out.close()
+    lower = name.lower()
+    n = len(RGB_SAMPLES)
+    return "\n".join(
+        [
+            f"/// lcms2's built-in sRGB → `{lower}.icc`, relative colorimetric, at each",
+            "/// of `RGB_SAMPLES`; ink 0–1, indexed by black-point compensation: 0",
+            "/// off, 1 on.",
+            f"pub const REVERSE_{name}: [[[f64; 4]; {n}]; 2] = [",
+            *(
+                line
+                for ink in inks
+                for line in ["    [", *(f"        {f64_array(c)}," for c in ink), "    ],"]
+            ),
+            "];",
+            f"/// That ink back through `{lower}.icc` → lcms2's built-in sRGB, relative",
+            "/// colorimetric, with the same compensation; sRGB 0–1, unclipped, so a",
+            "/// channel outside it is a colour the display had to clip.",
+            f"pub const ROUND_TRIP_RGB_{name}: [[[f64; 3]; {n}]; 2] = [",
+            *(
+                line
+                for trip in trips
+                for line in ["    [", *(f"        {f64_array(c)}," for c in trip), "    ],"]
+            ),
+            "];",
+        ]
+    )
+
+
 def main():
     profiles = [
         ("SPLIT", profile("stet test: A2B0 != A2B1, no A2B2", with_saturation=False)),
@@ -1598,6 +1681,15 @@ def main():
         ("RGB_XYZ", rgb_xyz_profile("stet test: RGB, XYZ PCS, lut16 A2B0/A2B1")),
         ("RGB_XYZ_MAB", rgb_xyz_mab_profile("stet test: RGB, XYZ PCS, ICC v4 mAB A2B0")),
         (
+            "INKLIMIT_A2B",
+            profile(
+                "stet test: inklimit.icc as input class, no B2A",
+                device_class=b"scnr",
+                with_b2a=False,
+                **inklimit,
+            ),
+        ),
+        (
             "INKLIMIT_MATRIX",
             profile(
                 "stet test: inklimit.icc, B2A0 with a matrix",
@@ -1653,6 +1745,7 @@ def main():
             "INKLIMIT_MATRIX",
             "RGB_XYZ",
             "RGB_XYZ_MAB",
+            "INKLIMIT_A2B",
         ):
             out += [rust_black_point(name, icc[name]), ""]
     for name in ["INKLIMIT", "INKLIMIT_LUT8"]:
@@ -1706,6 +1799,8 @@ def main():
         out += [rust_gray_chain(oi, icc), ""]
     for name in ["RGB_GAMMA", "SRGB"]:
         out += [rust_rgb_lab(name, icc[name]), ""]
+    for name in REVERSE:
+        out += [rust_reverse(name, icc), ""]
     (HERE / "reference.rs").write_text("\n".join(out))
 
 
