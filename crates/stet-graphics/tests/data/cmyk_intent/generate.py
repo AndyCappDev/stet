@@ -24,10 +24,18 @@ script runs it once and records what it produces. It writes, next to itself:
   split_xyz.icc  A CMYK profile with an XYZ PCS, A2B0 != A2B1, which stet's
                  hand-rolled evaluators do not read: the proofing chain's
                  moxcms fallback.
+  shadow.icc, shadow_straight.icc, shadow_v4.icc
+                 Output profiles whose B2A tables ease into an ink limit, so
+                 lcms2's destination black-point detector fits a curve to
+                 their shadows: one whose B2A1 bends the mid-tones, one whose
+                 B2A1 does not, and the first as ICC v4.
+  gray_trc.icc   A TRC-only Gray profile with an XYZ PCS and a black of
+                 L* 20, like a press's black-ink profile.
   reference.rs   lcms2's sRGB output for each profile, intent and BPC setting,
-                 its black points, the round trip behind them, and its
-                 proofing-chain stage 1 (CMYK source → output-intent CMYK) for
-                 each intent; included by `tests/cmyk_intent.rs`.
+                 its black points as a source and as a destination, the
+                 round trip behind them, and its proofing-chain stage 1
+                 (CMYK or Gray source → output-intent CMYK) for each intent;
+                 included by `tests/cmyk_intent.rs`.
 
 The profiles are ICC v2 output (`prtr`) profiles with a Lab PCS unless named
 otherwise. Most use `lut16Type` tables — the shape of FOGRA39, ISO Coated v2
@@ -56,6 +64,7 @@ Run with Pillow (which bundles lcms2):  python3 generate.py
 """
 
 import io
+import math
 import struct
 import ctypes
 import ctypes.util
@@ -78,11 +87,11 @@ def u16(v):
     return struct.pack(">H", v)
 
 
-def lut(bits, n_in, n_out, clut):
-    """An `mft2` (bits=16) or `mft1` (bits=8) tag on a 2-point grid with
-    identity curves. `clut` maps grid coordinates (each 0.0 or 1.0, first
+def lut(bits, n_in, n_out, clut, grid=2):
+    """An `mft2` (bits=16) or `mft1` (bits=8) tag on a `grid`-point grid with
+    identity curves. `clut` maps grid coordinates (each in 0.0–1.0, first
     channel slowest) to normalised outputs."""
-    t = (b"mft2" if bits == 16 else b"mft1") + bytes(4) + bytes([n_in, n_out, 2, 0])
+    t = (b"mft2" if bits == 16 else b"mft1") + bytes(4) + bytes([n_in, n_out, grid, 0])
     for v in (1, 0, 0, 0, 1, 0, 0, 0, 1):
         t += s15f16(v)
     if bits == 16:
@@ -94,9 +103,9 @@ def lut(bits, n_in, n_out, clut):
         curves = lambda n: bytes(range(256)) * n
         sample = lambda v: bytes([round(v * 255)])
     t += curves(n_in)
-    for idx in range(2**n_in):
-        coords = [(idx >> (n_in - 1 - i)) & 1 for i in range(n_in)]
-        out = clut([float(c) for c in coords])
+    for idx in range(grid**n_in):
+        coords = [idx // grid ** (n_in - 1 - i) % grid / (grid - 1) for i in range(n_in)]
+        out = clut(coords)
         assert len(out) == n_out
         for v in out:
             t += sample(min(max(v, 0.0), 1.0))
@@ -267,6 +276,59 @@ def xyz_profile(description):
     return assemble(tags, b"prtr", b"CMYK", b"XYZ ", 0x02100000)
 
 
+# Output profiles whose shadows level off as a press profile's do: each
+# B2A table follows the equal ink A2B1 gives an L* until it eases into an
+# ink limit (a soft minimum), so lcms2's destination black-point detector
+# finds a flat black and a bend, and fits a quadratic to it. In `shadow.icc`
+# B2A1 also bends the mid-tones (ink^0.85), which sends relative
+# colorimetric to the fit too; `shadow_straight.icc` keeps B2A1 straight,
+# where relative colorimetric takes its own black point instead. The tables
+# only depend on L*, on a 17-point grid: on a 2-point grid every round trip
+# is straight, and lcms2 then detects a black point of zero.
+def eased_b2a(limit, gamma):
+    softness = 0.03
+
+    def clut(coords):
+        l_star = coords[0] * 65535 / 65280 * 100
+        ink = max((100 - l_star) / 92, 0.0) ** gamma
+        ink = limit - softness * math.log1p(math.exp((limit - ink) / softness))
+        return [ink, ink, ink, ink]
+
+    return lut(16, 3, 4, clut, grid=17)
+
+
+def shadow_profile(description, version=0x02100000, relcol_gamma=0.85):
+    tags = [
+        (b"desc", desc_tag(description)),
+        (b"wtpt", xyz_tag(0.9642, 1.0, 0.8249)),
+        (b"A2B0", A2B0(16)),
+        (b"A2B1", A2B1(16)),
+        (b"A2B2", A2B2(16)),
+        (b"B2A0", eased_b2a(0.8, 1.0)),
+        (b"B2A1", eased_b2a(0.85, relcol_gamma)),
+        (b"B2A2", eased_b2a(0.9, 1.0)),
+    ]
+    return assemble(tags, b"prtr", b"CMYK", b"Lab ", version)
+
+
+def curv_tag(values):
+    return b"curv" + bytes(4) + struct.pack(">I", len(values)) + b"".join(
+        u16(round(v * 65535)) for v in values
+    )
+
+
+def gray_profile(description):
+    """A TRC-only Gray profile with an XYZ PCS, like a press's black-ink
+    profile: gray 0 is the ink's solid, Y 0.03 (L* 20), not black."""
+    trc = [0.03 + 0.97 * (i / 255) ** 1.8 for i in range(256)]
+    tags = [
+        (b"desc", desc_tag(description)),
+        (b"wtpt", xyz_tag(0.9642, 1.0, 0.8249)),
+        (b"kTRC", curv_tag(trc)),
+    ]
+    return assemble(tags, b"prtr", b"GRAY", b"XYZ ", 0x02100000)
+
+
 # ------------------------------------------------------------------ lcms2
 
 # CMYK samples, 0–255: paper, primaries, secondaries, black ramps, rich and
@@ -347,9 +409,18 @@ LCMS.cmsDetectBlackPoint.argtypes = [
     ctypes.c_uint32,
 ]
 
+LCMS.cmsDetectDestinationBlackPoint.restype = ctypes.c_int
+LCMS.cmsDetectDestinationBlackPoint.argtypes = [
+    ctypes.POINTER(ctypes.c_double * 3),
+    ctypes.c_void_p,
+    ctypes.c_uint32,
+    ctypes.c_uint32,
+]
+
 # lcms2.h: FLOAT_SH(1) | COLORSPACE_SH(PT_…) | CHANNELS_SH(n) | BYTES_SH(0).
 TYPE_LAB_DBL = (1 << 22) | (10 << 16) | (3 << 3)
 TYPE_CMYK_DBL = (1 << 22) | (6 << 16) | (4 << 3)
+TYPE_GRAY_DBL = (1 << 22) | (3 << 16) | (1 << 3)
 FLAGS_NOCACHE_NOOPTIMIZE = 0x0040 | 0x0100
 PERCEPTUAL, RELATIVE_COLORIMETRIC, SATURATION = 0, 1, 2
 
@@ -400,6 +471,12 @@ class Lcms:
         """`cmsDetectBlackPoint`, XYZ with white Y = 1."""
         xyz = (ctypes.c_double * 3)()
         LCMS.cmsDetectBlackPoint(ctypes.byref(xyz), self.profile, intent, 0)
+        return list(xyz)
+
+    def destination_black_point(self, intent):
+        """`cmsDetectDestinationBlackPoint`, XYZ with white Y = 1."""
+        xyz = (ctypes.c_double * 3)()
+        LCMS.cmsDetectDestinationBlackPoint(ctypes.byref(xyz), self.profile, intent, 0)
         return list(xyz)
 
     def b2a0(self, labs):
@@ -546,6 +623,82 @@ def rust_chain(source, oi, icc):
     return "\n".join(lines)
 
 
+# Output profiles whose destination black points the tests check: fitted,
+# straight through the mid-tones (relative colorimetric), ICC v4, and
+# profiles whose round trips are straight lines, where lcms2's fit gives
+# zero.
+DESTINATIONS = ["SHADOW", "SHADOW_STRAIGHT", "SHADOW_V4", "INKLIMIT", "SPLIT_SAT"]
+
+# Gray levels for the Gray chain references.
+GRAY_SAMPLES = [i / 16 for i in range(17)]
+
+# Gray chains: `gray_trc.icc` into each output intent.
+GRAY_CHAINS = ["SHADOW", "SHADOW_V4", "INKLIMIT"]
+
+
+def rust_destination(name, icc):
+    lcms = Lcms(icc)
+    rows = [
+        f64_array(lcms.destination_black_point(i))
+        for i in (PERCEPTUAL, RELATIVE_COLORIMETRIC, SATURATION)
+    ]
+    lcms.close()
+    return "\n".join(
+        [
+            f"/// lcms2's `cmsDetectDestinationBlackPoint` for `{name.lower()}.icc`,",
+            "/// XYZ (D50, white Y = 1), indexed by intent: 0 perceptual, 1",
+            "/// relative colorimetric, 2 saturation. Zero means no compensation.",
+            f"pub const {name}_DESTINATION_BLACK_POINT: [[f64; 3]; 3] = [",
+            *(f"    {row}," for row in rows),
+            "];",
+        ]
+    )
+
+
+def rust_gray_chain(oi, icc):
+    src = Lcms(icc["GRAY_TRC"])
+    out = Lcms(icc[oi])
+    lines = [
+        f"/// lcms2's proofing-chain stage 1, `gray_trc.icc` into `{oi.lower()}.icc`,",
+        "/// at each of `GRAY_SAMPLES`; ink 0–1, indexed `[intent][bpc]`: intent",
+        "/// 0 perceptual, 1 relative colorimetric, 2 saturation; black-point",
+        "/// compensation 0 off, 1 on.",
+        f"pub const GRAY_CHAIN_{oi}: [[[[f64; 4]; {len(GRAY_SAMPLES)}]; 2]; 3] = [",
+    ]
+    for intent in (PERCEPTUAL, RELATIVE_COLORIMETRIC, SATURATION):
+        lines.append("    [")
+        for bpc in (False, True):
+            xform = LCMS.cmsCreateExtendedTransform(
+                None,
+                2,
+                (ctypes.c_void_p * 2)(src.profile, out.profile),
+                (ctypes.c_int * 2)(int(bpc), int(bpc)),
+                (ctypes.c_uint32 * 2)(intent, intent),
+                (ctypes.c_double * 2)(1.0, 1.0),
+                None,
+                0,
+                TYPE_GRAY_DBL,
+                TYPE_CMYK_DBL,
+                FLAGS_NOCACHE_NOOPTIMIZE,
+            )
+            assert xform, "lcms2 could not build the Gray transform"
+            lines.append("        [")
+            for g in GRAY_SAMPLES:
+                s_ = (ctypes.c_double * 1)(g)
+                d = (ctypes.c_double * 4)()
+                LCMS.cmsDoTransform(xform, s_, d, 1)
+                lines.append(
+                    "            " + f64_array([min(max(v / 100, 0.0), 1.0) for v in d]) + ","
+                )
+            LCMS.cmsDeleteTransform(xform)
+            lines.append("        ],")
+        lines.append("    ],")
+    lines.append("];")
+    src.close()
+    out.close()
+    return "\n".join(lines)
+
+
 def rust_table(name, icc):
     lines = [
         f"/// lcms2's sRGB output for `{name.lower()}.icc`, indexed",
@@ -599,6 +752,15 @@ def main():
         ),
     ]
     profiles.append(("SPLIT_XYZ", xyz_profile("stet test: CMYK, XYZ PCS, A2B0 != A2B1")))
+    profiles += [
+        ("SHADOW", shadow_profile("stet test: B2A tables easing into an ink limit")),
+        (
+            "SHADOW_STRAIGHT",
+            shadow_profile("stet test: shadow.icc, straight B2A1", relcol_gamma=1.0),
+        ),
+        ("SHADOW_V4", shadow_profile("stet test: shadow.icc as ICC v4", version=0x04200000)),
+        ("GRAY_TRC", gray_profile("stet test: Gray TRC, XYZ PCS, black L* 20")),
+    ]
     for name, icc in profiles:
         (HERE / f"{name.lower()}.icc").write_bytes(icc)
     icc = dict(profiles)
@@ -625,12 +787,22 @@ def main():
     for name in ["SPLIT", "SPLIT_SAT", "SPLIT_LUT8", "SAME", "INKLIMIT", "INKLIMIT_LUT8", "INKLIMIT_SCNR", "INKLIMIT_V4"]:
         out += [rust_table(name, icc[name]), ""]
     for name, _ in profiles:
-        if name != "SPLIT_XYZ":
+        if name not in ("SPLIT_XYZ", "SHADOW", "SHADOW_STRAIGHT", "SHADOW_V4"):
             out += [rust_black_point(name, icc[name]), ""]
     for name in ["INKLIMIT", "INKLIMIT_LUT8"]:
         out += [rust_round_trip(name, icc[name]), ""]
     for source, oi in CHAIN_PAIRS:
         out += [rust_chain(source, oi, icc), ""]
+    grays = ", ".join(f64(g) for g in GRAY_SAMPLES)
+    out += [
+        "/// Gray inputs, 0–1, in the order of the Gray chain tables below.",
+        f"pub const GRAY_SAMPLES: [f64; {len(GRAY_SAMPLES)}] = [{grays}];",
+        "",
+    ]
+    for name in DESTINATIONS:
+        out += [rust_destination(name, icc[name]), ""]
+    for oi in GRAY_CHAINS:
+        out += [rust_gray_chain(oi, icc), ""]
     (HERE / "reference.rs").write_text("\n".join(out))
 
 

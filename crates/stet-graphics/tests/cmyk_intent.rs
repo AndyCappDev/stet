@@ -11,7 +11,7 @@
 //! `inklimit*.icc`, whose perceptual `B2A0` stops short of 400% ink as a
 //! press profile's does — and lcms2's output for each intent with
 //! black-point compensation off and on, and lcms2's proofing-chain stage 1
-//! (a CMYK source into an output-intent CMYK) for each intent.
+//! (a CMYK or Gray source into an output-intent CMYK) for each intent.
 //! `generate.py` there makes every file; re-run it rather than editing
 //! them.
 
@@ -28,6 +28,9 @@ const SPLIT: &[u8] = include_bytes!("data/cmyk_intent/split.icc");
 const SPLIT_SAT: &[u8] = include_bytes!("data/cmyk_intent/split_sat.icc");
 const SPLIT_LUT8: &[u8] = include_bytes!("data/cmyk_intent/split_lut8.icc");
 const SPLIT_XYZ: &[u8] = include_bytes!("data/cmyk_intent/split_xyz.icc");
+const SHADOW: &[u8] = include_bytes!("data/cmyk_intent/shadow.icc");
+const SHADOW_V4: &[u8] = include_bytes!("data/cmyk_intent/shadow_v4.icc");
+const GRAY_TRC: &[u8] = include_bytes!("data/cmyk_intent/gray_trc.icc");
 const SAME: &[u8] = include_bytes!("data/cmyk_intent/same.icc");
 const INKLIMIT: &[u8] = include_bytes!("data/cmyk_intent/inklimit.icc");
 const INKLIMIT_LUT8: &[u8] = include_bytes!("data/cmyk_intent/inklimit_lut8.icc");
@@ -533,5 +536,102 @@ fn chain_defaults_and_images() {
             assert_eq!(at(IccRenderingIntent::AbsoluteColorimetric), at(relcol));
             assert_eq!(cache.convert_color_readonly(&hash, &ink(cmyk)), at(relcol));
         }
+    }
+}
+
+/// A PDF/X cache with black-point compensation `bpc`: `oi` is the output
+/// intent, and the Gray profile is registered after proofing is on.
+fn gray_proofing(oi: &[u8], bpc: BpcMode) -> (IccCache, [u8; 32]) {
+    let mut cache = IccCache::new_with_options(IccCacheOptions {
+        bpc_mode: bpc,
+        source_cmyk_profile: Some(oi.to_vec()),
+    });
+    cache.set_proofing_enabled(true);
+    let hash = cache.register_profile(GRAY_TRC).unwrap();
+    (cache, hash)
+}
+
+/// In a PDF/X document an ICCBased Gray colour converts into the output
+/// condition by its intent, with black-point compensation when `--bpc` is
+/// on, as lcms2 does with its flag; into an ICC v4 output intent lcms2
+/// compensates perceptual and saturation whatever the flag. It used to
+/// convert absolute colorimetric, uncompensated, whatever the intent.
+#[test]
+fn gray_sources_chain_with_compensation() {
+    for (name, oi, expected, v4) in [
+        ("shadow", SHADOW, &reference::GRAY_CHAIN_SHADOW, false),
+        (
+            "shadow_v4",
+            SHADOW_V4,
+            &reference::GRAY_CHAIN_SHADOW_V4,
+            true,
+        ),
+        ("inklimit", INKLIMIT, &reference::GRAY_CHAIN_INKLIMIT, false),
+    ] {
+        for mode in [BpcMode::On, BpcMode::Off, BpcMode::Auto] {
+            let (cache, hash) = gray_proofing(oi, mode);
+            for intent in INTENTS {
+                let forced = v4 && intent != IccRenderingIntent::RelativeColorimetric;
+                let bpc = (mode.is_enabled() || forced) as usize;
+                let want = &expected[reference_row(intent)][bpc];
+                for (g, want) in reference::GRAY_SAMPLES.iter().zip(want) {
+                    let got = to_u8(
+                        cache
+                            .convert_color_readonly_with_intent(&hash, &[*g], intent)
+                            .unwrap(),
+                    );
+                    let want = shown(&cache, *want);
+                    for ch in 0..3 {
+                        assert!(
+                            got[ch].abs_diff(want[ch]) <= 1,
+                            "{name} {mode:?} {intent:?} gray {g}: chain {got:?}, lcms2's ink shown {want:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    // Compensation moves these colours, or the test proves nothing.
+    let shadow = &reference::GRAY_CHAIN_SHADOW;
+    for row in shadow {
+        assert_ne!(row[0], row[1]);
+    }
+    assert_eq!(
+        reference::GRAY_CHAIN_SHADOW_V4[0][0],
+        reference::GRAY_CHAIN_SHADOW_V4[0][1]
+    );
+}
+
+/// Gray, like CMYK: absolute colorimetric and a conversion that names no
+/// intent chain as relative colorimetric, and an image as its single
+/// colours do.
+#[test]
+fn gray_chain_defaults_and_images() {
+    let (cache, hash) = gray_proofing(SHADOW, BpcMode::On);
+    let relcol = IccRenderingIntent::RelativeColorimetric;
+    let samples: Vec<u8> = (0..=255).step_by(17).map(|v| v as u8).collect();
+    for intent in INTENTS {
+        let image = cache
+            .convert_image_8bit_with_intent(&hash, &samples, samples.len(), intent)
+            .unwrap();
+        for (&g, px) in samples.iter().zip(image.as_chunks::<3>().0) {
+            let single = to_u8(
+                cache
+                    .convert_color_readonly_with_intent(&hash, &[g as f64 / 255.0], intent)
+                    .unwrap(),
+            );
+            // The 8-bit chain rounds the intermediate ink to 8 bits.
+            for ch in 0..3 {
+                assert!(
+                    px[ch].abs_diff(single[ch]) <= 2,
+                    "{intent:?} {g}: image {px:?}, single colour {single:?}"
+                );
+            }
+        }
+    }
+    for g in reference::GRAY_SAMPLES {
+        let at = |intent| cache.convert_color_readonly_with_intent(&hash, &[g], intent);
+        assert_eq!(at(IccRenderingIntent::AbsoluteColorimetric), at(relcol));
+        assert_eq!(cache.convert_color_readonly(&hash, &[g]), at(relcol));
     }
 }

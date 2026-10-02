@@ -2,9 +2,12 @@
 // Copyright (c) 2026 Scott Bowman
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! The black point black-point compensation starts from, for a CMYK
-//! source profile and a rendering intent — lcms2's `cmsDetectBlackPoint`,
-//! as Ghostscript runs it.
+//! The black points black-point compensation maps between, for a profile
+//! and a rendering intent, as lcms2 detects them and Ghostscript runs it:
+//! a CMYK or Gray source's (`cmsDetectBlackPoint`, [`detect`],
+//! [`detect_gray`]) and a CMYK output intent's as the destination of the
+//! proofing chain (`cmsDetectDestinationBlackPoint`,
+//! [`detect_destination`]). For a CMYK source:
 //!
 //! | case | black point |
 //! |---|---|
@@ -85,6 +88,199 @@ pub(super) fn detect(
         _ => &profile.lut_a_to_b_colorimetric,
     };
     table.as_ref().map(|_| SourceBlack::DarkerColorant)
+}
+
+/// The black point lcms2 detects for a TRC-only Gray profile
+/// (`BlackPointAsDarkerColorant`): gray 0 through the tone curve, made
+/// neutral and clipped to L\* 50. The same for every intent, as the curve
+/// is; an ICC v4 profile under perceptual or saturation takes the darker
+/// colorant too, being a matrix-shaper. `None` is lcms2's zero black point,
+/// or a Gray profile that is not TRC-only.
+pub(super) fn detect_gray(profile: &ColorProfile, icc: &[u8]) -> Option<[f64; 3]> {
+    let class = icc.get(12..16)?;
+    if matches!(class, b"link" | b"abst" | b"nmcl") {
+        return None;
+    }
+    let y = hand_rolled::GrayTrc::new(profile)?.y(0.0);
+    let l_star = xyz_d50_to_lab([0.0, y, 0.0])[0];
+    Some(lab_to_xyz_d50([l_star.min(50.0), 0.0, 0.0]))
+}
+
+/// The black point lcms2 detects for the CMYK output profile `profile`,
+/// whose raw bytes are `icc`, as the *destination* of a conversion under
+/// `intent` (`cmsDetectDestinationBlackPoint`). `None` is lcms2's zero
+/// black point.
+///
+/// - ICC v4 under perceptual or saturation: the v4 perceptual black.
+/// - No B2A table for the intent (lcms2 does not fall back to `B2A0`
+///   here): the profile's black point as a source, [`detect`].
+/// - Otherwise a round trip of L\* 0–100 through the intent's B2A and back
+///   through `A2B1`, starting at a\*/b\* of the profile's own black point
+///   for relative colorimetric and of Lab 0 otherwise. Where relative
+///   colorimetric's round trip is straight through the mid-tones its black
+///   is that black point; otherwise a quadratic fitted to the shadows finds
+///   where the round trip leaves black.
+///
+/// A profile whose round-trip tables are v4 `mAB`/`mBA` has no destination
+/// black point here, as stet has no evaluator for them.
+pub(super) fn detect_destination(
+    profile: &ColorProfile,
+    icc: &[u8],
+    intent: RenderingIntent,
+) -> Option<[f64; 3]> {
+    let v4 = icc.get(8).is_some_and(|&major| major >= 4);
+    let intent = match intent {
+        RenderingIntent::AbsoluteColorimetric => RenderingIntent::RelativeColorimetric,
+        other => other,
+    };
+    if v4
+        && matches!(
+            intent,
+            RenderingIntent::Perceptual | RenderingIntent::Saturation
+        )
+    {
+        return Some(PERCEPTUAL_BLACK);
+    }
+    let b2a = match intent {
+        RenderingIntent::Perceptual => &profile.lut_b_to_a_perceptual,
+        RenderingIntent::Saturation => &profile.lut_b_to_a_saturation,
+        _ => &profile.lut_b_to_a_colorimetric,
+    };
+    if b2a.is_none() || profile.color_space != DataColorSpace::Cmyk {
+        return resolve(profile, intent, detect(profile, icc, intent)?);
+    }
+    let initial = if intent == RenderingIntent::RelativeColorimetric {
+        xyz_d50_to_lab(resolve(profile, intent, detect(profile, icc, intent)?)?)
+    } else {
+        [0.0; 3]
+    };
+    let trip = hand_rolled::RoundTrip::new(profile, intent)?;
+    let (a, b) = (initial[1].clamp(-50.0, 50.0), initial[2].clamp(-50.0, 50.0));
+    let in_ramp: [f64; 256] = std::array::from_fn(|l| l as f64 * 100.0 / 255.0);
+    let mut out_ramp = in_ramp.map(|l| trip.run([l, a, b]).1[0]);
+    for l in (1..255).rev() {
+        out_ramp[l] = out_ramp[l].min(out_ramp[l + 1]);
+    }
+    let (min_l, max_l) = (out_ramp[0], out_ramp[255]);
+    // A round trip that does not rise has no black to find; nor has one
+    // that is not a number.
+    if min_l.partial_cmp(&max_l) != Some(std::cmp::Ordering::Less) {
+        return None;
+    }
+    if intent == RenderingIntent::RelativeColorimetric
+        && in_ramp
+            .iter()
+            .zip(&out_ramp)
+            .all(|(&i, &o)| i <= min_l + 0.2 * (max_l - min_l) || (i - o).abs() < 4.0)
+    {
+        return Some(lab_to_xyz_d50(initial));
+    }
+    let (lo, hi) = if intent == RenderingIntent::RelativeColorimetric {
+        (0.1, 0.5)
+    } else {
+        (0.03, 0.25)
+    };
+    let shadows: Vec<(f64, f64)> = in_ramp
+        .iter()
+        .zip(&out_ramp)
+        .map(|(&i, &o)| (i, (o - min_l) / (max_l - min_l)))
+        .filter(|&(_, y)| y >= lo && y < hi)
+        .collect();
+    if shadows.len() < 3 {
+        return None;
+    }
+    let l_star = quadratic_root(&shadows).max(0.0);
+    Some(lab_to_xyz_d50([l_star, initial[1], initial[2]]))
+}
+
+/// lcms2's `RootOfLeastSquaresFitQuadraticCurve`: the least-squares
+/// quadratic through `points`, and the root of it lcms2 takes, clipped to
+/// L\* 0–50. A straight fit gives 0: lcms2 clamps it with `min` and `max`
+/// the wrong way round, and stet follows lcms2.
+fn quadratic_root(points: &[(f64, f64)]) -> f64 {
+    if points.len() < 4 {
+        return 0.0;
+    }
+    let n = points.len() as f64;
+    let (mut sx, mut sx2, mut sx3, mut sx4, mut sy, mut syx, mut syx2) =
+        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    for &(x, y) in points {
+        sx += x;
+        sx2 += x * x;
+        sx3 += x * x * x;
+        sx4 += x * x * x * x;
+        sy += y;
+        syx += y * x;
+        syx2 += y * x * x;
+    }
+    let Some([c, b, a]) = solve3(
+        [[n, sx, sx2], [sx, sx2, sx3], [sx2, sx3, sx4]],
+        [sy, syx, syx2],
+    ) else {
+        return 0.0;
+    };
+    if a.abs() < 1.0e-10 {
+        if b.abs() < 1.0e-10 {
+            return 0.0;
+        }
+        return f64::min(0.0, f64::max(50.0, -c / b));
+    }
+    let d = b * b - 4.0 * a * c;
+    if d <= 0.0 {
+        return 0.0;
+    }
+    ((-b + d.sqrt()) / (2.0 * a)).clamp(0.0, 50.0)
+}
+
+/// `m · x = v` by lcms2's `_cmsMAT3solve`: the inverse, refused when the
+/// determinant is under its tolerance.
+fn solve3(m: [[f64; 3]; 3], v: [f64; 3]) -> Option<[f64; 3]> {
+    let c0 = m[1][1] * m[2][2] - m[1][2] * m[2][1];
+    let c1 = -m[1][0] * m[2][2] + m[1][2] * m[2][0];
+    let c2 = m[1][0] * m[2][1] - m[1][1] * m[2][0];
+    let det = m[0][0] * c0 + m[0][1] * c1 + m[0][2] * c2;
+    if det.abs() < 0.0001 {
+        return None;
+    }
+    let inv = [
+        [
+            c0 / det,
+            (m[0][2] * m[2][1] - m[0][1] * m[2][2]) / det,
+            (m[0][1] * m[1][2] - m[0][2] * m[1][1]) / det,
+        ],
+        [
+            c1 / det,
+            (m[0][0] * m[2][2] - m[0][2] * m[2][0]) / det,
+            (m[0][2] * m[1][0] - m[0][0] * m[1][2]) / det,
+        ],
+        [
+            c2 / det,
+            (m[0][1] * m[2][0] - m[0][0] * m[2][1]) / det,
+            (m[0][0] * m[1][1] - m[0][1] * m[1][0]) / det,
+        ],
+    ];
+    Some(inv.map(|row| row[0] * v[0] + row[1] * v[1] + row[2] * v[2]))
+}
+
+/// The XYZ a detected CMYK black point stands for: the darker colorant is
+/// 400% ink through the intent's table, as lcms2 computes it.
+fn resolve(
+    profile: &ColorProfile,
+    intent: RenderingIntent,
+    black: SourceBlack,
+) -> Option<[f64; 3]> {
+    match black {
+        SourceBlack::Xyz(xyz) => Some(xyz),
+        SourceBlack::DarkerColorant => {
+            let table = match intent {
+                RenderingIntent::Perceptual => &profile.lut_a_to_b_perceptual,
+                RenderingIntent::Saturation => &profile.lut_a_to_b_saturation,
+                _ => &profile.lut_a_to_b_colorimetric,
+            };
+            let lab = hand_rolled::table_black(table.as_ref()?)?;
+            Some(lab_to_xyz_d50([lab[0].min(50.0), 0.0, 0.0]))
+        }
+    }
 }
 
 /// lcms2's `BlackPointUsingPerceptualBlack`: the round trip's landing
@@ -178,28 +374,6 @@ mod tests {
         ),
     ];
 
-    /// The XYZ a detected black point stands for: the darker colorant is
-    /// 400% ink through the intent's table, as lcms2 computes it.
-    fn resolve(
-        profile: &ColorProfile,
-        intent: RenderingIntent,
-        black: Option<SourceBlack>,
-    ) -> [f64; 3] {
-        match black {
-            None => [0.0; 3],
-            Some(SourceBlack::Xyz(xyz)) => xyz,
-            Some(SourceBlack::DarkerColorant) => {
-                let table = match intent {
-                    Perceptual => &profile.lut_a_to_b_perceptual,
-                    Saturation => &profile.lut_a_to_b_saturation,
-                    _ => &profile.lut_a_to_b_colorimetric,
-                };
-                let lab = hand_rolled::table_black(table.as_ref().unwrap()).unwrap();
-                lab_to_xyz_d50([lab[0].min(50.0), 0.0, 0.0])
-            }
-        }
-    }
-
     /// Every generated profile, every intent: the black point is lcms2's,
     /// to a hundredth of an L\* — which covers the v4 perceptual black,
     /// the ink-limited round trip in `lut16Type` and `lut8Type`, v4's
@@ -213,7 +387,9 @@ mod tests {
                 .into_iter()
                 .enumerate()
             {
-                let got = resolve(&profile, intent, detect(&profile, icc, intent));
+                let got = detect(&profile, icc, intent)
+                    .and_then(|black| resolve(&profile, intent, black))
+                    .unwrap_or_default();
                 let (l_got, l_want) = (xyz_d50_to_lab(got)[0], xyz_d50_to_lab(want[i])[0]);
                 assert!(
                     (l_got - l_want).abs() < 0.01,
@@ -267,5 +443,135 @@ mod tests {
             detect_in(v4, Saturation),
             Some(SourceBlack::Xyz(PERCEPTUAL_BLACK))
         );
+    }
+
+    /// Output profiles and lcms2's destination black point for each intent.
+    const DESTINATIONS: [Reference; 5] = [
+        (
+            "shadow",
+            profile!("shadow"),
+            reference::SHADOW_DESTINATION_BLACK_POINT,
+        ),
+        (
+            "shadow_straight",
+            profile!("shadow_straight"),
+            reference::SHADOW_STRAIGHT_DESTINATION_BLACK_POINT,
+        ),
+        (
+            "shadow_v4",
+            profile!("shadow_v4"),
+            reference::SHADOW_V4_DESTINATION_BLACK_POINT,
+        ),
+        (
+            "inklimit",
+            profile!("inklimit"),
+            reference::INKLIMIT_DESTINATION_BLACK_POINT,
+        ),
+        (
+            "split_sat",
+            profile!("split_sat"),
+            reference::SPLIT_SAT_DESTINATION_BLACK_POINT,
+        ),
+    ];
+
+    /// The destination black point is lcms2's, to a hundredth of an L\*:
+    /// fitted to curved shadows under every intent (`shadow`), relative
+    /// colorimetric's own black point where its round trip is straight
+    /// through the mid-tones (`shadow_straight`, L\* 26.4), the fixed v4
+    /// perceptual black, and zero where the round trip is a straight line,
+    /// as lcms2's fit returns.
+    #[test]
+    fn destination_black_point_is_lcms2s() {
+        for (name, icc, want) in DESTINATIONS {
+            let profile = ColorProfile::new_from_slice(icc).unwrap();
+            for (i, intent) in [Perceptual, RelativeColorimetric, Saturation]
+                .into_iter()
+                .enumerate()
+            {
+                let got = detect_destination(&profile, icc, intent).unwrap_or_default();
+                let (l_got, l_want) = (xyz_d50_to_lab(got)[0], xyz_d50_to_lab(want[i])[0]);
+                assert!(
+                    (l_got - l_want).abs() < 0.01,
+                    "{name} {intent:?}: L* {l_got}, lcms2 {l_want}"
+                );
+            }
+        }
+        // The cases are distinct, or the test proves less than it says.
+        let l = |xyz| xyz_d50_to_lab(xyz)[0];
+        let shadow = reference::SHADOW_DESTINATION_BLACK_POINT;
+        assert!(l(shadow[1]) > 20.0);
+        assert!((l(reference::SHADOW_STRAIGHT_DESTINATION_BLACK_POINT[1]) - 26.4).abs() < 0.01);
+        assert!(l(shadow[0]) > 20.0 && l(shadow[2]) > 10.0);
+    }
+
+    /// lcms2's quadratic root: a straight fit gives zero, whatever line it is.
+    #[test]
+    fn a_straight_fit_has_no_root() {
+        let line: Vec<(f64, f64)> = (0..10).map(|i| (i as f64, 0.1 * i as f64 - 0.3)).collect();
+        assert_eq!(quadratic_root(&line), 0.0);
+        let parabola: Vec<(f64, f64)> = (0..10)
+            .map(|i| (i as f64, (i as f64 - 4.0).powi(2) / 100.0 - 0.01))
+            .collect();
+        assert!((quadratic_root(&parabola) - 5.0).abs() < 1e-9);
+    }
+
+    /// A Gray profile's black is its tone curve at 0, the same under every
+    /// intent.
+    #[test]
+    fn gray_black_point_is_lcms2s() {
+        let icc = profile!("gray_trc");
+        let profile = ColorProfile::new_from_slice(icc).unwrap();
+        let got = detect_gray(&profile, icc).unwrap();
+        for want in reference::GRAY_TRC_BLACK_POINT {
+            let (l_got, l_want) = (xyz_d50_to_lab(got)[0], xyz_d50_to_lab(want)[0]);
+            assert!((l_got - l_want).abs() < 0.01, "L* {l_got}, lcms2 {l_want}");
+        }
+    }
+
+    /// A Gray source converts into an output intent as lcms2 converts it,
+    /// with black-point compensation from the gray's black to the output
+    /// intent's destination black, and without.
+    #[test]
+    fn gray_chain_stage1_matches_lcms() {
+        use crate::icc::bpc::{WP_D50, compute_bpc_params};
+        let gray_icc = profile!("gray_trc");
+        let gray = ColorProfile::new_from_slice(gray_icc).unwrap();
+        let gray_black = detect_gray(&gray, gray_icc).unwrap();
+        for (name, icc, want) in [
+            ("shadow", profile!("shadow"), &reference::GRAY_CHAIN_SHADOW),
+            (
+                "inklimit",
+                profile!("inklimit"),
+                &reference::GRAY_CHAIN_INKLIMIT,
+            ),
+        ] {
+            let oi = ColorProfile::new_from_slice(icc).unwrap();
+            for (i, intent) in [Perceptual, RelativeColorimetric, Saturation]
+                .into_iter()
+                .enumerate()
+            {
+                for (bpc, want) in want[i].iter().enumerate() {
+                    let params = (bpc == 1).then(|| {
+                        let oi_black = detect_destination(&oi, icc, intent).unwrap_or_default();
+                        compute_bpc_params(gray_black, oi_black, WP_D50)
+                    });
+                    let stage1 =
+                        hand_rolled::HandRolledChainStage1Gray::new(&gray, &oi, intent, params)
+                            .unwrap();
+                    for (g, want) in reference::GRAY_SAMPLES.iter().zip(want) {
+                        let got = stage1.sample(*g);
+                        for (got, want) in got.iter().zip(want) {
+                            assert!(
+                                (got - want).abs() < 2e-4,
+                                "{name} {intent:?} bpc {bpc} gray {g}: {got} vs lcms2 {want}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // Compensation moves the ink, or the test proves nothing.
+        let shadow = &reference::GRAY_CHAIN_SHADOW;
+        assert_ne!(shadow[0][0], shadow[0][1]);
     }
 }

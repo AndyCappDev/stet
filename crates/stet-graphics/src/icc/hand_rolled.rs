@@ -21,7 +21,9 @@
 //! chain in `register_profile_with_n`). [`HandRolledChainStage1Rgb`]
 //! composes a `SourceA2BSampler` and a `LabToCmykSampler` per pixel;
 //! [`HandRolledChainStage1Cmyk`] composes a CMYK source's A2B table and the
-//! OutputIntent's B2A table with lcms2's own interpolation. Both implement
+//! OutputIntent's B2A table with lcms2's own interpolation, and
+//! [`HandRolledChainStage1Gray`] a Gray source's tone curve, black-point
+//! compensation and the OutputIntent's B2A table. All three implement
 //! [`moxcms::TransformExecutor`] for `u8` and `f64` so they slot directly
 //! into the `ChainedTransform` stage-1 slot.
 //!
@@ -29,9 +31,9 @@
 //! back to moxcms; callers detect the `None` return and use the existing
 //! path. `lut8Type` (mft1) tables are read only by the evaluators that
 //! reproduce lcms2 exactly (see [`OwnedLutSampler::lcms_exact`]): the
-//! black point lcms2 would detect, and the CMYK chain stage 1. Widening
-//! the bake or the RGB chain to them would move every colour through those
-//! profiles.
+//! black points lcms2 would detect, and the CMYK and Gray chain stage 1.
+//! Widening the bake or the RGB chain to them would move every colour
+//! through those profiles.
 
 use moxcms::{
     CmsError, ColorProfile, Cube, DataColorSpace, Hypercube, Lab, LutStore, LutType, LutWarehouse,
@@ -40,7 +42,9 @@ use moxcms::{
 
 use super::Clut4;
 use super::black_point::SourceBlack;
-use super::bpc::{WP_D50, apply_bpc_xyz_d50, compute_bpc_params, lab_to_xyz_d50};
+use super::bpc::{
+    BpcParams, WP_D50, apply_bpc_xyz_d50, compute_bpc_params, lab_to_xyz_d50, xyz_d50_to_lab,
+};
 
 /// `0xFF00` — the legacy ICC v2 Lab denominator for L*. Stored values in
 /// `[0, 0xFF00]` map linearly to L*∈[0, 100]; values above `0xFF00` are
@@ -147,21 +151,83 @@ pub(super) fn perceptual_round_trip(
     profile: &ColorProfile,
     start: [f64; 3],
 ) -> Option<([f64; 4], [f64; 3])> {
-    if profile.color_space != DataColorSpace::Cmyk || profile.pcs != DataColorSpace::Lab {
-        return None;
+    Some(RoundTrip::new(profile, RenderingIntent::Perceptual)?.run(start))
+}
+
+/// lcms2's round trip through a CMYK output profile
+/// (`CreateRoundtripXForm`): Lab through the profile's B2A table for an
+/// intent, then back through its colorimetric A2B table, each as lcms2
+/// reads it (see [`lcms_table`]).
+pub(super) struct RoundTrip {
+    b2a: OwnedLutSampler,
+    a2b: OwnedLutSampler,
+}
+
+impl RoundTrip {
+    /// `None` when the profile is not CMYK with a Lab PCS, lacks a table
+    /// the round trip needs, or carries one these evaluators cannot read
+    /// (v4 `mAB`/`mBA`).
+    pub(super) fn new(profile: &ColorProfile, intent: RenderingIntent) -> Option<Self> {
+        if profile.color_space != DataColorSpace::Cmyk || profile.pcs != DataColorSpace::Lab {
+            return None;
+        }
+        let b2a = lcms_table(
+            [
+                profile.lut_b_to_a_perceptual.as_ref(),
+                profile.lut_b_to_a_colorimetric.as_ref(),
+                profile.lut_b_to_a_saturation.as_ref(),
+            ],
+            intent,
+        )?;
+        let a2b = lcms_table(
+            [
+                profile.lut_a_to_b_perceptual.as_ref(),
+                profile.lut_a_to_b_colorimetric.as_ref(),
+                profile.lut_a_to_b_saturation.as_ref(),
+            ],
+            RenderingIntent::RelativeColorimetric,
+        )?;
+        Some(Self {
+            b2a: OwnedLutSampler::lcms_exact(b2a, 3, 4)?,
+            a2b: OwnedLutSampler::lcms_exact(a2b, 4, 3)?,
+        })
     }
-    let b2a0 = OwnedLutSampler::lcms_exact(profile.lut_b_to_a_perceptual.as_ref()?, 3, 4)?;
-    let a2b = profile
-        .lut_a_to_b_colorimetric
-        .as_ref()
-        .or(profile.lut_a_to_b_perceptual.as_ref())?;
-    let a2b1 = OwnedLutSampler::lcms_exact(a2b, 4, 3)?;
-    let ink = b2a0.lab_to_ink(start);
-    Some((ink, a2b1.ink_to_lab(ink)))
+
+    /// Lab → the ink it passes through and the Lab it lands on.
+    pub(super) fn run(&self, lab: [f64; 3]) -> ([f64; 4], [f64; 3]) {
+        let ink = self.b2a.lab_to_ink(lab);
+        (ink, self.a2b.ink_to_lab(ink))
+    }
+}
+
+/// The tone curve of a TRC-only Gray profile with an XYZ PCS — the usual
+/// kind — which lcms2 treats as a matrix-shaper: gray → Y relative to the
+/// white, the colour neutral.
+pub(super) struct GrayTrc(Box<dyn ToneCurveEvaluator + Send + Sync>);
+
+impl GrayTrc {
+    /// `None` for anything else: a Gray profile with a LUT or a Lab PCS.
+    pub(super) fn new(profile: &ColorProfile) -> Option<Self> {
+        if profile.color_space != DataColorSpace::Gray
+            || profile.pcs != DataColorSpace::Xyz
+            || profile.lut_a_to_b_perceptual.is_some()
+            || profile.lut_a_to_b_colorimetric.is_some()
+            || profile.lut_a_to_b_saturation.is_some()
+        {
+            return None;
+        }
+        Some(Self(
+            profile.gray_trc.as_ref()?.make_linear_evaluator().ok()?,
+        ))
+    }
+
+    /// Y of `gray` (`[0, 1]`), relative to the white.
+    pub(super) fn y(&self, gray: f64) -> f64 {
+        f64::from(self.0.evaluate_value(gray.clamp(0.0, 1.0) as f32)).clamp(0.0, 1.0)
+    }
 }
 
 /// Lab of 400% ink through a CMYK A2B `table`, as lcms2 evaluates it.
-#[cfg(test)]
 pub(super) fn table_black(table: &LutWarehouse) -> Option<[f64; 3]> {
     Some(OwnedLutSampler::lcms_exact(table, 4, 3)?.ink_to_lab([1.0; 4]))
 }
@@ -1028,6 +1094,76 @@ impl TransformExecutor<f64> for HandRolledChainStage1Cmyk {
             .zip(dst.as_chunks_mut::<4>().0)
         {
             *d = self.sample(*s);
+        }
+        Ok(())
+    }
+}
+
+/// Source-Gray → OutputIntent-CMYK chain stage 1 for one rendering intent,
+/// as lcms2 converts it: the TRC's Y as neutral XYZ, black-point
+/// compensation in XYZ when it applies, Lab, then the OutputIntent's B2A
+/// table for the intent.
+pub(super) struct HandRolledChainStage1Gray {
+    trc: GrayTrc,
+    bpc: Option<BpcParams>,
+    b2a: OwnedLutSampler,
+}
+
+impl HandRolledChainStage1Gray {
+    /// `None` when the source is not a TRC-only Gray ([`GrayTrc`]), or the
+    /// output intent not CMYK with a Lab PCS and a B2A table these
+    /// evaluators read.
+    pub(super) fn new(
+        source: &ColorProfile,
+        output_intent: &ColorProfile,
+        intent: RenderingIntent,
+        bpc: Option<BpcParams>,
+    ) -> Option<Self> {
+        if output_intent.color_space != DataColorSpace::Cmyk
+            || output_intent.pcs != DataColorSpace::Lab
+        {
+            return None;
+        }
+        let b2a = lcms_table(
+            [
+                output_intent.lut_b_to_a_perceptual.as_ref(),
+                output_intent.lut_b_to_a_colorimetric.as_ref(),
+                output_intent.lut_b_to_a_saturation.as_ref(),
+            ],
+            intent,
+        )?;
+        Some(Self {
+            trc: GrayTrc::new(source)?,
+            bpc,
+            b2a: OwnedLutSampler::lcms_exact(b2a, 3, 4)?,
+        })
+    }
+
+    /// Gray (`[0, 1]`) → OutputIntent ink.
+    pub(super) fn sample(&self, gray: f64) -> [f64; 4] {
+        let y = self.trc.y(gray);
+        let mut xyz = [WP_D50[0] * y, y, WP_D50[2] * y];
+        if let Some(p) = &self.bpc {
+            xyz = apply_bpc_xyz_d50(xyz, p);
+        }
+        self.b2a.lab_to_ink(xyz_d50_to_lab(xyz))
+    }
+}
+
+impl TransformExecutor<u8> for HandRolledChainStage1Gray {
+    fn transform(&self, src: &[u8], dst: &mut [u8]) -> Result<(), CmsError> {
+        for (&g, d) in src.iter().zip(dst.as_chunks_mut::<4>().0) {
+            let ink = self.sample(f64::from(g) / 255.0);
+            *d = ink.map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8);
+        }
+        Ok(())
+    }
+}
+
+impl TransformExecutor<f64> for HandRolledChainStage1Gray {
+    fn transform(&self, src: &[f64], dst: &mut [f64]) -> Result<(), CmsError> {
+        for (&g, d) in src.iter().zip(dst.as_chunks_mut::<4>().0) {
+            *d = self.sample(g);
         }
         Ok(())
     }

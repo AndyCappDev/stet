@@ -118,11 +118,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mAB`) goes through moxcms's transform for the intent, about one ink
   level from lcms2. `IccCache::convert_color` and `convert_image_8bit`,
   which take no intent, now convert RGB and CMYK sources in a proofing
-  chain relative colorimetric rather than perceptual. Gray sources are
-  unchanged for now: the Ghent Workgroup's gray test (GWG 18.3) expects
-  black-point compensation on that conversion, which stet does not yet
-  apply. Overprint and CMYK blending still use an ICCBased CMYK colour's
-  own numbers, as GWG 16.4 expects.
+  chain relative colorimetric rather than perceptual. Overprint and CMYK
+  blending still use an ICCBased CMYK colour's own numbers, as GWG 16.4
+  expects.
+- **ICCBased Gray colours in a PDF/X document ignored the rendering intent
+  and black-point compensation.** moxcms could build the conversion into
+  the output intent only as absolute colorimetric, so that is what every
+  Gray colour got. Gray now converts as lcms2 does:
+  - by its intent;
+  - with black-point compensation when `--bpc` is on, the default, from
+    the gray's black to the output intent's black, as lcms2 detects it
+    for a destination (`cmsDetectDestinationBlackPoint`, which stet now
+    implements);
+  - into an ICC v4 output intent, compensated under perceptual and
+    saturation whatever `--bpc` says, as lcms2 does.
+
+  The Ghent Workgroup's 16-bit gray image test (GWG 18.3) made its
+  reference that way. Its X, which showed at 3.4 sRGB levels on average and
+  up to 36, is now at the 1-level noise of a test that compares an image
+  with itself. With `--bpc off` it shows at about 6, which is lcms2's
+  answer without compensation. Gray profiles with a LUT or a Lab PCS keep
+  the old conversion; every Gray profile under an output intent in the
+  test corpus is the usual tone-curve kind.
 - **Relative colorimetric CMYK rendered lighter than Ghostscript and
   Acrobat** with black-point compensation on, the default. Compensation
   maps the profile's black to sRGB black, and stet took that black to be

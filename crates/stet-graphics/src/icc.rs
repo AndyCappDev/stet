@@ -262,8 +262,8 @@ const OUTPUT_INTENT_DISPLAY: RenderingIntent = RenderingIntent::RelativeColorime
 struct CachedTransform {
     /// 8-bit transform for image data, used by callers that pass no
     /// intent and by intents whose chain slot is empty. When proofing is
-    /// enabled and the source is RGB or CMYK, this is the relative
-    /// colorimetric chain. Otherwise it is moxcms's transform for the first
+    /// enabled and the source is RGB, CMYK or TRC-only Gray, this is the
+    /// relative colorimetric chain. Otherwise it is moxcms's transform for the first
     /// intent that builds, Perceptual first — so for a CMYK profile outside
     /// a chain it reads `A2B0`, while `clut4` (which CMYK conversions
     /// prefer) reads `A2B1`. The two agree only on profiles whose tables
@@ -274,9 +274,10 @@ struct CachedTransform {
     transform_f64: Arc<dyn TransformExecutor<f64> + Send + Sync>,
     /// Per-intent proofing chains, indexed by ICC `RenderingIntent`
     /// discriminant: `[Perceptual=0, RelCol=1, Saturation=2, AbsCol=3]`.
-    /// Populated for RGB and CMYK sources when proofing is enabled: RGB
-    /// where the source has a viable A2B / OI B2A pair, CMYK through the
-    /// hand-rolled stage 1 or moxcms's transform for the intent. `None`
+    /// Populated for RGB, CMYK and Gray sources when proofing is enabled:
+    /// RGB where the source has a viable A2B / OI B2A pair, CMYK through
+    /// the hand-rolled stage 1 or moxcms's transform for the intent, Gray
+    /// for TRC-only profiles, with black-point compensation. `None`
     /// slots fall back to `transform_*bit` / `transform_*_f64` at lookup
     /// time. Every chain ends in the OutputIntent's display table. AbsCol
     /// uses the RelCol tables, without white-point adaptation.
@@ -693,10 +694,6 @@ impl IccCache {
             // the default chain below, the relative colorimetric one; so
             // does absolute colorimetric, which reads the relative
             // colorimetric tables on every other CMYK path too.
-            //
-            // Gray sources keep the default chain: lcms2 converts them
-            // as GWG 18.3 expects only with black-point compensation on
-            // this leg, which the chain does not apply yet.
             if n == 4 {
                 let mut moxcms_pair: Option<(ColorProfile, ColorProfile)> = None;
                 for intent in [
@@ -743,12 +740,63 @@ impl IccCache {
                 }
             }
 
+            // Chain stage 1 for TRC-only Gray sources, one per intent, as
+            // lcms2 builds it: the tone curve's Y, black-point compensation
+            // in XYZ, then the OI's B2A for the intent. Compensation follows
+            // the cache's mode, as lcms2 follows its flag, from the gray's
+            // black to the black lcms2 detects for the OI as a destination;
+            // lcms2 also forces it under perceptual and saturation into an
+            // ICC v4 OI. GWG 18.3's reference is this conversion with
+            // compensation. Gray profiles with a LUT or a Lab PCS, and OIs
+            // whose B2A stet cannot read, keep the default chain.
+            if n == 1 {
+                let oi_icc = self.raw_bytes.get(&oi_hash).cloned().unwrap_or_default();
+                let oi_v4 = oi_icc.get(8).is_some_and(|&major| major >= 4);
+                let gray_black = black_point::detect_gray(&profile, bytes).unwrap_or([0.0; 3]);
+                for intent in [
+                    RenderingIntent::Perceptual,
+                    RenderingIntent::RelativeColorimetric,
+                    RenderingIntent::Saturation,
+                ] {
+                    let forced = oi_v4 && intent != RenderingIntent::RelativeColorimetric;
+                    let bpc = if self.bpc_mode.is_enabled() || forced {
+                        let oi_black =
+                            black_point::detect_destination(&oi_profile, &oi_icc, intent)
+                                .unwrap_or([0.0; 3]);
+                        (gray_black != oi_black)
+                            .then(|| bpc::compute_bpc_params(gray_black, oi_black, bpc::WP_D50))
+                    } else {
+                        None
+                    };
+                    let Some(stage1) = hand_rolled::HandRolledChainStage1Gray::new(
+                        &profile,
+                        &oi_profile,
+                        intent,
+                        bpc,
+                    ) else {
+                        continue;
+                    };
+                    let stage1 = Arc::new(stage1);
+                    let i = intent as usize;
+                    chain_per_intent_8bit[i] = Some(Arc::new(ChainedTransform {
+                        stage1: stage1.clone(),
+                        stage2: stage2_8bit.clone(),
+                        intermediate_n: 4,
+                    }));
+                    chain_per_intent_f64[i] = Some(Arc::new(ChainedTransform {
+                        stage1,
+                        stage2: stage2_f64.clone(),
+                        intermediate_n: 4,
+                    }));
+                }
+            }
+
             // The default chain, for callers that pass no intent and for
             // intents whose slot is empty: relative colorimetric, the PDF
-            // default, when there is a chain for it. Otherwise — Gray and
-            // Lab sources, or a profile no relative colorimetric chain
-            // could be built for — moxcms's transform for the first intent
-            // that builds, Perceptual first.
+            // default, when there is a chain for it. Otherwise — Lab
+            // sources, or a profile no relative colorimetric chain could be
+            // built for — moxcms's transform for the first intent that
+            // builds, Perceptual first.
             let relcol = RenderingIntent::RelativeColorimetric as usize;
             let relcol_chain = chain_per_intent_8bit[relcol]
                 .clone()
