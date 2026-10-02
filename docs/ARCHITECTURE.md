@@ -609,7 +609,7 @@ DisplayList
     │         ▼
     │    IccCache
     │         │
-    ├──► ImageCache::build()         Pre-convert images to RGBA
+    ├──► ImageCache::build()         Pre-convert images to RGBA (layers too)
     │         │
     │         ▼
     │    ImageCache

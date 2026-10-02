@@ -351,6 +351,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Cached Type 3 glyphs take the transfer function in force where they
   are shown**, as they take its colour, rather than the one in force when
   the glyph was first built.
+- **An image inside a PDF layer could be drawn as another image on the
+  page.** The renderer's per-page image caches were indexed by position in
+  the page's top-level list, and an image inside an optional-content group
+  looked itself up by its position within the group, so it took whichever
+  top-level image shared that position (CLI, viewer and WASM). The caches
+  now nest like the layers. Images inside layers are also converted once
+  per page rather than once per band: a 3000×3000 CMYK image in a layer at
+  300 dpi went from 2.3 s and 1.5 GB to 1.3 s and 240 MB, the same as
+  outside one. Images in layers that are hidden are no longer converted.
 - **Relative colorimetric CMYK rendered lighter than Ghostscript and
   Acrobat** with black-point compensation on, the default. Compensation
   maps the profile's black to sRGB black, and stet took that black to be

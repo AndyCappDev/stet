@@ -737,7 +737,7 @@ fn intersect_masks(dst: &mut Mask, src: &Mask) {
 
 // ---- Banded rendering support ----
 
-use stet_graphics::display_list::{DisplayElement, DisplayList};
+use stet_graphics::display_list::{DisplayElement, DisplayList, OcgVisibility};
 
 /// Band-local clip state, rebuilt for each band.
 struct BandState {
@@ -881,11 +881,13 @@ struct RenderContext<'a> {
     effective_dpi: f64,
     /// ICC color profile cache (for CMYK conversions).
     icc: Option<&'a IccCache>,
-    /// Pre-converted image data cache (for viewport rendering).
-    image_cache: Option<&'a ImageCache>,
-    /// Pre-converted and prescaled images (for banded rendering).
-    preprocessed: Option<&'a [Option<PreprocessedImage>]>,
-    /// Element index in parent display list (for image cache lookup).
+    /// Pre-converted image data (for viewport rendering): the entries of
+    /// the list being rendered.
+    image_cache: Option<&'a [CacheEntry<Vec<u8>>]>,
+    /// Pre-converted and prescaled images (for banded rendering): the
+    /// entries of the list being rendered.
+    preprocessed: Option<&'a [CacheEntry<PreprocessedImage>]>,
+    /// Element index in the list being rendered (for image cache lookup).
     elem_idx: usize,
     /// Disable anti-aliasing for all fill/stroke operations.
     no_aa: bool,
@@ -3269,11 +3271,7 @@ fn render_element(
                 );
                 band_state.cmyk_buffer = Some(cmyk_buf);
                 band_state.restore_op_buffers(op_bg, op_touched);
-            } else if let Some(pp) = ctx
-                .preprocessed
-                .and_then(|pp| pp.get(ctx.elem_idx))
-                .and_then(|e| e.as_ref())
-            {
+            } else if let Some(pp) = cached_image(ctx.preprocessed, ctx.elem_idx) {
                 // Fast path: use pre-converted and prescaled image data.
                 // Only the per-band translation differs; scale factors are cached.
                 let Some(image_inv) = params.image_matrix.invert() else {
@@ -3343,7 +3341,7 @@ fn render_element(
                 // Use pre-converted RGBA from image cache when available
                 let owned_rgba;
                 let rgba_data: &[u8] =
-                    if let Some(cached) = ctx.image_cache.and_then(|c| c.get(ctx.elem_idx)) {
+                    if let Some(cached) = cached_image(ctx.image_cache, ctx.elem_idx) {
                         cached
                     } else {
                         owned_rgba = image_to_rgba(
@@ -3570,6 +3568,9 @@ fn render_element(
             // into the next visible one. Paint ops are skipped; that's what
             // "hidden layer" means.
             let visible = ctx.layer_set.evaluate(visibility);
+            // The children find their images in the layer's own entries.
+            let image_cache = cached_layer(ctx.image_cache, ctx.elem_idx);
+            let preprocessed = cached_layer(ctx.preprocessed, ctx.elem_idx);
             for (idx, elem) in elements.elements().iter().enumerate() {
                 if !visible
                     && !matches!(elem, DisplayElement::Clip { .. } | DisplayElement::InitClip)
@@ -3577,6 +3578,8 @@ fn render_element(
                     continue;
                 }
                 let elem_ctx = RenderContext {
+                    image_cache,
+                    preprocessed,
                     elem_idx: idx,
                     ..*ctx
                 };
@@ -9704,7 +9707,7 @@ fn render_banded_to_sink(
     let needs_cmyk_buffer = page_needs_cmyk_buffer(list);
 
     // Pre-convert and prescale images once (instead of per-band)
-    let preprocessed_images = preprocess_images_for_bands(list, Some(icc_cache));
+    let preprocessed_images = preprocess_images_for_bands(list, Some(icc_cache), layer_set);
 
     // Extra rows rendered above and below each band to provide anti-aliasing
     // context at band seams. Without this, tiny-skia clips geometry at the
@@ -10553,72 +10556,119 @@ struct PreprocessedImage {
     quality: stet_tiny_skia::FilterQuality,
 }
 
+/// One element's slot in a per-page image cache.
+///
+/// The caches have the shape of the page's layers: a layer
+/// (`DisplayElement::OcgGroup`) holds its children's entries, so an image
+/// inside a layer finds its own entry by its index within the layer. Every
+/// other container clears the caches for its children.
+enum CacheEntry<T> {
+    /// Not an image, or an image the cache does not hold.
+    Empty,
+    /// An image's converted data.
+    Image(T),
+    /// A layer's children.
+    Layer(Vec<CacheEntry<T>>),
+}
+
+/// Build cache entries for `elements`, converting each image with `image`
+/// and descending into each layer whose visibility `descend` accepts.
+fn build_cache_entries<T>(
+    elements: &[DisplayElement],
+    descend: &impl Fn(&OcgVisibility) -> bool,
+    image: &impl Fn(&[u8], &ImageParams) -> Option<T>,
+) -> Vec<CacheEntry<T>> {
+    elements
+        .iter()
+        .map(|elem| match elem {
+            DisplayElement::Image {
+                sample_data,
+                params,
+            } => image(sample_data, params).map_or(CacheEntry::Empty, CacheEntry::Image),
+            DisplayElement::OcgGroup {
+                elements,
+                visibility,
+            } if descend(visibility) => {
+                CacheEntry::Layer(build_cache_entries(elements.elements(), descend, image))
+            }
+            _ => CacheEntry::Empty,
+        })
+        .collect()
+}
+
+/// The image entry at `index` in `entries`.
+fn cached_image<T>(entries: Option<&[CacheEntry<T>]>, index: usize) -> Option<&T> {
+    match entries?.get(index)? {
+        CacheEntry::Image(image) => Some(image),
+        _ => None,
+    }
+}
+
+/// The children's entries of the layer at `index` in `entries`.
+fn cached_layer<T>(entries: Option<&[CacheEntry<T>]>, index: usize) -> Option<&[CacheEntry<T>]> {
+    match entries?.get(index)? {
+        CacheEntry::Layer(children) => Some(children),
+        _ => None,
+    }
+}
+
 /// Pre-converted RGBA image data cache, indexed by display list element index.
 ///
 /// Built once per page after display list capture. Reused across all viewport
 /// renders so that ICC color conversion (especially CMYK→sRGB) is not repeated
-/// on every pan/zoom.
+/// on every pan/zoom. Images inside layers are cached too, whatever the
+/// layers' visibility, since a viewer toggles layers without rebuilding it.
 pub struct ImageCache {
-    /// RGBA data per element index. `None` for non-image elements.
-    entries: Vec<Option<Vec<u8>>>,
+    /// RGBA data per element, shaped like the page's layers.
+    entries: Vec<CacheEntry<Vec<u8>>>,
 }
 
 impl ImageCache {
     /// Build cache by pre-converting all images in the display list.
     pub fn build(list: &DisplayList, icc: Option<&IccCache>) -> Self {
-        let entries = list
-            .elements()
-            .iter()
-            .map(|elem| {
-                if let DisplayElement::Image {
-                    sample_data,
-                    params,
-                } = elem
-                {
-                    if params.width == 0 || params.height == 0 {
-                        return None;
-                    }
-                    // The cache holds the page's own images, which nothing
-                    // encloses: the paint's own opacity decides.
-                    Some(image_to_rgba(
-                        sample_data,
-                        params,
-                        icc,
-                        false,
-                        paint_transfer(&params.transfer, params.alpha, params.blend_mode, false),
-                    ))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let entries = build_cache_entries(list.elements(), &|_| true, &|sample_data, params| {
+            if params.width == 0 || params.height == 0 {
+                return None;
+            }
+            // The cache holds images that no group or soft mask encloses
+            // (layers draw nothing of their own): the paint's own opacity
+            // decides.
+            Some(image_to_rgba(
+                sample_data,
+                params,
+                icc,
+                false,
+                paint_transfer(&params.transfer, params.alpha, params.blend_mode, false),
+            ))
+        });
         Self { entries }
     }
 
-    /// Get pre-converted RGBA for the element at the given index.
+    /// Get pre-converted RGBA for the top-level element at the given index.
     pub fn get(&self, index: usize) -> Option<&[u8]> {
-        self.entries.get(index).and_then(|e| e.as_deref())
+        cached_image(Some(&self.entries), index).map(Vec::as_slice)
+    }
+
+    /// The entries, as a render context holds them.
+    fn entries(&self) -> &[CacheEntry<Vec<u8>>] {
+        &self.entries
     }
 }
 
 /// Build preprocessed image cache for banded rendering.
 ///
 /// For each Image element, converts to RGBA and prescales once.
-/// Banded rendering then only needs `draw_pixmap` per band.
+/// Banded rendering then only needs `draw_pixmap` per band. Layers that
+/// `layer_set` hides are skipped: their images paint nothing.
 fn preprocess_images_for_bands(
     list: &DisplayList,
     icc: Option<&IccCache>,
-) -> Vec<Option<PreprocessedImage>> {
-    list.elements()
-        .iter()
-        .map(|elem| {
-            let DisplayElement::Image {
-                sample_data,
-                params,
-            } = elem
-            else {
-                return None;
-            };
+    layer_set: &LayerSet,
+) -> Vec<CacheEntry<PreprocessedImage>> {
+    build_cache_entries(
+        list.elements(),
+        &|visibility| layer_set.evaluate(visibility),
+        &|sample_data, params| {
             let iw = params.width;
             let ih = params.height;
             if iw == 0 || ih == 0 {
@@ -10629,9 +10679,9 @@ fn preprocess_images_for_bands(
                 return None;
             }
 
-            // Convert to RGBA. These are the page's own images, which
-            // nothing encloses: the paint's own opacity decides the transfer
-            // function.
+            // Convert to RGBA. No group or soft mask encloses these images
+            // (layers draw nothing of their own): the paint's own opacity
+            // decides the transfer function.
             let rgba = image_to_rgba(
                 sample_data,
                 params,
@@ -10667,8 +10717,8 @@ fn preprocess_images_for_bands(
                 adj_sy: adj_t.sy,
                 quality,
             })
-        })
-        .collect()
+        },
+    )
 }
 
 /// Render a rectangular viewport region using precomputed metadata.
@@ -10785,7 +10835,7 @@ pub fn render_region_prepared(
                 out_h: render_h,
                 effective_dpi,
                 icc,
-                image_cache,
+                image_cache: image_cache.map(ImageCache::entries),
                 preprocessed: None,
                 elem_idx: i,
                 no_aa,
@@ -10965,7 +11015,7 @@ pub fn render_region_single_band(
                 out_h: render_h,
                 effective_dpi,
                 icc,
-                image_cache,
+                image_cache: image_cache.map(ImageCache::entries),
                 preprocessed: None,
                 elem_idx: i,
                 no_aa,
@@ -11783,7 +11833,7 @@ pub fn render_region(
                 out_h: render_h,
                 effective_dpi,
                 icc,
-                image_cache,
+                image_cache: image_cache.map(ImageCache::entries),
                 preprocessed: None,
                 elem_idx: i,
                 no_aa,
@@ -14813,5 +14863,87 @@ mod tests {
         let grp = group_elem(inner, [0.0, -5.0, 40.0, 30.0], true, 1.0, 0);
         let d = dl(vec![parent, grp]);
         assert!(compute_obscured_fill_skips(&d).is_empty());
+    }
+
+    /// A one-pixel DeviceGray image, for the cache-shape tests.
+    fn cache_test_image() -> DisplayElement {
+        DisplayElement::Image {
+            sample_data: Arc::new(vec![128]),
+            params: ImageParams {
+                width: 1,
+                height: 1,
+                color_space: ImageColorSpace::DeviceGray,
+                bits_per_component: 8,
+                ctm: Matrix::new(10.0, 0.0, 0.0, 10.0, 0.0, 0.0),
+                image_matrix: Matrix::new(1.0, 0.0, 0.0, 1.0, 0.0, 0.0),
+                ..ImageParams::default()
+            },
+        }
+    }
+
+    fn cache_test_layer(id: u32, visible: bool, elements: Vec<DisplayElement>) -> DisplayElement {
+        DisplayElement::OcgGroup {
+            elements: dl(elements),
+            visibility: OcgVisibility::single(id, visible),
+        }
+    }
+
+    /// Each entry's shape: `I` an image, `.` empty, a layer its children in
+    /// brackets.
+    fn cache_shape<T>(entries: &[CacheEntry<T>]) -> String {
+        entries
+            .iter()
+            .map(|e| match e {
+                CacheEntry::Empty => ".".to_string(),
+                CacheEntry::Image(_) => "I".to_string(),
+                CacheEntry::Layer(children) => format!("[{}]", cache_shape(children)),
+            })
+            .collect()
+    }
+
+    /// A page with an image, a visible layer holding an image and a nested
+    /// visible layer, and a hidden layer holding an image.
+    fn cache_test_page() -> DisplayList {
+        dl(vec![
+            cache_test_image(),
+            cache_test_layer(
+                1,
+                true,
+                vec![
+                    cache_test_image(),
+                    cache_test_layer(2, true, vec![cache_test_image()]),
+                ],
+            ),
+            cache_test_layer(3, false, vec![cache_test_image()]),
+            cache_test_image(),
+        ])
+    }
+
+    /// The banded renderer's cache descends into the layers it will draw,
+    /// and skips the layers the `LayerSet` hides.
+    #[test]
+    fn band_cache_has_the_shape_of_the_visible_layers() {
+        let page = cache_test_page();
+        let entries = preprocess_images_for_bands(&page, None, &LayerSet::new());
+        assert_eq!(cache_shape(&entries), "I[I[I]].I");
+
+        let mut layers = LayerSet::new();
+        layers.set(2, false);
+        layers.set(3, true);
+        let entries = preprocess_images_for_bands(&page, None, &layers);
+        assert_eq!(cache_shape(&entries), "I[I.][I]I");
+    }
+
+    /// The viewer's cache descends into every layer, since the viewer
+    /// toggles layers without rebuilding it; `get` keeps its top-level
+    /// meaning.
+    #[test]
+    fn image_cache_has_the_shape_of_every_layer() {
+        let cache = ImageCache::build(&cache_test_page(), None);
+        assert_eq!(cache_shape(cache.entries()), "I[I[I]][I]I");
+        assert!(cache.get(0).is_some());
+        assert!(cache.get(1).is_none());
+        assert!(cache.get(3).is_some());
+        assert!(cache.get(4).is_none());
     }
 }
