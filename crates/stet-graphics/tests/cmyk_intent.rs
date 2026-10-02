@@ -1085,7 +1085,8 @@ fn rgb_round_trips_through_cmyk_shown_as_device_cmyk() {
 /// Largest per-channel difference of the round trip from lcms2's. The
 /// reverse is lcms2's; the display table shows lcms2's own ink up to 2
 /// levels from lcms2 at some of these colours, which `SAMPLES` does not
-/// reach.
+/// reach. The reference is lcms2 unoptimised; Ghostscript bakes its own
+/// table (lcms2's 23⁴ precalculation) and is as far from it there.
 const ROUND_TRIP_TOLERANCE: u8 = 2;
 
 /// The round trip against lcms2's own, sRGB → profile → sRGB.
@@ -1093,7 +1094,7 @@ const ROUND_TRIP_TOLERANCE: u8 = 2;
 /// A colour whose ink lcms2 shows outside sRGB is skipped: the display
 /// table clips it, and interpolating that table in gamma-encoded sRGB, where
 /// a channel climbs steeply off 0, is a limit of the table rather than of
-/// the reverse.
+/// the reverse. Ghostscript's table has the same limit, slightly larger.
 #[test]
 fn rgb_round_trips_through_cmyk_as_lcms() {
     for (name, profile, _, expected) in REVERSE {
