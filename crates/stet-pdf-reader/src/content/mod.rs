@@ -269,6 +269,23 @@ struct ImageSMask<D = Vec<u8>> {
     matte: Option<Vec<f64>>,
 }
 
+/// An image's samples as the display list carries them, from
+/// `ContentInterpreter::prepare_image_samples`, with what was done to them
+/// that a colour key has to know.
+struct PreparedImage {
+    color_space: ImageColorSpace,
+    samples: Vec<u8>,
+    /// The display list's bits per component: 8, except for the
+    /// non-standard depths that pass through.
+    bpc: u32,
+    /// The image's space, `DeviceCMYK` once gray is carried to K.
+    resolved_cs: Option<ResolvedColorSpace>,
+    /// A `/Decode` other than the default changed the samples.
+    decoded: bool,
+    /// DeviceGray samples were carried to CMYK K.
+    gray_promoted: bool,
+}
+
 /// Cached result of a fully-processed Image XObject.
 /// Keyed by obj_num in the content interpreter's `image_cache`.
 #[derive(Clone)]
@@ -4251,6 +4268,323 @@ impl<'a> ContentInterpreter<'a> {
         Ok(())
     }
 
+    /// The first stage of painting an image, shared by image XObjects and
+    /// inline images: the filtered stream `samples` (`width` × `height`
+    /// pixels of `bpc` bits, or of 8 when `already_8bit`, as JPEG and JPEG
+    /// 2000 decode) to the 8-bit samples the display list carries, in
+    /// `resolved_cs` (`None` for JPX data that is RGBA already). Registers
+    /// the profile of an ICCBased space.
+    ///
+    /// What a stencil `/Mask` or `/SMask` needs to see comes after this and
+    /// before [`Self::finish_image`].
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_image_samples(
+        &mut self,
+        dict: &PdfDict,
+        resolved_cs: Option<ResolvedColorSpace>,
+        samples: Vec<u8>,
+        width: u32,
+        height: u32,
+        bpc: u32,
+        already_8bit: bool,
+    ) -> PreparedImage {
+        let sample_data = samples;
+        let color_space = match &resolved_cs {
+            Some(rcs) => to_image_color_space(rcs),
+            None => ImageColorSpace::PreconvertedRGBA,
+        };
+
+        // JPXDecode with internal palette (pclr): hayro-jpeg2000 applies the JP2 palette
+        // and returns expanded data (e.g. 3-component RGB for a 1-component codestream).
+        // Per PDF spec 7.4.9, the JP2 palette is applied before the PDF color space.
+        // When the PDF says Indexed but the JP2 already expanded the palette,
+        // switch to the base color space since the data is already depalettized.
+        let color_space = if let ImageColorSpace::Indexed { base, .. } = &color_space {
+            let expected_1comp = (width * height) as usize;
+            let base_n = base.num_components() as usize;
+            if sample_data.len() == expected_1comp * base_n && base_n > 1 {
+                *base.clone()
+            } else {
+                color_space
+            }
+        } else {
+            color_space
+        };
+
+        let is_indexed = matches!(&color_space, ImageColorSpace::Indexed { .. });
+        // Expand sub-byte samples (1/2/4 BPC) to 8-bit since they're packed
+        // with geometry-dependent alignment. Reduce 16-bit samples to the
+        // nearest 8-bit value — downstream ICC and color conversion assumes
+        // 8-bit data. An index is never scaled; 16-bit Indexed is outside
+        // the spec, and keeps its high byte. JPEG and JPEG 2000 data is
+        // 8-bit whatever `/BitsPerComponent` says.
+        let (sample_data, display_bpc) = if bpc == 8 || bpc == 0 || already_8bit {
+            (sample_data, if already_8bit { 8 } else { bpc })
+        } else if bpc == 16 {
+            let reduce = |c: &[u8; 2]| {
+                if is_indexed {
+                    c[0]
+                } else {
+                    image_samples::to_8bit(u16::from_be_bytes(*c), 16)
+                }
+            };
+            (
+                sample_data.as_chunks::<2>().0.iter().map(reduce).collect(),
+                8,
+            )
+        } else if bpc > 8 {
+            (sample_data, bpc)
+        } else {
+            (
+                expand_bits_to_bytes(
+                    &sample_data,
+                    bpc,
+                    width,
+                    height,
+                    color_space.num_components(),
+                    is_indexed,
+                ),
+                8,
+            )
+        };
+
+        // Apply /Decode array if present (maps sample values to color component values).
+        // Default for most color spaces is [0 1 0 1 ...] (identity).
+        // For Indexed color spaces, default is [0 2^bpc-1] and values are indices.
+        // CMYK images may use [1 0 1 0 1 0 1 0] to invert values.
+        let mut decoded = false;
+        let sample_data = if let Some(decode) = dict.get_array(b"Decode") {
+            let n_comps = color_space.num_components() as usize;
+            let decode_vals: Vec<f64> = decode.iter().filter_map(|o| o.as_f64()).collect();
+            if decode_vals.len() >= n_comps * 2 {
+                let effective_bpc = if already_8bit { 8 } else { bpc };
+                let max_sample = ((1u32 << effective_bpc) - 1) as f64;
+                // Check if it's the default Decode for this color space.
+                // Indexed: default is [0 max_sample]; others: [0 1 0 1 ...].
+                let is_default = if is_indexed {
+                    decode_vals.len() == 2
+                        && (decode_vals[0]).abs() < 1e-6
+                        && (decode_vals[1] - max_sample).abs() < 1e-6
+                } else {
+                    decode_vals.chunks(2).all(|pair| {
+                        pair.len() == 2
+                            && (pair[0] - 0.0).abs() < 1e-6
+                            && (pair[1] - 1.0).abs() < 1e-6
+                    })
+                };
+                if !is_default {
+                    decoded = true;
+                    // After expand_bits_to_bytes: indexed data keeps raw values
+                    // (0 to 2^bpc-1), non-indexed data is scaled to 0-255.
+                    let max_val = if is_indexed {
+                        ((1u32 << effective_bpc) - 1) as f64
+                    } else {
+                        255.0f64
+                    };
+                    let mut result = Vec::with_capacity(sample_data.len());
+                    if is_indexed {
+                        // Indexed: Decode maps sample values to index values (integer range)
+                        let d_min = decode_vals[0];
+                        let d_max = decode_vals[1];
+                        for &sample in sample_data.iter() {
+                            let val = d_min + (sample as f64 / max_val) * (d_max - d_min);
+                            result.push(val.round().clamp(0.0, 255.0) as u8);
+                        }
+                    } else {
+                        // Non-indexed: Decode maps to normalized [0,1] component values
+                        for (i, &sample) in sample_data.iter().enumerate() {
+                            let comp = i % n_comps;
+                            let d_min = decode_vals[comp * 2];
+                            let d_max = decode_vals[comp * 2 + 1];
+                            let val = d_min + (sample as f64 / max_val) * (d_max - d_min);
+                            result.push((val.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+                        }
+                    }
+                    result
+                } else {
+                    sample_data
+                }
+            } else {
+                sample_data
+            }
+        } else {
+            sample_data
+        };
+
+        // For multi-input DeviceN images, evaluate the tinting function directly
+        // per pixel to avoid lossy N-D lookup table interpolation.  A pre-sampled
+        // table with spd^N entries can never faithfully represent all 256^N possible
+        // 8-bit input combinations for N≥2.  Direct evaluation is exact and fast
+        // enough for typical image sizes. It reads the samples expanded and
+        // decoded, as every other space's conversion does.
+        let (color_space, sample_data) = if let Some(ResolvedColorSpace::DeviceN {
+            names,
+            alt,
+            tint_fn: Some(func),
+        }) = resolved_cs.as_ref()
+            && names.len() >= 2
+            && matches!(
+                alt.as_ref(),
+                ResolvedColorSpace::DeviceGray | ResolvedColorSpace::DeviceRGB
+            ) {
+            let ni = names.len();
+            let npixels = width as usize * height as usize;
+            let mut rgba = vec![255u8; npixels * 4];
+            let mut inputs = vec![0.0f64; ni];
+            for i in 0..npixels {
+                let si = i * ni;
+                for (c, inp) in inputs.iter_mut().enumerate() {
+                    *inp = sample_data.get(si + c).copied().unwrap_or(0) as f64 / 255.0;
+                }
+                let out = func.evaluate(&inputs);
+                let (r, g, b) = color_space::alt_comps_to_rgb_f64(&out, alt);
+                let pi = i * 4;
+                rgba[pi] = r;
+                rgba[pi + 1] = g;
+                rgba[pi + 2] = b;
+            }
+            (ImageColorSpace::PreconvertedRGBA, rgba)
+        } else {
+            (color_space, sample_data)
+        };
+
+        // In CMYK page groups, route DeviceGray-derived images (DeviceGray
+        // itself, Separation with gray alt, DeviceN with gray alt) through
+        // the K plate so they composite equivalently to DeviceCMYK 0/0/0/(1−g).
+        // Required by GWG 17.3 (JBIG2 compression) and GWG 23.0's "4 different
+        // Grays" test.
+        let was_device_gray = matches!(color_space, ImageColorSpace::DeviceGray);
+        let (color_space, sample_data) =
+            self.cmyk_group_promote_image(color_space, sample_data, width, height);
+        let gray_promoted = was_device_gray && matches!(color_space, ImageColorSpace::DeviceCMYK);
+        let resolved_cs = if gray_promoted {
+            Some(ResolvedColorSpace::DeviceCMYK)
+        } else {
+            resolved_cs
+        };
+
+        // Register the ICC profile with the cache so the rasterizer can find
+        // it by hash.  Conversion itself is deferred to samples_to_rgba() so
+        // only pixels that actually land on screen pay the color-transform cost.
+        if let Some(ref rcs) = resolved_cs {
+            register_icc_profile(rcs, &mut self.icc_cache);
+        }
+
+        PreparedImage {
+            color_space,
+            samples: sample_data,
+            bpc: display_bpc,
+            resolved_cs,
+            decoded,
+            gray_promoted,
+        }
+    }
+
+    /// The last stage of painting an image, shared by image XObjects and
+    /// inline images: the transfer function, and the `ImageParams` that
+    /// paint `samples` (`width` × `height` pixels of `bpc` bits in
+    /// `color_space`) with the current graphics state. `resolved_cs` is the
+    /// image's space as [`Self::prepare_image_samples`] left it, `None` for
+    /// a stencil mask.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_image(
+        &self,
+        dict: &PdfDict,
+        color_space: ImageColorSpace,
+        samples: Vec<u8>,
+        width: u32,
+        height: u32,
+        bpc: u32,
+        resolved_cs: Option<&ResolvedColorSpace>,
+        mask_color: Option<Vec<u8>>,
+        rendering_intent: u8,
+    ) -> (Vec<u8>, ImageParams) {
+        // Apply transfer functions to image pixel data (colorizes grayscale charts etc.)
+        let sample_data = if self.gstate.transfer.has_functions() {
+            let n_comps = color_space.num_components() as usize;
+            if n_comps >= 3 {
+                let mut data = samples;
+                let premultiplied = matches!(color_space, ImageColorSpace::PreconvertedRGBA);
+                apply_transfer_to_image(&mut data, &self.gstate.transfer, n_comps, premultiplied);
+                data
+            } else {
+                samples
+            }
+        } else {
+            samples
+        };
+
+        // For K-only Indexed/DeviceCMYK palettes (grayscale images encoded as
+        // CMYK), narrow painted_channels to CMYK_K so the overprint renderer
+        // only paints the K channel.  This preserves spot-color contributions
+        // on C/M/Y underneath — required by GWG 3.1 (Gray Image Overprint).
+        // Non-K palettes keep CMYK_ALL so all channels are painted, matching
+        // the PDF spec rule that OPM 1 per-channel zeroing does not apply to
+        // Indexed color spaces (required by GWG 1.0 h/i).
+        let default_channels = || {
+            resolved_cs
+                .map(painted_channels_for_cs)
+                .unwrap_or(self.gstate.fill_painted_channels)
+        };
+        let painted_channels = if let ImageColorSpace::Indexed {
+            base,
+            hival,
+            lookup,
+        } = &color_space
+        {
+            if matches!(
+                base.as_ref(),
+                ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }
+            ) {
+                let n_entries = (*hival as usize + 1).min(lookup.len() / 4);
+                let is_k_only = n_entries > 0
+                    && (0..n_entries).all(|i| {
+                        let off = i * 4;
+                        lookup.get(off).copied().unwrap_or(0) == 0
+                            && lookup.get(off + 1).copied().unwrap_or(0) == 0
+                            && lookup.get(off + 2).copied().unwrap_or(0) == 0
+                    });
+                if is_k_only {
+                    stet_graphics::device::CMYK_K
+                } else {
+                    stet_graphics::device::CMYK_ALL
+                }
+            } else {
+                default_channels()
+            }
+        } else {
+            default_channels()
+        };
+
+        let interpolate = dict
+            .get(b"Interpolate")
+            .and_then(|o| match o {
+                PdfObj::Bool(b) => Some(*b),
+                _ => None,
+            })
+            .unwrap_or(false);
+
+        let params = ImageParams {
+            width,
+            height,
+            color_space,
+            bits_per_component: bpc as u8,
+            ctm: self.gstate.ctm,
+            image_matrix: Matrix::new(width as f64, 0.0, 0.0, -(height as f64), 0.0, height as f64),
+            interpolate,
+            mask_color,
+            alpha: self.gstate.fill_alpha,
+            blend_mode: self.gstate.blend_mode,
+            overprint: self.gstate.overprint,
+            overprint_mode: self.gstate.overprint_mode,
+            opm_paired: self.gstate.opm_paired,
+            painted_channels,
+            alpha_is_shape: self.gstate.alpha_is_shape,
+            rendering_intent,
+        };
+        (sample_data, params)
+    }
+
     /// Handle an Image XObject.
     fn handle_image_xobject(&mut self, obj: &PdfObj, dict: &PdfDict) -> Result<(), PdfError> {
         // Check image cache: if we've already processed this XObject, reuse the
@@ -4764,84 +5098,6 @@ impl<'a> ContentInterpreter<'a> {
             return Ok(());
         }
 
-        // For multi-input DeviceN images, evaluate the tinting function directly
-        // per pixel to avoid lossy N-D lookup table interpolation.  A pre-sampled
-        // table with spd^N entries can never faithfully represent all 256^N possible
-        // 8-bit input combinations for N≥2.  Direct evaluation is exact and fast
-        // enough for typical image sizes.
-        let (color_space, sample_data) = if !is_image_mask
-            && let Some(ResolvedColorSpace::DeviceN {
-                names,
-                alt,
-                tint_fn: Some(func),
-            }) = resolved_cs.as_ref()
-            && names.len() >= 2
-            && matches!(
-                alt.as_ref(),
-                ResolvedColorSpace::DeviceGray | ResolvedColorSpace::DeviceRGB
-            ) {
-            let ni = names.len();
-            let npixels = width as usize * height as usize;
-            let mut rgba = vec![255u8; npixels * 4];
-            let mut inputs = vec![0.0f64; ni];
-            for i in 0..npixels {
-                let si = i * ni;
-                for (c, inp) in inputs.iter_mut().enumerate() {
-                    *inp = sample_data.get(si + c).copied().unwrap_or(0) as f64 / 255.0;
-                }
-                let out = func.evaluate(&inputs);
-                let (r, g, b) = color_space::alt_comps_to_rgb_f64(&out, alt);
-                let pi = i * 4;
-                rgba[pi] = r;
-                rgba[pi + 1] = g;
-                rgba[pi + 2] = b;
-            }
-            (ImageColorSpace::PreconvertedRGBA, rgba)
-        } else if is_image_mask {
-            (
-                ImageColorSpace::Mask {
-                    color: self.gstate.fill_color.clone(),
-                    polarity,
-                    spot_color: self.gstate.fill_spot_color.clone(),
-                },
-                sample_data,
-            )
-        } else if let Some(ref rcs) = resolved_cs {
-            (to_image_color_space(rcs), sample_data)
-        } else {
-            // resolved_cs is None for JPX RGBA with SMaskInData — already RGBA
-            (ImageColorSpace::PreconvertedRGBA, sample_data)
-        };
-
-        // JPXDecode with internal palette (pclr): hayro-jpeg2000 applies the JP2 palette
-        // and returns expanded data (e.g. 3-component RGB for a 1-component codestream).
-        // Per PDF spec 7.4.9, the JP2 palette is applied before the PDF color space.
-        // When the PDF says Indexed but the JP2 already expanded the palette,
-        // switch to the base color space since the data is already depalettized.
-        let color_space = if !is_image_mask {
-            if let ImageColorSpace::Indexed { base, .. } = &color_space {
-                let expected_1comp = (width * height) as usize;
-                let base_n = base.num_components() as usize;
-                if sample_data.len() == expected_1comp * base_n && base_n > 1 {
-                    *base.clone()
-                } else {
-                    color_space
-                }
-            } else {
-                color_space
-            }
-        } else {
-            color_space
-        };
-
-        let interpolate = dict
-            .get(b"Interpolate")
-            .and_then(|o| match o {
-                PdfObj::Bool(b) => Some(*b),
-                _ => None,
-            })
-            .unwrap_or(false);
-
         // Explicit stencil mask: a `/Mask` stream, a 1-bit ImageMask. A
         // colour-key array was taken above.
         let explicit_mask_data = match mask_obj {
@@ -4851,135 +5107,38 @@ impl<'a> ContentInterpreter<'a> {
                 .unwrap_or(None),
         };
 
-        // Convert data if BPC != 8 (but NOT for image masks — keep raw 1-bit data).
-        // JPXDecode (JPEG 2000) and DCTDecode (JPEG) always produce 8-bit output
-        // regardless of the /BitsPerComponent value in the PDF dict.
-        let is_jpx = filter_is_jpx;
-        let is_dct = filter_is_dct;
-        let is_indexed = matches!(&color_space, ImageColorSpace::Indexed { .. });
-        // Expand sub-byte samples (1/2/4 BPC) to 8-bit since they're packed
-        // with geometry-dependent alignment. Reduce 16-bit samples to the
-        // nearest 8-bit value — downstream ICC and color conversion assumes
-        // 8-bit data. An index is never scaled; 16-bit Indexed is outside
-        // the spec, and keeps its high byte.
-        let (sample_data, display_bpc) =
-            if is_image_mask || bpc == 8 || bpc == 0 || is_jpx || is_dct {
-                (sample_data, if is_dct || is_jpx { 8 } else { bpc })
-            } else if bpc == 16 {
-                let reduce = |c: &[u8; 2]| {
-                    if is_indexed {
-                        c[0]
-                    } else {
-                        image_samples::to_8bit(u16::from_be_bytes(*c), 16)
-                    }
-                };
-                (
-                    sample_data.as_chunks::<2>().0.iter().map(reduce).collect(),
-                    8,
-                )
-            } else if bpc > 8 {
-                (sample_data, bpc)
-            } else {
-                (
-                    expand_bits_to_bytes(
-                        &sample_data,
-                        bpc,
-                        width,
-                        height,
-                        color_space.num_components(),
-                        is_indexed,
-                    ),
-                    8,
-                )
-            };
-
-        // Apply /Decode array if present (maps sample values to color component values).
-        // Default for most color spaces is [0 1 0 1 ...] (identity).
-        // For Indexed color spaces, default is [0 2^bpc-1] and values are indices.
-        // CMYK images may use [1 0 1 0 1 0 1 0] to invert values.
-        let mut decoded = false;
-        let sample_data = if !is_image_mask {
-            if let Some(decode) = dict.get_array(b"Decode") {
-                let n_comps = color_space.num_components() as usize;
-                let decode_vals: Vec<f64> = decode.iter().filter_map(|o| o.as_f64()).collect();
-                if decode_vals.len() >= n_comps * 2 {
-                    let effective_bpc = if is_jpx || is_dct { 8 } else { bpc };
-                    let max_sample = ((1u32 << effective_bpc) - 1) as f64;
-                    // Check if it's the default Decode for this color space.
-                    // Indexed: default is [0 max_sample]; others: [0 1 0 1 ...].
-                    let is_default = if is_indexed {
-                        decode_vals.len() == 2
-                            && (decode_vals[0]).abs() < 1e-6
-                            && (decode_vals[1] - max_sample).abs() < 1e-6
-                    } else {
-                        decode_vals.chunks(2).all(|pair| {
-                            pair.len() == 2
-                                && (pair[0] - 0.0).abs() < 1e-6
-                                && (pair[1] - 1.0).abs() < 1e-6
-                        })
-                    };
-                    if !is_default {
-                        decoded = true;
-                        // After expand_bits_to_bytes: indexed data keeps raw values
-                        // (0 to 2^bpc-1), non-indexed data is scaled to 0-255.
-                        let max_val = if is_indexed {
-                            ((1u32 << effective_bpc) - 1) as f64
-                        } else {
-                            255.0f64
-                        };
-                        let mut result = Vec::with_capacity(sample_data.len());
-                        if is_indexed {
-                            // Indexed: Decode maps sample values to index values (integer range)
-                            let d_min = decode_vals[0];
-                            let d_max = decode_vals[1];
-                            for &sample in sample_data.iter() {
-                                let val = d_min + (sample as f64 / max_val) * (d_max - d_min);
-                                result.push(val.round().clamp(0.0, 255.0) as u8);
-                            }
-                        } else {
-                            // Non-indexed: Decode maps to normalized [0,1] component values
-                            for (i, &sample) in sample_data.iter().enumerate() {
-                                let comp = i % n_comps;
-                                let d_min = decode_vals[comp * 2];
-                                let d_max = decode_vals[comp * 2 + 1];
-                                let val = d_min + (sample as f64 / max_val) * (d_max - d_min);
-                                result.push((val.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
-                            }
-                        }
-                        result
-                    } else {
-                        sample_data
-                    }
-                } else {
-                    sample_data
-                }
-            } else {
-                sample_data
+        let PreparedImage {
+            color_space,
+            samples: sample_data,
+            bpc: display_bpc,
+            resolved_cs,
+            decoded,
+            gray_promoted,
+        } = if is_image_mask {
+            PreparedImage {
+                color_space: ImageColorSpace::Mask {
+                    color: self.gstate.fill_color.clone(),
+                    polarity,
+                    spot_color: self.gstate.fill_spot_color.clone(),
+                },
+                samples: sample_data,
+                bpc,
+                resolved_cs: None,
+                decoded: false,
+                gray_promoted: false,
             }
         } else {
-            sample_data
+            self.prepare_image_samples(
+                dict,
+                resolved_cs,
+                sample_data,
+                width,
+                height,
+                bpc,
+                filter_is_dct || filter_is_jpx,
+            )
         };
-
-        // In CMYK page groups, route DeviceGray-derived images (DeviceGray
-        // itself, Separation with gray alt, DeviceN with gray alt) through
-        // the K plate so they composite equivalently to DeviceCMYK 0/0/0/(1−g).
-        // Required by GWG 17.3 (JBIG2 compression) and GWG 23.0's "4 different
-        // Grays" test.
-        let mut gray_promoted = false;
-        let (sample_data, color_space, resolved_cs) = if !is_image_mask {
-            let was_device_gray = matches!(color_space, ImageColorSpace::DeviceGray);
-            let (new_cs, new_data) =
-                self.cmyk_group_promote_image(color_space, sample_data, width, height);
-            gray_promoted = was_device_gray && matches!(new_cs, ImageColorSpace::DeviceCMYK);
-            let new_resolved = if gray_promoted {
-                Some(ResolvedColorSpace::DeviceCMYK)
-            } else {
-                resolved_cs
-            };
-            (new_data, new_cs, new_resolved)
-        } else {
-            (sample_data, color_space, resolved_cs)
-        };
+        let is_indexed = matches!(&color_space, ImageColorSpace::Indexed { .. });
 
         // The renderer can test a colour key on the samples it is given when
         // each is its encoded value expanded to 8 bits, which keeps every
@@ -5009,13 +5168,6 @@ impl<'a> ContentInterpreter<'a> {
             }
             None => (None, explicit_mask_data),
         };
-
-        // Register the ICC profile with the cache so the rasterizer can find
-        // it by hash.  Conversion itself is deferred to samples_to_rgba() so
-        // only pixels that actually land on screen pay the color-transform cost.
-        if !is_image_mask && let Some(ref rcs) = resolved_cs {
-            register_icc_profile(rcs, &mut self.icc_cache);
-        }
 
         // Handle SMask (soft mask / alpha channel).
         // Emit the image and its SMask as a SoftMasked display element so the
@@ -5092,86 +5244,18 @@ impl<'a> ContentInterpreter<'a> {
                 (sample_data, color_space, width, height)
             };
 
-        // Apply transfer functions to image pixel data (colorizes grayscale charts etc.)
-        let sample_data = if !is_image_mask && self.gstate.transfer.has_functions() {
-            let n_comps = color_space.num_components() as usize;
-            if n_comps >= 3 {
-                let mut data = sample_data;
-                let premultiplied = matches!(color_space, ImageColorSpace::PreconvertedRGBA);
-                apply_transfer_to_image(&mut data, &self.gstate.transfer, n_comps, premultiplied);
-                data
-            } else {
-                sample_data
-            }
-        } else {
-            sample_data
-        };
-
-        // Recompute image_matrix if dimensions changed (e.g. upscaled to match mask)
-        let image_matrix =
-            Matrix::new(width as f64, 0.0, 0.0, -(height as f64), 0.0, height as f64);
-
-        // For K-only Indexed/DeviceCMYK palettes (grayscale images encoded as
-        // CMYK), narrow painted_channels to CMYK_K so the overprint renderer
-        // only paints the K channel.  This preserves spot-color contributions
-        // on C/M/Y underneath — required by GWG 3.1 (Gray Image Overprint).
-        // Non-K palettes keep CMYK_ALL so all channels are painted, matching
-        // the PDF spec rule that OPM 1 per-channel zeroing does not apply to
-        // Indexed color spaces (required by GWG 1.0 h/i).
-        let painted_channels_override = if let ImageColorSpace::Indexed {
-            base,
-            hival,
-            lookup,
-        } = &color_space
-        {
-            if matches!(
-                base.as_ref(),
-                ImageColorSpace::DeviceCMYK | ImageColorSpace::ICCBased { n: 4, .. }
-            ) {
-                let n_entries = (*hival as usize + 1).min(lookup.len() / 4);
-                let is_k_only = n_entries > 0
-                    && (0..n_entries).all(|i| {
-                        let off = i * 4;
-                        lookup.get(off).copied().unwrap_or(0) == 0
-                            && lookup.get(off + 1).copied().unwrap_or(0) == 0
-                            && lookup.get(off + 2).copied().unwrap_or(0) == 0
-                    });
-                if is_k_only {
-                    stet_graphics::device::CMYK_K
-                } else {
-                    stet_graphics::device::CMYK_ALL
-                }
-            } else {
-                resolved_cs
-                    .as_ref()
-                    .map(painted_channels_for_cs)
-                    .unwrap_or(self.gstate.fill_painted_channels)
-            }
-        } else {
-            resolved_cs
-                .as_ref()
-                .map(painted_channels_for_cs)
-                .unwrap_or(self.gstate.fill_painted_channels)
-        };
-
-        let image_params = ImageParams {
+        let (sample_data, image_params) = self.finish_image(
+            dict,
+            color_space,
+            sample_data,
             width,
             height,
-            color_space,
-            bits_per_component: display_bpc as u8,
-            ctm: self.gstate.ctm,
-            image_matrix,
-            interpolate,
+            display_bpc,
+            resolved_cs.as_ref(),
             mask_color,
-            alpha: self.gstate.fill_alpha,
-            blend_mode: self.gstate.blend_mode,
-            overprint: self.gstate.overprint,
-            overprint_mode: self.gstate.overprint_mode,
-            opm_paired: self.gstate.opm_paired,
-            painted_channels: painted_channels_override,
-            alpha_is_shape: self.gstate.alpha_is_shape,
-            rendering_intent: image_intent,
-        };
+            image_intent,
+        );
+        let interpolate = image_params.interpolate;
 
         // When an SMask is present, emit as SoftMasked so the renderer scales
         // image and mask independently, preserving edge detail at hard alpha
@@ -6473,62 +6557,64 @@ impl<'a> ContentInterpreter<'a> {
             return Ok(());
         }
 
-        let color_space = if is_image_mask {
-            ImageColorSpace::Mask {
-                color: self.gstate.fill_color.clone(),
-                polarity,
-                spot_color: self.gstate.fill_spot_color.clone(),
-            }
-        } else {
-            to_image_color_space(resolved_cs.as_ref().unwrap())
-        };
-
-        // Expand bits if needed (but NOT for image masks — keep raw 1-bit packed data)
-        let is_indexed = matches!(&color_space, ImageColorSpace::Indexed { .. });
-        let sample_data = if !is_image_mask && bpc != 8 && bpc != 0 {
-            expand_bits_to_bytes(&sample_data, bpc, width, height, n_components, is_indexed)
-        } else {
-            sample_data
-        };
-
-        // PDF/X CMYK group: route DeviceGray / Separation-with-gray-alt /
-        // DeviceN-with-gray-alt images through the K plate so they composite
-        // equivalently to DeviceCMYK 0/0/0/(1−g).
-        let (color_space, sample_data) = if !is_image_mask {
-            self.cmyk_group_promote_image(color_space, sample_data, width, height)
-        } else {
-            (color_space, sample_data)
-        };
-
-        // Register ICC profile with the cache so the rasterizer can find it
-        // by hash.  Color conversion itself is deferred to samples_to_rgba().
-        if !is_image_mask && let Some(ref rcs) = resolved_cs {
-            register_icc_profile(rcs, &mut self.icc_cache);
+        if is_image_mask {
+            // A stencil mask keeps its packed 1-bit samples.
+            self.display_list.push(DisplayElement::Image {
+                sample_data: Arc::new(sample_data),
+                params: ImageParams {
+                    width,
+                    height,
+                    color_space: ImageColorSpace::Mask {
+                        color: self.gstate.fill_color.clone(),
+                        polarity,
+                        spot_color: self.gstate.fill_spot_color.clone(),
+                    },
+                    bits_per_component: 8,
+                    ctm: self.gstate.ctm,
+                    image_matrix,
+                    interpolate: false,
+                    mask_color: None,
+                    alpha: self.gstate.fill_alpha,
+                    blend_mode: self.gstate.blend_mode,
+                    overprint: self.gstate.overprint,
+                    overprint_mode: self.gstate.overprint_mode,
+                    opm_paired: self.gstate.opm_paired,
+                    painted_channels: self.gstate.fill_painted_channels,
+                    alpha_is_shape: self.gstate.alpha_is_shape,
+                    rendering_intent: image_intent,
+                },
+            });
+            return Ok(());
         }
 
+        // Everything else is painted as an image XObject is: an inline image
+        // is one written into the content stream (ISO 32000-1 §8.9.7), with
+        // none of the masks only an XObject may carry. DCT data is 8-bit.
+        let already_8bit = crate::filters::parse_filters(&dict, Some(self.resolver))
+            .is_ok_and(|(filters, _)| filters.contains(&crate::filters::Filter::DCTDecode));
+        let prepared = self.prepare_image_samples(
+            &dict,
+            resolved_cs,
+            sample_data,
+            width,
+            height,
+            bpc,
+            already_8bit,
+        );
+        let (sample_data, params) = self.finish_image(
+            &dict,
+            prepared.color_space,
+            prepared.samples,
+            width,
+            height,
+            prepared.bpc,
+            prepared.resolved_cs.as_ref(),
+            None,
+            image_intent,
+        );
         self.display_list.push(DisplayElement::Image {
             sample_data: Arc::new(sample_data),
-            params: ImageParams {
-                width,
-                height,
-                color_space,
-                bits_per_component: 8,
-                ctm: self.gstate.ctm,
-                image_matrix,
-                interpolate: false,
-                mask_color: None,
-                alpha: self.gstate.fill_alpha,
-                blend_mode: self.gstate.blend_mode,
-                overprint: self.gstate.overprint,
-                overprint_mode: self.gstate.overprint_mode,
-                opm_paired: self.gstate.opm_paired,
-                painted_channels: resolved_cs
-                    .as_ref()
-                    .map(painted_channels_for_cs)
-                    .unwrap_or(self.gstate.fill_painted_channels),
-                alpha_is_shape: self.gstate.alpha_is_shape,
-                rendering_intent: image_intent,
-            },
+            params,
         });
 
         Ok(())

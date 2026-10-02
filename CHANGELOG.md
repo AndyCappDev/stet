@@ -302,6 +302,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **An image with a stencil `/Mask` painted its masked pixels under a
   transfer function.** The function was applied to the masked pixels
   too, so an inverting `/TR` painted them white.
+- **Inline images are painted as image XObjects are.** They went through
+  a second, thinner pipeline. It ignored `/Decode`, so an inverted
+  inline image (`/D [1 0]`) painted inverted, and it also ignored
+  `/Interpolate` and transfer functions. It approximated multi-input
+  DeviceN through a sampled table, and painted all four inks for a
+  K-only Indexed CMYK image under overprint. Both forms now share one
+  pipeline. No inline image in the test corpus uses any of these, and
+  nothing in it moves.
+- **Multi-input DeviceN images honour `/Decode` and depths other than 8
+  bits.** They were evaluated from the raw stream, read as 8-bit
+  samples, before expansion and `/Decode`.
 - **Relative colorimetric CMYK rendered lighter than Ghostscript and
   Acrobat** with black-point compensation on, the default. Compensation
   maps the profile's black to sRGB black, and stet took that black to be
