@@ -212,6 +212,7 @@ fn handle_function_based(
             painted_channels: 0,
             alpha_is_shape: false,
             rendering_intent: gstate.rendering_intent,
+            transfer: gstate.transfer.clone(),
         },
     });
     Ok(())
@@ -271,6 +272,7 @@ fn handle_axial(
             alpha_is_shape: gstate.alpha_is_shape,
             rendering_intent: gstate.rendering_intent,
             spot_tint_blend: cs_has_spot_with_cmyk_alt(resolved_cs),
+            transfer: gstate.transfer.clone(),
         },
     });
     Ok(())
@@ -333,6 +335,7 @@ fn handle_radial(
             alpha_is_shape: gstate.alpha_is_shape,
             rendering_intent: gstate.rendering_intent,
             spot_tint_blend: cs_has_spot_with_cmyk_alt(resolved_cs),
+            transfer: gstate.transfer.clone(),
         },
     });
     Ok(())
@@ -540,6 +543,7 @@ fn handle_mesh(
             blend_mode: gstate.blend_mode,
             alpha_is_shape: gstate.alpha_is_shape,
             rendering_intent: gstate.rendering_intent,
+            transfer: gstate.transfer.clone(),
         },
     });
     Ok(())
@@ -692,6 +696,7 @@ fn handle_patches(
             blend_mode: gstate.blend_mode,
             alpha_is_shape: gstate.alpha_is_shape,
             rendering_intent: gstate.rendering_intent,
+            transfer: gstate.transfer.clone(),
         },
     });
     Ok(())

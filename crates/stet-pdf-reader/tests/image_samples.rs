@@ -296,8 +296,8 @@ fn colour_keys_on_converted_images() {
     assert_eq!(samples, [0, 0, 0, 0, 255, 255, 255, 255]);
 }
 
-/// A transfer function changes the samples the renderer is given, so the
-/// reader applies the key; the pixels it clears stay clear.
+/// A transfer function applies to the colour the renderer paints, not to
+/// the samples, so a key under one stays a key on the samples as encoded.
 #[test]
 fn colour_keys_under_a_transfer_function() {
     let pdf = document_with(
@@ -311,8 +311,9 @@ fn colour_keys_under_a_transfer_function() {
         "",
     );
     let Painted { samples, cs, .. } = painted(&pdf);
-    assert!(matches!(cs, ImageColorSpace::PreconvertedRGBA));
-    assert_eq!(samples, [0, 0, 0, 0, 200, 200, 200, 255]);
+    assert!(matches!(cs, ImageColorSpace::DeviceRGB));
+    assert_eq!(samples, [200, 200, 200, 55, 55, 55]);
+    assert_eq!(masked(&pdf), [true, false]);
 }
 
 /// Under a CMYK output intent a DeviceGray image is painted as K, which

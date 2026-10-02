@@ -273,17 +273,20 @@ fn inline_images_honour_decode() {
     assert_eq!(samples(&indexed, &[0x0F]), [15, 0]);
 }
 
-/// An inverting transfer function inverts an RGB image, inline as it does
-/// an XObject.
+/// An inline image carries the transfer function in force, as an XObject
+/// does, for the renderer to apply to its colour; its samples are left
+/// alone.
 #[test]
 fn inline_images_take_the_transfer_function() {
-    let got = same_either_way(
-        "/ColorSpace /DeviceRGB /BitsPerComponent 8",
-        &[200, 200, 200, 55, 55, 55],
-        "/TR0 gs",
-        false,
+    let entries = "/ColorSpace /DeviceRGB /BitsPerComponent 8";
+    let data = [200, 200, 200, 55, 55, 55];
+    let got = same_either_way(entries, &data, "/TR0 gs", false);
+    assert_eq!(got, data);
+    let (_, params) = image(&document(entries, &data, "/TR0 gs", Form::Inline, false));
+    assert!(
+        params.contains("transfer: TransferState { gray: Some("),
+        "{params}"
     );
-    assert_eq!(got, [55, 55, 55, 200, 200, 200]);
 }
 
 #[test]

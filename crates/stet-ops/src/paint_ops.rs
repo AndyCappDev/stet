@@ -63,6 +63,9 @@ pub(crate) struct PaintColor {
     pub painted_channels: u8,
     pub is_device_cmyk: bool,
     pub spot_color: Option<SpotColor>,
+    /// The transfer function in force, which a cached Type 3 glyph takes
+    /// from the show that replays it, like its colour.
+    pub transfer: TransferState,
 }
 
 /// Capture [`PaintColor`] from the graphics state.
@@ -85,6 +88,7 @@ pub(crate) fn capture_paint_color(ctx: &Context) -> PaintColor {
         painted_channels: painted_channels_for_space(space),
         is_device_cmyk,
         spot_color: capture_spot_color(ctx),
+        transfer: capture_transfer_state(ctx),
         color,
     }
 }

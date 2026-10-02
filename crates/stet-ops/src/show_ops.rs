@@ -5736,10 +5736,11 @@ fn transform_segments(
 /// Per PLRM, setcachedevice glyphs are stencils — painted with the current color at show time.
 ///
 /// The whole paint of a vector glyph is replaced, not just the colour:
-/// overprint, the painted colorants and the spot colour belong to the colour
-/// in force at show time, and keeping the cached ones would overprint (or
+/// overprint, the painted colorants, the spot colour and the transfer
+/// function belong to the colour in force at show time, and keeping the cached ones would overprint (or
 /// knock out) according to whatever was current when the glyph was first
-/// built. Image-mask glyphs take only the colour, like every PostScript image:
+/// built. Image-mask glyphs take only the colour and the transfer function,
+/// like every PostScript image:
 /// images do not overprint yet, because the renderer's overprint image path
 /// samples nearest-neighbour and loses a downscaled bitmap's smoothing.
 fn recolor_and_translate_element(
@@ -5759,6 +5760,7 @@ fn recolor_and_translate_element(
             params.painted_channels = paint.painted_channels;
             params.is_device_cmyk = paint.is_device_cmyk;
             params.spot_color = paint.spot_color.clone();
+            params.transfer = paint.transfer.clone();
             DisplayElement::Fill {
                 path: translate_path(path, dx, dy),
                 params,
@@ -5773,6 +5775,7 @@ fn recolor_and_translate_element(
             params.painted_channels = paint.painted_channels;
             params.is_device_cmyk = paint.is_device_cmyk;
             params.spot_color = paint.spot_color.clone();
+            params.transfer = paint.transfer.clone();
             DisplayElement::Stroke {
                 path: translate_path(path, dx, dy),
                 params,
@@ -5785,6 +5788,7 @@ fn recolor_and_translate_element(
             let mut params = params.clone();
             params.ctm.tx += dx;
             params.ctm.ty += dy;
+            params.transfer = paint.transfer.clone();
             if let stet_graphics::device::ImageColorSpace::Mask { .. } = &params.color_space {
                 // Update mask color to current color (raw 1-bit data stays unchanged)
                 params.color_space = stet_graphics::device::ImageColorSpace::Mask {
@@ -5810,6 +5814,7 @@ fn recolor_and_translate_element(
             let mut params = params.clone();
             params.color = color.clone();
             params.spot_color = paint.spot_color.clone();
+            params.transfer = paint.transfer.clone();
             params.start_x += dx;
             params.start_y += dy;
             params.ctm[4] += dx;
@@ -6023,6 +6028,7 @@ mod tests {
             painted_channels: 0,
             is_device_cmyk: false,
             spot_color: None,
+            transfer: Default::default(),
         };
         let replayed = recolor_and_translate_element(&run, 10.0, 20.0, &paint);
         let DisplayElement::TextRun { params } = replayed else {

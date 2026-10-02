@@ -1856,6 +1856,7 @@ fn draw_image_to_device(
         painted_channels: 0,
         alpha_is_shape: ctx.gstate.alpha_is_shape,
         rendering_intent: ctx.gstate.rendering_intent,
+        transfer: crate::paint_ops::capture_transfer_state(ctx),
     };
     ctx.current_display_list_mut().push(DisplayElement::Image {
         sample_data: std::sync::Arc::new(sample_data),

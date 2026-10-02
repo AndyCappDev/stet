@@ -15,6 +15,13 @@ use stet_fonts::geometry::{Matrix, PsPath};
 pub type TransferTable = Arc<Vec<f64>>;
 
 /// Transfer function state captured at paint time.
+///
+/// A transfer function adjusts device colour components just before
+/// output (PLRM 7.3; ISO 32000-1 §10.5). Renderers apply it to the final
+/// RGB of a paint, one function per channel ([`rgb_tables`](Self::rgb_tables)),
+/// and only where the paint is fully opaque (ISO 32000-1 §11.7.5.2): alpha
+/// 1, Normal blend mode, no soft mask, and the same for every enclosing
+/// group. The PDF writer emits it as `/TR`.
 #[derive(Clone, Debug, Default)]
 pub struct TransferState {
     /// Single-component transfer (from settransfer). None = identity.
@@ -34,6 +41,86 @@ impl TransferState {
             return color.iter().any(|t| t.is_some());
         }
         false
+    }
+
+    /// The functions for the red, green and blue components of an RGB
+    /// device: the per-component functions when set (`setcolortransfer`, a
+    /// four-element `/TR` array), otherwise the single function for all
+    /// three. `None` is identity.
+    pub fn rgb_tables(&self) -> [Option<&[f64]>; 3] {
+        if let Some(ref color) = self.color {
+            [0, 1, 2].map(|i| color[i].as_deref().map(|t| &t[..]))
+        } else {
+            let gray = self.gray.as_deref().map(|t| &t[..]);
+            [gray; 3]
+        }
+    }
+
+    /// Apply the functions to an RGB colour with components in `[0, 1]`.
+    pub fn apply_rgb(&self, rgb: [f64; 3]) -> [f64; 3] {
+        let tables = self.rgb_tables();
+        [0, 1, 2].map(|i| transfer_lookup(rgb[i], tables[i]))
+    }
+
+    /// 256-entry lookup tables for 8-bit red, green and blue, or `None`
+    /// when every function is identity.
+    pub fn rgb_luts(&self) -> Option<[[u8; 256]; 3]> {
+        if !self.has_functions() {
+            return None;
+        }
+        Some(self.rgb_tables().map(|table| {
+            let mut lut = [0u8; 256];
+            for (i, v) in lut.iter_mut().enumerate() {
+                *v = match table {
+                    Some(t) if t.len() == 256 => (t[i].clamp(0.0, 1.0) * 255.0 + 0.5) as u8,
+                    _ => i as u8,
+                };
+            }
+            lut
+        }))
+    }
+
+    /// Apply the functions to 8-bit RGBA pixels in place. With
+    /// `premultiplied`, the functions apply to each pixel's colour rather
+    /// than to its product with alpha, and a clear pixel stays clear.
+    pub fn apply_to_rgba(&self, data: &mut [u8], premultiplied: bool) {
+        let Some(luts) = self.rgb_luts() else {
+            return;
+        };
+        for pixel in data.as_chunks_mut::<4>().0 {
+            let alpha = if premultiplied {
+                u16::from(pixel[3])
+            } else {
+                255
+            };
+            if alpha == 0 {
+                continue;
+            }
+            for (v, lut) in pixel.iter_mut().zip(&luts) {
+                if alpha == 255 {
+                    *v = lut[*v as usize];
+                } else {
+                    let colour = ((u16::from(*v) * 255 + alpha / 2) / alpha).min(255);
+                    *v = ((u16::from(lut[colour as usize]) * alpha + 127) / 255) as u8;
+                }
+            }
+        }
+    }
+}
+
+/// Look up `value` in `[0, 1]` through a 256-sample transfer table,
+/// interpolating linearly between samples. `None`, or a table of another
+/// length, is identity.
+pub fn transfer_lookup(value: f64, table: Option<&[f64]>) -> f64 {
+    match table {
+        Some(t) if t.len() == 256 => {
+            let idx = (value * 255.0).clamp(0.0, 255.0);
+            let lo = idx.floor() as usize;
+            let hi = (lo + 1).min(255);
+            let frac = idx - lo as f64;
+            (t[lo] + frac * (t[hi] - t[lo])).clamp(0.0, 1.0)
+        }
+        _ => value,
     }
 }
 
@@ -255,7 +342,9 @@ pub struct FillParams {
     /// Rendering intent (0=RelativeColorimetric, 1=Absolute, 2=Perceptual, 3=Saturation);
     /// see [`crate::rendering_intent`].
     pub rendering_intent: u8,
-    /// Pre-sampled transfer function state for PDF output.
+    /// Transfer function in force when painted: applied by the renderer
+    /// to the final colour, and carried for PDF output (see
+    /// [`TransferState`]).
     pub transfer: TransferState,
     /// Pre-computed halftone screen state for PDF output.
     pub halftone: HalftoneState,
@@ -311,7 +400,9 @@ pub struct TextParams {
     /// Rendering intent (0=RelativeColorimetric, 1=Absolute, 2=Perceptual, 3=Saturation);
     /// see [`crate::rendering_intent`].
     pub rendering_intent: u8,
-    /// Pre-sampled transfer function state for PDF output.
+    /// Transfer function in force when painted: applied by the renderer
+    /// to the final colour, and carried for PDF output (see
+    /// [`TransferState`]).
     pub transfer: TransferState,
     /// Pre-computed halftone screen state for PDF output.
     pub halftone: HalftoneState,
@@ -521,7 +612,9 @@ pub struct StrokeParams {
     /// Rendering intent (0=RelativeColorimetric, 1=Absolute, 2=Perceptual, 3=Saturation);
     /// see [`crate::rendering_intent`].
     pub rendering_intent: u8,
-    /// Pre-sampled transfer function state for PDF output.
+    /// Transfer function in force when painted: applied by the renderer
+    /// to the final colour, and carried for PDF output (see
+    /// [`TransferState`]).
     pub transfer: TransferState,
     /// Pre-computed halftone screen state for PDF output.
     pub halftone: HalftoneState,
@@ -732,6 +825,11 @@ pub struct ImageParams {
     /// `/RI`; PDF readers populate this from `/Intent` when present and
     /// fall back to `gstate.rendering_intent` otherwise.
     pub rendering_intent: u8,
+    /// Transfer function in force when painted: applied by the renderer
+    /// to the image's colour after conversion, and carried for PDF output
+    /// (see [`TransferState`]). Front ends leave it at the default for an
+    /// image with a soft mask, which is never fully opaque.
+    pub transfer: TransferState,
 }
 
 /// A spot/DeviceN tint transform reduced to a uniform sampled grid.
@@ -878,6 +976,10 @@ pub struct AxialShadingParams {
     /// renderer uses it wherever it converts the shading's CMYK again at
     /// render time — overprint, spot-tint blending, patch subdivision.
     pub rendering_intent: u8,
+    /// Transfer function in force when painted: applied by the renderer
+    /// to each colour the shading evaluates, and carried for PDF output
+    /// (see [`TransferState`]).
+    pub transfer: TransferState,
 }
 
 /// Parameters for radial gradient shading (Type 3).
@@ -912,6 +1014,10 @@ pub struct RadialShadingParams {
     pub spot_tint_blend: bool,
     /// See [`AxialShadingParams::rendering_intent`].
     pub rendering_intent: u8,
+    /// Transfer function in force when painted: applied by the renderer
+    /// to each colour the shading evaluates, and carried for PDF output
+    /// (see [`TransferState`]).
+    pub transfer: TransferState,
 }
 
 /// A vertex in a shading triangle mesh.
@@ -958,6 +1064,10 @@ pub struct MeshShadingParams {
     pub alpha_is_shape: bool,
     /// See [`AxialShadingParams::rendering_intent`].
     pub rendering_intent: u8,
+    /// Transfer function in force when painted: applied by the renderer
+    /// to each colour the shading evaluates, and carried for PDF output
+    /// (see [`TransferState`]).
+    pub transfer: TransferState,
 }
 
 /// A patch in a Coons or tensor-product patch mesh.
@@ -994,6 +1104,10 @@ pub struct PatchShadingParams {
     pub alpha_is_shape: bool,
     /// See [`AxialShadingParams::rendering_intent`].
     pub rendering_intent: u8,
+    /// Transfer function in force when painted: applied by the renderer
+    /// to each colour the shading evaluates, and carried for PDF output
+    /// (see [`TransferState`]).
+    pub transfer: TransferState,
 }
 
 /// Parameters for a tiled pattern fill.
@@ -1153,6 +1267,7 @@ impl Default for ImageParams {
             painted_channels: 0,
             alpha_is_shape: false,
             rendering_intent: crate::rendering_intent::RELATIVE_COLORIMETRIC,
+            transfer: TransferState::default(),
         }
     }
 }
@@ -1189,6 +1304,7 @@ impl Default for AxialShadingParams {
             alpha_is_shape: false,
             spot_tint_blend: false,
             rendering_intent: crate::rendering_intent::RELATIVE_COLORIMETRIC,
+            transfer: TransferState::default(),
         }
     }
 }
@@ -1216,6 +1332,7 @@ impl Default for RadialShadingParams {
             alpha_is_shape: false,
             spot_tint_blend: false,
             rendering_intent: crate::rendering_intent::RELATIVE_COLORIMETRIC,
+            transfer: TransferState::default(),
         }
     }
 }
@@ -1235,6 +1352,7 @@ impl Default for MeshShadingParams {
             blend_mode: 0,
             alpha_is_shape: false,
             rendering_intent: crate::rendering_intent::RELATIVE_COLORIMETRIC,
+            transfer: TransferState::default(),
         }
     }
 }
@@ -1254,6 +1372,7 @@ impl Default for PatchShadingParams {
             blend_mode: 0,
             alpha_is_shape: false,
             rendering_intent: crate::rendering_intent::RELATIVE_COLORIMETRIC,
+            transfer: TransferState::default(),
         }
     }
 }

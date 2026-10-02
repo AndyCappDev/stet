@@ -172,6 +172,7 @@ fn build_type2_shading(
     let gs_blend_mode = ctx.gstate.blend_mode;
     let gs_alpha_is_shape = ctx.gstate.alpha_is_shape;
     let gs_rendering_intent = ctx.gstate.rendering_intent;
+    let gs_transfer = crate::paint_ops::capture_transfer_state(ctx);
     ctx.current_display_list_mut()
         .push(DisplayElement::AxialShading {
             params: AxialShadingParams {
@@ -192,6 +193,7 @@ fn build_type2_shading(
                 blend_mode: gs_blend_mode,
                 alpha_is_shape: gs_alpha_is_shape,
                 rendering_intent: gs_rendering_intent,
+                transfer: gs_transfer,
                 spot_tint_blend: false,
             },
         });
@@ -242,6 +244,7 @@ fn build_type3_shading(
     let gs_blend_mode = ctx.gstate.blend_mode;
     let gs_alpha_is_shape = ctx.gstate.alpha_is_shape;
     let gs_rendering_intent = ctx.gstate.rendering_intent;
+    let gs_transfer = crate::paint_ops::capture_transfer_state(ctx);
     ctx.current_display_list_mut()
         .push(DisplayElement::RadialShading {
             params: RadialShadingParams {
@@ -264,6 +267,7 @@ fn build_type3_shading(
                 blend_mode: gs_blend_mode,
                 alpha_is_shape: gs_alpha_is_shape,
                 rendering_intent: gs_rendering_intent,
+                transfer: gs_transfer,
                 spot_tint_blend: false,
             },
         });
@@ -404,6 +408,7 @@ fn build_type1_shading(
     let gs_blend_mode = ctx.gstate.blend_mode;
     let gs_alpha_is_shape = ctx.gstate.alpha_is_shape;
     let gs_rendering_intent = ctx.gstate.rendering_intent;
+    let gs_transfer = crate::paint_ops::capture_transfer_state(ctx);
     ctx.current_display_list_mut().push(DisplayElement::Image {
         sample_data: std::sync::Arc::new(rgb_data),
         params: ImageParams {
@@ -423,6 +428,7 @@ fn build_type1_shading(
             painted_channels: 0,
             alpha_is_shape: gs_alpha_is_shape,
             rendering_intent: gs_rendering_intent,
+            transfer: gs_transfer,
         },
     });
 
@@ -468,6 +474,7 @@ fn build_type4_shading(
         let gs_blend_mode = ctx.gstate.blend_mode;
         let gs_alpha_is_shape = ctx.gstate.alpha_is_shape;
         let gs_rendering_intent = ctx.gstate.rendering_intent;
+        let gs_transfer = crate::paint_ops::capture_transfer_state(ctx);
         ctx.current_display_list_mut()
             .push(DisplayElement::MeshShading {
                 params: MeshShadingParams {
@@ -483,6 +490,7 @@ fn build_type4_shading(
                     blend_mode: gs_blend_mode,
                     alpha_is_shape: gs_alpha_is_shape,
                     rendering_intent: gs_rendering_intent,
+                    transfer: gs_transfer,
                 },
             });
     }
@@ -527,6 +535,7 @@ fn build_type5_shading(
         let gs_blend_mode = ctx.gstate.blend_mode;
         let gs_alpha_is_shape = ctx.gstate.alpha_is_shape;
         let gs_rendering_intent = ctx.gstate.rendering_intent;
+        let gs_transfer = crate::paint_ops::capture_transfer_state(ctx);
         ctx.current_display_list_mut()
             .push(DisplayElement::MeshShading {
                 params: MeshShadingParams {
@@ -542,6 +551,7 @@ fn build_type5_shading(
                     blend_mode: gs_blend_mode,
                     alpha_is_shape: gs_alpha_is_shape,
                     rendering_intent: gs_rendering_intent,
+                    transfer: gs_transfer,
                 },
             });
     }
@@ -586,6 +596,7 @@ fn build_type6_shading(
         let gs_blend_mode = ctx.gstate.blend_mode;
         let gs_alpha_is_shape = ctx.gstate.alpha_is_shape;
         let gs_rendering_intent = ctx.gstate.rendering_intent;
+        let gs_transfer = crate::paint_ops::capture_transfer_state(ctx);
         ctx.current_display_list_mut()
             .push(DisplayElement::PatchShading {
                 params: PatchShadingParams {
@@ -601,6 +612,7 @@ fn build_type6_shading(
                     blend_mode: gs_blend_mode,
                     alpha_is_shape: gs_alpha_is_shape,
                     rendering_intent: gs_rendering_intent,
+                    transfer: gs_transfer,
                 },
             });
     }
@@ -643,6 +655,7 @@ fn build_type7_shading(
         let gs_blend_mode = ctx.gstate.blend_mode;
         let gs_alpha_is_shape = ctx.gstate.alpha_is_shape;
         let gs_rendering_intent = ctx.gstate.rendering_intent;
+        let gs_transfer = crate::paint_ops::capture_transfer_state(ctx);
         ctx.current_display_list_mut()
             .push(DisplayElement::PatchShading {
                 params: PatchShadingParams {
@@ -658,6 +671,7 @@ fn build_type7_shading(
                     blend_mode: gs_blend_mode,
                     alpha_is_shape: gs_alpha_is_shape,
                     rendering_intent: gs_rendering_intent,
+                    transfer: gs_transfer,
                 },
             });
     }

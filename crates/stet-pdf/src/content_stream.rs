@@ -724,6 +724,14 @@ impl<'tracker> Builder<'tracker> {
                     &mut self.ext_gstates,
                     &mut self.ext_gstate_map,
                 );
+                emit_transfer(
+                    &mut self.buf,
+                    &params.transfer,
+                    &mut self.gs,
+                    &mut self.ext_gstates,
+                    &mut self.ext_gstate_map,
+                    &mut self.transfer_refs,
+                );
                 emit_paint_alpha_blend(
                     &mut self.buf,
                     false,
@@ -789,6 +797,14 @@ impl<'tracker> Builder<'tracker> {
                     &mut self.ext_gstates,
                     &mut self.ext_gstate_map,
                 );
+                emit_transfer(
+                    &mut self.buf,
+                    &params.transfer,
+                    &mut self.gs,
+                    &mut self.ext_gstates,
+                    &mut self.ext_gstate_map,
+                    &mut self.transfer_refs,
+                );
                 emit_paint_alpha_blend(
                     &mut self.buf,
                     false,
@@ -817,6 +833,14 @@ impl<'tracker> Builder<'tracker> {
                     &mut self.gs,
                     &mut self.ext_gstates,
                     &mut self.ext_gstate_map,
+                );
+                emit_transfer(
+                    &mut self.buf,
+                    &params.transfer,
+                    &mut self.gs,
+                    &mut self.ext_gstates,
+                    &mut self.ext_gstate_map,
+                    &mut self.transfer_refs,
                 );
                 emit_paint_alpha_blend(
                     &mut self.buf,
@@ -847,6 +871,14 @@ impl<'tracker> Builder<'tracker> {
                     &mut self.ext_gstates,
                     &mut self.ext_gstate_map,
                 );
+                emit_transfer(
+                    &mut self.buf,
+                    &params.transfer,
+                    &mut self.gs,
+                    &mut self.ext_gstates,
+                    &mut self.ext_gstate_map,
+                    &mut self.transfer_refs,
+                );
                 emit_paint_alpha_blend(
                     &mut self.buf,
                     false,
@@ -875,6 +907,14 @@ impl<'tracker> Builder<'tracker> {
                     &mut self.gs,
                     &mut self.ext_gstates,
                     &mut self.ext_gstate_map,
+                );
+                emit_transfer(
+                    &mut self.buf,
+                    &params.transfer,
+                    &mut self.gs,
+                    &mut self.ext_gstates,
+                    &mut self.ext_gstate_map,
+                    &mut self.transfer_refs,
                 );
                 emit_paint_alpha_blend(
                     &mut self.buf,
@@ -1729,8 +1769,20 @@ fn emit_transfer(
     }
     gs.transfer_key = key.clone();
 
-    // Identity transfer — no ExtGState needed
+    // Back to identity after a function: an ExtGState that says so, or the
+    // earlier function stays in force for everything painted after it.
     if key.is_empty() {
+        let identity_key = b"TR/Identity".to_vec();
+        let idx = *ext_gstate_map.entry(identity_key).or_insert_with(|| {
+            ext_gstates.push(ExtGStateDict {
+                entries: vec![
+                    (b"Type".to_vec(), PdfObj::name("ExtGState")),
+                    (b"TR2".to_vec(), PdfObj::name("Identity")),
+                ],
+            });
+            ext_gstates.len() - 1
+        });
+        writeln!(buf, "/GS{} gs", idx).unwrap();
         return;
     }
 

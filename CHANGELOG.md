@@ -66,6 +66,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`stet_graphics::image_samples`**: `to_8bit`, the nearest 8-bit value
   of a sample of any depth, and `ColorKey`, a colour-key mask tested on
   samples as encoded — what both front ends now use.
+- **`transfer` on `ImageParams` and the shading parameter structs**
+  (`AxialShadingParams`, `RadialShadingParams`, `MeshShadingParams`,
+  `PatchShadingParams`): the transfer function in force, as `FillParams`
+  and `StrokeParams` already carry it, and `TransferState::rgb_tables`,
+  `apply_rgb`, `rgb_luts`, `apply_to_rgba` and `transfer_lookup` in
+  `stet-graphics` to apply one. The renderer now applies the field (see
+  Fixed); a third-party renderer should apply it to the final RGB of fully
+  opaque paints. Struct literals must add the field, under the same
+  reader-not-writer policy as `rendering_intent`.
 
 ### Deprecated
 
@@ -313,6 +322,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Multi-input DeviceN images honour `/Decode` and depths other than 8
   bits.** They were evaluated from the raw stream, read as 8-bit
   samples, before expansion and `/Decode`.
+- **PostScript transfer functions are rendered.** `settransfer` and
+  `setcolortransfer` were recorded for PDF output and otherwise ignored, so
+  fills, images and shadings painted as if no function were set.
+  `pmaster.ps` and `birthday.ps`, which set a tone curve, came out up to
+  30 levels from Ghostscript; the pixels more than 8 levels from it fall
+  from 5% to 1% and from 28% to 3.5%.
+- **PDF transfer functions apply to images in every colour space, and to
+  shadings.** The reader applied `/TR` to the samples of images with three
+  or more components — right for DeviceRGB, wrong for ICCBased RGB and for
+  CMYK, whose cyan, magenta and yellow took the red, green and blue
+  functions — and to no Gray, Separation, Indexed or two-component image,
+  nor to any shading. The renderer now applies the function to the final
+  RGB of every paint, after colour management, as Ghostscript does. An
+  image XObject drawn twice no longer keeps the function in force the
+  first time.
+- **Transfer functions apply only to fully opaque paints** (ISO 32000-1
+  §11.7.5.2): not to a paint with alpha below 1, a blend mode other than
+  Normal, or a soft mask, nor inside a transparency group drawn so, nor
+  inside a soft mask's own mask. stet applied them to every paint, as
+  poppler does; Ghostscript follows the spec except for the group rule.
+- **PDF output no longer applies a document's transfer function twice.**
+  The reader baked `/TR` into fill colours and also passed it on, so
+  `--device pdf` from a PDF wrote both. Output now carries the function
+  once, as `/TR2`, for images and shadings as well as fills and strokes,
+  and resets it to `/Identity` when the function returns to identity —
+  before, everything painted after it stayed under it.
+- **Cached Type 3 glyphs take the transfer function in force where they
+  are shown**, as they take its colour, rather than the one in force when
+  the glyph was first built.
 - **Relative colorimetric CMYK rendered lighter than Ghostscript and
   Acrobat** with black-point compensation on, the default. Compensation
   maps the profile's black to sRGB black, and stet took that black to be

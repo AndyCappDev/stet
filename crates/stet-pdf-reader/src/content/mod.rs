@@ -4481,8 +4481,7 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     /// The last stage of painting an image, shared by image XObjects and
-    /// inline images: the transfer function, and the `ImageParams` that
-    /// paint `samples` (`width` × `height` pixels of `bpc` bits in
+    /// inline images: the `ImageParams` that paint `samples` (`width` × `height` pixels of `bpc` bits in
     /// `color_space`) with the current graphics state. `resolved_cs` is the
     /// image's space as [`Self::prepare_image_samples`] left it, `None` for
     /// a stencil mask.
@@ -4499,21 +4498,6 @@ impl<'a> ContentInterpreter<'a> {
         mask_color: Option<Vec<u8>>,
         rendering_intent: u8,
     ) -> (Vec<u8>, ImageParams) {
-        // Apply transfer functions to image pixel data (colorizes grayscale charts etc.)
-        let sample_data = if self.gstate.transfer.has_functions() {
-            let n_comps = color_space.num_components() as usize;
-            if n_comps >= 3 {
-                let mut data = samples;
-                let premultiplied = matches!(color_space, ImageColorSpace::PreconvertedRGBA);
-                apply_transfer_to_image(&mut data, &self.gstate.transfer, n_comps, premultiplied);
-                data
-            } else {
-                samples
-            }
-        } else {
-            samples
-        };
-
         // For K-only Indexed/DeviceCMYK palettes (grayscale images encoded as
         // CMYK), narrow painted_channels to CMYK_K so the overprint renderer
         // only paints the K channel.  This preserves spot-color contributions
@@ -4581,8 +4565,9 @@ impl<'a> ContentInterpreter<'a> {
             painted_channels,
             alpha_is_shape: self.gstate.alpha_is_shape,
             rendering_intent,
+            transfer: self.gstate.transfer.clone(),
         };
-        (sample_data, params)
+        (samples, params)
     }
 
     /// Handle an Image XObject.
@@ -4939,6 +4924,7 @@ impl<'a> ContentInterpreter<'a> {
                     painted_channels: 0,
                     alpha_is_shape: false,
                     rendering_intent: DEFAULT_RENDERING_INTENT,
+                    transfer: Default::default(),
                 },
             });
 
@@ -5040,6 +5026,7 @@ impl<'a> ContentInterpreter<'a> {
                     painted_channels: 0,
                     alpha_is_shape: false,
                     rendering_intent: DEFAULT_RENDERING_INTENT,
+                    transfer: Default::default(),
                 },
             });
 
@@ -5143,15 +5130,13 @@ impl<'a> ContentInterpreter<'a> {
         // The renderer can test a colour key on the samples it is given when
         // each is its encoded value expanded to 8 bits, which keeps every
         // value distinct: 8 bits or fewer, an index as it is, and nothing
-        // since — no `/Decode`, no gray carried to CMYK, no transfer
-        // function, no conversion. Otherwise the pixels the key masks are
+        // since — no `/Decode`, no gray carried to CMYK, no conversion. Otherwise the pixels the key masks are
         // cleared here, as a stencil `/Mask` stream's are.
         let (mask_color, explicit_mask_data) = match color_key {
             Some((key, key_bpc, alpha)) => {
                 let samples_are_encoded = key_bpc <= 8
                     && !decoded
                     && !gray_promoted
-                    && !(self.gstate.transfer.has_functions() && color_space.num_components() >= 3)
                     && !matches!(color_space, ImageColorSpace::PreconvertedRGBA);
                 if samples_are_encoded {
                     let reduce = |v: u16| {
@@ -5390,6 +5375,7 @@ impl<'a> ContentInterpreter<'a> {
                     painted_channels: 0,
                     alpha_is_shape: false,
                     rendering_intent: DEFAULT_RENDERING_INTENT,
+                    transfer: Default::default(),
                 },
             });
 
@@ -5493,6 +5479,7 @@ impl<'a> ContentInterpreter<'a> {
             painted_channels: cached.painted_channels,
             alpha_is_shape: self.gstate.alpha_is_shape,
             rendering_intent: cached.rendering_intent,
+            transfer: self.gstate.transfer.clone(),
         };
 
         if let Some(ImageSMask {
@@ -5522,6 +5509,7 @@ impl<'a> ContentInterpreter<'a> {
                     painted_channels: 0,
                     alpha_is_shape: false,
                     rendering_intent: DEFAULT_RENDERING_INTENT,
+                    transfer: Default::default(),
                 },
             });
 
@@ -6513,6 +6501,7 @@ impl<'a> ContentInterpreter<'a> {
                     painted_channels: 0,
                     alpha_is_shape: false,
                     rendering_intent: DEFAULT_RENDERING_INTENT,
+                    transfer: Default::default(),
                 },
             });
 
@@ -6582,6 +6571,7 @@ impl<'a> ContentInterpreter<'a> {
                     painted_channels: self.gstate.fill_painted_channels,
                     alpha_is_shape: self.gstate.alpha_is_shape,
                     rendering_intent: image_intent,
+                    transfer: self.gstate.transfer.clone(),
                 },
             });
             return Ok(());
@@ -8260,113 +8250,4 @@ fn sample_transfer_function(func: &crate::resources::function::PdfFunction) -> V
             result.first().copied().unwrap_or(t).clamp(0.0, 1.0)
         })
         .collect()
-}
-
-/// Apply transfer functions to RGB image pixel data (in-place).
-///
-/// `data` is interleaved RGB (3 bytes per pixel) or RGBA (4 bytes per pixel).
-/// Transfer tables are 256-sample [0,1]→[0,1] lookup tables. With
-/// `premultiplied`, `data` is premultiplied RGBA, and the functions apply to
-/// each pixel's colour, not to its product with alpha: a cleared pixel stays
-/// clear.
-fn apply_transfer_to_image(
-    data: &mut [u8],
-    transfer: &stet_graphics::device::TransferState,
-    components: usize,
-    premultiplied: bool,
-) {
-    // Build 256-entry u8 lookup tables for each RGB channel
-    let (r_table, g_table, b_table) = if let Some(ref color) = transfer.color {
-        // Per-component transfer: [R, G, B, Gray]
-        let r = build_u8_lut(color[0].as_ref().map(|v| &v[..]));
-        let g = build_u8_lut(color[1].as_ref().map(|v| &v[..]));
-        let b = build_u8_lut(color[2].as_ref().map(|v| &v[..]));
-        (r, g, b)
-    } else if let Some(ref gray) = transfer.gray {
-        // Single function applied to all channels
-        let lut = build_u8_lut(Some(&gray[..]));
-        (lut, lut, lut)
-    } else {
-        return; // Identity — nothing to do
-    };
-
-    // Apply LUT per channel
-    let stride = components;
-    for pixel in data.chunks_exact_mut(stride) {
-        if pixel.len() < 3 {
-            continue;
-        }
-        let alpha = if premultiplied && pixel.len() == 4 {
-            u16::from(pixel[3])
-        } else {
-            255
-        };
-        if alpha == 0 {
-            continue;
-        }
-        for (v, table) in pixel.iter_mut().zip([&r_table, &g_table, &b_table]) {
-            if alpha == 255 {
-                *v = table[*v as usize];
-            } else {
-                let colour = ((u16::from(*v) * 255 + alpha / 2) / alpha).min(255);
-                *v = ((u16::from(table[colour as usize]) * alpha + 127) / 255) as u8;
-            }
-        }
-    }
-}
-
-/// Apply transfer functions to a DeviceColor (fill/stroke).
-fn apply_transfer_to_color(
-    color: &DeviceColor,
-    transfer: &stet_graphics::device::TransferState,
-) -> DeviceColor {
-    if let Some(ref color_tables) = transfer.color {
-        // Per-component transfer: [R, G, B, Gray]
-        let r = apply_transfer_component(color.r, color_tables[0].as_ref().map(|v| &v[..]));
-        let g = apply_transfer_component(color.g, color_tables[1].as_ref().map(|v| &v[..]));
-        let b = apply_transfer_component(color.b, color_tables[2].as_ref().map(|v| &v[..]));
-        DeviceColor::from_rgb(r, g, b)
-    } else if let Some(ref gray) = transfer.gray {
-        let r = apply_transfer_component(color.r, Some(&gray[..]));
-        let g = apply_transfer_component(color.g, Some(&gray[..]));
-        let b = apply_transfer_component(color.b, Some(&gray[..]));
-        DeviceColor::from_rgb(r, g, b)
-    } else {
-        color.clone()
-    }
-}
-
-/// Look up a single f64 component [0,1] through a transfer table.
-fn apply_transfer_component(value: f64, table: Option<&[f64]>) -> f64 {
-    match table {
-        None => value,
-        Some(t) if t.len() != 256 => value,
-        Some(t) => {
-            let idx = (value * 255.0).clamp(0.0, 255.0);
-            let lo = idx.floor() as usize;
-            let hi = (lo + 1).min(255);
-            let frac = idx - lo as f64;
-            let v0 = t[lo];
-            let v1 = t[hi];
-            (v0 + frac * (v1 - v0)).clamp(0.0, 1.0)
-        }
-    }
-}
-
-/// Build a 256-entry u8 lookup table from a transfer table.
-fn build_u8_lut(table: Option<&[f64]>) -> [u8; 256] {
-    let mut lut = [0u8; 256];
-    match table {
-        Some(t) if t.len() == 256 => {
-            for (i, v) in lut.iter_mut().enumerate() {
-                *v = (t[i].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-            }
-        }
-        _ => {
-            for (i, v) in lut.iter_mut().enumerate() {
-                *v = i as u8;
-            }
-        }
-    }
-    lut
 }

@@ -24,7 +24,7 @@ use stet_graphics::device::PageSinkFactory;
 use stet_graphics::device::{
     AxialShadingParams, ClipParams, FillParams, ImageColorSpace, ImageParams, MeshShadingParams,
     PatchShadingParams, RadialShadingParams, ShadingColorSpace, ShadingVertex, StrokeParams,
-    TintLookupTable,
+    TintLookupTable, TransferState,
 };
 use stet_graphics::icc::{BpcMode, IccCache, IccCacheOptions};
 use stet_graphics::layer_set::LayerSet;
@@ -346,6 +346,57 @@ fn to_paint_alpha(color: &DeviceColor, alpha: f64, blend_mode: u8, no_aa: bool) 
     paint.anti_alias = !no_aa;
     paint.blend_mode = u8_to_blend_mode(blend_mode);
     paint
+}
+
+/// The transfer function a paint applies: its own when the paint is fully
+/// opaque, and otherwise none, the page default (ISO 32000-1 §11.7.5.2).
+/// Fully opaque means alpha 1 and the Normal blend mode here, and nothing
+/// transparent enclosing the paint (`suppressed`, from
+/// [`RenderContext::transfer_suppressed`]).
+///
+/// The rule is applied per paint, so a transparent paint over an opaque one
+/// leaves the opaque one's function in place beneath it, where the spec
+/// reverts that region to the default. Ghostscript does the same; being
+/// exact would need a per-pixel record of whose function applies.
+fn paint_transfer(
+    transfer: &TransferState,
+    alpha: f64,
+    blend_mode: u8,
+    suppressed: bool,
+) -> Option<&TransferState> {
+    (!suppressed && alpha >= 1.0 && blend_mode == 0 && transfer.has_functions()).then_some(transfer)
+}
+
+/// `color` with its RGB passed through `transfer`. The native CMYK is kept:
+/// the CMYK buffer tracks ink, which a transfer function on an RGB device
+/// leaves alone.
+fn transfer_color<'c>(
+    color: &'c DeviceColor,
+    transfer: Option<&TransferState>,
+) -> std::borrow::Cow<'c, DeviceColor> {
+    match transfer {
+        None => std::borrow::Cow::Borrowed(color),
+        Some(t) => {
+            let [r, g, b] = t.apply_rgb([color.r, color.g, color.b]);
+            std::borrow::Cow::Owned(DeviceColor {
+                r,
+                g,
+                b,
+                ..color.clone()
+            })
+        }
+    }
+}
+
+/// An RGB colour in `[0, 1]` passed through `transfer`, if any.
+fn transfer_rgb(transfer: Option<&TransferState>, rgb: (f64, f64, f64)) -> (f64, f64, f64) {
+    match transfer {
+        None => rgb,
+        Some(t) => {
+            let [r, g, b] = t.apply_rgb([rgb.0, rgb.1, rgb.2]);
+            (r, g, b)
+        }
+    }
 }
 
 /// Map a blend mode byte (0–15) to the corresponding tiny-skia `BlendMode`.
@@ -872,6 +923,11 @@ struct RenderContext<'a> {
     /// OCG visibility overrides. Empty (every layer at its
     /// `default_visible`) when the caller didn't supply one.
     layer_set: &'a LayerSet,
+    /// True when nothing painted here is fully opaque, so no transfer
+    /// function applies (ISO 32000-1 §11.7.5.2): inside a soft mask's mask
+    /// or content, or inside a group drawn with alpha below 1 or a blend
+    /// mode other than Normal. See [`paint_transfer`].
+    transfer_suppressed: bool,
 }
 
 /// Override mode applied to `render_group` while the knockout group renders
@@ -1904,6 +1960,25 @@ fn register_shading_icc_profiles(list: &DisplayList, cache: &mut IccCache) {
     let mut seen = HashSet::new();
     scan(list.elements(), &mut seen, cache);
 }
+/// An image's samples as premultiplied RGBA: [`samples_to_rgba`], then the
+/// transfer function the paint applies (see [`paint_transfer`]) on each
+/// pixel's colour, then the colour key's pixels cleared.
+fn image_to_rgba(
+    sample_data: &[u8],
+    params: &ImageParams,
+    icc: Option<&IccCache>,
+    opm_zero_transparent: bool,
+    transfer: Option<&TransferState>,
+) -> Vec<u8> {
+    let mut rgba = samples_to_rgba(sample_data, params, icc, opm_zero_transparent);
+    if let Some(transfer) = transfer {
+        transfer.apply_to_rgba(&mut rgba, true);
+    }
+    if params.mask_color.is_some() {
+        apply_mask_color_rgba(&mut rgba, sample_data, params);
+    }
+    rgba
+}
 
 /// Convert raw image samples to RGBA for rasterization.
 ///
@@ -2856,6 +2931,12 @@ fn render_element(
             // instead of knocking the pixmap out with plain RGB gray.
             let mut promoted_fill: Option<FillParams> = None;
             let params = maybe_promote_gray_fill(params, &mut promoted_fill);
+            let transfer = paint_transfer(
+                &params.transfer,
+                params.alpha,
+                params.blend_mode,
+                ctx.transfer_suppressed,
+            );
             // Use the overprint compositing path whenever the fill needs
             // per-channel CMYK rendering. Five cases trigger it:
             //   1. Subset painted_channels (Separation /Magenta, DeviceN, etc.)
@@ -2924,6 +3005,7 @@ fn render_element(
                     ctx.out_h,
                     ctx.icc,
                     ctx.no_aa,
+                    transfer,
                 );
                 band_state.cmyk_buffer = Some(cmyk_buf);
                 band_state.restore_op_buffers(op_bg, op_touched);
@@ -2941,8 +3023,12 @@ fn render_element(
                 ) else {
                     return;
                 };
-                let paint =
-                    to_paint_alpha(&params.color, params.alpha, params.blend_mode, ctx.no_aa);
+                let paint = to_paint_alpha(
+                    &transfer_color(&params.color, transfer),
+                    params.alpha,
+                    params.blend_mode,
+                    ctx.no_aa,
+                );
                 let transform = ctx.transform(&params.ctm);
 
                 // Detect degenerate fill paths: rectangles/lines with zero extent
@@ -2988,6 +3074,12 @@ fn render_element(
         DisplayElement::Stroke { path, params } => {
             let mut promoted_stroke: Option<StrokeParams> = None;
             let params = maybe_promote_gray_stroke(params, &mut promoted_stroke);
+            let transfer = paint_transfer(
+                &params.transfer,
+                params.alpha,
+                params.blend_mode,
+                ctx.transfer_suppressed,
+            );
             let transform = ctx.transform(&params.ctm);
             // Build stroke using the composited transform so hairline width
             // calculations account for the actual output resolution.
@@ -3085,13 +3177,18 @@ fn render_element(
                     ctx.out_h,
                     ctx.icc,
                     ctx.no_aa,
+                    transfer,
                 );
                 band_state.cmyk_buffer = Some(cmyk_buf);
                 band_state.restore_op_buffers(op_bg, op_touched);
                 band_state.restore_spot_mask(spot_mask);
             } else {
-                let paint =
-                    to_paint_alpha(&params.color, params.alpha, params.blend_mode, ctx.no_aa);
+                let paint = to_paint_alpha(
+                    &transfer_color(&params.color, transfer),
+                    params.alpha,
+                    params.blend_mode,
+                    ctx.no_aa,
+                );
                 pixmap.stroke_path(&skia_path, &paint, &stroke, transform, mask_ref);
 
                 if band_state.cmyk_buffer.is_some() {
@@ -3163,6 +3260,12 @@ fn render_element(
                     ctx.out_w,
                     ctx.out_h,
                     ctx.icc,
+                    paint_transfer(
+                        &params.transfer,
+                        params.alpha,
+                        params.blend_mode,
+                        ctx.transfer_suppressed,
+                    ),
                 );
                 band_state.cmyk_buffer = Some(cmyk_buf);
                 band_state.restore_op_buffers(op_bg, op_touched);
@@ -3239,21 +3342,24 @@ fn render_element(
             } else {
                 // Use pre-converted RGBA from image cache when available
                 let owned_rgba;
-                let rgba_data: &[u8] = if let Some(cached) =
-                    ctx.image_cache.and_then(|c| c.get(ctx.elem_idx))
-                {
-                    cached
-                } else {
-                    owned_rgba = {
-                        let mut rgba =
-                            samples_to_rgba(sample_data, params, ctx.icc, ctx.opm_zero_transparent);
-                        if params.mask_color.is_some() {
-                            apply_mask_color_rgba(&mut rgba, sample_data, params);
-                        }
-                        rgba
+                let rgba_data: &[u8] =
+                    if let Some(cached) = ctx.image_cache.and_then(|c| c.get(ctx.elem_idx)) {
+                        cached
+                    } else {
+                        owned_rgba = image_to_rgba(
+                            sample_data,
+                            params,
+                            ctx.icc,
+                            ctx.opm_zero_transparent,
+                            paint_transfer(
+                                &params.transfer,
+                                params.alpha,
+                                params.blend_mode,
+                                ctx.transfer_suppressed,
+                            ),
+                        );
+                        &owned_rgba
                     };
-                    &owned_rgba
-                };
                 let expected = (iw * ih * 4) as usize;
                 if rgba_data.len() < expected {
                     return;
@@ -3345,6 +3451,12 @@ fn render_element(
                 ctx.no_aa,
                 band_state.cmyk_buffer.as_deref_mut(),
                 ctx.icc,
+                paint_transfer(
+                    &params.transfer,
+                    params.alpha,
+                    params.blend_mode,
+                    ctx.transfer_suppressed,
+                ),
             );
         }
         DisplayElement::RadialShading { params } => {
@@ -3368,6 +3480,12 @@ fn render_element(
                 ctx.no_aa,
                 band_state.cmyk_buffer.as_deref_mut(),
                 ctx.icc,
+                paint_transfer(
+                    &params.transfer,
+                    params.alpha,
+                    params.blend_mode,
+                    ctx.transfer_suppressed,
+                ),
             );
         }
         DisplayElement::MeshShading { params } => {
@@ -3390,6 +3508,12 @@ fn render_element(
                 mask_ref,
                 band_state.cmyk_buffer.as_deref_mut(),
                 ctx.icc,
+                paint_transfer(
+                    &params.transfer,
+                    params.alpha,
+                    params.blend_mode,
+                    ctx.transfer_suppressed,
+                ),
             );
         }
         DisplayElement::PatchShading { params } => {
@@ -3412,6 +3536,12 @@ fn render_element(
                 mask_ref,
                 band_state.cmyk_buffer.as_deref_mut(),
                 ctx.icc,
+                paint_transfer(
+                    &params.transfer,
+                    params.alpha,
+                    params.blend_mode,
+                    ctx.transfer_suppressed,
+                ),
             );
         }
         DisplayElement::PatternFill { params } => {
@@ -4101,6 +4231,9 @@ fn render_group(
         parent_group_isolated: params.isolated,
         alpha_extraction_pass: ctx.alpha_extraction_pass,
         layer_set: ctx.layer_set,
+        transfer_suppressed: ctx.transfer_suppressed
+            || params.alpha < 1.0
+            || params.blend_mode != 0,
     };
 
     let skip_indices = compute_obscured_fill_skips(elements);
@@ -4657,6 +4790,9 @@ fn render_knockout_group(
         parent_group_isolated: true,
         alpha_extraction_pass: false,
         layer_set: ctx.layer_set,
+        transfer_suppressed: ctx.transfer_suppressed
+            || params.alpha < 1.0
+            || params.blend_mode != 0,
     };
 
     // Persistent band state for clip tracking — clips must accumulate across
@@ -5030,6 +5166,7 @@ fn render_soft_masked(
         // backdrop preloading regardless of the outer extraction context.
         alpha_extraction_pass: false,
         layer_set: ctx.layer_set,
+        transfer_suppressed: true,
     };
 
     // 1a. INLINE PATH: Mask form contains nested offscreens.
@@ -5573,6 +5710,7 @@ fn rasterize_mask(
         parent_group_isolated: false,
         alpha_extraction_pass: false,
         layer_set,
+        transfer_suppressed: true,
     };
 
     // 5. Mask rendering doesn't participate in CMYK overprint compositing.
@@ -6077,6 +6215,7 @@ fn render_pattern_fill(
                     parent_group_isolated: ctx.parent_group_isolated,
                     alpha_extraction_pass: ctx.alpha_extraction_pass,
                     layer_set: ctx.layer_set,
+                    transfer_suppressed: ctx.transfer_suppressed,
                 };
 
                 let mut tile_band = BandState {
@@ -6156,6 +6295,7 @@ fn render_pattern_fill(
                 parent_group_isolated: ctx.parent_group_isolated,
                 alpha_extraction_pass: ctx.alpha_extraction_pass,
                 layer_set: ctx.layer_set,
+                transfer_suppressed: ctx.transfer_suppressed,
             };
             let mut tile_bs = BandState {
                 clip_region: None,
@@ -6232,11 +6372,18 @@ fn render_pattern_fill(
                 let iw = ip.width;
                 let ih = ip.height;
                 if iw > 0 && ih > 0 {
-                    let mut rgba =
-                        samples_to_rgba(sample_data, ip, ctx.icc, ctx.opm_zero_transparent);
-                    if ip.mask_color.is_some() {
-                        apply_mask_color_rgba(&mut rgba, sample_data, ip);
-                    }
+                    let rgba = image_to_rgba(
+                        sample_data,
+                        ip,
+                        ctx.icc,
+                        ctx.opm_zero_transparent,
+                        paint_transfer(
+                            &ip.transfer,
+                            ip.alpha,
+                            ip.blend_mode,
+                            ctx.transfer_suppressed,
+                        ),
+                    );
                     let expected = (iw * ih * 4) as usize;
                     if rgba.len() >= expected {
                         if let Some(inv) = ip.image_matrix.invert() {
@@ -6346,15 +6493,22 @@ fn render_pattern_fill(
                         }
                         DisplayElement::Fill { path, params: fp } => {
                             if let Some(sp) = build_skia_path(path) {
+                                let transfer = paint_transfer(
+                                    &fp.transfer,
+                                    fp.alpha,
+                                    fp.blend_mode,
+                                    ctx.transfer_suppressed,
+                                );
                                 let mut paint = if params.paint_type == 1 {
-                                    to_paint(&fp.color)
+                                    to_paint(&transfer_color(&fp.color, transfer))
                                 } else {
-                                    to_paint(
+                                    to_paint(&transfer_color(
                                         params
                                             .underlying_color
                                             .as_ref()
                                             .unwrap_or(&DeviceColor::black()),
-                                    )
+                                        transfer,
+                                    ))
                                 };
                                 paint.anti_alias = false;
                                 let t = to_transform(&fp.ctm);
@@ -6372,15 +6526,22 @@ fn render_pattern_fill(
                                 let mut sp_adj = sp.clone();
                                 sp_adj.ctm = effective_ctm;
                                 let stroke = build_stroke(&sp_adj, ctx.effective_dpi);
+                                let transfer = paint_transfer(
+                                    &sp.transfer,
+                                    sp.alpha,
+                                    sp.blend_mode,
+                                    ctx.transfer_suppressed,
+                                );
                                 let paint = if params.paint_type == 1 {
-                                    to_paint(&sp.color)
+                                    to_paint(&transfer_color(&sp.color, transfer))
                                 } else {
-                                    to_paint(
+                                    to_paint(&transfer_color(
                                         params
                                             .underlying_color
                                             .as_ref()
                                             .unwrap_or(&DeviceColor::black()),
-                                    )
+                                        transfer,
+                                    ))
                                 };
                                 let t = to_transform(&sp.ctm);
                                 let combined = t.post_concat(tile_transform);
@@ -6632,7 +6793,13 @@ impl OutputDevice for SkiaDevice {
             return; // empty clip
         };
 
-        let paint = to_paint_alpha(&params.color, params.alpha, params.blend_mode, self.no_aa);
+        let transfer = paint_transfer(&params.transfer, params.alpha, params.blend_mode, false);
+        let paint = to_paint_alpha(
+            &transfer_color(&params.color, transfer),
+            params.alpha,
+            params.blend_mode,
+            self.no_aa,
+        );
         let transform = to_transform(&params.ctm);
         let fill_rule = to_fill_rule(&params.fill_rule);
 
@@ -6655,7 +6822,13 @@ impl OutputDevice for SkiaDevice {
         let Some(skia_path) = build_skia_path(draw_path) else {
             return;
         };
-        let paint = to_paint_alpha(&params.color, params.alpha, params.blend_mode, self.no_aa);
+        let transfer = paint_transfer(&params.transfer, params.alpha, params.blend_mode, false);
+        let paint = to_paint_alpha(
+            &transfer_color(&params.color, transfer),
+            params.alpha,
+            params.blend_mode,
+            self.no_aa,
+        );
         let transform = to_transform(&params.ctm);
 
         let (w, h) = (self.pixmap.width(), self.pixmap.height());
@@ -6786,11 +6959,13 @@ impl OutputDevice for SkiaDevice {
         if w == 0 || h == 0 {
             return;
         }
-        let mut rgba_data =
-            samples_to_rgba(sample_data, params, self.render_icc_cache.as_ref(), false);
-        if params.mask_color.is_some() {
-            apply_mask_color_rgba(&mut rgba_data, sample_data, params);
-        }
+        let rgba_data = image_to_rgba(
+            sample_data,
+            params,
+            self.render_icc_cache.as_ref(),
+            false,
+            paint_transfer(&params.transfer, params.alpha, params.blend_mode, false),
+        );
         let expected = (w * h * 4) as usize;
         if rgba_data.len() < expected {
             return;
@@ -6845,6 +7020,7 @@ impl OutputDevice for SkiaDevice {
             self.no_aa,
             None,
             None,
+            paint_transfer(&params.transfer, params.alpha, params.blend_mode, false),
         );
     }
 
@@ -6866,6 +7042,7 @@ impl OutputDevice for SkiaDevice {
             self.no_aa,
             None,
             None,
+            paint_transfer(&params.transfer, params.alpha, params.blend_mode, false),
         );
     }
 
@@ -6886,6 +7063,7 @@ impl OutputDevice for SkiaDevice {
             mask_ref,
             None,
             None,
+            paint_transfer(&params.transfer, params.alpha, params.blend_mode, false),
         );
     }
 
@@ -6906,6 +7084,7 @@ impl OutputDevice for SkiaDevice {
             mask_ref,
             None,
             None,
+            paint_transfer(&params.transfer, params.alpha, params.blend_mode, false),
         );
     }
 
@@ -6943,6 +7122,7 @@ impl OutputDevice for SkiaDevice {
                 parent_group_isolated: false,
                 alpha_extraction_pass: false,
                 layer_set: &self.layer_set,
+                transfer_suppressed: false,
             };
             render_pattern_fill(&mut self.pixmap, &mut band_state, params, &ctx);
         }
@@ -7021,6 +7201,7 @@ impl OutputDevice for SkiaDevice {
                 parent_group_isolated: false,
                 alpha_extraction_pass: false,
                 layer_set: &self.layer_set,
+                transfer_suppressed: false,
             };
             let cmyk_buffer = page_needs_cmyk_buffer(&list)
                 .then(|| vec![0.0f32; page_w as usize * page_h as usize * 4]);
@@ -7451,6 +7632,7 @@ fn render_overprint_fill(
     out_h: u32,
     icc: Option<&IccCache>,
     no_aa: bool,
+    transfer: Option<&TransferState>,
 ) {
     // Overprint re-converts the composited CMYK with the painting
     // element's intent.
@@ -7603,7 +7785,12 @@ fn render_overprint_fill(
         else {
             return;
         };
-        let paint = to_paint_alpha(&params.color, params.alpha, params.blend_mode, no_aa);
+        let paint = to_paint_alpha(
+            &transfer_color(&params.color, transfer),
+            params.alpha,
+            params.blend_mode,
+            no_aa,
+        );
         pixmap.fill_path(&skia_path, &paint, fill_rule, transform, mask_ref);
         return;
     }
@@ -7762,7 +7949,7 @@ fn render_overprint_fill(
                     // page 2) would otherwise hit the multiplicative branch
                     // with all-zero source CMYK, which leaves the backdrop
                     // unchanged — hiding the white label.
-                    (params.color.r, params.color.g, params.color.b)
+                    transfer_rgb(transfer, (params.color.r, params.color.g, params.color.b))
                 } else if use_multiplicative {
                     // Multiplicative ink stacking: each painted channel attenuates
                     // the corresponding RGB component; preserved channels leave
@@ -7797,12 +7984,18 @@ fn render_overprint_fill(
                         (bg_g * over_g * k_fac).clamp(0.0, 1.0),
                         (bg_b * over_b * k_fac).clamp(0.0, 1.0),
                     )
-                } else if let Some(icc_cache) = icc {
-                    icc_cache
-                        .convert_cmyk_readonly_with_intent(new_c, new_m, new_y, new_k, intent)
-                        .unwrap_or_else(|| cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k))
                 } else {
-                    cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k)
+                    // The transfer function goes on the colour this paint
+                    // resolves. Ink stacked onto a backdrop (above) is left
+                    // as it is: the backdrop already carries its own.
+                    let rgb = if let Some(icc_cache) = icc {
+                        icc_cache
+                            .convert_cmyk_readonly_with_intent(new_c, new_m, new_y, new_k, intent)
+                            .unwrap_or_else(|| cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k))
+                    } else {
+                        cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k)
+                    };
+                    transfer_rgb(transfer, rgb)
                 };
 
             let a = (cov * params.alpha as f32).min(1.0);
@@ -8079,6 +8272,7 @@ fn render_overprint_stroke(
     out_h: u32,
     icc: Option<&IccCache>,
     no_aa: bool,
+    transfer: Option<&TransferState>,
 ) {
     // Overprint re-converts the composited CMYK with the painting
     // element's intent.
@@ -8226,7 +8420,12 @@ fn render_overprint_stroke(
         else {
             return;
         };
-        let paint = to_paint_alpha(&params.color, params.alpha, params.blend_mode, no_aa);
+        let paint = to_paint_alpha(
+            &transfer_color(&params.color, transfer),
+            params.alpha,
+            params.blend_mode,
+            no_aa,
+        );
         pixmap.stroke_path(skia_path, &paint, stroke, transform, mask_ref);
         return;
     }
@@ -8335,7 +8534,7 @@ fn render_overprint_stroke(
                     // the multiplicative branch so a `1 g` / `1 G` white paint
                     // doesn't get folded into the backdrop via zero-source
                     // multiplication).
-                    (params.color.r, params.color.g, params.color.b)
+                    transfer_rgb(transfer, (params.color.r, params.color.g, params.color.b))
                 } else if use_multiplicative {
                     let bg_r = px_data[pi] as f64 / 255.0;
                     let bg_g = px_data[pi + 1] as f64 / 255.0;
@@ -8365,12 +8564,18 @@ fn render_overprint_stroke(
                         (bg_g * over_g * k_fac).clamp(0.0, 1.0),
                         (bg_b * over_b * k_fac).clamp(0.0, 1.0),
                     )
-                } else if let Some(icc_cache) = icc {
-                    icc_cache
-                        .convert_cmyk_readonly_with_intent(new_c, new_m, new_y, new_k, intent)
-                        .unwrap_or_else(|| cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k))
                 } else {
-                    cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k)
+                    // The transfer function goes on the colour this paint
+                    // resolves. Ink stacked onto a backdrop (above) is left
+                    // as it is: the backdrop already carries its own.
+                    let rgb = if let Some(icc_cache) = icc {
+                        icc_cache
+                            .convert_cmyk_readonly_with_intent(new_c, new_m, new_y, new_k, intent)
+                            .unwrap_or_else(|| cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k))
+                    } else {
+                        cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k)
+                    };
+                    transfer_rgb(transfer, rgb)
                 };
 
             let a = (cov * params.alpha as f32).min(1.0);
@@ -8572,6 +8777,7 @@ fn render_overprint_image(
     out_w: u32,
     out_h: u32,
     icc: Option<&IccCache>,
+    transfer: Option<&TransferState>,
 ) {
     // Overprint re-converts the composited CMYK with the painting
     // element's intent.
@@ -8770,6 +8976,7 @@ fn render_overprint_image(
                 } else {
                     cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k)
                 };
+                let (r, g, b) = transfer_rgb(transfer, (r, g, b));
                 if op_touched[mi] == 0 && px_data[pi + 3] > 0 {
                     op_bg[pi] = px_data[pi];
                     op_bg[pi + 1] = px_data[pi + 1];
@@ -8903,12 +9110,17 @@ fn render_overprint_image(
                     (bg_g * over_g * k_fac).clamp(0.0, 1.0),
                     (bg_b * over_b * k_fac).clamp(0.0, 1.0),
                 )
-            } else if let Some(icc_cache) = icc {
-                icc_cache
-                    .convert_cmyk_readonly_with_intent(new_c, new_m, new_y, new_k, intent)
-                    .unwrap_or_else(|| cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k))
             } else {
-                cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k)
+                // As in render_overprint_fill: the transfer function goes on
+                // the colour this paint resolves, not on stacked ink.
+                let rgb = if let Some(icc_cache) = icc {
+                    icc_cache
+                        .convert_cmyk_readonly_with_intent(new_c, new_m, new_y, new_k, intent)
+                        .unwrap_or_else(|| cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k))
+                } else {
+                    cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k)
+                };
+                transfer_rgb(transfer, rgb)
             };
 
             // Snapshot the pre-paint pixmap so a later overprint fill/stroke
@@ -9590,6 +9802,7 @@ fn render_banded_to_sink(
                     parent_group_isolated: false,
                     alpha_extraction_pass: false,
                     layer_set,
+                    transfer_suppressed: false,
                 };
                 render_element(&mut band_pixmap, &mut band_state, &elements[i], &ctx);
             }
@@ -10365,11 +10578,15 @@ impl ImageCache {
                     if params.width == 0 || params.height == 0 {
                         return None;
                     }
-                    let mut rgba = samples_to_rgba(sample_data, params, icc, false);
-                    if params.mask_color.is_some() {
-                        apply_mask_color_rgba(&mut rgba, sample_data, params);
-                    }
-                    Some(rgba)
+                    // The cache holds the page's own images, which nothing
+                    // encloses: the paint's own opacity decides.
+                    Some(image_to_rgba(
+                        sample_data,
+                        params,
+                        icc,
+                        false,
+                        paint_transfer(&params.transfer, params.alpha, params.blend_mode, false),
+                    ))
                 } else {
                     None
                 }
@@ -10412,11 +10629,16 @@ fn preprocess_images_for_bands(
                 return None;
             }
 
-            // Convert to RGBA
-            let mut rgba = samples_to_rgba(sample_data, params, icc, false);
-            if params.mask_color.is_some() {
-                apply_mask_color_rgba(&mut rgba, sample_data, params);
-            }
+            // Convert to RGBA. These are the page's own images, which
+            // nothing encloses: the paint's own opacity decides the transfer
+            // function.
+            let rgba = image_to_rgba(
+                sample_data,
+                params,
+                icc,
+                false,
+                paint_transfer(&params.transfer, params.alpha, params.blend_mode, false),
+            );
 
             // Compute the device-space transform (vp_y=0, scale=1.0)
             let image_inv = params.image_matrix.invert()?;
@@ -10572,6 +10794,7 @@ pub fn render_region_prepared(
                 parent_group_isolated: false,
                 alpha_extraction_pass: false,
                 layer_set: &layer_set,
+                transfer_suppressed: false,
             };
             render_element(&mut pixmap, &mut state, &elements[i], &ctx);
         }
@@ -10751,6 +10974,7 @@ pub fn render_region_single_band(
                 parent_group_isolated: false,
                 alpha_extraction_pass: false,
                 layer_set: &layer_set,
+                transfer_suppressed: false,
             };
             render_element(&mut pixmap, &mut state, &elements[i], &ctx);
         }
@@ -11568,6 +11792,7 @@ pub fn render_region(
                 parent_group_isolated: false,
                 alpha_extraction_pass: false,
                 layer_set: &layer_set,
+                transfer_suppressed: false,
             };
             render_element(&mut pixmap, &mut state, &elements[i], &ctx);
         }
@@ -11648,6 +11873,7 @@ fn render_axial_shading(
     no_aa: bool,
     cmyk_buf: Option<&mut [f32]>,
     icc: Option<&IccCache>,
+    transfer: Option<&TransferState>,
 ) {
     // Spot-tint and overprint re-conversions use the shading's intent.
     let intent = stet_graphics::icc::intent_from_byte(params.rendering_intent);
@@ -11709,7 +11935,7 @@ fn render_axial_shading(
     if needs_perpendicular_clip {
         // Diagonal gradient with non-extended side — fall back to tiny-skia
         // for Sutherland-Hodgman polygon clipping.
-        let stops = build_gradient_stops(&params.color_stops);
+        let stops = build_gradient_stops(&params.color_stops, transfer);
         if stops.is_empty() {
             return;
         }
@@ -11851,7 +12077,7 @@ fn render_axial_shading(
             .max(params.color_stops.len())
             .max(256)
             .min(16384);
-        let lut = build_gradient_lut(&params.color_stops, lut_size);
+        let lut = build_gradient_lut(&params.color_stops, lut_size, transfer);
 
         let Some(inv) = params.ctm.invert() else {
             return;
@@ -12094,6 +12320,7 @@ fn render_axial_shading(
                             } else {
                                 cmyk_to_rgb_plrm(new_c, new_m, new_y, new_k)
                             };
+                            let (rv, gv, bv) = transfer_rgb(transfer, (rv, gv, bv));
                             let stride = pixmap.data().len() / pixmap.height() as usize;
                             let offset = py as usize * stride + px as usize * 4;
                             let data = pixmap.data_mut();
@@ -12128,6 +12355,7 @@ fn render_axial_shading(
                         } else {
                             cmyk_to_rgb_plrm(c, m, y, k)
                         };
+                        let (rv, gv, bv) = transfer_rgb(transfer, (rv, gv, bv));
                         let stride = pixmap.data().len() / pixmap.height() as usize;
                         let offset = py as usize * stride + px as usize * 4;
                         let data = pixmap.data_mut();
@@ -12175,6 +12403,7 @@ fn render_radial_shading(
     _no_aa: bool,
     mut cmyk_buf: Option<&mut [f32]>,
     icc: Option<&IccCache>,
+    transfer: Option<&TransferState>,
 ) {
     // Spot-tint and overprint re-conversions use the shading's intent.
     let intent = stet_graphics::icc::intent_from_byte(params.rendering_intent);
@@ -12377,9 +12606,10 @@ fn render_radial_shading(
                         ((bg_b * over_b * k_fac).clamp(0.0, 1.0) * 255.0).round() as u8;
                     data[offset + 3] = 255;
                 } else {
-                    data[offset] = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
-                    data[offset + 1] = (color.g * 255.0).round().clamp(0.0, 255.0) as u8;
-                    data[offset + 2] = (color.b * 255.0).round().clamp(0.0, 255.0) as u8;
+                    let (cr, cg, cb) = transfer_rgb(transfer, (color.r, color.g, color.b));
+                    data[offset] = (cr * 255.0).round().clamp(0.0, 255.0) as u8;
+                    data[offset + 1] = (cg * 255.0).round().clamp(0.0, 255.0) as u8;
+                    data[offset + 2] = (cb * 255.0).round().clamp(0.0, 255.0) as u8;
                     data[offset + 3] = 255;
 
                     // Recomposite RGB from the CMYK buffer via ICC only for
@@ -12415,6 +12645,7 @@ fn render_radial_shading(
                         if let Some((r, g, b)) =
                             icc_cache.convert_cmyk_readonly_with_intent(c, m, y, k, intent)
                         {
+                            let (r, g, b) = transfer_rgb(transfer, (r, g, b));
                             data[offset] = (r * 255.0).round().clamp(0.0, 255.0) as u8;
                             data[offset + 1] = (g * 255.0).round().clamp(0.0, 255.0) as u8;
                             data[offset + 2] = (b * 255.0).round().clamp(0.0, 255.0) as u8;
@@ -12506,6 +12737,7 @@ fn render_mesh_shading(
     clip_mask: Option<&Mask>,
     mut cmyk_buf: Option<&mut [f32]>,
     icc: Option<&IccCache>,
+    transfer: Option<&TransferState>,
 ) {
     let pw = pixmap.width() as usize;
     let ph = pixmap.height() as usize;
@@ -12662,6 +12894,9 @@ fn render_mesh_shading(
                     continue;
                 }
 
+                // The CMYK buffer above took the ink; the transfer function
+                // applies to the colour painted.
+                let (r, g, b) = transfer_rgb(transfer, (r, g, b));
                 let offset = py * stride + px * 4;
                 data[offset] = (r * 255.0).round().clamp(0.0, 255.0) as u8;
                 data[offset + 1] = (g * 255.0).round().clamp(0.0, 255.0) as u8;
@@ -12852,6 +13087,7 @@ fn render_patch_shading(
     clip_mask: Option<&Mask>,
     cmyk_buf: Option<&mut [f32]>,
     icc: Option<&IccCache>,
+    transfer: Option<&TransferState>,
 ) {
     let mut triangles = Vec::new();
     let scale = scale_x.max(scale_y) as f64;
@@ -12926,6 +13162,7 @@ fn render_patch_shading(
             blend_mode: params.blend_mode,
             alpha_is_shape: params.alpha_is_shape,
             rendering_intent: params.rendering_intent,
+            transfer: params.transfer.clone(),
         };
         render_mesh_shading(
             pixmap,
@@ -12937,6 +13174,7 @@ fn render_patch_shading(
             clip_mask,
             cmyk_buf,
             icc,
+            transfer,
         );
     }
 }
@@ -13219,7 +13457,13 @@ fn bilinear_raw(raw_colors: &[Vec<f64>; 4], u: f64, v: f64) -> Vec<f64> {
 /// Each entry is linearly interpolated from the color stops. Used by the
 /// direct-rasterization axial shading path to replace per-pixel stop search
 /// with a single array lookup.
-fn build_gradient_lut(stops: &[stet_graphics::device::ColorStop], size: usize) -> Vec<[u8; 4]> {
+///
+/// `transfer` applies to each entry before it is quantised.
+fn build_gradient_lut(
+    stops: &[stet_graphics::device::ColorStop],
+    size: usize,
+    transfer: Option<&TransferState>,
+) -> Vec<[u8; 4]> {
     let size = size.max(2);
     let mut lut = vec![[0u8; 4]; size];
     if stops.is_empty() {
@@ -13255,6 +13499,7 @@ fn build_gradient_lut(stops: &[stet_graphics::device::ColorStop], size: usize) -
                 c0.b + frac * (c1.b - c0.b),
             )
         };
+        let (r, g, b) = transfer_rgb(transfer, (r, g, b));
         *entry = [
             (r * 255.0).round().clamp(0.0, 255.0) as u8,
             (g * 255.0).round().clamp(0.0, 255.0) as u8,
@@ -13266,18 +13511,51 @@ fn build_gradient_lut(stops: &[stet_graphics::device::ColorStop], size: usize) -
 }
 
 /// Build tiny-skia gradient stops from color stops.
+///
+/// tiny-skia interpolates linearly between stops, and a transfer function
+/// is not linear, so under one the span between each pair of stops is
+/// sampled at 1/255 steps of the gradient and each sample passed through
+/// the function. A pair of stops at one position (a hard edge) stays one.
 fn build_gradient_stops(
     stops: &[stet_graphics::device::ColorStop],
+    transfer: Option<&TransferState>,
 ) -> Vec<stet_tiny_skia::GradientStop> {
+    let stop = |position: f64, (r, g, b): (f64, f64, f64)| {
+        let (r, g, b) = transfer_rgb(transfer, (r, g, b));
+        stet_tiny_skia::GradientStop::new(
+            position as f32,
+            Color::from_rgba8(
+                (r * 255.0).round().clamp(0.0, 255.0) as u8,
+                (g * 255.0).round().clamp(0.0, 255.0) as u8,
+                (b * 255.0).round().clamp(0.0, 255.0) as u8,
+                255,
+            ),
+        )
+    };
     let mut result = Vec::with_capacity(stops.len());
-    for stop in stops {
-        let r = (stop.color.r * 255.0).round().clamp(0.0, 255.0) as u8;
-        let g = (stop.color.g * 255.0).round().clamp(0.0, 255.0) as u8;
-        let b = (stop.color.b * 255.0).round().clamp(0.0, 255.0) as u8;
-        result.push(stet_tiny_skia::GradientStop::new(
-            stop.position as f32,
-            Color::from_rgba8(r, g, b, 255),
-        ));
+    for (i, s0) in stops.iter().enumerate() {
+        let c0 = &s0.color;
+        result.push(stop(s0.position, (c0.r, c0.g, c0.b)));
+        if transfer.is_none() {
+            continue;
+        }
+        let Some(s1) = stops.get(i + 1) else {
+            break;
+        };
+        let span = s1.position - s0.position;
+        let samples = (span * 255.0).ceil() as usize;
+        let c1 = &s1.color;
+        for k in 1..samples {
+            let frac = k as f64 / samples as f64;
+            result.push(stop(
+                s0.position + frac * span,
+                (
+                    c0.r + frac * (c1.r - c0.r),
+                    c0.g + frac * (c1.g - c0.g),
+                    c0.b + frac * (c1.b - c0.b),
+                ),
+            ));
+        }
     }
     result
 }

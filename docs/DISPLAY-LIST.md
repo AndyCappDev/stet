@@ -32,7 +32,7 @@ through the CTM). `FillParams` carries:
 | `is_device_cmyk` | `bool` | True when color space is DeviceCMYK/ICCBased(4) |
 | `spot_color` | `Option<SpotColor>` | Separation/DeviceN color (if applicable) |
 | `rendering_intent` | `u8` | 0=RelativeColorimetric, 1=Absolute, 2=Perceptual, 3=Saturation |
-| `transfer` | `TransferState` | Pre-sampled transfer function tables |
+| `transfer` | `TransferState` | Transfer function in force, applied by the renderer to the final RGB (see "Print Production State") |
 | `halftone` | `HalftoneState` | Halftone screen parameters |
 | `bg_ucr` | `BgUcrState` | Black generation / undercolor removal tables |
 | `is_text_glyph` | `bool` | True when this fill is a glyph from a show operator |
@@ -85,6 +85,9 @@ share the sample buffer without copying.
 | `overprint_mode` | `i32` | OPM (0 or 1) |
 | `opm_paired` | `bool` | Strict OPM-1 flag (see `FillParams`) |
 | `painted_channels` | `u8` | CMYK channel bitmask for overprint |
+| `alpha_is_shape` | `bool` | Alpha-is-shape (PDF `AIS`) |
+| `rendering_intent` | `u8` | Intent for converting the image's colours (see "Rendering intent") |
+| `transfer` | `TransferState` | Transfer function in force, applied after conversion to RGB (see "Print Production State") |
 
 #### Image Color Spaces
 
@@ -131,7 +134,7 @@ the rasterizer (which renders text via Fill elements with glyph outlines).
 | `stroke_width` | `f64` | Device-space stroke width for PaintType 2 |
 | `spot_color` | `Option<SpotColor>` | Separation/DeviceN text color |
 | `rendering_intent` | `u8` | 0=RelativeColorimetric, 1=Absolute, 2=Perceptual, 3=Saturation |
-| `transfer` | `TransferState` | Pre-sampled transfer function tables |
+| `transfer` | `TransferState` | Transfer function in force, applied by the renderer to the final RGB (see "Print Production State") |
 | `halftone` | `HalftoneState` | Halftone screen parameters |
 | `bg_ucr` | `BgUcrState` | Black generation / undercolor removal tables |
 | `fill_opacity` | `f64` | Fill opacity (0.0–1.0, default 1.0) — PDF `CA` |
@@ -336,8 +339,10 @@ DeviceRGB, DeviceCMYK, or ICCBased with embedded profile data). Gradient
 color stops are pre-sampled from PostScript functions. Mesh and patch data
 includes per-vertex colors and coordinates in device space.
 
-Each also carries `rendering_intent` (see "Rendering intent" below), the
-intent its colours were converted with. A renderer that converts a
+Each also carries `transfer`, the transfer function in force, which the
+renderer applies to each colour the shading evaluates (see "Print
+Production State"), and `rendering_intent` (see "Rendering intent"
+below), the intent its colours were converted with. A renderer that converts a
 shading's CMYK again at render time — for overprint, spot-tint blending
 or patch subdivision — should use it, so those pixels match the
 pre-converted ones.
@@ -546,8 +551,31 @@ Each paint element (Fill, Stroke) carries the full print production state
 at the time it was created:
 
 - **Transfer functions** (`TransferState`): Pre-sampled 256-entry lookup
-  tables for gray and/or per-channel (C/M/Y/K) transfer. Identity transfers
-  are represented as `None`.
+  tables, one function for all components (`gray`, from `settransfer` or a
+  single `/TR` function) or one per component (`color`, `[R, G, B, Gray]`,
+  from `setcolortransfer` or a four-function `/TR` array). Identity
+  functions are `None`. Fills, strokes, text, images and all four shadings
+  carry one. The front ends carry the function beside the colour and never
+  apply it themselves.
+
+  A transfer function adjusts the *device's* components just before
+  output (PLRM 7.3; ISO 32000-1 §10.5), so the renderer applies it to the
+  final RGB of each paint: a fill's colour, an image's pixels after
+  conversion (on un-premultiplied colour), each colour a shading
+  evaluates. `TransferState::rgb_tables` gives the function for each of R,
+  G and B. The CMYK a paint records for overprint simulation is ink, and
+  stays untransformed; the RGB an overprinting paint resolves from it takes
+  the paint's function.
+
+  Only fully opaque paints take their function (ISO 32000-1 §11.7.5.2):
+  alpha 1 and the Normal blend mode, not the content of a `SoftMasked`,
+  and inside no `Group` drawn with alpha below 1 or another blend mode.
+  Elsewhere the page default, identity, applies, and a soft mask's own
+  mask is rendered with none. (A transparent paint over an opaque one
+  leaves the opaque one's function beneath it, where the spec would revert
+  that region to the default, as Ghostscript does.) The PDF writer emits
+  each function as `/TR2`, and `/TR2 /Identity` when it returns to
+  identity.
 
 - **Halftone screens** (`HalftoneState`): Screen frequency, angle, and
   spot function for gray and/or per-channel halftoning.

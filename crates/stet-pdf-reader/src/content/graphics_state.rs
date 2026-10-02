@@ -346,13 +346,10 @@ impl PdfGraphicsState {
         }
     }
 
-    /// Build FillParams from current state, applying transfer functions to color.
+    /// Build FillParams from current state. The transfer function travels
+    /// beside the colour, for the renderer to apply.
     pub fn fill_params(&self, fill_rule: FillRule) -> FillParams {
-        let color = if self.transfer.has_functions() {
-            super::apply_transfer_to_color(&self.fill_color, &self.transfer)
-        } else {
-            self.fill_color.clone()
-        };
+        let color = self.fill_color.clone();
         FillParams {
             color,
             fill_rule,
@@ -379,18 +376,14 @@ impl PdfGraphicsState {
         }
     }
 
-    /// Build StrokeParams from current state with CTM scale applied, applying transfer to color.
+    /// Build StrokeParams from current state with CTM scale applied.
     pub fn stroke_params(&self) -> StrokeParams {
         let scale = self.ctm_scale_factor();
         let scaled_dash = DashPattern {
             array: self.dash_pattern.array.iter().map(|d| d * scale).collect(),
             offset: self.dash_pattern.offset * scale,
         };
-        let color = if self.transfer.has_functions() {
-            super::apply_transfer_to_color(&self.stroke_color, &self.transfer)
-        } else {
-            self.stroke_color.clone()
-        };
+        let color = self.stroke_color.clone();
         StrokeParams {
             color,
             line_width: self.line_width * scale,
@@ -425,11 +418,7 @@ impl PdfGraphicsState {
     /// Build StrokeParams with the CTM applied by the renderer (not pre-scaled).
     /// Used for correct anisotropic strokes where the CTM has non-uniform scaling.
     pub fn stroke_params_with_ctm(&self) -> StrokeParams {
-        let color = if self.transfer.has_functions() {
-            super::apply_transfer_to_color(&self.stroke_color, &self.transfer)
-        } else {
-            self.stroke_color.clone()
-        };
+        let color = self.stroke_color.clone();
         StrokeParams {
             color,
             line_width: self.line_width,
