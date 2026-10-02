@@ -46,6 +46,13 @@ script runs it once and records what it produces. It writes, next to itself:
   gray_near_black.icc
                  A TRC-only Gray whose black is Y 0.0002: compensating it to
                  a black of zero is a change so small lcms2 drops it.
+  mab.icc        An ICC v4 output profile whose tables are all `lutAToBType`
+                 / `lutBToAType`, like Ghent's estprofile.icc: B2A CLUTs with a
+                 different grid per input, 16- and 8-bit CLUTs, a matrix with
+                 an offset, every kind of curve, an empty `curv` before
+                 others in a set (which moxcms 0.8.1 misreads), and elements
+                 left out.
+  rgb_mab.icc    An ICC v4 RGB profile with `lutAToBType` A2B0 and A2B1.
   reference.rs   lcms2's sRGB output for each profile, intent and BPC setting,
                  its black points as a source and as a destination, the
                  round trip behind them, and its proofing-chain stage 1
@@ -427,6 +434,193 @@ def gray_near_black_profile(description):
     return assemble(tags, b"mntr", b"GRAY", b"XYZ ", 0x02100000)
 
 
+def para_tag(function, params):
+    """A `para` curve of ICC function type `function` (0–4)."""
+    return (
+        b"para"
+        + bytes(4)
+        + struct.pack(">HH", function, 0)
+        + b"".join(s15f16(p) for p in params)
+    )
+
+
+def padded(body):
+    return body + bytes(-len(body) % 4)
+
+
+def multi_tag(to_pcs, n_in, n_out, a=None, clut=None, m=None, matrix=None, b=None):
+    """A `lutAToBType` (`to_pcs`) or `lutBToAType` tag. `a`, `m` and `b` are
+    lists of curve tags; `clut` is (grid points per input, bytes per entry,
+    function of the grid coordinates → normalised outputs); `matrix` is
+    (3×3 rows, offset). `None` leaves an element out."""
+    header = 32
+    parts = []
+    offsets = {}
+
+    def place(name, body):
+        offsets[name] = header + sum(len(p) for p in parts)
+        parts.append(padded(body))
+
+    def curves(set_):
+        return b"".join(padded(c) for c in set_)
+
+    order = ["a", "clut", "m", "matrix", "b"] if to_pcs else ["b", "matrix", "m", "clut", "a"]
+    for name in order:
+        if name == "a" and a is not None:
+            place("a", curves(a))
+        elif name == "m" and m is not None:
+            place("m", curves(m))
+        elif name == "b" and b is not None:
+            place("b", curves(b))
+        elif name == "matrix" and matrix is not None:
+            rows, offset = matrix
+            place("matrix", b"".join(s15f16(v) for row in rows for v in row) + b"".join(s15f16(v) for v in offset))
+        elif name == "clut" and clut is not None:
+            grids, precision, fn = clut
+            body = bytes(grids) + bytes(16 - len(grids)) + bytes([precision]) + bytes(3)
+            total = 1
+            for g in grids:
+                total *= g
+            for idx in range(total):
+                coords = []
+                rest = idx
+                for g in reversed(grids):
+                    coords.append(rest % g / (g - 1))
+                    rest //= g
+                out = fn(list(reversed(coords)))
+                for v in out:
+                    v = min(max(v, 0.0), 1.0)
+                    body += u16(round(v * 65535)) if precision == 2 else bytes([round(v * 255)])
+            place("clut", body)
+    sig = b"mAB " if to_pcs else b"mBA "
+    head = sig + bytes(4) + bytes([n_in, n_out, 0, 0])
+    head += struct.pack(
+        ">IIIII",
+        offsets.get("b", 0),
+        offsets.get("matrix", 0),
+        offsets.get("m", 0),
+        offsets.get("clut", 0),
+        offsets.get("a", 0),
+    )
+    return head + b"".join(parts)
+
+
+def v4_lab(l, a, b):
+    """Lab → the v4 encoding, each 0–1."""
+    return [l / 100, (a + 128) / 255, (b + 128) / 255]
+
+
+def mab_a2b(precision, chroma):
+    """CMYK → Lab: the A2B1 tables' Lab, curved in every input and bent in
+    C·M so tetrahedral interpolation matters, on a 4⁴ grid. (moxcms, which
+    shows this profile's CMYK, refuses a four-input grid that differs per
+    input; the B2A tables and rgb_mab.icc have one.)"""
+
+    def fn(cmyk):
+        c, m, y, k = cmyk
+        return v4_lab(
+            100 - 18 * c - 14 * m - 6 * y - 54 * k + 6 * c * m,
+            chroma * (-32 * c + 62 * m - 6 * y),
+            chroma * (-42 * c - 6 * m + 72 * y),
+        )
+
+    return multi_tag(
+        True,
+        4,
+        3,
+        a=[
+            curv_tag([(i / 32) ** 1.15 for i in range(33)]),
+            para_tag(0, [0.9]),
+            para_tag(3, [2.4, 1 / 1.055, 0.055 / 1.055, 1 / 12.92, 0.04045]),
+            curv_tag([]),
+        ],
+        clut=([4, 4, 4, 4], precision, fn),
+        m=[para_tag(0, [1.1]), gamma_curv_tag(0.95), curv_tag([])],
+        matrix=(
+            [[0.95, 0.02, 0.01], [0.01, 0.97, 0.0], [0.0, 0.02, 0.96]],
+            [0.02, 0.005, 0.01],
+        ),
+        b=[curv_tag([0, 0.5, 1]), para_tag(0, [1.0]), curv_tag([])],
+    )
+
+
+def mab_b2a(limit, gamma, precision, with_m=True):
+    """Lab → CMYK on a 17×5×5 grid: equal ink easing into `limit` from L*,
+    the CMY shifted by a* and b* in proportion to the ink, so the grid is
+    not separable and trilinear and tetrahedral interpolation differ."""
+    softness = 0.03
+
+    def fn(lab):
+        l_star = lab[0] * 100
+        a_star = lab[1] * 255 - 128
+        b_star = lab[2] * 255 - 128
+        ink = max((100 - l_star) / 92, 0.0) ** gamma
+        ink = limit - softness * math.log1p(math.exp((limit - ink) / softness))
+        return [
+            ink - 0.003 * a_star * ink,
+            ink + 0.004 * a_star * ink - 0.002 * b_star * ink,
+            ink + 0.005 * b_star * ink,
+            ink,
+        ]
+
+    return multi_tag(
+        False,
+        3,
+        4,
+        b=[curv_tag([]), curv_tag([]), curv_tag([])],
+        m=[para_tag(0, [1.0]), curv_tag([0, 0.5, 1]), curv_tag([])] if with_m else None,
+        clut=([17, 5, 5], precision, fn),
+        a=[
+            curv_tag([(i / 32) ** 0.95 for i in range(33)]),
+            curv_tag([]),
+            para_tag(0, [1.05]),
+            curv_tag([]),
+        ],
+    )
+
+
+def mab_profile(description):
+    tags = [
+        (b"desc", desc_tag(description)),
+        (b"wtpt", xyz_tag(0.9642, 1.0, 0.8249)),
+        (b"A2B0", mab_a2b(2, 0.8)),
+        (b"A2B1", mab_a2b(2, 1.0)),
+        (b"A2B2", mab_a2b(1, 1.15)),
+        (b"B2A0", mab_b2a(0.8, 1.0, 2)),
+        (b"B2A1", mab_b2a(0.85, 0.85, 2)),
+        (b"B2A2", mab_b2a(0.9, 1.0, 1, with_m=False)),
+    ]
+    return assemble(tags, b"prtr", b"CMYK", b"Lab ", 0x04200000)
+
+
+def rgb_mab_profile(description):
+    def a2b(scale):
+        def fn(rgb):
+            r, g, b = rgb
+            return v4_lab(
+                100 * (0.25 * r + 0.62 * g + 0.13 * b) ** 0.6,
+                scale * 90 * (r * r - g) * (1 - 0.4 * b),
+                scale * (80 * (0.7 * r * g - b * b) + 10 * r),
+            )
+
+        return multi_tag(
+            True,
+            3,
+            3,
+            a=[para_tag(0, [2.2]), para_tag(0, [1.8]), curv_tag([(i / 32) ** 2 for i in range(33)])],
+            clut=([5, 6, 7], 2, fn),
+            b=[curv_tag([]), curv_tag([]), curv_tag([])],
+        )
+
+    tags = [
+        (b"desc", desc_tag(description)),
+        (b"wtpt", xyz_tag(0.9642, 1.0, 0.8249)),
+        (b"A2B0", a2b(0.85)),
+        (b"A2B1", a2b(1.0)),
+    ]
+    return assemble(tags, b"mntr", b"RGB ", b"Lab ", 0x04200000)
+
+
 # ------------------------------------------------------------------ lcms2
 
 # CMYK samples, 0–255: paper, primaries, secondaries, black ramps, rich and
@@ -683,6 +877,37 @@ def rust_round_trip(name, icc):
     )
 
 
+def rust_v4_legs(name, icc):
+    """The relative colorimetric legs of an ICC v4 profile, `B2A1` and
+    `A2B1`: lcms2 forces black-point compensation into a v4 profile under
+    perceptual, so its `B2A0` through a transform is not the table alone."""
+    lcms = Lcms(icc)
+    cmyks = lcms_chain(
+        [lcms.lab, lcms.profile],
+        [RELATIVE_COLORIMETRIC, RELATIVE_COLORIMETRIC],
+        TYPE_LAB_DBL,
+        TYPE_CMYK_DBL,
+        LAB_SAMPLES,
+        4,
+    )
+    ink = [v / 255 for v in (c for sample in SAMPLES for c in sample)]
+    labs = lcms.a2b1([ink[i : i + 4] for i in range(0, len(ink), 4)])
+    lcms.close()
+    lower = name.lower()
+    return "\n".join(
+        [
+            f"/// lcms2's `B2A1` of `{lower}.icc` at each of `LAB_SAMPLES`, ink 0–1.",
+            f"pub const {name}_B2A1: [[f64; 4]; {len(LAB_SAMPLES)}] = [",
+            *(f"    {f64_array([v / 100 for v in c])}," for c in cmyks),
+            "];",
+            f"/// lcms2's `A2B1` of `{lower}.icc` at each of `SAMPLES`, Lab.",
+            f"pub const {name}_A2B1: [[f64; 3]; {len(SAMPLES)}] = [",
+            *(f"    {f64_array(l)}," for l in labs),
+            "];",
+        ]
+    )
+
+
 # Proofing-chain stage 1: source → output-intent CMYK. `inklimit.icc` is the
 # output intent: its B2A0 differs from its B2A1 and it has no B2A2, so
 # saturation reads B2A0. `split.icc` has no A2B2, so saturation reads its
@@ -918,7 +1143,16 @@ def srgb_profile():
     buf = ctypes.create_string_buffer(size.value)
     assert LCMS.cmsSaveProfileToMem(handle, buf, ctypes.byref(size))
     LCMS.cmsCloseProfile(handle)
-    return buf.raw[: size.value]
+    icc = bytearray(buf.raw[: size.value])
+    # lcms2 stamps the time it saved the profile; pin it so the file
+    # regenerates byte for byte.
+    icc[24:36] = struct.pack(">6H", *SRGB_SAVED)
+    assert icc[84:100] == bytes(16), "a profile ID would cover the date"
+    return bytes(icc)
+
+
+# When `srgb.icc` was first generated, as its header records it.
+SRGB_SAVED = (2026, 10, 2, 3, 51, 56)
 
 
 # Stage 1 with and without black-point compensation, into output intents
@@ -936,6 +1170,13 @@ BPC_CHAINS = [
     ("SRGB", "SHADOW_V4", "RGB"),
     ("LAB", "SHADOW", "LAB"),
     ("LAB", "SHADOW_V4", "LAB"),
+    # ICC v4 `lutAToBType` / `lutBToAType` tables, as a source and as the
+    # output intent.
+    ("MAB", "SHADOW", "CMYK"),
+    ("SPLIT", "MAB", "CMYK"),
+    ("RGB_MAB", "SHADOW", "RGB"),
+    ("RGB_GAMMA", "MAB", "RGB"),
+    ("LAB", "MAB", "LAB"),
 ]
 
 
@@ -1110,6 +1351,8 @@ def main():
         ("RGB_LUT_V4", rgb_lut_profile("stet test: RGB A2B0-2, ICC v4, no matrix", v4=True)),
         ("SRGB", srgb_profile()),
         ("GRAY_NEAR_BLACK", gray_near_black_profile("stet test: Gray, black Y 0.0002")),
+        ("MAB", mab_profile("stet test: ICC v4 lutAToBType / lutBToAType")),
+        ("RGB_MAB", rgb_mab_profile("stet test: ICC v4 RGB lutAToBType")),
     ]
     for name, icc in profiles:
         (HERE / f"{name.lower()}.icc").write_bytes(icc)
@@ -1148,6 +1391,8 @@ def main():
             "RGB_LUT_V4",
             "SRGB",
             "GRAY_NEAR_BLACK",
+            "MAB",
+            "RGB_MAB",
         ):
             out += [rust_black_point(name, icc[name]), ""]
     for name in ["INKLIMIT", "INKLIMIT_LUT8"]:
@@ -1179,6 +1424,11 @@ def main():
     for source, oi, kind in BPC_CHAINS:
         out += [rust_bpc_chain(source, oi, kind, icc), ""]
     out += [rust_gray_chain("INKLIMIT", icc, source="GRAY_NEAR_BLACK"), ""]
+    out += [rust_black_point("MAB", icc["MAB"]), ""]
+    out += [rust_black_point("RGB_MAB", icc["RGB_MAB"]), ""]
+    out += [rust_destination("MAB", icc["MAB"]), ""]
+    out += [rust_v4_legs("MAB", icc["MAB"]), ""]
+    out += [rust_gray_chain("MAB", icc), ""]
     (HERE / "reference.rs").write_text("\n".join(out))
 
 

@@ -27,9 +27,12 @@
 //! [`moxcms::TransformExecutor`] for `u8` and `f64` so they slot directly
 //! into the `ChainedTransform` stage-1 slot.
 //!
-//! Profiles whose tables are `mAB`/`mBA` (v4 multi-process elements) fall
-//! back to moxcms; callers detect the `None` return and use the existing
-//! path. `lut8Type` (mft1) tables are read only by the evaluators that
+//! The evaluators that reproduce lcms2 exactly (`LcmsLut`) also read ICC v4
+//! `lutAToBType`/`lutBToAType` tables, taking their curves from the
+//! profile's own bytes: moxcms 0.8.1 misreads a curve set holding an empty
+//! `curv`. The display bake still leaves those tables to moxcms; callers
+//! detect the `None` return and use the existing path. `lut8Type` (mft1)
+//! tables are read only by the evaluators that
 //! reproduce lcms2 exactly (see [`OwnedLutSampler::lcms_exact`]): the
 //! black points lcms2 would detect, the CMYK and Gray chain stage 1, and an
 //! RGB source's table in the RGB chain stage 1. Widening the bake, or the
@@ -41,8 +44,9 @@
 //! garbage at 0.
 
 use moxcms::{
-    CmsError, ColorProfile, Cube, DataColorSpace, Hypercube, Lab, LutStore, LutType, LutWarehouse,
-    Matrix3d, RenderingIntent, ToneReprCurve, TransformExecutor, Xyz,
+    CmsError, ColorProfile, Cube, DataColorSpace, Hypercube, Lab, LutMultidimensionalType,
+    LutStore, LutType, LutWarehouse, Matrix3d, RenderingIntent, ToneReprCurve, TransformExecutor,
+    Xyz,
 };
 
 use super::Clut4;
@@ -149,14 +153,15 @@ pub(super) fn bake_clut4_hand_rolled(
 /// lcms2's black-point round trip for a CMYK output profile: Lab `start`
 /// through the perceptual `B2A0`, then back through the colorimetric
 /// `A2B1` (`A2B0` when there is none, as lcms2 reads it). Returns the ink
-/// it passed through and the Lab it landed on; `None` when the profile is
-/// not CMYK with a Lab PCS, or a table is one these evaluators cannot read
-/// (v4 `mAB`/`mBA`).
+/// it passed through and the Lab it landed on; `None` when the profile,
+/// whose raw bytes are `icc`, is not CMYK with a Lab PCS, or a table is one
+/// these evaluators cannot read.
 pub(super) fn perceptual_round_trip(
     profile: &ColorProfile,
+    icc: &[u8],
     start: [f64; 3],
 ) -> Option<([f64; 4], [f64; 3])> {
-    Some(RoundTrip::new(profile, RenderingIntent::Perceptual)?.run(start))
+    Some(RoundTrip::new(profile, icc, RenderingIntent::Perceptual)?.run(start))
 }
 
 /// lcms2's round trip through a CMYK output profile
@@ -164,37 +169,23 @@ pub(super) fn perceptual_round_trip(
 /// intent, then back through its colorimetric A2B table, each as lcms2
 /// reads it (see [`lcms_table`]).
 pub(super) struct RoundTrip {
-    b2a: OwnedLutSampler,
-    a2b: OwnedLutSampler,
+    b2a: LcmsLut,
+    a2b: LcmsLut,
 }
 
 impl RoundTrip {
-    /// `None` when the profile is not CMYK with a Lab PCS, lacks a table
-    /// the round trip needs, or carries one these evaluators cannot read
-    /// (v4 `mAB`/`mBA`).
-    pub(super) fn new(profile: &ColorProfile, intent: RenderingIntent) -> Option<Self> {
+    /// `None` when the profile, whose raw bytes are `icc`, is not CMYK
+    /// with a Lab PCS, lacks a table the round trip needs, or carries one
+    /// these evaluators cannot read.
+    pub(super) fn new(profile: &ColorProfile, icc: &[u8], intent: RenderingIntent) -> Option<Self> {
         if profile.color_space != DataColorSpace::Cmyk || profile.pcs != DataColorSpace::Lab {
             return None;
         }
-        let b2a = lcms_table(
-            [
-                profile.lut_b_to_a_perceptual.as_ref(),
-                profile.lut_b_to_a_colorimetric.as_ref(),
-                profile.lut_b_to_a_saturation.as_ref(),
-            ],
-            intent,
-        )?;
-        let a2b = lcms_table(
-            [
-                profile.lut_a_to_b_perceptual.as_ref(),
-                profile.lut_a_to_b_colorimetric.as_ref(),
-                profile.lut_a_to_b_saturation.as_ref(),
-            ],
-            RenderingIntent::RelativeColorimetric,
-        )?;
+        let b2a = b2a_table(profile, intent)?;
+        let a2b = a2b_table(profile, RenderingIntent::RelativeColorimetric)?;
         Some(Self {
-            b2a: OwnedLutSampler::lcms_exact(b2a, 3, 4)?,
-            a2b: OwnedLutSampler::lcms_exact(a2b, 4, 3)?,
+            b2a: LcmsLut::from_pcs(b2a, icc, 4)?,
+            a2b: LcmsLut::to_pcs(a2b, icc, 4)?,
         })
     }
 
@@ -248,6 +239,39 @@ enum LcmsCurve {
 }
 
 impl LcmsCurve {
+    /// The `curv` or `para` curve at the start of `bytes`, and its length;
+    /// `None` when it is neither or is cut short.
+    fn read(bytes: &[u8]) -> Option<(Self, usize)> {
+        let be16 = |at: usize| -> Option<u16> {
+            Some(u16::from_be_bytes(bytes.get(at..at + 2)?.try_into().ok()?))
+        };
+        match bytes.get(..4)? {
+            b"curv" => {
+                let n = u32::from_be_bytes(bytes.get(8..12)?.try_into().ok()?) as usize;
+                let len = n.checked_mul(2)?.checked_add(12)?;
+                let table: Vec<u16> = (0..n).map(|i| be16(12 + 2 * i)).collect::<Option<_>>()?;
+                let curve = match table.as_slice() {
+                    [] => LcmsCurve::Gamma(1.0),
+                    [gamma] => LcmsCurve::Gamma(f64::from(*gamma) / 256.0),
+                    _ => LcmsCurve::Table(table),
+                };
+                Some((curve, len))
+            }
+            b"para" => {
+                let function = be16(8)?;
+                let n = [1, 3, 4, 5, 7].get(usize::from(function)).copied()?;
+                let mut p = [0.0; 7];
+                for (i, v) in p.iter_mut().take(n).enumerate() {
+                    let raw =
+                        i32::from_be_bytes(bytes.get(12 + 4 * i..16 + 4 * i)?.try_into().ok()?);
+                    *v = f64::from(raw) / 65536.0;
+                }
+                Some((LcmsCurve::Parametric(function as u8 + 1, p), 12 + 4 * n))
+            }
+            _ => None,
+        }
+    }
+
     /// `None` for a parametric curve of an unknown type.
     fn new(curve: &ToneReprCurve) -> Option<Self> {
         Some(match curve {
@@ -335,9 +359,20 @@ impl LcmsCurve {
     }
 }
 
-/// Lab of 400% ink through a CMYK A2B `table`, as lcms2 evaluates it.
-pub(super) fn table_black(table: &LutWarehouse) -> Option<[f64; 3]> {
-    Some(OwnedLutSampler::lcms_exact(table, 4, 3)?.ink_to_lab([1.0; 4]))
+/// Lab of 400% ink through the CMYK profile's A2B table for `intent` —
+/// that intent's own, with no fallback — as lcms2 evaluates it; `icc` is
+/// the profile's raw bytes.
+pub(super) fn table_black(
+    profile: &ColorProfile,
+    icc: &[u8],
+    intent: RenderingIntent,
+) -> Option<[f64; 3]> {
+    let (table, sig) = match intent {
+        RenderingIntent::Perceptual => (profile.lut_a_to_b_perceptual.as_ref()?, b"A2B0"),
+        RenderingIntent::Saturation => (profile.lut_a_to_b_saturation.as_ref()?, b"A2B2"),
+        _ => (profile.lut_a_to_b_colorimetric.as_ref()?, b"A2B1"),
+    };
+    Some(LcmsLut::to_pcs((table, sig), icc, 4)?.ink_to_lab([1.0; 4]))
 }
 
 /// Whether [`bake_clut4_hand_rolled`] can read `table` of `profile`.
@@ -442,32 +477,24 @@ fn linear_to_srgb(v: f64) -> f64 {
 /// [`HandRolledChainStage1Rgb`] so the chain can outlive the source
 /// `ColorProfile` it was built from.
 enum SourceA2BSampler {
-    Lut(OwnedLutSampler),
+    Lut(LcmsLut),
     Shaper(ShaperMatrix),
 }
 
 impl SourceA2BSampler {
-    fn new(profile: &ColorProfile, intent: RenderingIntent) -> Option<Self> {
+    fn new(profile: &ColorProfile, icc: &[u8], intent: RenderingIntent) -> Option<Self> {
         if profile.color_space != DataColorSpace::Rgb {
             return None;
         }
         // lcms2 reads the intent's A2B table, else A2B0, and only when the
         // profile has neither its tone curves and colorant matrix, which
         // give the same XYZ under every intent. A table these evaluators
-        // cannot read — v4 `mAB`, an XYZ PCS, a non-identity matrix — has
-        // no hand-rolled stage: the caller falls back to moxcms rather than
-        // to a matrix lcms2 would not use.
-        let table = lcms_table(
-            [
-                profile.lut_a_to_b_perceptual.as_ref(),
-                profile.lut_a_to_b_colorimetric.as_ref(),
-                profile.lut_a_to_b_saturation.as_ref(),
-            ],
-            intent,
-        );
-        match table {
+        // cannot read — an XYZ PCS, a `lut16Type` with a non-identity
+        // matrix — has no hand-rolled stage: the caller falls back to moxcms
+        // rather than to a matrix lcms2 would not use.
+        match a2b_table(profile, intent) {
             Some(table) if profile.pcs == DataColorSpace::Lab => {
-                OwnedLutSampler::lcms_exact(table, 3, 3).map(SourceA2BSampler::Lut)
+                LcmsLut::to_pcs(table, icc, 3).map(SourceA2BSampler::Lut)
             }
             Some(_) => None,
             None => ShaperMatrix::new(profile).map(SourceA2BSampler::Shaper),
@@ -483,9 +510,7 @@ impl SourceA2BSampler {
     /// what black-point compensation works on.
     fn sample_xyz(&self, rgb: [f64; 3]) -> [f64; 3] {
         match self {
-            SourceA2BSampler::Lut(lut) => {
-                lab_to_xyz_d50(LabEncoding::V2.decode(lut.rgb_to_pcs_lab(rgb)))
-            }
+            SourceA2BSampler::Lut(lut) => lab_to_xyz_d50(lut.rgb_to_lab(rgb)),
             SourceA2BSampler::Shaper(sm) => sm.sample_xyz(rgb),
         }
     }
@@ -590,21 +615,23 @@ impl ShaperMatrix {
     }
 }
 
-/// Lab of `rgb` (each `[0, 1]`) through the RGB profile `profile` as the
-/// chain stage 1 reads it for `intent`; `None` when it cannot.
+/// Lab of `rgb` (each `[0, 1]`) through the RGB profile `profile`, whose
+/// raw bytes are `icc`, as the chain stage 1 reads it for `intent`; `None`
+/// when it cannot.
 pub(super) fn rgb_to_lab(
     profile: &ColorProfile,
+    icc: &[u8],
     intent: RenderingIntent,
     rgb: [f64; 3],
 ) -> Option<[f64; 3]> {
-    let source = SourceA2BSampler::new(profile, intent)?;
+    let source = SourceA2BSampler::new(profile, icc, intent)?;
     Some(xyz_d50_to_lab(source.sample_xyz(rgb)))
 }
 
 /// OutputIntent CMYK profile B2A sampler (Lab → CMYK), owned variant, with
 /// the black-point compensation lcms2 applies to a Lab source.
 pub struct LabToCmykSampler {
-    lut: OwnedLutSampler,
+    lut: LcmsLut,
     bpc: Option<BpcParams>,
 }
 
@@ -612,30 +639,34 @@ impl LabToCmykSampler {
     /// The output intent's B2A table for `intent` as lcms2 reads it (the
     /// intent's, else `B2A0`; absolute colorimetric reads `B2A1`), with
     /// `bpc` applied to the Lab that [`Self::sample_pdf_lab`] converts.
-    /// `None` when the profile is not CMYK with a Lab PCS, or the table is
-    /// missing or not a `lut16Type`.
+    /// `None` when the profile, whose raw bytes are `icc`, is not CMYK
+    /// with a Lab PCS, or the table is missing or one these evaluators
+    /// cannot read.
     pub(super) fn new(
         profile: &ColorProfile,
+        icc: &[u8],
         intent: RenderingIntent,
         bpc: Option<BpcParams>,
     ) -> Option<Self> {
         if profile.color_space != DataColorSpace::Cmyk || profile.pcs != DataColorSpace::Lab {
             return None;
         }
-        let warehouse = lcms_table(
-            [
-                profile.lut_b_to_a_perceptual.as_ref(),
-                profile.lut_b_to_a_colorimetric.as_ref(),
-                profile.lut_b_to_a_saturation.as_ref(),
-            ],
-            intent,
-        )?;
-        let lut = OwnedLutSampler::from_warehouse(warehouse, 3, 4)?;
+        let lut = LcmsLut::from_pcs(b2a_table(profile, intent)?, icc, 4)?;
         Some(LabToCmykSampler { lut, bpc })
     }
 
+    /// Legacy v2-encoded PCS Lab (each `[0, 1]`) → ink. A `lut16Type`
+    /// table takes it as it is; any other goes through Lab.
     fn sample_pcs_lab(&self, pcs_lab: [f32; 3]) -> [f32; 4] {
-        self.lut.sample_pcs_lab_to_cmyk(pcs_lab)
+        match &self.lut {
+            LcmsLut::Legacy(lut) if lut.encoding == LabEncoding::V2 => {
+                lut.sample_pcs_lab_to_cmyk(pcs_lab)
+            }
+            lut => {
+                let lab = LabEncoding::V2.decode(pcs_lab.map(f64::from));
+                lut.lab_to_ink(lab).map(|v| v as f32)
+            }
+        }
     }
 
     /// Convert a PDF Lab triplet (L\* ∈ [0, 100], a\*/b\* ∈ [-128, 127]) to
@@ -779,7 +810,7 @@ impl OwnedLutSampler {
     ) -> Option<Self> {
         let lut = match warehouse {
             LutWarehouse::Lut(l) => l,
-            // mAB/mBA (v4 multi-process elements) deferred.
+            // v4 tables are `MultiLut`'s.
             LutWarehouse::Multidimensional(_) => return None,
         };
         let encoding = match lut.lut_type {
@@ -936,6 +967,270 @@ impl OwnedLutSampler {
     }
 }
 
+/// A profile's A2B or B2A table as lcms2 evaluates it: a `lut8Type` or
+/// `lut16Type` one, or an ICC v4 `lutAToBType`/`lutBToAType` one. Lab on
+/// the PCS side is L\* 0–100, a\*/b\* −128–127.
+enum LcmsLut {
+    Legacy(OwnedLutSampler),
+    Multi(MultiLut),
+}
+
+impl LcmsLut {
+    /// A device-to-PCS (A2B) table of `n_in` inputs and three outputs, of
+    /// the profile whose raw bytes are `icc`.
+    fn to_pcs((table, sig): Table, icc: &[u8], n_in: usize) -> Option<Self> {
+        match table {
+            LutWarehouse::Lut(_) => OwnedLutSampler::lcms_exact(table, n_in, 3).map(Self::Legacy),
+            LutWarehouse::Multidimensional(t) => {
+                MultiLut::new(t, CurveSets::read(icc, sig)?, n_in, 3, true).map(Self::Multi)
+            }
+        }
+    }
+
+    /// A PCS-to-device (B2A) table of three inputs and `n_out` outputs, of
+    /// the profile whose raw bytes are `icc`.
+    fn from_pcs((table, sig): Table, icc: &[u8], n_out: usize) -> Option<Self> {
+        match table {
+            LutWarehouse::Lut(_) => OwnedLutSampler::lcms_exact(table, 3, n_out).map(Self::Legacy),
+            LutWarehouse::Multidimensional(t) => {
+                MultiLut::new(t, CurveSets::read(icc, sig)?, 3, n_out, false).map(Self::Multi)
+            }
+        }
+    }
+
+    /// CMYK ink (each `[0, 1]`) → Lab.
+    fn ink_to_lab(&self, ink: [f64; 4]) -> [f64; 3] {
+        match self {
+            LcmsLut::Legacy(l) => l.ink_to_lab(ink),
+            LcmsLut::Multi(m) => {
+                let mut out = [0.0; 4];
+                m.eval(&ink, &mut out);
+                LabEncoding::V4.decode([out[0], out[1], out[2]])
+            }
+        }
+    }
+
+    /// Lab → CMYK ink (each `[0, 1]`).
+    fn lab_to_ink(&self, lab: [f64; 3]) -> [f64; 4] {
+        match self {
+            LcmsLut::Legacy(l) => l.lab_to_ink(lab),
+            LcmsLut::Multi(m) => {
+                let mut out = [0.0; 4];
+                m.eval(&LabEncoding::V4.encode(lab), &mut out);
+                out.map(|v| v.clamp(0.0, 1.0))
+            }
+        }
+    }
+
+    /// RGB (each `[0, 1]`) → its PCS Lab in the legacy v2 `lut16Type`
+    /// encoding, each in `[0, 1]`: the form an output intent's `lut16Type`
+    /// B2A input curves take.
+    fn rgb_to_pcs_lab(&self, rgb: [f64; 3]) -> [f64; 3] {
+        match self {
+            LcmsLut::Legacy(l) => l.rgb_to_pcs_lab(rgb),
+            LcmsLut::Multi(_) => LabEncoding::V2
+                .encode(self.rgb_to_lab(rgb))
+                .map(|v| v.clamp(0.0, 1.0)),
+        }
+    }
+
+    /// RGB (each `[0, 1]`) → Lab.
+    fn rgb_to_lab(&self, rgb: [f64; 3]) -> [f64; 3] {
+        match self {
+            LcmsLut::Legacy(l) => LabEncoding::V2.decode(l.rgb_to_pcs_lab(rgb)),
+            LcmsLut::Multi(m) => {
+                let mut out = [0.0; 4];
+                m.eval(&rgb, &mut out);
+                LabEncoding::V4.decode([out[0], out[1], out[2]])
+            }
+        }
+    }
+}
+
+/// The A, M and B curve sets of a `lutAToBType` or `lutBToAType` tag, read
+/// from the profile's bytes as lcms2 reads them (`ReadSetOfCurves`). moxcms
+/// 0.8.1 does not advance past an empty `curv` — the usual identity — so
+/// every curve after one in the same set comes back as another identity.
+struct CurveSets {
+    a: Vec<LcmsCurve>,
+    m: Vec<LcmsCurve>,
+    b: Vec<LcmsCurve>,
+}
+
+impl CurveSets {
+    /// The sets of the tag `sig` in the profile whose raw bytes are `icc`;
+    /// `None` when the tag is not one of those types or does not parse.
+    fn read(icc: &[u8], sig: &[u8; 4]) -> Option<Self> {
+        let be32 = |at: usize| -> Option<usize> {
+            Some(u32::from_be_bytes(icc.get(at..at + 4)?.try_into().ok()?) as usize)
+        };
+        let count = be32(128)?;
+        let entry = (0..count.min(1024))
+            .map(|i| 132 + 12 * i)
+            .find(|&e| icc.get(e..e + 4) == Some(sig))?;
+        let start = be32(entry + 4)?;
+        let to_pcs = match icc.get(start..start + 4)? {
+            b"mAB " => true,
+            b"mBA " => false,
+            _ => return None,
+        };
+        let (n_in, n_out) = (
+            usize::from(*icc.get(start + 8)?),
+            usize::from(*icc.get(start + 9)?),
+        );
+        let (device, pcs) = if to_pcs { (n_in, n_out) } else { (n_out, n_in) };
+        let set = |field: usize, n: usize| -> Option<Vec<LcmsCurve>> {
+            let offset = be32(start + field)?;
+            if offset == 0 {
+                return Some(Vec::new());
+            }
+            let mut at = start + offset;
+            let mut curves = Vec::with_capacity(n);
+            for _ in 0..n {
+                let (curve, len) = LcmsCurve::read(icc.get(at..)?)?;
+                curves.push(curve);
+                // lcms2 aligns to four bytes of the profile between curves.
+                at = (at + len).next_multiple_of(4);
+            }
+            Some(curves)
+        };
+        // The header's offsets: B at 12, matrix 16, M 20, CLUT 24, A 28.
+        Some(Self {
+            a: set(28, device)?,
+            m: set(20, pcs)?,
+            b: set(12, pcs)?,
+        })
+    }
+}
+
+/// An ICC v4 `lutAToBType` (`to_pcs`) or `lutBToAType` table, in lcms2's
+/// order: device curves (A), CLUT, M curves, matrix with offset, PCS curves
+/// (B) toward the PCS, and the reverse from it. Any element may be absent.
+/// The CLUT has its own number of grid points per input and interpolates
+/// as lcms2's does: tetrahedral, except trilinear for a Lab-indexed output
+/// table (`ChangeInterpolationToTrilinear`). Lab is v4-encoded.
+struct MultiLut {
+    to_pcs: bool,
+    n_in: usize,
+    n_out: usize,
+    a: Vec<LcmsCurve>,
+    clut: Option<(Vec<f32>, Vec<usize>)>,
+    m: Vec<LcmsCurve>,
+    matrix: [[f64; 3]; 3],
+    offset: [f64; 3],
+    b: Vec<LcmsCurve>,
+}
+
+impl MultiLut {
+    /// moxcms's parse of the table `t`, with its curves from `sets`. `None`
+    /// unless the table has `n_in` inputs and `n_out` outputs, one side
+    /// three (the PCS) and the other three or four, a CLUT whenever they
+    /// differ, and a curve per channel in each set it carries.
+    fn new(
+        t: &LutMultidimensionalType,
+        sets: CurveSets,
+        n_in: usize,
+        n_out: usize,
+        to_pcs: bool,
+    ) -> Option<Self> {
+        let (device, pcs) = if to_pcs { (n_in, n_out) } else { (n_out, n_in) };
+        if usize::from(t.num_input_channels) != n_in
+            || usize::from(t.num_output_channels) != n_out
+            || pcs != 3
+            || !(3..=4).contains(&device)
+        {
+            return None;
+        }
+        let curves = |set: Vec<LcmsCurve>, n: usize| -> Option<Vec<LcmsCurve>> {
+            (set.is_empty() || set.len() == n).then_some(set)
+        };
+        let clut = match &t.clut {
+            Some(store) => {
+                let grids: Vec<usize> = t.grid_points[..n_in]
+                    .iter()
+                    .map(|&g| usize::from(g))
+                    .collect();
+                if grids.iter().any(|&g| g < 2) {
+                    return None;
+                }
+                let len = grids.iter().try_fold(n_out, |acc, &g| acc.checked_mul(g))?;
+                Some((normalised(store, len)?, grids))
+            }
+            None if n_in == n_out => None,
+            None => return None,
+        };
+        Some(Self {
+            to_pcs,
+            n_in,
+            n_out,
+            a: curves(sets.a, device)?,
+            clut,
+            m: curves(sets.m, 3)?,
+            matrix: t.matrix.v,
+            offset: t.bias.v,
+            b: curves(sets.b, 3)?,
+        })
+    }
+
+    /// `input` (`n_in` values, `[0, 1]` encoded) → `out` (`n_out`).
+    fn eval(&self, input: &[f64], out: &mut [f64; 4]) {
+        let mut v = [0.0; 4];
+        v[..self.n_in].copy_from_slice(&input[..self.n_in]);
+        if self.to_pcs {
+            Self::curves(&self.a, &mut v);
+            self.clut(&mut v);
+            Self::curves(&self.m, &mut v);
+            self.matrix(&mut v);
+            Self::curves(&self.b, &mut v);
+        } else {
+            Self::curves(&self.b, &mut v);
+            self.matrix(&mut v);
+            Self::curves(&self.m, &mut v);
+            self.clut(&mut v);
+            Self::curves(&self.a, &mut v);
+        }
+        out[..self.n_out].copy_from_slice(&v[..self.n_out]);
+    }
+
+    fn curves(set: &[LcmsCurve], v: &mut [f64; 4]) {
+        for (curve, x) in set.iter().zip(v.iter_mut()) {
+            *x = curve.eval(*x);
+        }
+    }
+
+    fn matrix(&self, v: &mut [f64; 4]) {
+        let m = &self.matrix;
+        let x = [v[0], v[1], v[2]];
+        for i in 0..3 {
+            v[i] = m[i][0] * x[0] + m[i][1] * x[1] + m[i][2] * x[2] + self.offset[i];
+        }
+    }
+
+    fn clut(&self, v: &mut [f64; 4]) {
+        let Some((data, grids)) = &self.clut else {
+            return;
+        };
+        let mut out = [0.0; 4];
+        match *grids.as_slice() {
+            [g0, g1, g2, g3] => {
+                eval4_grids(data, [g0, g1, g2, g3], *v, &mut out[..self.n_out]);
+            }
+            [g0, g1, g2] => {
+                let trilinear = !self.to_pcs;
+                eval3_grids(
+                    data,
+                    [g0, g1, g2],
+                    [v[0], v[1], v[2]],
+                    trilinear,
+                    &mut out[..self.n_out],
+                );
+            }
+            _ => unreachable!("MultiLut::new admits three or four inputs"),
+        }
+        *v = out;
+    }
+}
+
 /// A table's first `len` entries, normalised to `[0, 1]`; `None` when it
 /// holds fewer.
 fn normalised(store: &LutStore, len: usize) -> Option<Vec<f32>> {
@@ -950,16 +1245,22 @@ fn normalised(store: &LutStore, len: usize) -> Option<Vec<f32>> {
 /// three in the two grid planes either side of it. `cube` holds the grid
 /// with the last input varying fastest and three outputs per point.
 fn eval4_lcms(cube: &[f32], grid: usize, input: [f64; 4], out: &mut [f64; 3]) {
-    let axis = |v, stride| grid_axis(v, grid, stride);
-    let n_out = 3;
-    let (k0, rk, k_step) = axis(input[0], n_out * grid * grid * grid);
-    let x = axis(input[1], n_out * grid * grid);
-    let y = axis(input[2], n_out * grid);
-    let z = axis(input[3], n_out);
-    let mut lo = [0.0; 3];
-    let mut hi = [0.0; 3];
-    tetrahedral3(cube, k0, x, y, z, &mut lo);
-    tetrahedral3(cube, k0 + k_step, x, y, z, &mut hi);
+    eval4_grids(cube, [grid; 4], input, out);
+}
+
+/// [`eval4_lcms`] on a grid with its own number of points per input, as a
+/// v4 table's may be; `out.len()` outputs per point.
+fn eval4_grids(cube: &[f32], grids: [usize; 4], input: [f64; 4], out: &mut [f64]) {
+    let [s0, s1, s2, s3] = strides(grids, out.len());
+    let (k0, rk, k_step) = grid_axis(input[0], grids[0], s0);
+    let x = grid_axis(input[1], grids[1], s1);
+    let y = grid_axis(input[2], grids[2], s2);
+    let z = grid_axis(input[3], grids[3], s3);
+    let mut lo = [0.0; 4];
+    let mut hi = [0.0; 4];
+    let n_out = out.len();
+    tetrahedral3(cube, k0, x, y, z, &mut lo[..n_out]);
+    tetrahedral3(cube, k0 + k_step, x, y, z, &mut hi[..n_out]);
     for ch in 0..n_out {
         out[ch] = lo[ch] + (hi[ch] - lo[ch]) * rk;
     }
@@ -969,11 +1270,62 @@ fn eval4_lcms(cube: &[f32], grid: usize, input: [f64; 4], out: &mut [f64; 3]) {
 /// tetrahedral. `cube` holds the grid with the last input varying fastest
 /// and three outputs per point.
 fn eval3_lcms(cube: &[f32], grid: usize, input: [f64; 3], out: &mut [f64; 3]) {
-    let n_out = 3;
-    let x = grid_axis(input[0], grid, n_out * grid * grid);
-    let y = grid_axis(input[1], grid, n_out * grid);
-    let z = grid_axis(input[2], grid, n_out);
-    tetrahedral3(cube, 0, x, y, z, out);
+    eval3_grids(cube, [grid; 3], input, false, out);
+}
+
+/// [`eval3_lcms`] on a grid with its own number of points per input, and
+/// `out.len()` outputs per point; `trilinear` as lcms2 reads a Lab-indexed
+/// output table.
+fn eval3_grids(cube: &[f32], grids: [usize; 3], input: [f64; 3], trilinear: bool, out: &mut [f64]) {
+    let [s0, s1, s2] = strides(grids, out.len());
+    let x = grid_axis(input[0], grids[0], s0);
+    let y = grid_axis(input[1], grids[1], s1);
+    let z = grid_axis(input[2], grids[2], s2);
+    if trilinear {
+        trilinear3(cube, x, y, z, out);
+    } else {
+        tetrahedral3(cube, 0, x, y, z, out);
+    }
+}
+
+/// The distance between neighbouring points along each input of a grid
+/// with `grids` points per input, the last varying fastest, and `n_out`
+/// outputs per point.
+fn strides<const N: usize>(grids: [usize; N], n_out: usize) -> [usize; N] {
+    let mut s = [0; N];
+    let mut stride = n_out;
+    for i in (0..N).rev() {
+        s[i] = stride;
+        stride *= grids[i];
+    }
+    s
+}
+
+/// lcms2's `TrilinearInterpFloat` over a three-input grid; each axis is
+/// `(offset, fraction, step)`.
+fn trilinear3(
+    cube: &[f32],
+    (x0, rx, sx): (usize, f64, usize),
+    (y0, ry, sy): (usize, f64, usize),
+    (z0, rz, sz): (usize, f64, usize),
+    out: &mut [f64],
+) {
+    let lerp = |a: f64, b: f64, t: f64| a + (b - a) * t;
+    for (ch, o) in out.iter_mut().enumerate() {
+        let d = |x: usize, y: usize, z: usize| f64::from(cube[x + y + z + ch]);
+        let (x1, y1, z1) = (x0 + sx, y0 + sy, z0 + sz);
+        let near = lerp(
+            lerp(d(x0, y0, z0), d(x0, y0, z1), rz),
+            lerp(d(x0, y1, z0), d(x0, y1, z1), rz),
+            ry,
+        );
+        let far = lerp(
+            lerp(d(x1, y0, z0), d(x1, y0, z1), rz),
+            lerp(d(x1, y1, z0), d(x1, y1, z1), rz),
+            ry,
+        );
+        *o = lerp(near, far, rx);
+    }
 }
 
 /// One input's grid offset, fraction and the offset to the next grid
@@ -995,7 +1347,7 @@ fn tetrahedral3(
     (x0, rx, sx): (usize, f64, usize),
     (y0, ry, sy): (usize, f64, usize),
     (z0, rz, sz): (usize, f64, usize),
-    out: &mut [f64; 3],
+    out: &mut [f64],
 ) {
     let (x1, y1, z1) = (x0 + sx, y0 + sy, z0 + sz);
     for (ch, o) in out.iter_mut().enumerate() {
@@ -1075,21 +1427,23 @@ impl HandRolledChainStage1Rgb {
     /// the OutputIntent CMYK profile, picking the source's A2B table
     /// and the OI's B2A table for the given rendering intent, with
     /// black-point compensation `bpc` in XYZ between them. Returns
-    /// `None` when either side has a table these evaluators cannot read
-    /// (v4 `mAB`/`mBA`, an XYZ PCS, a `lut8Type` B2A) or the source has
-    /// neither table nor matrix — the caller falls back to the
-    /// moxcms-driven chain in that case.
+    /// `source_icc` and `oi_icc` are the profiles' raw bytes. `None` when
+    /// either side has a table these evaluators cannot read (an XYZ PCS)
+    /// or the source has neither table nor matrix — the caller falls back
+    /// to the moxcms-driven chain in that case.
     pub(super) fn new(
         source: &ColorProfile,
+        source_icc: &[u8],
         output_intent: &ColorProfile,
+        oi_icc: &[u8],
         intent: RenderingIntent,
         bpc: Option<BpcParams>,
     ) -> Option<Self> {
         if source.color_space != DataColorSpace::Rgb {
             return None;
         }
-        let src = SourceA2BSampler::new(source, intent)?;
-        let oi = LabToCmykSampler::new(output_intent, intent, None)?;
+        let src = SourceA2BSampler::new(source, source_icc, intent)?;
+        let oi = LabToCmykSampler::new(output_intent, oi_icc, intent, None)?;
         Some(Self { src, oi, bpc })
     }
 
@@ -1163,16 +1517,43 @@ impl TransformExecutor<f64> for HandRolledChainStage1Rgb {
 /// none, each profile on its own. Absolute colorimetric reads the
 /// colorimetric table; its white-point adaptation is not applied, as on
 /// every other CMYK path.
-fn lcms_table(
-    tables: [Option<&LutWarehouse>; 3],
-    intent: RenderingIntent,
-) -> Option<&LutWarehouse> {
+fn lcms_table(tables: [Option<&LutWarehouse>; 3], intent: RenderingIntent) -> Option<usize> {
     let i = match intent {
         RenderingIntent::Perceptual => 0,
         RenderingIntent::RelativeColorimetric | RenderingIntent::AbsoluteColorimetric => 1,
         RenderingIntent::Saturation => 2,
     };
-    tables[i].or(tables[0])
+    if tables[i].is_some() {
+        Some(i)
+    } else {
+        tables[0].map(|_| 0)
+    }
+}
+
+/// A table of a profile chosen as [`lcms_table`] chooses it, with its tag
+/// signature.
+type Table<'a> = (&'a LutWarehouse, &'static [u8; 4]);
+
+/// The profile's A2B table for `intent` as lcms2 reads it.
+fn a2b_table(profile: &ColorProfile, intent: RenderingIntent) -> Option<Table<'_>> {
+    let tables = [
+        profile.lut_a_to_b_perceptual.as_ref(),
+        profile.lut_a_to_b_colorimetric.as_ref(),
+        profile.lut_a_to_b_saturation.as_ref(),
+    ];
+    let i = lcms_table(tables, intent)?;
+    Some((tables[i]?, [b"A2B0", b"A2B1", b"A2B2"][i]))
+}
+
+/// The profile's B2A table for `intent` as lcms2 reads it.
+fn b2a_table(profile: &ColorProfile, intent: RenderingIntent) -> Option<Table<'_>> {
+    let tables = [
+        profile.lut_b_to_a_perceptual.as_ref(),
+        profile.lut_b_to_a_colorimetric.as_ref(),
+        profile.lut_b_to_a_saturation.as_ref(),
+    ];
+    let i = lcms_table(tables, intent)?;
+    Some((tables[i]?, [b"B2A0", b"B2A1", b"B2A2"][i]))
 }
 
 /// A copy of `profile` whose missing colorimetric and saturation LUT tags
@@ -1201,18 +1582,21 @@ pub(super) fn with_lcms_tables(profile: &ColorProfile) -> ColorProfile {
 /// B2A table for the intent, composed per pixel so no intermediate table
 /// quantises it.
 pub(super) struct HandRolledChainStage1Cmyk {
-    a2b: OwnedLutSampler,
-    b2a: OwnedLutSampler,
+    a2b: LcmsLut,
+    b2a: LcmsLut,
     bpc: Option<BpcParams>,
 }
 
 impl HandRolledChainStage1Cmyk {
-    /// `None` when either profile is not CMYK with a Lab PCS, or carries
-    /// tables these evaluators cannot read (v4 `mAB`/`mBA`); the caller
-    /// then builds moxcms's transform for the same intent.
+    /// `source_icc` and `oi_icc` are the profiles' raw bytes. `None` when
+    /// either profile is not CMYK with a Lab PCS, or carries tables these
+    /// evaluators cannot read; the caller then builds moxcms's transform
+    /// for the same intent.
     pub(super) fn new(
         source: &ColorProfile,
+        source_icc: &[u8],
         output_intent: &ColorProfile,
+        oi_icc: &[u8],
         intent: RenderingIntent,
         bpc: Option<BpcParams>,
     ) -> Option<Self> {
@@ -1222,25 +1606,9 @@ impl HandRolledChainStage1Cmyk {
         if !cmyk_lab(source) || !cmyk_lab(output_intent) {
             return None;
         }
-        let a2b = lcms_table(
-            [
-                source.lut_a_to_b_perceptual.as_ref(),
-                source.lut_a_to_b_colorimetric.as_ref(),
-                source.lut_a_to_b_saturation.as_ref(),
-            ],
-            intent,
-        )?;
-        let b2a = lcms_table(
-            [
-                output_intent.lut_b_to_a_perceptual.as_ref(),
-                output_intent.lut_b_to_a_colorimetric.as_ref(),
-                output_intent.lut_b_to_a_saturation.as_ref(),
-            ],
-            intent,
-        )?;
         Some(Self {
-            a2b: OwnedLutSampler::lcms_exact(a2b, 4, 3)?,
-            b2a: OwnedLutSampler::lcms_exact(b2a, 3, 4)?,
+            a2b: LcmsLut::to_pcs(a2b_table(source, intent)?, source_icc, 4)?,
+            b2a: LcmsLut::from_pcs(b2a_table(output_intent, intent)?, oi_icc, 4)?,
             bpc,
         })
     }
@@ -1292,16 +1660,17 @@ impl TransformExecutor<f64> for HandRolledChainStage1Cmyk {
 pub(super) struct HandRolledChainStage1Gray {
     trc: GrayTrc,
     bpc: Option<BpcParams>,
-    b2a: OwnedLutSampler,
+    b2a: LcmsLut,
 }
 
 impl HandRolledChainStage1Gray {
     /// `None` when the source is not a TRC-only Gray ([`GrayTrc`]), or the
-    /// output intent not CMYK with a Lab PCS and a B2A table these
-    /// evaluators read.
+    /// output intent, whose raw bytes are `oi_icc`, not CMYK with a Lab PCS
+    /// and a B2A table these evaluators read.
     pub(super) fn new(
         source: &ColorProfile,
         output_intent: &ColorProfile,
+        oi_icc: &[u8],
         intent: RenderingIntent,
         bpc: Option<BpcParams>,
     ) -> Option<Self> {
@@ -1310,18 +1679,10 @@ impl HandRolledChainStage1Gray {
         {
             return None;
         }
-        let b2a = lcms_table(
-            [
-                output_intent.lut_b_to_a_perceptual.as_ref(),
-                output_intent.lut_b_to_a_colorimetric.as_ref(),
-                output_intent.lut_b_to_a_saturation.as_ref(),
-            ],
-            intent,
-        )?;
         Some(Self {
             trc: GrayTrc::new(source)?,
             bpc,
-            b2a: OwnedLutSampler::lcms_exact(b2a, 3, 4)?,
+            b2a: LcmsLut::from_pcs(b2a_table(output_intent, intent)?, oi_icc, 4)?,
         })
     }
 
@@ -1378,15 +1739,17 @@ mod tests {
     const SRGB: &[u8] = include_bytes!("../../tests/data/cmyk_intent/srgb.icc");
     const SHADOW: &[u8] = include_bytes!("../../tests/data/cmyk_intent/shadow.icc");
     const SHADOW_V4: &[u8] = include_bytes!("../../tests/data/cmyk_intent/shadow_v4.icc");
+    const MAB: &[u8] = include_bytes!("../../tests/data/cmyk_intent/mab.icc");
+    const RGB_MAB: &[u8] = include_bytes!("../../tests/data/cmyk_intent/rgb_mab.icc");
 
     /// The two legs of lcms2's black-point round trip: `B2A0` and `A2B1`.
-    fn legs(icc: &[u8]) -> (OwnedLutSampler, OwnedLutSampler) {
+    fn legs(icc: &[u8]) -> (LcmsLut, LcmsLut) {
         let profile = ColorProfile::new_from_slice(icc).unwrap();
         let b2a0 = profile.lut_b_to_a_perceptual.as_ref().unwrap();
         let a2b1 = profile.lut_a_to_b_colorimetric.as_ref().unwrap();
         (
-            OwnedLutSampler::lcms_exact(b2a0, 3, 4).unwrap(),
-            OwnedLutSampler::lcms_exact(a2b1, 4, 3).unwrap(),
+            LcmsLut::from_pcs((b2a0, b"B2A0"), icc, 4).unwrap(),
+            LcmsLut::to_pcs((a2b1, b"A2B1"), icc, 4).unwrap(),
         )
     }
 
@@ -1450,6 +1813,74 @@ mod tests {
         }
     }
 
+    /// An ICC v4 profile's `lutBToAType` and `lutAToBType` tables evaluate
+    /// as lcms2's do: their curves, matrix and offset, CLUTs with a grid
+    /// per input, 16-bit and 8-bit, trilinear from Lab and tetrahedral to
+    /// it. (Relative colorimetric, where lcms2 does not force black-point
+    /// compensation into the profile.)
+    #[test]
+    fn v4_tables_match_lcms() {
+        let profile = ColorProfile::new_from_slice(MAB).unwrap();
+        let relcol = RenderingIntent::RelativeColorimetric;
+        let b2a1 = LcmsLut::from_pcs(b2a_table(&profile, relcol).unwrap(), MAB, 4).unwrap();
+        let a2b1 = LcmsLut::to_pcs(a2b_table(&profile, relcol).unwrap(), MAB, 4).unwrap();
+        assert!(matches!(b2a1, LcmsLut::Multi(_)) && matches!(a2b1, LcmsLut::Multi(_)));
+        for (lab, want) in reference::LAB_SAMPLES.iter().zip(&reference::MAB_B2A1) {
+            assert_near(
+                &format!("mab B2A1 at {lab:?}"),
+                b2a1.lab_to_ink(*lab),
+                *want,
+                INK_TOLERANCE,
+            );
+        }
+        for (cmyk, want) in reference::SAMPLES.iter().zip(&reference::MAB_A2B1) {
+            let got = a2b1.ink_to_lab(cmyk.map(|v| f64::from(v) / 255.0));
+            assert_near(&format!("mab A2B1 at {cmyk:?}"), got, *want, LAB_TOLERANCE);
+        }
+    }
+
+    /// A four-input grid with its own number of points per input is
+    /// indexed by each input's own size: an affine table, which any
+    /// interpolation reproduces, comes back exactly only if the strides
+    /// and fractions are right.
+    #[test]
+    fn four_input_grids_may_differ_per_input() {
+        let grids = [3, 4, 5, 2];
+        let f = |x: [f64; 4]| {
+            [
+                0.1 + 0.2 * x[0] + 0.3 * x[1],
+                0.4 * x[2] + 0.5 * x[3],
+                0.25 + 0.15 * x[0] + 0.2 * x[3],
+            ]
+        };
+        let mut cube = Vec::new();
+        for i in 0..grids[0] {
+            for j in 0..grids[1] {
+                for k in 0..grids[2] {
+                    for l in 0..grids[3] {
+                        let at = |n: usize, g: usize| n as f64 / (g - 1) as f64;
+                        let x = [
+                            at(i, grids[0]),
+                            at(j, grids[1]),
+                            at(k, grids[2]),
+                            at(l, grids[3]),
+                        ];
+                        cube.extend(f(x).map(|v| v as f32));
+                    }
+                }
+            }
+        }
+        for x in [
+            [0.3, 0.7, 0.45, 0.9],
+            [1.0, 0.0, 0.62, 0.5],
+            [0.05, 0.99, 1.0, 0.0],
+        ] {
+            let mut out = [0.0; 3];
+            eval4_grids(&cube, grids, x, &mut out);
+            assert_near(&format!("{x:?}"), out, f(x), 1e-6);
+        }
+    }
+
     /// Lab 0/0/0 through `B2A0` then `A2B1` lands where lcms2's does —
     /// about 310% ink, L* 19, not 400% ink's L* 8. That needs trilinear
     /// interpolation of `B2A0`: tetrahedral would give 250% ink.
@@ -1495,8 +1926,8 @@ mod tests {
     }
 
     /// `lut8Type` tables are read only by the lcms2-exact evaluators (the
-    /// black point and the chain stage 1's source side): the bake and the
-    /// RGB chain's output-intent side still pass them to moxcms.
+    /// black point and the chain stage 1, including the output-intent side
+    /// of RGB and Lab): the bake still passes them to moxcms.
     #[test]
     fn lut8_tables_are_for_the_lcms_exact_evaluators_only() {
         let profile = ColorProfile::new_from_slice(INKLIMIT_LUT8).unwrap();
@@ -1505,7 +1936,8 @@ mod tests {
         assert!(OwnedLutSampler::from_warehouse(a2b1, 4, 3).is_none());
         assert!(OwnedLutSampler::from_warehouse(b2a0, 3, 4).is_none());
         assert!(!can_sample(&profile, a2b1));
-        assert!(LabToCmykSampler::new(&profile, RenderingIntent::Perceptual, None).is_none());
+        let perceptual = RenderingIntent::Perceptual;
+        assert!(LabToCmykSampler::new(&profile, INKLIMIT_LUT8, perceptual, None).is_some());
         assert!(OwnedLutSampler::lcms_exact(a2b1, 4, 3).is_some());
         assert!(OwnedLutSampler::lcms_exact(b2a0, 3, 4).is_some());
     }
@@ -1537,10 +1969,13 @@ mod tests {
                 &reference::CHAIN_SPLIT_LUT8_INKLIMIT_LUT8,
             ),
         ] {
-            let source = ColorProfile::new_from_slice(source).unwrap();
-            let oi = ColorProfile::new_from_slice(oi).unwrap();
+            let (source_icc, oi_icc) = (source, oi);
+            let source = ColorProfile::new_from_slice(source_icc).unwrap();
+            let oi = ColorProfile::new_from_slice(oi_icc).unwrap();
             for (intent, want) in INTENTS.into_iter().zip(want) {
-                let stage1 = HandRolledChainStage1Cmyk::new(&source, &oi, intent, None).unwrap();
+                let stage1 =
+                    HandRolledChainStage1Cmyk::new(&source, source_icc, &oi, oi_icc, intent, None)
+                        .unwrap();
                 for (cmyk, want) in reference::SAMPLES.iter().zip(want) {
                     let got = stage1.sample(cmyk.map(|v| f64::from(v) / 255.0));
                     assert_near(
@@ -1605,9 +2040,12 @@ mod tests {
             ("rgb_gamma", RGB_GAMMA, &reference::CHAIN_RGB_GAMMA_INKLIMIT),
             ("rgb_lut", RGB_LUT, &reference::CHAIN_RGB_LUT_INKLIMIT),
         ] {
-            let source = ColorProfile::new_from_slice(source).unwrap();
+            let source_icc = source;
+            let source = ColorProfile::new_from_slice(source_icc).unwrap();
             for (intent, want) in INTENTS.into_iter().zip(want) {
-                let stage1 = HandRolledChainStage1Rgb::new(&source, &oi, intent, None).unwrap();
+                let stage1 =
+                    HandRolledChainStage1Rgb::new(&source, source_icc, &oi, INKLIMIT, intent, None)
+                        .unwrap();
                 for (rgb, want) in reference::RGB_SAMPLES.iter().zip(want) {
                     let [r, g, b] = rgb.map(|v| f64::from(v) / 255.0);
                     assert_near(
@@ -1633,7 +2071,7 @@ mod tests {
             let profile = ColorProfile::new_from_slice(oi).unwrap();
             chain_compensation(source_black, &profile, oi, intent, bpc == 1)
         };
-        let cmyk: [(&str, &[u8], &[u8], &Chain<16>); 3] = [
+        let cmyk: [(&str, &[u8], &[u8], &Chain<16>); 5] = [
             ("split", SPLIT, SHADOW, &reference::CHAIN_BPC_SPLIT_SHADOW),
             (
                 "split_sat v4",
@@ -1647,6 +2085,8 @@ mod tests {
                 SHADOW,
                 &reference::CHAIN_BPC_INKLIMIT_SHADOW,
             ),
+            ("mab", MAB, SHADOW, &reference::CHAIN_BPC_MAB_SHADOW),
+            ("into mab", SPLIT, MAB, &reference::CHAIN_BPC_SPLIT_MAB),
         ];
         for (name, source_icc, oi_icc, want) in cmyk {
             let source = ColorProfile::new_from_slice(source_icc).unwrap();
@@ -1655,7 +2095,9 @@ mod tests {
                 for (bpc, want) in want[i].iter().enumerate() {
                     let black = detect_xyz(&source, source_icc, intent);
                     let p = compensation(black, oi_icc, intent, bpc);
-                    let stage1 = HandRolledChainStage1Cmyk::new(&source, &oi, intent, p).unwrap();
+                    let stage1 =
+                        HandRolledChainStage1Cmyk::new(&source, source_icc, &oi, oi_icc, intent, p)
+                            .unwrap();
                     for (cmyk, want) in reference::SAMPLES.iter().zip(want) {
                         assert_near(
                             &format!("{name} {intent:?} bpc {bpc} at {cmyk:?}"),
@@ -1667,7 +2109,7 @@ mod tests {
                 }
             }
         }
-        let rgb: [(&str, &[u8], &[u8], &Chain<15>); 5] = [
+        let rgb: [(&str, &[u8], &[u8], &Chain<15>); 7] = [
             (
                 "rgb_gamma",
                 RGB_GAMMA,
@@ -1693,6 +2135,18 @@ mod tests {
                 SHADOW_V4,
                 &reference::CHAIN_BPC_SRGB_SHADOW_V4,
             ),
+            (
+                "rgb_mab",
+                RGB_MAB,
+                SHADOW,
+                &reference::CHAIN_BPC_RGB_MAB_SHADOW,
+            ),
+            (
+                "rgb into mab",
+                RGB_GAMMA,
+                MAB,
+                &reference::CHAIN_BPC_RGB_GAMMA_MAB,
+            ),
         ];
         for (name, source_icc, oi_icc, want) in rgb {
             let source = ColorProfile::new_from_slice(source_icc).unwrap();
@@ -1701,7 +2155,9 @@ mod tests {
                 for (bpc, want) in want[i].iter().enumerate() {
                     let black = detect_rgb(&source, source_icc, intent);
                     let p = compensation(black, oi_icc, intent, bpc);
-                    let stage1 = HandRolledChainStage1Rgb::new(&source, &oi, intent, p).unwrap();
+                    let stage1 =
+                        HandRolledChainStage1Rgb::new(&source, source_icc, &oi, oi_icc, intent, p)
+                            .unwrap();
                     for (rgb, want) in reference::RGB_SAMPLES.iter().zip(want) {
                         let [r, g, b] = rgb.map(|v| f64::from(v) / 255.0);
                         assert_near(
@@ -1714,16 +2170,17 @@ mod tests {
                 }
             }
         }
-        let lab: [(&str, &[u8], &Chain<6>); 2] = [
+        let lab: [(&str, &[u8], &Chain<6>); 3] = [
             ("lab", SHADOW, &reference::CHAIN_BPC_LAB_SHADOW),
             ("lab v4", SHADOW_V4, &reference::CHAIN_BPC_LAB_SHADOW_V4),
+            ("lab into mab", MAB, &reference::CHAIN_BPC_LAB_MAB),
         ];
         for (name, oi_icc, want) in lab {
             let oi = ColorProfile::new_from_slice(oi_icc).unwrap();
             for (i, intent) in INTENTS.into_iter().enumerate() {
                 for (bpc, want) in want[i].iter().enumerate() {
                     let p = compensation(None, oi_icc, intent, bpc);
-                    let sampler = LabToCmykSampler::new(&oi, intent, p).unwrap();
+                    let sampler = LabToCmykSampler::new(&oi, oi_icc, intent, p).unwrap();
                     for (lab, want) in reference::LAB_SAMPLES.iter().zip(want) {
                         assert_near(
                             &format!("{name} {intent:?} bpc {bpc} at {lab:?}"),
@@ -1743,8 +2200,11 @@ mod tests {
         let source = ColorProfile::new_from_slice(SPLIT_XYZ).unwrap();
         let oi = ColorProfile::new_from_slice(INKLIMIT).unwrap();
         for intent in INTENTS {
-            assert!(HandRolledChainStage1Cmyk::new(&source, &oi, intent, None).is_none());
-            assert!(HandRolledChainStage1Cmyk::new(&oi, &source, intent, None).is_none());
+            let into =
+                HandRolledChainStage1Cmyk::new(&source, SPLIT_XYZ, &oi, INKLIMIT, intent, None);
+            let from =
+                HandRolledChainStage1Cmyk::new(&oi, INKLIMIT, &source, SPLIT_XYZ, intent, None);
+            assert!(into.is_none() && from.is_none());
         }
     }
 }

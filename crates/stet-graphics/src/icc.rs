@@ -679,7 +679,9 @@ impl IccCache {
                         compensation(black_point::detect_rgb(&profile, bytes, intent), intent);
                     let Some(stage1) = hand_rolled::HandRolledChainStage1Rgb::new(
                         &profile,
+                        bytes,
                         &oi_profile,
+                        &oi_icc,
                         intent,
                         bpc,
                     ) else {
@@ -708,8 +710,9 @@ impl IccCache {
             // Chain stage 1 for CMYK sources, one per intent, as lcms2
             // builds it: the source's A2B and the OI's B2A for the intent,
             // composed per pixel with lcms2's interpolation, compensated in
-            // XYZ between them. Where either profile is a shape those
-            // evaluators cannot read (v4 `mAB`/`mBA`, an XYZ PCS), moxcms's
+            // XYZ between them; ICC v4 `lutAToBType`/`lutBToAType` tables
+            // included. Where either profile is a shape those evaluators
+            // cannot read (an XYZ PCS), moxcms's
             // transform built for the same intent from copies whose missing
             // tags are filled as lcms2 reads them, about one ink level from
             // lcms2 without compensation, and uncompensated: moxcms offers
@@ -730,7 +733,9 @@ impl IccCache {
                     let stage1: Option<Stage2> = if let Some(s) =
                         hand_rolled::HandRolledChainStage1Cmyk::new(
                             &profile,
+                            bytes,
                             &oi_profile,
+                            &oi_icc,
                             intent,
                             bpc,
                         ) {
@@ -787,6 +792,7 @@ impl IccCache {
                     let Some(stage1) = hand_rolled::HandRolledChainStage1Gray::new(
                         &profile,
                         &oi_profile,
+                        &oi_icc,
                         intent,
                         bpc,
                     ) else {
@@ -1587,7 +1593,9 @@ impl IccCache {
                 intent,
                 self.bpc_mode.is_enabled(),
             );
-            if let Some(sampler) = hand_rolled::LabToCmykSampler::new(&profile, intent, bpc) {
+            if let Some(sampler) =
+                hand_rolled::LabToCmykSampler::new(&profile, &oi_icc, intent, bpc)
+            {
                 self.lab_to_oi_per_intent[i] = Some(Arc::new(sampler));
             }
         }

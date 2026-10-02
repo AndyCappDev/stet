@@ -24,10 +24,8 @@
 //! trip's perceptual leg. Absolute colorimetric is rendered as relative
 //! colorimetric and takes its black point.
 //!
-//! Two departures, both documented where they apply: a profile whose
-//! round-trip tables are v4 `mAB`/`mBA` keeps 400% ink, as stet has no
-//! evaluator for them; and the `bkpt` tag is ignored, as Ghostscript's
-//! lcms2 build ignores it.
+//! One departure: the `bkpt` tag is ignored, as Ghostscript's lcms2 build
+//! ignores it.
 
 use moxcms::{ColorProfile, DataColorSpace, RenderingIntent};
 
@@ -79,7 +77,7 @@ pub(super) fn detect(
         && class == b"prtr"
         && profile.color_space == DataColorSpace::Cmyk
     {
-        return ink_limited_black(profile, v4);
+        return ink_limited_black(profile, icc, v4);
     }
     // lcms2 assumes black is zero when the profile has no table for the
     // intent ("intent not supported").
@@ -108,13 +106,13 @@ pub(super) fn detect_gray(profile: &ColorProfile, icc: &[u8]) -> Option<[f64; 3]
 }
 
 /// [`detect`] as the XYZ it stands for. `None` is lcms2's zero black point,
-/// or a table that black needs which stet cannot read (v4 `mAB`).
+/// or a table that black needs which stet cannot read (an XYZ PCS).
 pub(super) fn detect_xyz(
     profile: &ColorProfile,
     icc: &[u8],
     intent: RenderingIntent,
 ) -> Option<[f64; 3]> {
-    resolve(profile, intent, detect(profile, icc, intent)?)
+    resolve(profile, icc, intent, detect(profile, icc, intent)?)
 }
 
 /// The black point lcms2 detects for an RGB source
@@ -149,7 +147,7 @@ pub(super) fn detect_rgb(
         }
         intent = RenderingIntent::RelativeColorimetric;
     }
-    let lab = hand_rolled::rgb_to_lab(profile, intent, [0.0; 3])?;
+    let lab = hand_rolled::rgb_to_lab(profile, icc, intent, [0.0; 3])?;
     Some(lab_to_xyz_d50([lab[0].min(50.0), 0.0, 0.0]))
 }
 
@@ -210,8 +208,8 @@ pub(super) fn chain_compensation(
 ///   is that black point; otherwise a quadratic fitted to the shadows finds
 ///   where the round trip leaves black.
 ///
-/// A profile whose round-trip tables are v4 `mAB`/`mBA` has no destination
-/// black point here, as stet has no evaluator for them.
+/// A profile whose round-trip tables stet cannot read (an XYZ PCS) has no
+/// destination black point here.
 pub(super) fn detect_destination(
     profile: &ColorProfile,
     icc: &[u8],
@@ -236,14 +234,19 @@ pub(super) fn detect_destination(
         _ => &profile.lut_b_to_a_colorimetric,
     };
     if b2a.is_none() || profile.color_space != DataColorSpace::Cmyk {
-        return resolve(profile, intent, detect(profile, icc, intent)?);
+        return resolve(profile, icc, intent, detect(profile, icc, intent)?);
     }
     let initial = if intent == RenderingIntent::RelativeColorimetric {
-        xyz_d50_to_lab(resolve(profile, intent, detect(profile, icc, intent)?)?)
+        xyz_d50_to_lab(resolve(
+            profile,
+            icc,
+            intent,
+            detect(profile, icc, intent)?,
+        )?)
     } else {
         [0.0; 3]
     };
-    let trip = hand_rolled::RoundTrip::new(profile, intent)?;
+    let trip = hand_rolled::RoundTrip::new(profile, icc, intent)?;
     let (a, b) = (initial[1].clamp(-50.0, 50.0), initial[2].clamp(-50.0, 50.0));
     let in_ramp: [f64; 256] = std::array::from_fn(|l| l as f64 * 100.0 / 255.0);
     let mut out_ramp = in_ramp.map(|l| trip.run([l, a, b]).1[0]);
@@ -355,18 +358,14 @@ fn solve3(m: [[f64; 3]; 3], v: [f64; 3]) -> Option<[f64; 3]> {
 /// 400% ink through the intent's table, as lcms2 computes it.
 fn resolve(
     profile: &ColorProfile,
+    icc: &[u8],
     intent: RenderingIntent,
     black: SourceBlack,
 ) -> Option<[f64; 3]> {
     match black {
         SourceBlack::Xyz(xyz) => Some(xyz),
         SourceBlack::DarkerColorant => {
-            let table = match intent {
-                RenderingIntent::Perceptual => &profile.lut_a_to_b_perceptual,
-                RenderingIntent::Saturation => &profile.lut_a_to_b_saturation,
-                _ => &profile.lut_a_to_b_colorimetric,
-            };
-            let lab = hand_rolled::table_black(table.as_ref()?)?;
+            let lab = hand_rolled::table_black(profile, icc, intent)?;
             Some(lab_to_xyz_d50([lab[0].min(50.0), 0.0, 0.0]))
         }
     }
@@ -374,7 +373,7 @@ fn resolve(
 
 /// lcms2's `BlackPointUsingPerceptualBlack`: the round trip's landing
 /// point, made neutral and clipped to L\* 50.
-fn ink_limited_black(profile: &ColorProfile, v4: bool) -> Option<SourceBlack> {
+fn ink_limited_black(profile: &ColorProfile, icc: &[u8], v4: bool) -> Option<SourceBlack> {
     // Perceptual must be supported as input, and lcms2 cannot build the
     // round trip without `B2A0`; either way the black point is zero.
     profile.lut_a_to_b_perceptual.as_ref()?;
@@ -384,7 +383,7 @@ fn ink_limited_black(profile: &ColorProfile, v4: bool) -> Option<SourceBlack> {
     } else {
         [0.0; 3]
     };
-    let Some((ink, lab)) = hand_rolled::perceptual_round_trip(profile, start) else {
+    let Some((ink, lab)) = hand_rolled::perceptual_round_trip(profile, icc, start) else {
         return Some(SourceBlack::DarkerColorant);
     };
     // A `B2A0` that reaches 400% ink lands on the darker colorant, through
@@ -423,7 +422,7 @@ mod tests {
     /// intent.
     type Reference = (&'static str, &'static [u8], [[f64; 3]; 3]);
 
-    const PROFILES: [Reference; 9] = [
+    const PROFILES: [Reference; 10] = [
         ("split", profile!("split"), reference::SPLIT_BLACK_POINT),
         (
             "split_sat",
@@ -461,6 +460,9 @@ mod tests {
             profile!("inklimit_no_a2b0"),
             reference::INKLIMIT_NO_A2B0_BLACK_POINT,
         ),
+        // ICC v4 `lutAToBType` / `lutBToAType`: relative colorimetric's
+        // black is the round trip through them.
+        ("mab", profile!("mab"), reference::MAB_BLACK_POINT),
     ];
 
     /// Every generated profile, every intent: the black point is lcms2's,
@@ -477,7 +479,7 @@ mod tests {
                 .enumerate()
             {
                 let got = detect(&profile, icc, intent)
-                    .and_then(|black| resolve(&profile, intent, black))
+                    .and_then(|black| resolve(&profile, icc, intent, black))
                     .unwrap_or_default();
                 let (l_got, l_want) = (xyz_d50_to_lab(got)[0], xyz_d50_to_lab(want[i])[0]);
                 assert!(
@@ -535,7 +537,7 @@ mod tests {
     }
 
     /// Output profiles and lcms2's destination black point for each intent.
-    const DESTINATIONS: [Reference; 5] = [
+    const DESTINATIONS: [Reference; 6] = [
         (
             "shadow",
             profile!("shadow"),
@@ -560,6 +562,11 @@ mod tests {
             "split_sat",
             profile!("split_sat"),
             reference::SPLIT_SAT_DESTINATION_BLACK_POINT,
+        ),
+        (
+            "mab",
+            profile!("mab"),
+            reference::MAB_DESTINATION_BLACK_POINT,
         ),
     ];
 
@@ -641,6 +648,14 @@ mod tests {
                 profile!("inklimit"),
                 &reference::CHAIN_GRAY_GAMMA_INKLIMIT,
             ),
+            // Into ICC v4 `lutBToAType` tables, compensated under perceptual
+            // and saturation whatever the flag.
+            (
+                "mab",
+                profile!("gray_trc"),
+                profile!("mab"),
+                &reference::GRAY_CHAIN_MAB,
+            ),
             // Compensating this black to zero is an empty layer to lcms2.
             (
                 "near black",
@@ -658,9 +673,10 @@ mod tests {
             {
                 for (bpc, want) in want[i].iter().enumerate() {
                     let params = chain_compensation(Some(gray_black), &oi, icc, intent, bpc == 1);
-                    let stage1 =
-                        hand_rolled::HandRolledChainStage1Gray::new(&gray, &oi, intent, params)
-                            .unwrap();
+                    let stage1 = hand_rolled::HandRolledChainStage1Gray::new(
+                        &gray, &oi, icc, intent, params,
+                    )
+                    .unwrap();
                     for (g, want) in reference::GRAY_SAMPLES.iter().zip(want) {
                         let got = stage1.sample(*g);
                         for (got, want) in got.iter().zip(want) {
@@ -700,6 +716,11 @@ mod tests {
                 reference::RGB_LUT_V4_BLACK_POINT,
             ),
             ("srgb", profile!("srgb"), reference::SRGB_BLACK_POINT),
+            (
+                "rgb_mab",
+                profile!("rgb_mab"),
+                reference::RGB_MAB_BLACK_POINT,
+            ),
         ] {
             let profile = ColorProfile::new_from_slice(icc).unwrap();
             for (i, intent) in [Perceptual, RelativeColorimetric, Saturation]

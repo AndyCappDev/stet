@@ -40,6 +40,8 @@ const RGB_GAMMA: &[u8] = include_bytes!("data/cmyk_intent/rgb_gamma.icc");
 const RGB_LUT: &[u8] = include_bytes!("data/cmyk_intent/rgb_lut.icc");
 const RGB_LUT_V4: &[u8] = include_bytes!("data/cmyk_intent/rgb_lut_v4.icc");
 const SRGB: &[u8] = include_bytes!("data/cmyk_intent/srgb.icc");
+const MAB: &[u8] = include_bytes!("data/cmyk_intent/mab.icc");
+const RGB_MAB: &[u8] = include_bytes!("data/cmyk_intent/rgb_mab.icc");
 
 /// Largest per-channel difference allowed from lcms2. stet bakes a 17⁴ table
 /// and interpolates it, and its Lab → sRGB arithmetic is its own.
@@ -563,6 +565,7 @@ fn gray_sources_chain_with_compensation() {
             true,
         ),
         ("inklimit", INKLIMIT, &reference::GRAY_CHAIN_INKLIMIT, false),
+        ("mab", MAB, &reference::GRAY_CHAIN_MAB, true),
     ] {
         for mode in [BpcMode::On, BpcMode::Off, BpcMode::Auto] {
             let (cache, hash) = proofing(oi, GRAY_TRC, mode);
@@ -653,7 +656,7 @@ fn compensated(mode: BpcMode, v4: bool, intent: IccRenderingIntent) -> usize {
 /// whatever `--bpc` said.
 #[test]
 fn rgb_and_cmyk_sources_chain_with_compensation() {
-    let cmyk: [Case<16>; 3] = [
+    let cmyk: [Case<16>; 5] = [
         (
             "split",
             SHADOW,
@@ -675,8 +678,18 @@ fn rgb_and_cmyk_sources_chain_with_compensation() {
             false,
             &reference::CHAIN_BPC_INKLIMIT_SHADOW,
         ),
+        // ICC v4 `lutAToBType` / `lutBToAType` tables, which moxcms used to
+        // convert, uncompensated.
+        ("mab", SHADOW, MAB, false, &reference::CHAIN_BPC_MAB_SHADOW),
+        (
+            "into mab",
+            MAB,
+            SPLIT,
+            true,
+            &reference::CHAIN_BPC_SPLIT_MAB,
+        ),
     ];
-    let rgb: [Case<15>; 5] = [
+    let rgb: [Case<15>; 7] = [
         (
             "rgb_gamma",
             SHADOW,
@@ -711,6 +724,20 @@ fn rgb_and_cmyk_sources_chain_with_compensation() {
             SRGB,
             true,
             &reference::CHAIN_BPC_SRGB_SHADOW_V4,
+        ),
+        (
+            "rgb_mab",
+            SHADOW,
+            RGB_MAB,
+            false,
+            &reference::CHAIN_BPC_RGB_MAB_SHADOW,
+        ),
+        (
+            "rgb into mab",
+            MAB,
+            RGB_GAMMA,
+            true,
+            &reference::CHAIN_BPC_RGB_GAMMA_MAB,
         ),
     ];
     let inputs_cmyk: Vec<Vec<f64>> = reference::SAMPLES
@@ -825,6 +852,7 @@ fn lab_ink_is_compensated_as_lcms() {
             true,
             &reference::CHAIN_BPC_LAB_SHADOW_V4,
         ),
+        ("lab into mab", MAB, true, &reference::CHAIN_BPC_LAB_MAB),
     ] {
         for mode in [BpcMode::On, BpcMode::Off, BpcMode::Auto] {
             let mut cache = IccCache::new_with_options(IccCacheOptions {

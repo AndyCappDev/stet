@@ -114,8 +114,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sides as lcms2 does without black-point compensation — within 0.06 of
   255 ink levels on the press profiles in the corpus — so relative
   colorimetric content moves by 3–12 levels on average and up to 69, and
-  saturation by about 30. A profile stet cannot read itself (ICC v4
-  `mAB`) goes through moxcms's transform for the intent, about one ink
+  saturation by about 30. A profile stet cannot read itself (one with an
+  XYZ PCS) goes through moxcms's transform for the intent, about one ink
   level from lcms2. `IccCache::convert_color` and `convert_image_8bit`,
   which take no intent, now convert RGB and CMYK sources in a proofing
   chain relative colorimetric rather than perceptual. Overprint and CMYK
@@ -179,9 +179,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     intent).
   - **Gray:** it now also skips a compensation too small for lcms2 to
     apply.
-  - **Not compensated:** a profile stet cannot read itself (ICC v4 `mAB`),
-    which still goes through moxcms.
+  - **Not compensated:** a CMYK profile stet cannot read itself (one with
+    an XYZ PCS), which still goes through moxcms.
   - **`--bpc off`** keeps the previous output.
+- **ICC v4 profiles built on `lutAToBType`/`lutBToAType` tables now convert
+  into a PDF/X output intent as lcms2 does, with black-point
+  compensation.** This covers such a profile as the source, such as the
+  Ghent suite's estprofile.icc, and as the output intent. stet used to
+  hand these tables to moxcms, and three things went wrong:
+  - **Accuracy:** moxcms was up to 19 ink levels from lcms2 without
+    compensation and 31 with it.
+  - **Compensation:** none was applied.
+  - **Black point:** a v4 press profile's relative colorimetric black
+    point fell back to 400% ink.
+
+  stet now evaluates the tables itself, within 0.12 of 255 ink levels of
+  lcms2 on estprofile, including that black point. The black point is
+  also what CMYK display through such a profile compensates from.
+
+  moxcms 0.8.1 misreads a set of curves in these tables that holds an
+  identity (empty) curve before another: every curve after it comes back
+  as identity. stet reads them from the profile's bytes. Only GWG 20.5's
+  image moves in the test corpus, by up to 5 levels, toward Ghostscript.
 - **Relative colorimetric CMYK rendered lighter than Ghostscript and
   Acrobat** with black-point compensation on, the default. Compensation
   maps the profile's black to sRGB black, and stet took that black to be
@@ -203,8 +222,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rules come with it: an ICC v4 profile's perceptual and saturation
   intents compensate from the fixed v4 perceptual black, and an output
   profile with no perceptual table is not compensated under relative
-  colorimetric. A profile whose round-trip tables are v4 `mAB`/`mBA`
-  keeps 400% ink.
+  colorimetric.
 - **`--bpc` did not reach PostScript images.** The PNG device converts
   DeviceCMYK images and overprinted colours as it renders, through a
   colour cache it builds for itself with the default options, so
