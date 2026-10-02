@@ -637,6 +637,22 @@ impl IccCache {
                 ),
             };
 
+            // Black-point compensation on stage 1, for every source kind
+            // below: lcms2's, by the cache's mode as lcms2 follows its flag,
+            // from the source's black to the black lcms2 detects for the OI
+            // as a destination (see `black_point::chain_compensation`).
+            let oi_icc = self.raw_bytes.get(&oi_hash).cloned().unwrap_or_default();
+            let bpc_enabled = self.bpc_mode.is_enabled();
+            let compensation = |source_black, intent| {
+                black_point::chain_compensation(
+                    source_black,
+                    &oi_profile,
+                    &oi_icc,
+                    intent,
+                    bpc_enabled,
+                )
+            };
+
             // Hand-rolled chain stage 1 for RGB sources. moxcms's
             // `create_transform` over-saturates sRGB-style first legs by
             // ~5–15% (visible as the GWG 16.1 "X" marks), so we compose
@@ -646,10 +662,11 @@ impl IccCache {
             // that drifts GWG 13.0's BG-vs-X match by ~6 RGB levels.
             //
             // For each of the four ICC rendering intents we try to build
-            // a chain using that intent's tables on both sides. Intents
-            // whose A2B / B2A tables are missing (or whose profile is in
-            // an unsupported shape) skip silently and the slot stays
-            // `None`; lookup-time callers fall back to moxcms.
+            // a chain using that intent's tables on both sides, compensated
+            // as lcms2 compensates. Intents whose A2B / B2A tables are
+            // missing (or whose profile is in an unsupported shape) skip
+            // silently and the slot stays `None`; lookup-time callers fall
+            // back to moxcms.
             if n == 3 {
                 use moxcms::RenderingIntent;
                 for &intent in &[
@@ -658,9 +675,14 @@ impl IccCache {
                     RenderingIntent::Saturation,
                     RenderingIntent::AbsoluteColorimetric,
                 ] {
-                    let Some(stage1) =
-                        hand_rolled::HandRolledChainStage1Rgb::new(&profile, &oi_profile, intent)
-                    else {
+                    let bpc =
+                        compensation(black_point::detect_rgb(&profile, bytes, intent), intent);
+                    let Some(stage1) = hand_rolled::HandRolledChainStage1Rgb::new(
+                        &profile,
+                        &oi_profile,
+                        intent,
+                        bpc,
+                    ) else {
                         continue;
                     };
                     let stage1_arc = Arc::new(stage1);
@@ -684,13 +706,15 @@ impl IccCache {
             }
 
             // Chain stage 1 for CMYK sources, one per intent, as lcms2
-            // builds it without black-point compensation: the source's A2B
-            // and the OI's B2A for the intent, composed per pixel with
-            // lcms2's interpolation. Where either profile is a shape those
+            // builds it: the source's A2B and the OI's B2A for the intent,
+            // composed per pixel with lcms2's interpolation, compensated in
+            // XYZ between them. Where either profile is a shape those
             // evaluators cannot read (v4 `mAB`/`mBA`, an XYZ PCS), moxcms's
             // transform built for the same intent from copies whose missing
             // tags are filled as lcms2 reads them, about one ink level from
-            // lcms2. A slot neither can build stays empty and falls back to
+            // lcms2 without compensation, and uncompensated: moxcms offers
+            // no point between the two profiles to compensate at. A slot
+            // neither can build stays empty and falls back to
             // the default chain below, the relative colorimetric one; so
             // does absolute colorimetric, which reads the relative
             // colorimetric tables on every other CMYK path too.
@@ -701,9 +725,15 @@ impl IccCache {
                     RenderingIntent::RelativeColorimetric,
                     RenderingIntent::Saturation,
                 ] {
+                    let bpc =
+                        compensation(black_point::detect_xyz(&profile, bytes, intent), intent);
                     let stage1: Option<Stage2> = if let Some(s) =
-                        hand_rolled::HandRolledChainStage1Cmyk::new(&profile, &oi_profile, intent)
-                    {
+                        hand_rolled::HandRolledChainStage1Cmyk::new(
+                            &profile,
+                            &oi_profile,
+                            intent,
+                            bpc,
+                        ) {
                         let s = Arc::new(s);
                         Some((s.clone(), s))
                     } else {
@@ -742,32 +772,18 @@ impl IccCache {
 
             // Chain stage 1 for TRC-only Gray sources, one per intent, as
             // lcms2 builds it: the tone curve's Y, black-point compensation
-            // in XYZ, then the OI's B2A for the intent. Compensation follows
-            // the cache's mode, as lcms2 follows its flag, from the gray's
-            // black to the black lcms2 detects for the OI as a destination;
-            // lcms2 also forces it under perceptual and saturation into an
-            // ICC v4 OI. GWG 18.3's reference is this conversion with
-            // compensation. Gray profiles with a LUT or a Lab PCS, and OIs
-            // whose B2A stet cannot read, keep the default chain.
+            // in XYZ, then the OI's B2A for the intent. GWG 18.3's reference
+            // is this conversion with compensation. Gray profiles with a LUT
+            // or a Lab PCS, and OIs whose B2A stet cannot read, keep the
+            // default chain.
             if n == 1 {
-                let oi_icc = self.raw_bytes.get(&oi_hash).cloned().unwrap_or_default();
-                let oi_v4 = oi_icc.get(8).is_some_and(|&major| major >= 4);
-                let gray_black = black_point::detect_gray(&profile, bytes).unwrap_or([0.0; 3]);
+                let gray_black = black_point::detect_gray(&profile, bytes);
                 for intent in [
                     RenderingIntent::Perceptual,
                     RenderingIntent::RelativeColorimetric,
                     RenderingIntent::Saturation,
                 ] {
-                    let forced = oi_v4 && intent != RenderingIntent::RelativeColorimetric;
-                    let bpc = if self.bpc_mode.is_enabled() || forced {
-                        let oi_black =
-                            black_point::detect_destination(&oi_profile, &oi_icc, intent)
-                                .unwrap_or([0.0; 3]);
-                        (gray_black != oi_black)
-                            .then(|| bpc::compute_bpc_params(gray_black, oi_black, bpc::WP_D50))
-                    } else {
-                        None
-                    };
+                    let bpc = compensation(gray_black, intent);
                     let Some(stage1) = hand_rolled::HandRolledChainStage1Gray::new(
                         &profile,
                         &oi_profile,
@@ -1550,6 +1566,7 @@ impl IccCache {
         let Some(profile) = self.profiles.get(&hash).cloned() else {
             return;
         };
+        let oi_icc = self.raw_bytes.get(&hash).cloned().unwrap_or_default();
         use moxcms::RenderingIntent;
         for &intent in &[
             RenderingIntent::Perceptual,
@@ -1561,14 +1578,25 @@ impl IccCache {
             if self.lab_to_oi_per_intent[i].is_some() {
                 continue;
             }
-            if let Some(sampler) = hand_rolled::LabToCmykSampler::build(&profile, intent) {
+            // A Lab colour's black is zero, and lcms2 compensates it into
+            // the output intent as it does any other source.
+            let bpc = black_point::chain_compensation(
+                None,
+                &profile,
+                &oi_icc,
+                intent,
+                self.bpc_mode.is_enabled(),
+            );
+            if let Some(sampler) = hand_rolled::LabToCmykSampler::new(&profile, intent, bpc) {
                 self.lab_to_oi_per_intent[i] = Some(Arc::new(sampler));
             }
         }
     }
 
     /// Convert a PDF Lab triplet (L\* ∈ [0, 100], a\*/b\* ∈ [-128, 127]) to
-    /// OutputIntent CMYK using the OI's per-intent B2A table. Returns `None`
+    /// OutputIntent CMYK using the OI's per-intent B2A table, with the
+    /// black-point compensation lcms2 applies to a Lab source (from black
+    /// to the OI's black, when the cache's mode enables it). Returns `None`
     /// when the per-intent sampler hasn't been built (call
     /// [`Self::prepare_lab_to_oi_cmyk`] first) or when the intent slot is
     /// empty (falls back to Perceptual when available).

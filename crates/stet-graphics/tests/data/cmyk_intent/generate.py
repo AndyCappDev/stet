@@ -38,11 +38,20 @@ script runs it once and records what it produces. It writes, next to itself:
                  are not affine, so tetrahedral and trilinear interpolation
                  differ, and no A2B0; it also carries rgb_gamma.icc's curves
                  and colorants, which lcms2 reads for perceptual.
+  rgb_lut_v4.icc rgb_lut.icc's tables, plus A2B0, as ICC v4 without the
+                 curves and colorants: lcms2 takes its perceptual and
+                 saturation black point from the v4 perceptual black.
+  srgb.icc       lcms2's built-in sRGB, an ICC v4 matrix-shaper with
+                 parametric curves.
+  gray_near_black.icc
+                 A TRC-only Gray whose black is Y 0.0002: compensating it to
+                 a black of zero is a change so small lcms2 drops it.
   reference.rs   lcms2's sRGB output for each profile, intent and BPC setting,
                  its black points as a source and as a destination, the
                  round trip behind them, and its proofing-chain stage 1
-                 (CMYK, RGB or Gray source → output-intent CMYK) for each
-                 intent, and its tone-curve evaluation for each curve kind;
+                 (CMYK, RGB, Gray or Lab source → output-intent CMYK) for each
+                 intent, with and without black-point compensation, and its
+                 tone-curve evaluation for each curve kind;
                  included by `tests/cmyk_intent.rs`.
 
 The profiles are ICC v2 output (`prtr`) profiles with a Lab PCS unless named
@@ -376,9 +385,10 @@ def rgb_gamma_profile(description):
     return assemble(tags, b"mntr", b"RGB ", b"XYZ ", 0x02100000)
 
 
-def rgb_lut_profile(description):
+def rgb_lut_profile(description, v4=False):
     """A2B1 and A2B2 on a 5-point grid, curved in every input so tetrahedral
-    and trilinear interpolation land apart; no A2B0."""
+    and trilinear interpolation land apart; no A2B0. As ICC v4: A2B0 a copy
+    of A2B1, and no curves or colorants."""
     a2b1 = lab_table(
         16,
         lambda r, g, b: 100 * (0.25 * r + 0.62 * g + 0.13 * b) ** 0.6,
@@ -398,11 +408,23 @@ def rgb_lut_profile(description):
     tags = [
         (b"desc", desc_tag(description)),
         (b"wtpt", xyz_tag(0.9642, 1.0, 0.8249)),
-        *matrix_tags(1.8),
-        (b"A2B1", a2b1),
-        (b"A2B2", a2b2),
     ]
-    return assemble(tags, b"mntr", b"RGB ", b"Lab ", 0x02100000)
+    if v4:
+        tags.append((b"A2B0", a2b1))
+    else:
+        tags += matrix_tags(1.8)
+    tags += [(b"A2B1", a2b1), (b"A2B2", a2b2)]
+    return assemble(tags, b"mntr", b"RGB ", b"Lab ", 0x04200000 if v4 else 0x02100000)
+
+
+def gray_near_black_profile(description):
+    trc = [0.0002 + 0.9998 * (i / 255) ** 2.2 for i in range(256)]
+    tags = [
+        (b"desc", desc_tag(description)),
+        (b"wtpt", xyz_tag(0.9642, 1.0, 0.8249)),
+        (b"kTRC", curv_tag(trc)),
+    ]
+    return assemble(tags, b"mntr", b"GRAY", b"XYZ ", 0x02100000)
 
 
 # ------------------------------------------------------------------ lcms2
@@ -476,6 +498,13 @@ LCMS.cmsCreateExtendedTransform.argtypes = [
     ctypes.c_uint32,
 ]
 LCMS.cmsDoTransform.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32]
+LCMS.cmsCreate_sRGBProfile.restype = ctypes.c_void_p
+LCMS.cmsSaveProfileToMem.restype = ctypes.c_int
+LCMS.cmsSaveProfileToMem.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    ctypes.POINTER(ctypes.c_uint32),
+]
 LCMS.cmsDeleteTransform.argtypes = [ctypes.c_void_p]
 LCMS.cmsDetectBlackPoint.restype = ctypes.c_int
 LCMS.cmsDetectBlackPoint.argtypes = [
@@ -881,6 +910,90 @@ CURVE_TABLE = [round(65535 * (i / 36) ** 2.2) for i in range(37)]
 CURVE_GAMMA = 461
 
 
+def srgb_profile():
+    """lcms2's built-in sRGB, as bytes."""
+    handle = LCMS.cmsCreate_sRGBProfile()
+    size = ctypes.c_uint32(0)
+    assert LCMS.cmsSaveProfileToMem(handle, None, ctypes.byref(size))
+    buf = ctypes.create_string_buffer(size.value)
+    assert LCMS.cmsSaveProfileToMem(handle, buf, ctypes.byref(size))
+    LCMS.cmsCloseProfile(handle)
+    return buf.raw[: size.value]
+
+
+# Stage 1 with and without black-point compensation, into output intents
+# whose blacks compensation moves to: `shadow.icc`, and `shadow_v4.icc`,
+# where lcms2 forces it under perceptual and saturation. Each entry is
+# (source, output intent, input kind); "LAB" is lcms2's Lab identity.
+BPC_CHAINS = [
+    ("SPLIT", "SHADOW", "CMYK"),
+    ("SPLIT_SAT", "SHADOW_V4", "CMYK"),
+    ("INKLIMIT", "SHADOW", "CMYK"),
+    ("RGB_GAMMA", "SHADOW", "RGB"),
+    ("RGB_LUT", "SHADOW", "RGB"),
+    ("RGB_LUT_V4", "SHADOW", "RGB"),
+    ("SRGB", "SHADOW", "RGB"),
+    ("SRGB", "SHADOW_V4", "RGB"),
+    ("LAB", "SHADOW", "LAB"),
+    ("LAB", "SHADOW_V4", "LAB"),
+]
+
+
+def rust_bpc_chain(source, oi, kind, icc):
+    out = Lcms(icc[oi])
+    src = Lcms(icc[source]) if kind != "LAB" else None
+    src_handle = src.profile if src else out.lab
+    inputs, in_format, samples = {
+        "CMYK": (
+            [[v * 100 / 255 for v in sample] for sample in SAMPLES],
+            TYPE_CMYK_DBL,
+            "SAMPLES",
+        ),
+        "RGB": ([[v / 255 for v in sample] for sample in RGB_SAMPLES], TYPE_RGB_DBL, "RGB_SAMPLES"),
+        "LAB": ([list(lab) for lab in LAB_SAMPLES], TYPE_LAB_DBL, "LAB_SAMPLES"),
+    }[kind]
+    lines = [
+        f"/// lcms2's proofing-chain stage 1, `{source.lower()}` into `{oi.lower()}.icc`,",
+        f"/// at each of `{samples}`; ink 0–1, indexed `[intent][bpc]`: intent 0",
+        "/// perceptual, 1 relative colorimetric, 2 saturation; black-point",
+        "/// compensation 0 off, 1 on.",
+        f"pub const CHAIN_BPC_{source}_{oi}: [[[[f64; 4]; {len(inputs)}]; 2]; 3] = [",
+    ]
+    for intent in (PERCEPTUAL, RELATIVE_COLORIMETRIC, SATURATION):
+        lines.append("    [")
+        for bpc in (False, True):
+            xform = LCMS.cmsCreateExtendedTransform(
+                None,
+                2,
+                (ctypes.c_void_p * 2)(src_handle, out.profile),
+                (ctypes.c_int * 2)(int(bpc), int(bpc)),
+                (ctypes.c_uint32 * 2)(intent, intent),
+                (ctypes.c_double * 2)(1.0, 1.0),
+                None,
+                0,
+                in_format,
+                TYPE_CMYK_DBL,
+                FLAGS_NOCACHE_NOOPTIMIZE,
+            )
+            assert xform, f"lcms2 could not build {source} → {oi}"
+            lines.append("        [")
+            for v in inputs:
+                s_ = (ctypes.c_double * len(v))(*v)
+                d = (ctypes.c_double * 4)()
+                LCMS.cmsDoTransform(xform, s_, d, 1)
+                lines.append(
+                    "            " + f64_array([min(max(x / 100, 0.0), 1.0) for x in d]) + ","
+                )
+            LCMS.cmsDeleteTransform(xform)
+            lines.append("        ],")
+        lines.append("    ],")
+    lines.append("];")
+    if src:
+        src.close()
+    out.close()
+    return "\n".join(lines)
+
+
 def rust_curves():
     xs = [f32(x) for x in CURVE_X]
 
@@ -994,6 +1107,9 @@ def main():
         ("GRAY_GAMMA", gray_gamma_profile("stet test: Gray, pure gamma 1.8")),
         ("RGB_GAMMA", rgb_gamma_profile("stet test: matrix RGB, pure gamma 1.8")),
         ("RGB_LUT", rgb_lut_profile("stet test: RGB A2B1 + A2B2, no A2B0")),
+        ("RGB_LUT_V4", rgb_lut_profile("stet test: RGB A2B0-2, ICC v4, no matrix", v4=True)),
+        ("SRGB", srgb_profile()),
+        ("GRAY_NEAR_BLACK", gray_near_black_profile("stet test: Gray, black Y 0.0002")),
     ]
     for name, icc in profiles:
         (HERE / f"{name.lower()}.icc").write_bytes(icc)
@@ -1029,6 +1145,9 @@ def main():
             "GRAY_GAMMA",
             "RGB_GAMMA",
             "RGB_LUT",
+            "RGB_LUT_V4",
+            "SRGB",
+            "GRAY_NEAR_BLACK",
         ):
             out += [rust_black_point(name, icc[name]), ""]
     for name in ["INKLIMIT", "INKLIMIT_LUT8"]:
@@ -1055,6 +1174,11 @@ def main():
         out += [rust_rgb_chain(source, "INKLIMIT", icc), ""]
     out += [rust_gray_chain("INKLIMIT", icc, source="GRAY_GAMMA"), ""]
     out += [rust_curves(), ""]
+    for name in ["RGB_GAMMA", "RGB_LUT", "RGB_LUT_V4", "SRGB"]:
+        out += [rust_black_point(name, icc[name]), ""]
+    for source, oi, kind in BPC_CHAINS:
+        out += [rust_bpc_chain(source, oi, kind, icc), ""]
+    out += [rust_gray_chain("INKLIMIT", icc, source="GRAY_NEAR_BLACK"), ""]
     (HERE / "reference.rs").write_text("\n".join(out))
 
 

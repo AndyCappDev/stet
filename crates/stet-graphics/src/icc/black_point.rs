@@ -4,10 +4,11 @@
 
 //! The black points black-point compensation maps between, for a profile
 //! and a rendering intent, as lcms2 detects them and Ghostscript runs it:
-//! a CMYK or Gray source's (`cmsDetectBlackPoint`, [`detect`],
-//! [`detect_gray`]) and a CMYK output intent's as the destination of the
-//! proofing chain (`cmsDetectDestinationBlackPoint`,
-//! [`detect_destination`]). For a CMYK source:
+//! a CMYK, RGB or Gray source's (`cmsDetectBlackPoint`, [`detect`],
+//! [`detect_rgb`], [`detect_gray`]) and a CMYK output intent's as the
+//! destination of the proofing chain (`cmsDetectDestinationBlackPoint`,
+//! [`detect_destination`]); and, from them, the compensation lcms2 applies
+//! on the chain's first stage ([`chain_compensation`]). For a CMYK source:
 //!
 //! | case | black point |
 //! |---|---|
@@ -30,7 +31,7 @@
 
 use moxcms::{ColorProfile, DataColorSpace, RenderingIntent};
 
-use super::bpc::{lab_to_xyz_d50, xyz_d50_to_lab};
+use super::bpc::{BpcParams, WP_D50, compute_bpc_params, lab_to_xyz_d50, xyz_d50_to_lab};
 use super::hand_rolled;
 
 /// lcms2's `cmsPERCEPTUAL_BLACK_{X,Y,Z}`: the black of the ICC v4
@@ -104,6 +105,94 @@ pub(super) fn detect_gray(profile: &ColorProfile, icc: &[u8]) -> Option<[f64; 3]
     let y = hand_rolled::GrayTrc::new(profile)?.y(0.0);
     let l_star = xyz_d50_to_lab([0.0, y, 0.0])[0];
     Some(lab_to_xyz_d50([l_star.min(50.0), 0.0, 0.0]))
+}
+
+/// [`detect`] as the XYZ it stands for. `None` is lcms2's zero black point,
+/// or a table that black needs which stet cannot read (v4 `mAB`).
+pub(super) fn detect_xyz(
+    profile: &ColorProfile,
+    icc: &[u8],
+    intent: RenderingIntent,
+) -> Option<[f64; 3]> {
+    resolve(profile, intent, detect(profile, icc, intent)?)
+}
+
+/// The black point lcms2 detects for an RGB source
+/// (`BlackPointAsDarkerColorant`): RGB 0 through the source as the chain
+/// reads it for `intent` — its table, or its tone curves and matrix — made
+/// neutral and clipped to L\* 50. For an ICC v4 profile under perceptual
+/// or saturation lcms2 takes relative colorimetric's if the profile is a
+/// matrix-shaper, and the v4 perceptual black if not. `None` is lcms2's
+/// zero black point, or a source the chain cannot read.
+pub(super) fn detect_rgb(
+    profile: &ColorProfile,
+    icc: &[u8],
+    intent: RenderingIntent,
+) -> Option<[f64; 3]> {
+    let class = icc.get(12..16)?;
+    if matches!(class, b"link" | b"abst" | b"nmcl") {
+        return None;
+    }
+    let v4 = icc.get(8).is_some_and(|&major| major >= 4);
+    let mut intent = match intent {
+        RenderingIntent::AbsoluteColorimetric => RenderingIntent::RelativeColorimetric,
+        other => other,
+    };
+    if v4
+        && matches!(
+            intent,
+            RenderingIntent::Perceptual | RenderingIntent::Saturation
+        )
+    {
+        if !profile.is_matrix_shaper() {
+            return Some(PERCEPTUAL_BLACK);
+        }
+        intent = RenderingIntent::RelativeColorimetric;
+    }
+    let lab = hand_rolled::rgb_to_lab(profile, intent, [0.0; 3])?;
+    Some(lab_to_xyz_d50([lab[0].min(50.0), 0.0, 0.0]))
+}
+
+/// The black-point compensation lcms2 applies on the proofing chain's first
+/// stage under `intent`, from a source whose black is `source_black` (zero
+/// when `None`) into the output intent `oi`, whose raw bytes are `oi_icc`:
+///
+/// - only when `enabled` (`--bpc`), or — lcms2 forces it — when the output
+///   intent is ICC v4 and the intent perceptual or saturation;
+/// - never under absolute colorimetric;
+/// - to the output intent's black as a destination, [`detect_destination`];
+/// - none when the two blacks are equal, or so close that lcms2 drops the
+///   matrix as an empty layer (`IsEmptyLayer`): into a v2 output intent
+///   under perceptual, typically, whose black is L\* 0.2.
+pub(super) fn chain_compensation(
+    source_black: Option<[f64; 3]>,
+    oi: &ColorProfile,
+    oi_icc: &[u8],
+    intent: RenderingIntent,
+    enabled: bool,
+) -> Option<BpcParams> {
+    if intent == RenderingIntent::AbsoluteColorimetric {
+        return None;
+    }
+    let v4 = oi_icc.get(8).is_some_and(|&major| major >= 4);
+    let forced = v4 && intent != RenderingIntent::RelativeColorimetric;
+    if !enabled && !forced {
+        return None;
+    }
+    let source = source_black.unwrap_or([0.0; 3]);
+    let destination = detect_destination(oi, oi_icc, intent).unwrap_or([0.0; 3]);
+    if source == destination {
+        return None;
+    }
+    let p = compute_bpc_params(source, destination, WP_D50);
+    // lcms2 adds a matrix stage only when Σ|m − I| + Σ|offset| ≥ 0.002.
+    let change = (p.ax - 1.0).abs()
+        + (p.ay - 1.0).abs()
+        + (p.az - 1.0).abs()
+        + p.bx.abs()
+        + p.by.abs()
+        + p.bz.abs();
+    (change >= 0.002).then_some(p)
 }
 
 /// The black point lcms2 detects for the CMYK output profile `profile`,
@@ -533,7 +622,6 @@ mod tests {
     /// intent's destination black, and without.
     #[test]
     fn gray_chain_stage1_matches_lcms() {
-        use crate::icc::bpc::{WP_D50, compute_bpc_params};
         for (name, gray_icc, icc, want) in [
             (
                 "shadow",
@@ -553,6 +641,13 @@ mod tests {
                 profile!("inklimit"),
                 &reference::CHAIN_GRAY_GAMMA_INKLIMIT,
             ),
+            // Compensating this black to zero is an empty layer to lcms2.
+            (
+                "near black",
+                profile!("gray_near_black"),
+                profile!("inklimit"),
+                &reference::CHAIN_GRAY_NEAR_BLACK_INKLIMIT,
+            ),
         ] {
             let gray = ColorProfile::new_from_slice(gray_icc).unwrap();
             let gray_black = detect_gray(&gray, gray_icc).unwrap();
@@ -562,10 +657,7 @@ mod tests {
                 .enumerate()
             {
                 for (bpc, want) in want[i].iter().enumerate() {
-                    let params = (bpc == 1).then(|| {
-                        let oi_black = detect_destination(&oi, icc, intent).unwrap_or_default();
-                        compute_bpc_params(gray_black, oi_black, WP_D50)
-                    });
+                    let params = chain_compensation(Some(gray_black), &oi, icc, intent, bpc == 1);
                     let stage1 =
                         hand_rolled::HandRolledChainStage1Gray::new(&gray, &oi, intent, params)
                             .unwrap();
@@ -584,5 +676,88 @@ mod tests {
         // Compensation moves the ink, or the test proves nothing.
         let shadow = &reference::GRAY_CHAIN_SHADOW;
         assert_ne!(shadow[0][0], shadow[0][1]);
+    }
+
+    /// An RGB source's black point is lcms2's: RGB 0 through the source,
+    /// except an ICC v4 profile without a matrix under perceptual and
+    /// saturation, which takes the v4 perceptual black.
+    #[test]
+    fn rgb_black_point_is_lcms2s() {
+        for (name, icc, want) in [
+            (
+                "rgb_gamma",
+                profile!("rgb_gamma"),
+                reference::RGB_GAMMA_BLACK_POINT,
+            ),
+            (
+                "rgb_lut",
+                profile!("rgb_lut"),
+                reference::RGB_LUT_BLACK_POINT,
+            ),
+            (
+                "rgb_lut_v4",
+                profile!("rgb_lut_v4"),
+                reference::RGB_LUT_V4_BLACK_POINT,
+            ),
+            ("srgb", profile!("srgb"), reference::SRGB_BLACK_POINT),
+        ] {
+            let profile = ColorProfile::new_from_slice(icc).unwrap();
+            for (i, intent) in [Perceptual, RelativeColorimetric, Saturation]
+                .into_iter()
+                .enumerate()
+            {
+                let got = detect_rgb(&profile, icc, intent).unwrap_or_default();
+                for (got, want) in got.iter().zip(want[i]) {
+                    assert!(
+                        (got - want).abs() < 1e-5,
+                        "{name} {intent:?}: {got:?} vs lcms2 {:?}",
+                        want
+                    );
+                }
+            }
+        }
+        // The v4 rule is exercised: a black that is not zero.
+        assert_ne!(reference::RGB_LUT_V4_BLACK_POINT[0], [0.0; 3]);
+    }
+
+    /// When the proofing chain compensates, as lcms2 decides: by the flag,
+    /// forced into an ICC v4 output intent under perceptual and saturation,
+    /// never under absolute colorimetric, and not at all when the blacks
+    /// are equal or the change is an empty layer.
+    #[test]
+    fn chain_compensation_is_lcms2s() {
+        let shadow_icc = profile!("shadow");
+        let shadow = ColorProfile::new_from_slice(shadow_icc).unwrap();
+        let shadow_v4_icc = profile!("shadow_v4");
+        let shadow_v4 = ColorProfile::new_from_slice(shadow_v4_icc).unwrap();
+        let inklimit_icc = profile!("inklimit");
+        let inklimit = ColorProfile::new_from_slice(inklimit_icc).unwrap();
+        for intent in [Perceptual, RelativeColorimetric, Saturation] {
+            assert!(chain_compensation(None, &shadow, shadow_icc, intent, true).is_some());
+            assert!(chain_compensation(None, &shadow, shadow_icc, intent, false).is_none());
+            let forced = chain_compensation(None, &shadow_v4, shadow_v4_icc, intent, false);
+            assert_eq!(
+                forced.is_some(),
+                intent != RelativeColorimetric,
+                "{intent:?}"
+            );
+            // Black to black: nothing to do.
+            assert!(chain_compensation(None, &inklimit, inklimit_icc, intent, true).is_none());
+        }
+        for oi in [&shadow, &shadow_v4] {
+            assert!(
+                chain_compensation(None, oi, shadow_v4_icc, AbsoluteColorimetric, true).is_none()
+            );
+        }
+        // Y 0.0002 → 0 changes the matrix by about 0.0012: an empty layer.
+        let near = Some(lab_to_xyz_d50([0.18, 0.0, 0.0]));
+        assert!(
+            chain_compensation(near, &inklimit, inklimit_icc, RelativeColorimetric, true).is_none()
+        );
+        let further = Some(lab_to_xyz_d50([0.5, 0.0, 0.0]));
+        assert!(
+            chain_compensation(further, &inklimit, inklimit_icc, RelativeColorimetric, true)
+                .is_some()
+        );
     }
 }

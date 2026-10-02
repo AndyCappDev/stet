@@ -36,6 +36,10 @@ const INKLIMIT: &[u8] = include_bytes!("data/cmyk_intent/inklimit.icc");
 const INKLIMIT_LUT8: &[u8] = include_bytes!("data/cmyk_intent/inklimit_lut8.icc");
 const INKLIMIT_SCNR: &[u8] = include_bytes!("data/cmyk_intent/inklimit_scnr.icc");
 const INKLIMIT_V4: &[u8] = include_bytes!("data/cmyk_intent/inklimit_v4.icc");
+const RGB_GAMMA: &[u8] = include_bytes!("data/cmyk_intent/rgb_gamma.icc");
+const RGB_LUT: &[u8] = include_bytes!("data/cmyk_intent/rgb_lut.icc");
+const RGB_LUT_V4: &[u8] = include_bytes!("data/cmyk_intent/rgb_lut_v4.icc");
+const SRGB: &[u8] = include_bytes!("data/cmyk_intent/srgb.icc");
 
 /// Largest per-channel difference allowed from lcms2. stet bakes a 17⁴ table
 /// and interpolates it, and its Lab → sRGB arithmetic is its own.
@@ -402,10 +406,14 @@ fn moxcms_fallback_follows_the_intent() {
     }
 }
 
-/// A PDF/X cache: `oi` is the output intent, and `source` is registered
-/// after proofing is on, so its colours chain through the output intent.
-fn proofing(oi: &[u8], source: &[u8]) -> (IccCache, [u8; 32]) {
-    let mut cache = cache(oi);
+/// A PDF/X cache with black-point compensation `bpc`: `oi` is the output
+/// intent, and `source` is registered after proofing is on, so its colours
+/// chain through the output intent.
+fn proofing(oi: &[u8], source: &[u8], bpc: BpcMode) -> (IccCache, [u8; 32]) {
+    let mut cache = IccCache::new_with_options(IccCacheOptions {
+        bpc_mode: bpc,
+        source_cmyk_profile: Some(oi.to_vec()),
+    });
     cache.set_proofing_enabled(true);
     let hash = cache.register_profile(source).unwrap();
     (cache, hash)
@@ -420,17 +428,17 @@ fn ink(cmyk: [u8; 4]) -> [f64; 4] {
     cmyk.map(|v| v as f64 / 255.0)
 }
 
-/// Check every sample of `source` chained into `oi` under `intent` against
-/// lcms2's stage 1 shown through the output intent: at most `tolerance`
-/// levels per channel, from the stage-1 ink alone, since both sides share
-/// stage 2.
+/// Check every sample of `source` chained into `oi` under `intent`, with
+/// `--bpc off`, against lcms2's stage 1 without compensation shown through
+/// the output intent: at most `tolerance` levels per channel, from the
+/// stage-1 ink alone, since both sides share stage 2.
 fn assert_chain_matches_lcms(
     name: &str,
     (oi, source): (&[u8], &[u8]),
     expected: &[[[f64; 4]; 16]; 3],
     tolerance: u8,
 ) {
-    let (cache, hash) = proofing(oi, source);
+    let (cache, hash) = proofing(oi, source, BpcMode::Off);
     for intent in INTENTS {
         let want = &expected[reference_row(intent)];
         for (cmyk, want) in reference::SAMPLES.iter().zip(want) {
@@ -451,9 +459,9 @@ fn assert_chain_matches_lcms(
 }
 
 /// In a PDF/X document an ICCBased CMYK colour converts into the output
-/// condition through its own intent's tables on both sides, as lcms2 does
-/// without black-point compensation. It used to take moxcms's perceptual
-/// transform whatever the intent.
+/// condition through its own intent's tables on both sides, as lcms2 does;
+/// here without black-point compensation, which the tests below add. It
+/// used to take moxcms's perceptual transform whatever the intent.
 #[test]
 fn cmyk_sources_chain_through_the_output_intent_by_intent() {
     for (name, profiles, expected) in [
@@ -508,7 +516,7 @@ fn moxcms_fallback_chains_by_intent() {
 #[test]
 fn chain_defaults_and_images() {
     for (oi, source) in [(INKLIMIT, SPLIT), (SPLIT, SPLIT_XYZ)] {
-        let (cache, hash) = proofing(oi, source);
+        let (cache, hash) = proofing(oi, source, BpcMode::On);
         let relcol = IccRenderingIntent::RelativeColorimetric;
         let samples: Vec<u8> = reference::SAMPLES.iter().flatten().copied().collect();
         let n = reference::SAMPLES.len();
@@ -539,18 +547,6 @@ fn chain_defaults_and_images() {
     }
 }
 
-/// A PDF/X cache with black-point compensation `bpc`: `oi` is the output
-/// intent, and the Gray profile is registered after proofing is on.
-fn gray_proofing(oi: &[u8], bpc: BpcMode) -> (IccCache, [u8; 32]) {
-    let mut cache = IccCache::new_with_options(IccCacheOptions {
-        bpc_mode: bpc,
-        source_cmyk_profile: Some(oi.to_vec()),
-    });
-    cache.set_proofing_enabled(true);
-    let hash = cache.register_profile(GRAY_TRC).unwrap();
-    (cache, hash)
-}
-
 /// In a PDF/X document an ICCBased Gray colour converts into the output
 /// condition by its intent, with black-point compensation when `--bpc` is
 /// on, as lcms2 does with its flag; into an ICC v4 output intent lcms2
@@ -569,7 +565,7 @@ fn gray_sources_chain_with_compensation() {
         ("inklimit", INKLIMIT, &reference::GRAY_CHAIN_INKLIMIT, false),
     ] {
         for mode in [BpcMode::On, BpcMode::Off, BpcMode::Auto] {
-            let (cache, hash) = gray_proofing(oi, mode);
+            let (cache, hash) = proofing(oi, GRAY_TRC, mode);
             for intent in INTENTS {
                 let forced = v4 && intent != IccRenderingIntent::RelativeColorimetric;
                 let bpc = (mode.is_enabled() || forced) as usize;
@@ -607,7 +603,7 @@ fn gray_sources_chain_with_compensation() {
 /// colours do.
 #[test]
 fn gray_chain_defaults_and_images() {
-    let (cache, hash) = gray_proofing(SHADOW, BpcMode::On);
+    let (cache, hash) = proofing(SHADOW, GRAY_TRC, BpcMode::On);
     let relcol = IccRenderingIntent::RelativeColorimetric;
     let samples: Vec<u8> = (0..=255).step_by(17).map(|v| v as u8).collect();
     for intent in INTENTS {
@@ -633,5 +629,224 @@ fn gray_chain_defaults_and_images() {
         let at = |intent| cache.convert_color_readonly_with_intent(&hash, &[g], intent);
         assert_eq!(at(IccRenderingIntent::AbsoluteColorimetric), at(relcol));
         assert_eq!(cache.convert_color_readonly(&hash, &[g]), at(relcol));
+    }
+}
+
+/// lcms2's stage-1 ink for each sample, indexed `[intent][bpc]`.
+type Chain<const N: usize> = [[[[f64; 4]; N]; 2]; 3];
+
+/// A chain to check: name, output intent, source, whether the output
+/// intent is ICC v4, and lcms2's ink.
+type Case<'a, const N: usize> = (&'a str, &'a [u8], &'a [u8], bool, &'a Chain<N>);
+
+/// `--bpc` as lcms2's flag: on for `On` and `Auto`, and forced into an ICC
+/// v4 output intent under perceptual and saturation.
+fn compensated(mode: BpcMode, v4: bool, intent: IccRenderingIntent) -> usize {
+    let forced = v4 && intent != IccRenderingIntent::RelativeColorimetric;
+    (mode.is_enabled() || forced) as usize
+}
+
+/// In a PDF/X document an ICCBased RGB or CMYK colour converts into the
+/// output condition with black-point compensation when `--bpc` is on, as
+/// lcms2 does with its flag, and as Gray already did: what is shown, and
+/// the ink recorded for CMYK blending. They used to convert uncompensated
+/// whatever `--bpc` said.
+#[test]
+fn rgb_and_cmyk_sources_chain_with_compensation() {
+    let cmyk: [Case<16>; 3] = [
+        (
+            "split",
+            SHADOW,
+            SPLIT,
+            false,
+            &reference::CHAIN_BPC_SPLIT_SHADOW,
+        ),
+        (
+            "split_sat v4",
+            SHADOW_V4,
+            SPLIT_SAT,
+            true,
+            &reference::CHAIN_BPC_SPLIT_SAT_SHADOW_V4,
+        ),
+        (
+            "inklimit",
+            SHADOW,
+            INKLIMIT,
+            false,
+            &reference::CHAIN_BPC_INKLIMIT_SHADOW,
+        ),
+    ];
+    let rgb: [Case<15>; 5] = [
+        (
+            "rgb_gamma",
+            SHADOW,
+            RGB_GAMMA,
+            false,
+            &reference::CHAIN_BPC_RGB_GAMMA_SHADOW,
+        ),
+        (
+            "rgb_lut",
+            SHADOW,
+            RGB_LUT,
+            false,
+            &reference::CHAIN_BPC_RGB_LUT_SHADOW,
+        ),
+        (
+            "rgb_lut_v4",
+            SHADOW,
+            RGB_LUT_V4,
+            false,
+            &reference::CHAIN_BPC_RGB_LUT_V4_SHADOW,
+        ),
+        (
+            "srgb",
+            SHADOW,
+            SRGB,
+            false,
+            &reference::CHAIN_BPC_SRGB_SHADOW,
+        ),
+        (
+            "srgb v4",
+            SHADOW_V4,
+            SRGB,
+            true,
+            &reference::CHAIN_BPC_SRGB_SHADOW_V4,
+        ),
+    ];
+    let inputs_cmyk: Vec<Vec<f64>> = reference::SAMPLES
+        .iter()
+        .map(|s| ink(*s).to_vec())
+        .collect();
+    let inputs_rgb: Vec<Vec<f64>> = reference::RGB_SAMPLES
+        .iter()
+        .map(|s| s.map(|v| v as f64 / 255.0).to_vec())
+        .collect();
+    let cases = cmyk
+        .iter()
+        .map(|&(n, oi, src, v4, want)| {
+            (
+                n,
+                oi,
+                src,
+                v4,
+                &inputs_cmyk,
+                want.map(|i| i.map(|b| b.to_vec())),
+            )
+        })
+        .chain(rgb.iter().map(|&(n, oi, src, v4, want)| {
+            (
+                n,
+                oi,
+                src,
+                v4,
+                &inputs_rgb,
+                want.map(|i| i.map(|b| b.to_vec())),
+            )
+        }));
+    for (name, oi, source, v4, inputs, expected) in cases {
+        for mode in [BpcMode::On, BpcMode::Off, BpcMode::Auto] {
+            let (cache, hash) = proofing(oi, source, mode);
+            for intent in INTENTS {
+                let want = &expected[reference_row(intent)][compensated(mode, v4, intent)];
+                for (input, want) in inputs.iter().zip(want) {
+                    let got = to_u8(
+                        cache
+                            .convert_color_readonly_with_intent(&hash, input, intent)
+                            .unwrap(),
+                    );
+                    let shown_want = shown(&cache, *want);
+                    for ch in 0..3 {
+                        assert!(
+                            got[ch].abs_diff(shown_want[ch]) <= 1,
+                            "{name} {mode:?} {intent:?} {input:?}: chain {got:?}, lcms2's ink shown {shown_want:?}"
+                        );
+                    }
+                    // RGB records the stage-1 ink for CMYK blending.
+                    if input.len() == 3 {
+                        let ink = cache.convert_to_oi_cmyk(&hash, input, intent).unwrap();
+                        for (got, want) in ink.iter().zip(want) {
+                            assert!(
+                                (got - want).abs() < 1e-4,
+                                "{name} {mode:?} {intent:?} {input:?}: ink {ink:?}, lcms2 {want:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// An RGB image converts as its single colours do with compensation on,
+/// and compensation moves the chain, or the test above proves nothing.
+#[test]
+fn compensated_rgb_images_match_their_colours() {
+    let (cache, hash) = proofing(SHADOW, SRGB, BpcMode::On);
+    let samples: Vec<u8> = reference::RGB_SAMPLES.iter().flatten().copied().collect();
+    let n = reference::RGB_SAMPLES.len();
+    for intent in INTENTS {
+        let image = cache
+            .convert_image_8bit_with_intent(&hash, &samples, n, intent)
+            .unwrap();
+        for (rgb, px) in reference::RGB_SAMPLES.iter().zip(image.as_chunks::<3>().0) {
+            let input = rgb.map(|v| v as f64 / 255.0);
+            let single = to_u8(
+                cache
+                    .convert_color_readonly_with_intent(&hash, &input, intent)
+                    .unwrap(),
+            );
+            // The 8-bit chain rounds the intermediate ink to 8 bits.
+            for ch in 0..3 {
+                assert!(
+                    px[ch].abs_diff(single[ch]) <= 2,
+                    "{intent:?} {rgb:?}: image {px:?}, single colour {single:?}"
+                );
+            }
+        }
+    }
+    for row in &reference::CHAIN_BPC_SRGB_SHADOW {
+        assert_ne!(row[0], row[1]);
+    }
+    for row in &reference::CHAIN_BPC_SPLIT_SHADOW {
+        assert_ne!(row[0], row[1]);
+    }
+}
+
+/// A Lab colour's ink in the output intent, which CMYK blending uses, is
+/// lcms2's with its flag as `--bpc` sets it: from Lab's black, zero, to the
+/// output intent's.
+#[test]
+fn lab_ink_is_compensated_as_lcms() {
+    for (name, oi, v4, expected) in [
+        ("lab", SHADOW, false, &reference::CHAIN_BPC_LAB_SHADOW),
+        (
+            "lab v4",
+            SHADOW_V4,
+            true,
+            &reference::CHAIN_BPC_LAB_SHADOW_V4,
+        ),
+    ] {
+        for mode in [BpcMode::On, BpcMode::Off, BpcMode::Auto] {
+            let mut cache = IccCache::new_with_options(IccCacheOptions {
+                bpc_mode: mode,
+                source_cmyk_profile: Some(oi.to_vec()),
+            });
+            cache.set_proofing_enabled(true);
+            cache.prepare_lab_to_oi_cmyk();
+            for intent in INTENTS {
+                let want = &expected[reference_row(intent)][compensated(mode, v4, intent)];
+                for (lab, want) in reference::LAB_SAMPLES.iter().zip(want) {
+                    let got = cache
+                        .convert_lab_to_oi_cmyk(lab[0], lab[1], lab[2], intent)
+                        .unwrap();
+                    for (g, w) in got.iter().zip(want) {
+                        assert!(
+                            (g - w).abs() < 1e-4,
+                            "{name} {mode:?} {intent:?} {lab:?}: {got:?}, lcms2 {want:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

@@ -479,6 +479,17 @@ impl SourceA2BSampler {
     /// LUT-based profiles return their post-output-curve values, re-encoded
     /// from a `lut8Type` table's full scale; shaper-matrix profiles compute
     /// Lab via TRC + colorant matrix and re-encode to mft2.
+    /// The source's XYZ-D50 (white Y = 1) for RGB in `[0, 1]`, in `f64`:
+    /// what black-point compensation works on.
+    fn sample_xyz(&self, rgb: [f64; 3]) -> [f64; 3] {
+        match self {
+            SourceA2BSampler::Lut(lut) => {
+                lab_to_xyz_d50(LabEncoding::V2.decode(lut.rgb_to_pcs_lab(rgb)))
+            }
+            SourceA2BSampler::Shaper(sm) => sm.sample_xyz(rgb),
+        }
+    }
+
     fn sample_pcs_lab(&self, r: f32, g: f32, b: f32) -> [f32; 3] {
         match self {
             SourceA2BSampler::Lut(lut) => lut
@@ -515,7 +526,12 @@ struct ShaperMatrix {
 const PCS_XYZ_DENOM: f64 = 1.0 + 32767.0 / 32768.0;
 
 impl ShaperMatrix {
+    /// `None` unless the profile has all three colorants and tone curves,
+    /// as lcms2 requires of a matrix-shaper.
     fn new(profile: &ColorProfile) -> Option<Self> {
+        if !profile.is_matrix_shaper() {
+            return None;
+        }
         let red_trc = profile.red_trc.as_ref()?;
         let green_trc = profile.green_trc.as_ref()?;
         let blue_trc = profile.blue_trc.as_ref()?;
@@ -540,6 +556,19 @@ impl ShaperMatrix {
         })
     }
 
+    /// Absolute XYZ-D50 (white Y = 1) for RGB in `[0, 1]`, in `f64`.
+    fn sample_xyz(&self, rgb: [f64; 3]) -> [f64; 3] {
+        let lin = [
+            self.trc_r.eval(rgb[0]),
+            self.trc_g.eval(rgb[1]),
+            self.trc_b.eval(rgb[2]),
+        ];
+        let m = &self.matrix;
+        std::array::from_fn(|i| {
+            PCS_XYZ_DENOM * (m[i][0] * lin[0] + m[i][1] * lin[1] + m[i][2] * lin[2])
+        })
+    }
+
     fn sample_pcs_lab(&self, r: f32, g: f32, b: f32) -> [f32; 3] {
         let lin_r = self.trc_r.eval(f64::from(r));
         let lin_g = self.trc_g.eval(f64::from(g));
@@ -561,39 +590,48 @@ impl ShaperMatrix {
     }
 }
 
-/// OutputIntent CMYK profile B2A sampler (Lab → CMYK), owned variant.
+/// Lab of `rgb` (each `[0, 1]`) through the RGB profile `profile` as the
+/// chain stage 1 reads it for `intent`; `None` when it cannot.
+pub(super) fn rgb_to_lab(
+    profile: &ColorProfile,
+    intent: RenderingIntent,
+    rgb: [f64; 3],
+) -> Option<[f64; 3]> {
+    let source = SourceA2BSampler::new(profile, intent)?;
+    Some(xyz_d50_to_lab(source.sample_xyz(rgb)))
+}
+
+/// OutputIntent CMYK profile B2A sampler (Lab → CMYK), owned variant, with
+/// the black-point compensation lcms2 applies to a Lab source.
 pub struct LabToCmykSampler {
     lut: OwnedLutSampler,
+    bpc: Option<BpcParams>,
 }
 
 impl LabToCmykSampler {
-    pub(super) fn new(profile: &ColorProfile, intent: RenderingIntent) -> Option<Self> {
+    /// The output intent's B2A table for `intent` as lcms2 reads it (the
+    /// intent's, else `B2A0`; absolute colorimetric reads `B2A1`), with
+    /// `bpc` applied to the Lab that [`Self::sample_pdf_lab`] converts.
+    /// `None` when the profile is not CMYK with a Lab PCS, or the table is
+    /// missing or not a `lut16Type`.
+    pub(super) fn new(
+        profile: &ColorProfile,
+        intent: RenderingIntent,
+        bpc: Option<BpcParams>,
+    ) -> Option<Self> {
         if profile.color_space != DataColorSpace::Cmyk || profile.pcs != DataColorSpace::Lab {
             return None;
         }
-        // Pick the requested intent's B2A table; fall back to B2A0 and
-        // then to whichever is available. AbsoluteColorimetric uses the
-        // same B2A1 table as RelativeColorimetric.
-        let primary = match intent {
-            RenderingIntent::Perceptual => profile.lut_b_to_a_perceptual.as_ref(),
-            RenderingIntent::RelativeColorimetric | RenderingIntent::AbsoluteColorimetric => {
-                profile.lut_b_to_a_colorimetric.as_ref()
-            }
-            RenderingIntent::Saturation => profile.lut_b_to_a_saturation.as_ref(),
-        };
-        let warehouse = primary
-            .or(profile.lut_b_to_a_perceptual.as_ref())
-            .or(profile.lut_b_to_a_colorimetric.as_ref())
-            .or(profile.lut_b_to_a_saturation.as_ref())?;
+        let warehouse = lcms_table(
+            [
+                profile.lut_b_to_a_perceptual.as_ref(),
+                profile.lut_b_to_a_colorimetric.as_ref(),
+                profile.lut_b_to_a_saturation.as_ref(),
+            ],
+            intent,
+        )?;
         let lut = OwnedLutSampler::from_warehouse(warehouse, 3, 4)?;
-        Some(LabToCmykSampler { lut })
-    }
-
-    pub(super) fn build(
-        profile: &ColorProfile,
-        intent: RenderingIntent,
-    ) -> Option<LabToCmykSampler> {
-        Self::new(profile, intent)
+        Some(LabToCmykSampler { lut, bpc })
     }
 
     fn sample_pcs_lab(&self, pcs_lab: [f32; 3]) -> [f32; 4] {
@@ -607,7 +645,19 @@ impl LabToCmykSampler {
     /// holds the same direct Lab→OI value Acrobat's ACE produces (rather
     /// than stet's Lab→sRGB→ICC-reverse approximation, which drifts under
     /// CMYK-group blends — GWG 22.1's ColorBurn form).
+    ///
+    /// With black-point compensation the Lab goes to XYZ and back around
+    /// it, as lcms2 compensates: a Lab source's black is zero.
     pub fn sample_pdf_lab(&self, l_star: f64, a_star: f64, b_star: f64) -> [f64; 4] {
+        if let Some(p) = &self.bpc {
+            let lab = [
+                l_star.clamp(0.0, 100.0),
+                a_star.clamp(-128.0, 127.0),
+                b_star.clamp(-128.0, 127.0),
+            ];
+            let xyz = apply_bpc_xyz_d50(lab_to_xyz_d50(lab), p);
+            return self.lut.lab_to_ink(xyz_d50_to_lab(xyz));
+        }
         let l_norm = (l_star / 100.0).clamp(0.0, 1.0) as f32;
         let a_norm = ((a_star + 128.0) / 255.0).clamp(0.0, 1.0) as f32;
         let b_norm = ((b_star + 128.0) / 255.0).clamp(0.0, 1.0) as f32;
@@ -1017,12 +1067,14 @@ fn sample_curve_f32(table: &[f32], ch: usize, n_entries: usize, x: f32) -> f32 {
 pub(super) struct HandRolledChainStage1Rgb {
     src: SourceA2BSampler,
     oi: LabToCmykSampler,
+    bpc: Option<BpcParams>,
 }
 
 impl HandRolledChainStage1Rgb {
     /// Build the chain stage-1 sampler from the source RGB profile and
     /// the OutputIntent CMYK profile, picking the source's A2B table
-    /// and the OI's B2A table for the given rendering intent. Returns
+    /// and the OI's B2A table for the given rendering intent, with
+    /// black-point compensation `bpc` in XYZ between them. Returns
     /// `None` when either side has a table these evaluators cannot read
     /// (v4 `mAB`/`mBA`, an XYZ PCS, a `lut8Type` B2A) or the source has
     /// neither table nor matrix — the caller falls back to the
@@ -1031,17 +1083,25 @@ impl HandRolledChainStage1Rgb {
         source: &ColorProfile,
         output_intent: &ColorProfile,
         intent: RenderingIntent,
+        bpc: Option<BpcParams>,
     ) -> Option<Self> {
         if source.color_space != DataColorSpace::Rgb {
             return None;
         }
         let src = SourceA2BSampler::new(source, intent)?;
-        let oi = LabToCmykSampler::new(output_intent, intent)?;
-        Some(Self { src, oi })
+        let oi = LabToCmykSampler::new(output_intent, intent, None)?;
+        Some(Self { src, oi, bpc })
     }
 
+    /// Without compensation the source's encoded PCS Lab goes straight into
+    /// the B2A table; with it, through XYZ, where lcms2 compensates.
     #[inline]
     fn sample(&self, r: f32, g: f32, b: f32) -> [f32; 4] {
+        if let Some(p) = &self.bpc {
+            let xyz = self.src.sample_xyz([r, g, b].map(f64::from));
+            let lab = xyz_d50_to_lab(apply_bpc_xyz_d50(xyz, p));
+            return self.oi.lut.lab_to_ink(lab).map(|v| v as f32);
+        }
         let pcs = self.src.sample_pcs_lab(r, g, b);
         self.oi.sample_pcs_lab(pcs)
     }
@@ -1136,12 +1196,14 @@ pub(super) fn with_lcms_tables(profile: &ColorProfile) -> ColorProfile {
 }
 
 /// Source-CMYK → OutputIntent-CMYK chain stage 1 for one rendering intent,
-/// as lcms2 converts without black-point compensation: the source's A2B
-/// table for the intent to Lab, then the OutputIntent's B2A table for the
-/// intent, composed per pixel so no intermediate table quantises it.
+/// as lcms2 converts: the source's A2B table for the intent to Lab,
+/// black-point compensation in XYZ when it applies, then the OutputIntent's
+/// B2A table for the intent, composed per pixel so no intermediate table
+/// quantises it.
 pub(super) struct HandRolledChainStage1Cmyk {
     a2b: OwnedLutSampler,
     b2a: OwnedLutSampler,
+    bpc: Option<BpcParams>,
 }
 
 impl HandRolledChainStage1Cmyk {
@@ -1152,6 +1214,7 @@ impl HandRolledChainStage1Cmyk {
         source: &ColorProfile,
         output_intent: &ColorProfile,
         intent: RenderingIntent,
+        bpc: Option<BpcParams>,
     ) -> Option<Self> {
         let cmyk_lab = |p: &ColorProfile| {
             p.color_space == DataColorSpace::Cmyk && p.pcs == DataColorSpace::Lab
@@ -1178,12 +1241,18 @@ impl HandRolledChainStage1Cmyk {
         Some(Self {
             a2b: OwnedLutSampler::lcms_exact(a2b, 4, 3)?,
             b2a: OwnedLutSampler::lcms_exact(b2a, 3, 4)?,
+            bpc,
         })
     }
 
     /// Source ink (each `[0, 1]`) → OutputIntent ink.
     pub(super) fn sample(&self, ink: [f64; 4]) -> [f64; 4] {
-        self.b2a.lab_to_ink(self.a2b.ink_to_lab(ink))
+        let lab = self.a2b.ink_to_lab(ink);
+        let lab = match &self.bpc {
+            Some(p) => xyz_d50_to_lab(apply_bpc_xyz_d50(lab_to_xyz_d50(lab), p)),
+            None => lab,
+        };
+        self.b2a.lab_to_ink(lab)
     }
 }
 
@@ -1305,6 +1374,10 @@ mod tests {
     const SPLIT_XYZ: &[u8] = include_bytes!("../../tests/data/cmyk_intent/split_xyz.icc");
     const RGB_GAMMA: &[u8] = include_bytes!("../../tests/data/cmyk_intent/rgb_gamma.icc");
     const RGB_LUT: &[u8] = include_bytes!("../../tests/data/cmyk_intent/rgb_lut.icc");
+    const RGB_LUT_V4: &[u8] = include_bytes!("../../tests/data/cmyk_intent/rgb_lut_v4.icc");
+    const SRGB: &[u8] = include_bytes!("../../tests/data/cmyk_intent/srgb.icc");
+    const SHADOW: &[u8] = include_bytes!("../../tests/data/cmyk_intent/shadow.icc");
+    const SHADOW_V4: &[u8] = include_bytes!("../../tests/data/cmyk_intent/shadow_v4.icc");
 
     /// The two legs of lcms2's black-point round trip: `B2A0` and `A2B1`.
     fn legs(icc: &[u8]) -> (OwnedLutSampler, OwnedLutSampler) {
@@ -1432,7 +1505,7 @@ mod tests {
         assert!(OwnedLutSampler::from_warehouse(a2b1, 4, 3).is_none());
         assert!(OwnedLutSampler::from_warehouse(b2a0, 3, 4).is_none());
         assert!(!can_sample(&profile, a2b1));
-        assert!(LabToCmykSampler::new(&profile, RenderingIntent::Perceptual).is_none());
+        assert!(LabToCmykSampler::new(&profile, RenderingIntent::Perceptual, None).is_none());
         assert!(OwnedLutSampler::lcms_exact(a2b1, 4, 3).is_some());
         assert!(OwnedLutSampler::lcms_exact(b2a0, 3, 4).is_some());
     }
@@ -1467,7 +1540,7 @@ mod tests {
             let source = ColorProfile::new_from_slice(source).unwrap();
             let oi = ColorProfile::new_from_slice(oi).unwrap();
             for (intent, want) in INTENTS.into_iter().zip(want) {
-                let stage1 = HandRolledChainStage1Cmyk::new(&source, &oi, intent).unwrap();
+                let stage1 = HandRolledChainStage1Cmyk::new(&source, &oi, intent, None).unwrap();
                 for (cmyk, want) in reference::SAMPLES.iter().zip(want) {
                     let got = stage1.sample(cmyk.map(|v| f64::from(v) / 255.0));
                     assert_near(
@@ -1534,7 +1607,7 @@ mod tests {
         ] {
             let source = ColorProfile::new_from_slice(source).unwrap();
             for (intent, want) in INTENTS.into_iter().zip(want) {
-                let stage1 = HandRolledChainStage1Rgb::new(&source, &oi, intent).unwrap();
+                let stage1 = HandRolledChainStage1Rgb::new(&source, &oi, intent, None).unwrap();
                 for (rgb, want) in reference::RGB_SAMPLES.iter().zip(want) {
                     let [r, g, b] = rgb.map(|v| f64::from(v) / 255.0);
                     assert_near(
@@ -1548,14 +1621,130 @@ mod tests {
         }
     }
 
+    /// Stage 1 with black-point compensation, from each kind of source
+    /// into an output intent with a black to compensate to, is lcms2's with
+    /// its flag on and off. Into the ICC v4 output intent lcms2 compensates
+    /// perceptual and saturation either way.
+    #[test]
+    fn chain_stage1_compensates_as_lcms() {
+        use super::super::black_point::{chain_compensation, detect_rgb, detect_xyz};
+        type Chain<const N: usize> = [[[[f64; 4]; N]; 2]; 3];
+        let compensation = |source_black, oi: &[u8], intent, bpc: usize| {
+            let profile = ColorProfile::new_from_slice(oi).unwrap();
+            chain_compensation(source_black, &profile, oi, intent, bpc == 1)
+        };
+        let cmyk: [(&str, &[u8], &[u8], &Chain<16>); 3] = [
+            ("split", SPLIT, SHADOW, &reference::CHAIN_BPC_SPLIT_SHADOW),
+            (
+                "split_sat v4",
+                SPLIT_SAT,
+                SHADOW_V4,
+                &reference::CHAIN_BPC_SPLIT_SAT_SHADOW_V4,
+            ),
+            (
+                "inklimit",
+                INKLIMIT,
+                SHADOW,
+                &reference::CHAIN_BPC_INKLIMIT_SHADOW,
+            ),
+        ];
+        for (name, source_icc, oi_icc, want) in cmyk {
+            let source = ColorProfile::new_from_slice(source_icc).unwrap();
+            let oi = ColorProfile::new_from_slice(oi_icc).unwrap();
+            for (i, intent) in INTENTS.into_iter().enumerate() {
+                for (bpc, want) in want[i].iter().enumerate() {
+                    let black = detect_xyz(&source, source_icc, intent);
+                    let p = compensation(black, oi_icc, intent, bpc);
+                    let stage1 = HandRolledChainStage1Cmyk::new(&source, &oi, intent, p).unwrap();
+                    for (cmyk, want) in reference::SAMPLES.iter().zip(want) {
+                        assert_near(
+                            &format!("{name} {intent:?} bpc {bpc} at {cmyk:?}"),
+                            stage1.sample(cmyk.map(|v| f64::from(v) / 255.0)),
+                            *want,
+                            INK_TOLERANCE,
+                        );
+                    }
+                }
+            }
+        }
+        let rgb: [(&str, &[u8], &[u8], &Chain<15>); 5] = [
+            (
+                "rgb_gamma",
+                RGB_GAMMA,
+                SHADOW,
+                &reference::CHAIN_BPC_RGB_GAMMA_SHADOW,
+            ),
+            (
+                "rgb_lut",
+                RGB_LUT,
+                SHADOW,
+                &reference::CHAIN_BPC_RGB_LUT_SHADOW,
+            ),
+            (
+                "rgb_lut_v4",
+                RGB_LUT_V4,
+                SHADOW,
+                &reference::CHAIN_BPC_RGB_LUT_V4_SHADOW,
+            ),
+            ("srgb", SRGB, SHADOW, &reference::CHAIN_BPC_SRGB_SHADOW),
+            (
+                "srgb v4",
+                SRGB,
+                SHADOW_V4,
+                &reference::CHAIN_BPC_SRGB_SHADOW_V4,
+            ),
+        ];
+        for (name, source_icc, oi_icc, want) in rgb {
+            let source = ColorProfile::new_from_slice(source_icc).unwrap();
+            let oi = ColorProfile::new_from_slice(oi_icc).unwrap();
+            for (i, intent) in INTENTS.into_iter().enumerate() {
+                for (bpc, want) in want[i].iter().enumerate() {
+                    let black = detect_rgb(&source, source_icc, intent);
+                    let p = compensation(black, oi_icc, intent, bpc);
+                    let stage1 = HandRolledChainStage1Rgb::new(&source, &oi, intent, p).unwrap();
+                    for (rgb, want) in reference::RGB_SAMPLES.iter().zip(want) {
+                        let [r, g, b] = rgb.map(|v| f64::from(v) / 255.0);
+                        assert_near(
+                            &format!("{name} {intent:?} bpc {bpc} at {rgb:?}"),
+                            stage1.sample_cmyk_f64(r, g, b),
+                            *want,
+                            INK_TOLERANCE,
+                        );
+                    }
+                }
+            }
+        }
+        let lab: [(&str, &[u8], &Chain<6>); 2] = [
+            ("lab", SHADOW, &reference::CHAIN_BPC_LAB_SHADOW),
+            ("lab v4", SHADOW_V4, &reference::CHAIN_BPC_LAB_SHADOW_V4),
+        ];
+        for (name, oi_icc, want) in lab {
+            let oi = ColorProfile::new_from_slice(oi_icc).unwrap();
+            for (i, intent) in INTENTS.into_iter().enumerate() {
+                for (bpc, want) in want[i].iter().enumerate() {
+                    let p = compensation(None, oi_icc, intent, bpc);
+                    let sampler = LabToCmykSampler::new(&oi, intent, p).unwrap();
+                    for (lab, want) in reference::LAB_SAMPLES.iter().zip(want) {
+                        assert_near(
+                            &format!("{name} {intent:?} bpc {bpc} at {lab:?}"),
+                            sampler.sample_pdf_lab(lab[0], lab[1], lab[2]),
+                            *want,
+                            INK_TOLERANCE,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// A source with an XYZ PCS is left to moxcms.
     #[test]
     fn cmyk_chain_stage1_needs_lab_tables() {
         let source = ColorProfile::new_from_slice(SPLIT_XYZ).unwrap();
         let oi = ColorProfile::new_from_slice(INKLIMIT).unwrap();
         for intent in INTENTS {
-            assert!(HandRolledChainStage1Cmyk::new(&source, &oi, intent).is_none());
-            assert!(HandRolledChainStage1Cmyk::new(&oi, &source, intent).is_none());
+            assert!(HandRolledChainStage1Cmyk::new(&source, &oi, intent, None).is_none());
+            assert!(HandRolledChainStage1Cmyk::new(&oi, &source, intent, None).is_none());
         }
     }
 }

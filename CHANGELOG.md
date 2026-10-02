@@ -157,6 +157,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the intent's tag, else `A2B0`, else the tone curves and matrix (rather
   than any table the profile has), and it is interpolated tetrahedrally
   rather than trilinearly. ICC v2 `lut8Type` tables are read too.
+- **`--bpc` now reaches ICCBased RGB and CMYK colours, and Lab, in a PDF/X
+  document.** Converting them into the output intent ignored black-point
+  compensation, so `--bpc on`, the default, meant one thing for Gray and
+  another for everything else. Ghostscript and Acrobat both compensate
+  this conversion by default. It now compensates as lcms2 does: from the
+  source's black, as lcms2 detects it, to the output intent's.
+  - **Relative colorimetric RGB gets lighter, more open shadows:** about 6
+    sRGB levels on average and up to 40, compressed into the press's
+    range instead of clipped at its ink limit. This is the default intent,
+    so it covers most PDF/X files made from RGB artwork. Tagged CMYK moves
+    by 1.6–9 levels on average.
+  - **Perceptual barely moves:** into an ICC v2 output intent lcms2 drops
+    a compensation that small. Into an ICC v4 output intent it compensates
+    perceptual and saturation whatever the flag, and so does stet.
+  - **The Ghent Workgroup's X marks fade:** GWG 17.2's, which showed at 6
+    levels, is gone, and GWG 16.1's are fainter. Every region the change
+    moves comes closer to Ghostscript's output.
+  - **What moves:** what is shown, the ink recorded for CMYK blending, and
+    a Lab colour's ink (only its ink: Lab is shown without the output
+    intent).
+  - **Gray:** it now also skips a compensation too small for lcms2 to
+    apply.
+  - **Not compensated:** a profile stet cannot read itself (ICC v4 `mAB`),
+    which still goes through moxcms.
+  - **`--bpc off`** keeps the previous output.
 - **Relative colorimetric CMYK rendered lighter than Ghostscript and
   Acrobat** with black-point compensation on, the default. Compensation
   maps the profile's black to sRGB black, and stet took that black to be
