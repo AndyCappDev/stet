@@ -508,12 +508,20 @@ fn eval_one(ctx: &mut Context, obj: PsObject) -> Result<(), PsError> {
                     ctx.files.advance_position(file_entity, consumed);
                     if consumed < remaining.len() {
                         ctx.e_stack.push(obj)?;
+                    } else {
+                        // The last token: executing the file has met its
+                        // end, which closes it (PLRM 3e `file`) and frees
+                        // its bytes — `remaining` is not used again.
+                        ctx.files.close_at_eof(file_entity);
                     }
                     if auto_exec {
                         ctx.e_stack.push(tok_obj)?;
                     } else {
                         dispatch_scanned_token(ctx, tok_obj, is_immediate)?;
                     }
+                } else {
+                    // Only whitespace and comments were left.
+                    ctx.files.close_at_eof(file_entity);
                 }
             } else if ctx.files.is_readable(file_entity) {
                 // Streaming path: filter/real files — byte-at-a-time tokenization.
@@ -544,6 +552,8 @@ fn eval_one(ctx: &mut Context, obj: PsObject) -> Result<(), PsError> {
                     } else {
                         dispatch_scanned_token(ctx, tok_obj, is_immediate)?;
                     }
+                } else {
+                    ctx.files.close_at_eof(file_entity);
                 }
             }
         }
@@ -693,7 +703,11 @@ fn stream_parse_procedure_at(
     loop {
         ctx.pump_proc_sources(file_entity)?;
         match stream_next_token(&mut ctx.files, file_entity)? {
-            None => return Err(PsError::SyntaxError), // unterminated
+            None => {
+                // Unterminated: the file has met its end, which closes it.
+                ctx.files.close_at_eof(file_entity);
+                return Err(PsError::SyntaxError);
+            }
             Some((Token::ProcEnd, _)) => break,
             Some((Token::ProcBegin, _)) => {
                 let nested = stream_parse_procedure_at(ctx, file_entity, depth + 1)?;

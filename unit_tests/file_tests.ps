@@ -240,6 +240,11 @@ myfile 16 setfileposition
 myfile 1 string readstring
 [() false] assert  % Should get EOF
 
+% Meeting end of file closed it (PLRM 3e `file`), read-write or not, as in
+% Ghostscript; reopen it to write.
+myfile /status [false] assert
+(postest.txt) (r+) file /myfile exch def
+
 % Test writing after setfileposition
 myfile 10 setfileposition
 myfile (XYZ) writestring

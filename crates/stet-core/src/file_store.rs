@@ -174,6 +174,10 @@ pub struct FilterState {
     pub eof: bool,
     /// Total bytes consumed by the caller (for fileposition).
     pub bytes_read: u64,
+    /// Whether `source` belongs to this filter: a string source stet made
+    /// for a string or procedure data source, which nothing else can reach.
+    /// Closing the filter closes it too.
+    pub owns_source: bool,
 }
 
 /// The underlying handle for a file.
@@ -425,6 +429,7 @@ impl FileStore {
                 putback: Vec::new(),
                 eof: false,
                 bytes_read: 0,
+                owns_source: false,
             })),
             name: "%filter".to_string(),
             mode: "r".to_string(),
@@ -451,6 +456,7 @@ impl FileStore {
                 putback: Vec::new(),
                 eof: false,
                 bytes_read: 0,
+                owns_source: false,
             })),
             name: "%filter".to_string(),
             mode: "r".to_string(),
@@ -472,6 +478,7 @@ impl FileStore {
                 putback: Vec::new(),
                 eof: false,
                 bytes_read: 0,
+                owns_source: false,
             })),
             name: "%filter".to_string(),
             mode: "w".to_string(),
@@ -639,18 +646,47 @@ impl FileStore {
         }
 
         let entry = &mut self.files[entity.0 as usize];
-        match entry.handle {
+        match &entry.handle {
             FileHandle::Stdin | FileHandle::Stdout | FileHandle::Stderr => Ok(()),
             FileHandle::Closed => Ok(()),
-            FileHandle::Filter(_) => {
-                // Close the filter but NOT its underlying source.
+            FileHandle::Filter(state) => {
+                // Close the filter, and its source only if the filter owns it.
+                let owned_source = state.owns_source.then_some(state.source);
                 entry.handle = FileHandle::Closed;
+                match owned_source {
+                    Some(source) => self.close(source),
+                    None => Ok(()),
+                }
+            }
+            FileHandle::PendingProc { .. } => {
+                self.close_pending_proc(entity);
                 Ok(())
             }
             _ => {
                 entry.handle = FileHandle::Closed;
                 Ok(())
             }
+        }
+    }
+
+    /// Close a file that reading has taken to its end, as PLRM 3e `file`
+    /// says encountering end-of-file does — whether an operator such as
+    /// `read` or the interpreter executing the file met it.
+    ///
+    /// Only an input file is closed; the standard files never are. Closing is
+    /// what releases what the file holds: a string source's bytes, a filter's
+    /// buffers, a real file's descriptor.
+    pub fn close_at_eof(&mut self, entity: EntityId) {
+        if self.files[entity.0 as usize].mode.starts_with('r') {
+            let _ = self.close(entity);
+        }
+    }
+
+    /// Make `filter` the owner of its source, so closing it closes the
+    /// source too (see [`FilterState::owns_source`]).
+    pub fn set_owns_source(&mut self, filter: EntityId) {
+        if let FileHandle::Filter(state) = &mut self.files[filter.0 as usize].handle {
+            state.owns_source = true;
         }
     }
 
@@ -774,7 +810,10 @@ impl FileStore {
                 }
                 Ok(count)
             }
-            FileHandle::Closed => Err(io::Error::other("file closed")),
+            // As `read_byte`: reading a closed file meets end of file, so
+            // `readstring` on a file already read to its end answers
+            // `() false` rather than `ioerror`, as Ghostscript does.
+            FileHandle::Closed => Ok(0),
             _ => Err(io::Error::other("not readable")),
         }
     }

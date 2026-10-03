@@ -113,6 +113,9 @@ pub fn op_filter(ctx: &mut Context) -> Result<(), PsError> {
         early_change,
         dict_entity,
     )?;
+    if owns_source(&source_obj) {
+        ctx.files.set_owns_source(filter_entity);
+    }
 
     // Push the filter file object
     let file_obj = PsObject {
@@ -179,6 +182,9 @@ fn create_subfile_filter(ctx: &mut Context) -> Result<(), PsError> {
             bytes_remaining,
         ),
     );
+    if owns_source(&source_obj) {
+        ctx.files.set_owns_source(filter_entity);
+    }
 
     ctx.o_stack.push(PsObject {
         value: PsValue::File(filter_entity),
@@ -237,6 +243,10 @@ fn create_reusable_stream(ctx: &mut Context) -> Result<(), PsError> {
         data.extend_from_slice(&buf[..n]);
     }
 
+    // Read to its end, which closes the source (PLRM 3e `file`), as
+    // Ghostscript does.
+    ctx.files.close_at_eof(source_entity);
+
     let entity = ctx.files.create_string_source(data);
     ctx.o_stack.push(PsObject {
         value: PsValue::File(entity),
@@ -249,6 +259,13 @@ fn create_reusable_stream(ctx: &mut Context) -> Result<(), PsError> {
 /// source may be a file, a string, or a procedure.
 fn is_valid_source(obj: &PsObject) -> bool {
     matches!(obj.value, PsValue::File(_) | PsValue::String { .. }) || is_procedure(obj)
+}
+
+/// Whether the filter made over `source` owns the file `resolve_source` gives
+/// it: a string or procedure source becomes a string source nothing else can
+/// reach, and closes with its filter.
+fn owns_source(source: &PsObject) -> bool {
+    !matches!(source.value, PsValue::File(_))
 }
 
 /// Resolve a data source object to a `FileStore` `EntityId`.

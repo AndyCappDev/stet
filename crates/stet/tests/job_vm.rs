@@ -89,3 +89,36 @@ fn an_eps_leaves_nothing() {
     }
     assert_eq!(vm(&mut interp), before);
 }
+
+/// Every file a job reads to its end is closed, as PLRM 3e `file` has it,
+/// which is what releases it: the job's own source, which the library copies
+/// into memory, among them. Nothing closed a file but `closefile`, so each
+/// call kept a copy of its job for the life of the `Interpreter`.
+#[test]
+fn a_job_leaves_no_file_open() {
+    use stet_core::object::EntityId;
+    let jobs = [
+        "%!PS\n0 0 10 10 rectfill showpage\n",
+        "%!PS\n(616263>) /ASCIIHexDecode filter 10 string readstring pop pop\n",
+        "%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 50 50\n0 0 10 10 rectfill\n",
+    ];
+    let open = |interp: &mut Interpreter| -> Vec<u32> {
+        let files = &interp.context().files;
+        // 0, 1 and 2 are %stdin, %stdout and %stderr.
+        (3..files.len() as u32)
+            .filter(|&i| files.is_open(EntityId::local(i)))
+            .collect()
+    };
+    let mut interp = Interpreter::new();
+    for job in jobs {
+        interp.exec(job.as_bytes()).unwrap();
+        assert_eq!(open(&mut interp), [0u32; 0], "exec {job:?}");
+        interp.render_to_display_list(job.as_bytes(), 72.0).unwrap();
+        assert_eq!(open(&mut interp), [0u32; 0], "render {job:?}");
+        #[cfg(feature = "pdf-output")]
+        {
+            interp.render_to_pdf(job.as_bytes(), 72.0).unwrap();
+            assert_eq!(open(&mut interp), [0u32; 0], "pdf {job:?}");
+        }
+    }
+}

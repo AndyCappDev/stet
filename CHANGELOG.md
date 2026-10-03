@@ -458,6 +458,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the count from before the page, since the count lived in the page device
   dictionary the `restore` reinstated. It is now the device's count, as in
   Ghostscript.
+- **A file is closed when reading or executing it reaches its end**, as
+  PLRM 3e `file` says and Ghostscript does. Only `closefile` closed one, so
+  a file kept what it held for the life of the process: every job the
+  library ran, which it copies into memory (an 864 KB job rendered 50 times
+  kept 43 MB), every file `run` reads in whole, every font file loaded from
+  disk, and the descriptor of every file read to the end. `read`,
+  `readstring`, `readhexstring`, `readline`, `token` and executing a file
+  now close it at end of file, and `status` then answers false — so
+  `setfileposition` on a file read to its end is an `ioerror`, as in
+  Ghostscript. A filter that reads its source to the end leaves the source
+  open, as Ghostscript does, except ReusableStreamDecode, which reads it
+  eagerly and closes it. `readstring` on a closed file answers `() false`
+  rather than `ioerror`, like `read`.
 - **PDF output is reproducible.** The same job gives the same PDF, apart
   from its `/CreationDate`: a page's `/Font` resources were listed in an
   order that changed from run to run, and are now in their own order (`F0`,

@@ -186,3 +186,47 @@ currentfile line type /integertype eq [true] assert
 
 %% line - value is positive %%
 currentfile line 0 gt [true] assert
+
+
+%% =============================================================================
+%% end of file closes the file (PLRM 3e `file`: "closed ... implicitly (by
+%% encountering end-of-file while reading or executing the file)").
+%% Expected values are Ghostscript 10.05's.
+%% =============================================================================
+
+(ft_eof_test.txt) (w) file dup (abc) writestring closefile
+(ft_eof_test.ps) (w) file dup (1 2 add pop\n) writestring closefile
+(ft_eof_hex.txt) (w) file dup (616263) writestring closefile
+(ft_eof_lines.txt) (w) file dup (ab\ncd) writestring closefile
+
+%% eof - each read path closes the file it reads %%
+{(ft_eof_test.txt) (r) file dup 10 string readstring pop pop status} [false] assert
+{(ft_eof_test.txt) (r) file 3 {dup read pop pop} repeat dup read exch status} [false false] assert
+{(ft_eof_test.txt) (r) file dup 10 string readline pop pop status} [false] assert
+{(ft_eof_hex.txt) (r) file dup 10 string readhexstring pop pop status} [false] assert
+{(ft_eof_test.ps) (r) file {dup token {pop} {exit} ifelse} loop status} [false] assert
+{(ft_eof_test.ps) (r) file dup cvx exec status} [false] assert
+{(616263>) /ASCIIHexDecode filter dup 10 string readstring pop pop status} [false] assert
+
+%% eof - a read that stops short of the end leaves the file open %%
+{(ft_eof_test.txt) (r) file dup 3 string readstring pop pop status} [true] assert
+{(ft_eof_lines.txt) (r) file dup 10 string readline pop pop status} [true] assert
+
+%% eof - a filter reading its source to the end leaves the source open %%
+{(ft_eof_hex.txt) (r) file dup /ASCIIHexDecode filter 10 string readstring pop pop status} [true] assert
+
+%% eof - ReusableStreamDecode reads its source to the end, closing it %%
+{(ft_eof_hex.txt) (r) file dup /ReusableStreamDecode filter pop status} [false] assert
+
+%% eof - reading again after the end answers end of file, not ioerror %%
+{(ft_eof_test.txt) (r) file dup 10 string readstring pop pop 10 string readstring exch length} [false 0] assert
+{(ft_eof_test.txt) (r) file dup 10 string readstring pop pop dup read exch bytesavailable} [false -1] assert
+{(ft_eof_test.txt) (r) file dup closefile 10 string readstring exch length} [false 0] assert
+
+%% eof - the standard files stay open %%
+{(%stdin) (r) file status} [true] assert
+
+(ft_eof_test.txt) deletefile
+(ft_eof_test.ps) deletefile
+(ft_eof_hex.txt) deletefile
+(ft_eof_lines.txt) deletefile

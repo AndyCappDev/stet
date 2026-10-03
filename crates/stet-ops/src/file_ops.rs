@@ -219,6 +219,7 @@ pub fn op_read(ctx: &mut Context) -> Result<(), PsError> {
             ctx.o_stack.push(PsObject::bool(true))?;
         }
         None => {
+            ctx.files.close_at_eof(entity);
             ctx.o_stack.push(PsObject::bool(false))?;
         }
     }
@@ -301,6 +302,9 @@ pub fn op_readstring(ctx: &mut Context) -> Result<(), PsError> {
 
     // Return substring with original string's flags (preserves global bit)
     let got_all = n == str_len as usize;
+    if !got_all {
+        ctx.files.close_at_eof(file_entity);
+    }
     ctx.o_stack.push(PsObject {
         value: PsValue::String {
             entity: str_entity,
@@ -376,6 +380,10 @@ pub fn op_readline(ctx: &mut Context) -> Result<(), PsError> {
         .files
         .readline(file_entity, &mut temp)
         .map_err(|_| PsError::IOError)?;
+    // No newline and room to spare: the line ended at end of file.
+    if !got_line && n < str_len as usize {
+        ctx.files.close_at_eof(file_entity);
+    }
 
     ctx.cow_check_string(str_entity);
     let dest = ctx.strings.get_mut(str_entity, str_start, str_len);
@@ -461,6 +469,9 @@ pub fn op_readhexstring(ctx: &mut Context) -> Result<(), PsError> {
     dest[..n].copy_from_slice(&result);
 
     let got_all = n == str_len as usize && !eof;
+    if eof {
+        ctx.files.close_at_eof(file_entity);
+    }
     ctx.o_stack.push(PsObject {
         value: PsValue::String {
             entity: str_entity,
@@ -901,6 +912,7 @@ fn token_from_file(ctx: &mut Context, file_entity: EntityId) -> Result<(), PsErr
             ctx.o_stack.push(PsObject::bool(true))?;
         }
         None => {
+            ctx.files.close_at_eof(file_entity);
             ctx.o_stack.push(PsObject::bool(false))?;
         }
     }
@@ -1051,12 +1063,16 @@ pub fn op_eexec(ctx: &mut Context) -> Result<(), PsError> {
         }
         _ => return Err(PsError::TypeCheck),
     };
+    let owns_source = !matches!(obj.value, PsValue::File(_));
 
     // Create an EexecDecode filter wrapping the source.
     let filter_entity = ctx.files.create_filter(
         source_entity,
         stet_core::file_store::FilterKind::eexec_decode(),
     );
+    if owns_source {
+        ctx.files.set_owns_source(filter_entity);
+    }
 
     // Push systemdict on d_stack (PLRM: eexec pushes systemdict)
     let sd = *ctx.d_stack.first().unwrap_or(&ctx.systemdict);
