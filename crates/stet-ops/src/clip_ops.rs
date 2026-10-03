@@ -118,43 +118,53 @@ pub fn op_clippath(ctx: &mut Context) -> Result<(), PsError> {
             ctx.gstate.current_point = Some(pt);
         }
     } else {
-        // Default clip is full page — read dimensions from page_device or fallback
-        let (w, h) = if ctx.gstate.page_device.is_some() {
-            if crate::device_ops::is_null_device(ctx) {
-                // Null device: degenerate clip
-                ctx.gstate.path.clear();
-                ctx.gstate.path.segments.push(PathSegment::MoveTo(0.0, 0.0));
-                ctx.gstate.current_point = Some((0.0, 0.0));
-                return Ok(());
-            }
-            crate::device_ops::get_pd_f64_pair(ctx, b"PageSize")
-                .unwrap_or((ctx.page_width as f64, ctx.page_height as f64))
-        } else {
-            (ctx.page_width as f64, ctx.page_height as f64)
+        // A closed rectangle, or the null device's point: either way the
+        // current point is where it starts.
+        ctx.gstate.path = page_clip_path(ctx);
+        ctx.gstate.current_point = match ctx.gstate.path.segments.first() {
+            Some(PathSegment::MoveTo(x, y)) => Some((*x, *y)),
+            _ => None,
         };
-
-        // PageSize is in default user space, so map it with the *default*
-        // CTM. The default clip is the page itself: a fixed region of the
-        // device that does not move when the program transforms its own
-        // coordinate system. Using the current CTM here made `translate`
-        // shift the clip rectangle, so `clippath fill` — the standard idiom
-        // for painting a background — filled an offset region instead of the
-        // page. `pathbbox` and `fill` map this back through the current CTM,
-        // which is what puts the result in user space for the caller.
-        let ctm = &ctx.gstate.default_ctm;
-        let (dx0, dy0) = ctm.transform_point(0.0, 0.0);
-        let (dx1, dy1) = ctm.transform_point(w, 0.0);
-        let (dx2, dy2) = ctm.transform_point(w, h);
-        let (dx3, dy3) = ctm.transform_point(0.0, h);
-        ctx.gstate.path.clear();
-        ctx.gstate.path.segments.push(PathSegment::MoveTo(dx0, dy0));
-        ctx.gstate.path.segments.push(PathSegment::LineTo(dx1, dy1));
-        ctx.gstate.path.segments.push(PathSegment::LineTo(dx2, dy2));
-        ctx.gstate.path.segments.push(PathSegment::LineTo(dx3, dy3));
-        ctx.gstate.path.segments.push(PathSegment::ClosePath);
-        ctx.gstate.current_point = Some((dx0, dy0));
     }
     Ok(())
+}
+
+/// The default clip — the page — as a device-space path: what the clip is
+/// when `clip_path` is `None`, as after `initclip`. A null device's is a
+/// single point at the origin.
+pub(crate) fn page_clip_path(ctx: &Context) -> PsPath {
+    let mut path = PsPath::new();
+    // Default clip is full page — read dimensions from page_device or fallback
+    let (w, h) = if ctx.gstate.page_device.is_some() {
+        if crate::device_ops::is_null_device(ctx) {
+            path.segments.push(PathSegment::MoveTo(0.0, 0.0));
+            return path;
+        }
+        crate::device_ops::get_pd_f64_pair(ctx, b"PageSize")
+            .unwrap_or((ctx.page_width as f64, ctx.page_height as f64))
+    } else {
+        (ctx.page_width as f64, ctx.page_height as f64)
+    };
+
+    // PageSize is in default user space, so map it with the *default*
+    // CTM. The default clip is the page itself: a fixed region of the
+    // device that does not move when the program transforms its own
+    // coordinate system. Using the current CTM here made `translate`
+    // shift the clip rectangle, so `clippath fill` — the standard idiom
+    // for painting a background — filled an offset region instead of the
+    // page. `pathbbox` and `fill` map this back through the current CTM,
+    // which is what puts the result in user space for the caller.
+    let ctm = &ctx.gstate.default_ctm;
+    let (dx0, dy0) = ctm.transform_point(0.0, 0.0);
+    let (dx1, dy1) = ctm.transform_point(w, 0.0);
+    let (dx2, dy2) = ctm.transform_point(w, h);
+    let (dx3, dy3) = ctm.transform_point(0.0, h);
+    path.segments.push(PathSegment::MoveTo(dx0, dy0));
+    path.segments.push(PathSegment::LineTo(dx1, dy1));
+    path.segments.push(PathSegment::LineTo(dx2, dy2));
+    path.segments.push(PathSegment::LineTo(dx3, dy3));
+    path.segments.push(PathSegment::ClosePath);
+    path
 }
 
 /// `initclip`: — → — (reset clip to page boundary)

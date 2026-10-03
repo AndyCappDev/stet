@@ -258,44 +258,18 @@ fn user_bbox_to_device(ctx: &Context, dict: EntityId) -> Result<Option<[f64; 4]>
     Ok(Some([xmin, ymin, xmax, ymax]))
 }
 
-/// Default group bbox when the dict supplies none. We use the active
-/// device clip path's bbox if there is one; otherwise the page bbox.
-/// Both are already in device space (paths are stored device-space per
-/// stet's convention).
+/// Default group bbox when the dict supplies none: the bbox of the clip,
+/// which is the page when no clip is set. Both are device space.
 fn default_device_bbox(ctx: &Context) -> [f64; 4] {
-    if let Some(clip) = ctx.gstate.clip_path.as_ref() {
-        let mut xmin = f64::INFINITY;
-        let mut ymin = f64::INFINITY;
-        let mut xmax = f64::NEG_INFINITY;
-        let mut ymax = f64::NEG_INFINITY;
-        let mut saw = false;
-        for seg in &clip.segments {
-            use stet_fonts::geometry::PathSegment::*;
-            let pts: &[(f64, f64)] = match seg {
-                MoveTo(x, y) | LineTo(x, y) => &[(*x, *y)][..],
-                CurveTo {
-                    x1,
-                    y1,
-                    x2,
-                    y2,
-                    x3,
-                    y3,
-                } => &[(*x1, *y1), (*x2, *y2), (*x3, *y3)][..],
-                ClosePath => &[][..],
-            };
-            for (x, y) in pts {
-                xmin = xmin.min(*x);
-                ymin = ymin.min(*y);
-                xmax = xmax.max(*x);
-                ymax = ymax.max(*y);
-                saw = true;
-            }
+    let page;
+    let clip = match ctx.gstate.clip_path.as_ref() {
+        Some(clip) => clip,
+        None => {
+            page = crate::clip_ops::page_clip_path(ctx);
+            &page
         }
-        if saw {
-            return [xmin, ymin, xmax, ymax];
-        }
-    }
-    [0.0, 0.0, ctx.page_width as f64, ctx.page_height as f64]
+    };
+    path_device_bbox(clip).unwrap_or([0.0; 4])
 }
 
 /// `begintransparencygroup`: dict → —

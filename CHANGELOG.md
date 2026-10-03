@@ -501,6 +501,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   they were computed from a copy that had drifted from it for re-encoded
   Type 1 instances, Type 42 codes without a glyph, and CIDFontType 2 fonts
   rebuilt from `GlyphDirectory`, where a kern could move the text after it.
+- **A transparency group without a `/BBox` is bounded by the page.**
+  `begintransparencygroup` with no `/BBox`, and no clip set, took the page
+  size in points as its device-space bounds, so above 72 dpi the group drew
+  only in the device's top-left corner — at 300 dpi, the first 24% of the
+  page across and down — in every output. It now takes the page as
+  `clippath` does.
 - **PostScript → PDF no longer crashes on fonts a `restore` reclaimed**
   (`--device pdf` and `Interpreter::render_to_pdf`). PDF output builds the
   document at the end of the job and read each font out of the
