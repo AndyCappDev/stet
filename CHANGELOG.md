@@ -395,6 +395,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   used to carry onto the next page.
 - **`--device pdf` no longer leaves an integer on the operand stack at
   every page.** Its `EndPage` consumed the reason code but not the count.
+- **Erasing the page paints gray 1 through the transfer function**, as the
+  PLRM defines `erasepage` and Ghostscript does: under an inverting
+  function the page is erased to black. That covers `erasepage` and the
+  erase `showpage` and `copypage` perform, so a job that sets an inverting
+  function once (film negatives) gets black paper from page 2 on, as in
+  Ghostscript; page 1 was erased before the function was set.
+  `setpagedevice` reinitializes the transfer function before it erases, so
+  its erase stays white. Pages whose transfer function leaves white white
+  are unchanged.
 - **An EPS that calls `showpage` renders as one page** on the command line
   and in the library's PDF output. Both added a `showpage` of their own
   regardless, writing a blank second page (the `ps_samples` files

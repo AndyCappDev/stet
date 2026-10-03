@@ -341,6 +341,9 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
         device.erase_page();
     }
     ctx.display_list.clear();
+    // Erased with the graphics state just reinitialized, transfer function
+    // included (PLRM `setpagedevice`), so it is white.
+    ctx.page_erase_fill = None;
 
     // Push Install and BeginPage procs on e_stack for execution.
     // e_stack is LIFO: last pushed runs first.
@@ -511,6 +514,7 @@ pub fn op_copypage(ctx: &mut Context) -> Result<(), PsError> {
 /// page, then erase it.
 pub(crate) fn transmit_page_without_end_page(ctx: &mut Context) {
     ctx.showpage_count += 1;
+    lay_down_erase_fill(ctx);
     if ctx.device.is_some() {
         if ctx.output_path.is_some() {
             let list = ctx.take_display_list();
@@ -524,10 +528,35 @@ pub(crate) fn transmit_page_without_end_page(ctx: &mut Context) {
             stet_core::device::replay_to_device(&ctx.display_list, device.as_mut());
             ctx.display_list.clear();
         }
-        ctx.device.as_mut().unwrap().erase_page();
     } else {
         ctx.display_list.clear();
     }
+    erase_sent_page(ctx);
+}
+
+/// Put the colour the last erase left (if not white) under the page's marks,
+/// as the page is about to be sent.
+fn lay_down_erase_fill(ctx: &mut Context) {
+    if let Some(fill) = ctx.page_erase_fill.take() {
+        let marks = std::mem::take(&mut ctx.display_list);
+        let mut page = stet_core::display_list::DisplayList::new();
+        page.set_page_group_color_space(marks.page_group_color_space());
+        page.push(fill);
+        for element in marks.into_elements() {
+            page.push(element);
+        }
+        ctx.display_list = page;
+    }
+}
+
+/// After a page is sent: erase it, which paints gray 1 through the transfer
+/// function in force (PLRM `erasepage`). The colour waits in
+/// `page_erase_fill` until the next page is sent.
+fn erase_sent_page(ctx: &mut Context) {
+    if let Some(ref mut device) = ctx.device {
+        device.erase_page();
+    }
+    ctx.page_erase_fill = crate::paint_ops::erase_fill(ctx);
 }
 
 /// The page device's `EndPage` procedure, if it has one.
@@ -571,9 +600,7 @@ fn finish_page(ctx: &mut Context, copypage: bool) -> Result<(), PsError> {
 
     if transmit {
         transmit_page(ctx, if copypage { "copypage" } else { "showpage" })?;
-        if let Some(ref mut device) = ctx.device {
-            device.erase_page();
-        }
+        erase_sent_page(ctx);
     }
 
     if !copypage {
@@ -611,6 +638,7 @@ fn transmit_page(ctx: &mut Context, operator: &str) -> Result<(), PsError> {
         .page_filter
         .as_ref()
         .is_none_or(|f| f.contains(&page_count));
+    lay_down_erase_fill(ctx);
     if in_filter {
         let list = ctx.take_display_list();
         let path = resolve_page_output(ctx, page_count)?;

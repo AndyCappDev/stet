@@ -218,3 +218,108 @@ fn pdf_output_preserves_the_function() {
         assert!(d[0].abs_diff(p[0]) <= 2, "shading via PDF: {d:?} vs {p:?}");
     }
 }
+
+/// Every page the job sends, rendered, with `background`.
+fn pages(body: &str, background: stet::PageBackground) -> Vec<Page> {
+    Interpreter::builder()
+        .page_background(background)
+        .build()
+        .render(source(body).as_bytes(), 72.0)
+        .unwrap()
+        .into_iter()
+        .map(|p| Page::from_rgba(p.width, p.height, p.rgba))
+        .collect()
+}
+
+/// `erasepage` paints the page "with gray level 1.0 (which is ordinarily
+/// white, but may be some other color if an atypical transfer function has
+/// been defined)" (PLRM 3e), as Ghostscript does.
+#[test]
+fn erasepage_paints_white_through_the_function() {
+    let page = Page::render(&format!(
+        "{INVERT} 0.5 setgray 0 0 100 20 rectfill erasepage 0.2 setgray 0 0 50 20 rectfill"
+    ));
+    assert_eq!(page.halves(), [[204; 3], [0; 3]]);
+}
+
+/// `showpage` erases the page for the next under the function in force, so
+/// a job that inverts its output once gets black paper from page 2 on —
+/// page 1 was erased before the function was set. A page with no marks is
+/// sent black too.
+#[test]
+fn showpage_erases_through_the_function() {
+    let body = format!(
+        "{INVERT} 0.2 setgray 0 0 50 20 rectfill showpage \
+         0.2 setgray 0 0 50 20 rectfill showpage"
+    ); // and `source`'s own showpage, with no marks
+    let sent = pages(&body, stet::PageBackground::White);
+    let halves: Vec<_> = sent.iter().map(Page::halves).collect();
+    assert_eq!(
+        halves,
+        [[[204; 3], [255; 3]], [[204; 3], [0; 3]], [[0; 3], [0; 3]],]
+    );
+    // The colour is paint, not paper: a transparent page keeps it.
+    let clear = pages(&body, stet::PageBackground::Transparent);
+    let i = ((10 * clear[1].width + 75) * 4) as usize;
+    assert_eq!(&clear[1].rgba[i..i + 4], [0, 0, 0, 255]);
+}
+
+/// A function that maps white elsewhere adds the erase colour after the
+/// erase; one that leaves white white adds nothing. And the erase colour is
+/// no mark: a job that ends on a `showpage` under an inverting function has
+/// not dropped a page.
+#[test]
+fn the_erase_colour_is_not_a_mark() {
+    let mut interp = Interpreter::new();
+    let lists = interp
+        .render_to_display_list(
+            source("{0.5 mul} settransfer erasepage 0 0 10 10 rectfill").as_bytes(),
+            72.0,
+        )
+        .unwrap();
+    assert_eq!(
+        lists[0].display_list.len(),
+        3,
+        "erase, its colour, the fill"
+    );
+    let lists = interp
+        .render_to_display_list(
+            source("{} settransfer erasepage 0 0 10 10 rectfill").as_bytes(),
+            72.0,
+        )
+        .unwrap();
+    assert_eq!(lists[0].display_list.len(), 2, "erase, the fill");
+
+    let body = format!("%!PS\n<< /PageSize [100 20] >> setpagedevice {INVERT} showpage\n");
+    interp.render(body.as_bytes(), 72.0).unwrap();
+    assert!(interp.warnings().is_empty(), "{:?}", interp.warnings());
+}
+
+/// PDF output carries the erase colour as a page-filling rectangle.
+#[test]
+fn pdf_output_carries_the_erase_colour() {
+    let body = format!("{INVERT} showpage 0.2 setgray 0 0 50 20 rectfill");
+    let pdf = Interpreter::new()
+        .render_to_pdf(source(&body).as_bytes(), 72.0)
+        .unwrap();
+    let doc = PdfDocument::from_bytes(&pdf).unwrap();
+    assert_eq!(doc.page_count(), 2);
+    let (rgba, width, height) = doc.render_page_to_rgba(1, 72.0).unwrap();
+    let page = Page::from_rgba(width, height, rgba);
+    assert_eq!(page.halves(), [[204; 3], [0; 3]]);
+}
+
+/// `setpagedevice` reinitializes the graphics state, transfer function
+/// included, before it erases (PLRM 3e), so its erase is white even after
+/// `showpage` erased through an inverting function.
+#[test]
+fn setpagedevice_erases_white() {
+    let sent = pages(
+        &format!(
+            "{INVERT} showpage << /PageSize [100 20] >> setpagedevice \
+             0.2 setgray 0 0 50 20 rectfill"
+        ),
+        stet::PageBackground::White,
+    );
+    assert_eq!(sent[1].halves(), [[51; 3], [255; 3]]);
+}

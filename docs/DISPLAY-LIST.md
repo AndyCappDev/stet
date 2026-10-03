@@ -322,8 +322,18 @@ outline before rasterizing the clip mask. Used for shading pattern strokes.
 ErasePage
 ```
 
-Fills the entire page with white. Typically emitted at the start of each
-page by the `erasepage` operator.
+Clears everything painted on the page so far, back to the paper (the
+page group's transparent backdrop, put on paper when the page is
+finished). Emitted by the `erasepage` operator.
+
+PLRM `erasepage` paints the page with gray 1, which a transfer function
+can map to something other than white. When the transfer function in
+force does, the interpreter follows the erase with a page-sized `Fill` of
+gray 1 carrying that function, so a renderer that applies transfer
+functions draws the erase colour. The same fill heads the next page after
+`showpage` or `copypage` erases under such a function. A renderer that
+ignores transfer functions sees a white fill, which is what the erase
+would have looked like anyway.
 
 ### Shadings
 

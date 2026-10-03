@@ -275,6 +275,13 @@ pub struct Context {
     /// advances whatever `EndPage` returns, so the two part when an
     /// `EndPage` declines a page.
     pub showpage_count: i32,
+    /// The colour the last erase left on the page, when it is not white: a
+    /// page-sized fill of gray 1 through a transfer function that maps it to
+    /// something else (PLRM 3e, `erasepage`). `showpage`'s erase sets it,
+    /// and the page carries it as its first element once it is sent; it is
+    /// kept off the display list until then, so a page with no marks still
+    /// reads as empty to the checks that ask.
+    pub page_erase_fill: Option<crate::display_list::DisplayElement>,
     /// Page filter: if set, only render pages in this set (1-based).
     pub page_filter: Option<std::collections::HashSet<i32>>,
     /// Factory closure for creating raster devices (registered by CLI).
@@ -1212,6 +1219,7 @@ impl Context {
             output_template: None,
             pages_emitted: 0,
             showpage_count: 0,
+            page_erase_fill: None,
             page_filter: None,
             device_factory: None,
             font_directory,

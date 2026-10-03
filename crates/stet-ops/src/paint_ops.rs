@@ -677,7 +677,47 @@ pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
 pub fn op_erasepage(ctx: &mut Context) -> Result<(), PsError> {
     ctx.current_display_list_mut()
         .push(DisplayElement::ErasePage);
+    ctx.page_erase_fill = None;
+    if let Some(fill) = erase_fill(ctx) {
+        ctx.current_display_list_mut().push(fill);
+    }
     Ok(())
+}
+
+/// What erasing the page paints beyond clearing it, if anything.
+///
+/// PLRM 3e, `erasepage`: "erases the current page by painting it with gray
+/// level 1.0 (which is ordinarily white, but may be some other color if an
+/// atypical transfer function has been defined)". Ghostscript paints every
+/// erase that way. When the transfer function in force leaves white white,
+/// clearing the page is the same thing and nothing more is painted; when it
+/// does not, this is a page-sized fill of gray 1 carrying it, opaque and
+/// in the Normal blend mode whatever the graphics state says, since the erase
+/// is not a painting operation of the program's.
+pub(crate) fn erase_fill(ctx: &Context) -> Option<DisplayElement> {
+    let transfer = capture_transfer_state(ctx);
+    let white = transfer.apply_rgb([1.0; 3]);
+    if white.iter().all(|&v| (v - 1.0).abs() < 0.5 / 255.0) {
+        return None;
+    }
+    let (w, h) = ctx.device.as_ref()?.page_size();
+    let (w, h) = (w as f64, h as f64);
+    let mut path = PsPath::new();
+    path.segments.push(PathSegment::MoveTo(0.0, 0.0));
+    path.segments.push(PathSegment::LineTo(w, 0.0));
+    path.segments.push(PathSegment::LineTo(w, h));
+    path.segments.push(PathSegment::LineTo(0.0, h));
+    path.segments.push(PathSegment::ClosePath);
+    Some(DisplayElement::Fill {
+        path,
+        params: FillParams {
+            color: DeviceColor::from_gray(1.0),
+            fill_rule: FillRule::NonZeroWinding,
+            ctm: Matrix::identity(),
+            transfer,
+            ..FillParams::default()
+        },
+    })
 }
 
 /// `showpage`: — → — (output current page)
