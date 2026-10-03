@@ -301,7 +301,9 @@ The pdfmark operators (`pdfmark`, `currentdistillerparams`,
 `setdistillerparams`) are not registered by the default
 `stet_ops::build_system_dict` — only the PDF rendering paths
 (`stet::Interpreter::render_to_pdf` and the CLI's `run_pdf_mode`) call
-the separate `register_pdf_authoring_ops`. PostScript prologues that
+the separate `register_pdf_authoring_ops` (and `render_to_pdf`, whose
+`Interpreter` may run screen jobs next, removes them again with
+`remove_pdf_authoring_ops` at the end of its job). PostScript prologues that
 branch on `systemdict /pdfmark known` therefore see Distiller-equivalent
 semantics on the PDF output path and pre-Distiller semantics on the
 screen / viewer / WASM paths — which matters for prologues like

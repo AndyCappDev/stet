@@ -348,6 +348,9 @@ impl Interpreter {
         };
 
         end_job(&mut self.ctx, save_id);
+        // `systemdict` is global, so the restore left them in; a later
+        // screen render must not see `pdfmark`.
+        stet_ops::remove_pdf_authoring_ops(&mut self.ctx);
 
         exec_result?;
         Ok(pdf_bytes)

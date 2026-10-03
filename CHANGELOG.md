@@ -86,6 +86,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   text is shown with before any `restore` can reclaim it or revert glyphs
   added to it, and marks the `Text` element with its copy. The font's
   `font_entity` is valid only while the font lives.
+- **`stet_ops::remove_pdf_authoring_ops`**: takes `pdfmark`,
+  `setdistillerparams` and `currentdistillerparams` back out of
+  `systemdict`, for a context that runs screen jobs after PDF ones.
+  `register_pdf_authoring_ops` may now be called again; it adds nothing to
+  the operator table the second time.
 
 ### Deprecated
 
@@ -431,6 +436,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   built the document a second time for the bytes it returned, whose
   `/Title` was "output" after that file. It now builds the document once,
   in memory, with no `/Title` unless a `/DOCINFO` pdfmark sets one.
+- **An `Interpreter` used for PDF output no longer shows `pdfmark` to
+  later screen renders, or fails after ~21 700 PDF renders.** Each
+  `render_to_pdf` call registered `pdfmark` and the distiller-parameter
+  operators afresh and left them in `systemdict`. A later `render` saw
+  `systemdict /pdfmark known` as true, so a prologue that asks took its
+  Distiller branch on screen too — FrameMaker's, for one, then paints its
+  colours as RGB instead of CMYK. And the operator table grew by three per
+  call until its 16-bit operator numbers wrapped, after 21 723 calls, and
+  `pdfmark` ran another operator. They are now registered once and are in
+  `systemdict` for PDF jobs only.
 - **PDF output is reproducible.** The same job gives the same PDF, apart
   from its `/CreationDate`: a page's `/Font` resources were listed in an
   order that changed from run to run, and are now in their own order (`F0`,

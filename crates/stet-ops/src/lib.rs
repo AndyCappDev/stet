@@ -86,7 +86,7 @@ mod text_record;
 use stet_core::context::{Context, OpEntry};
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
-use stet_core::object::{OpCode, PsObject, PsValue};
+use stet_core::object::{NameId, OpCode, PsObject, PsValue};
 
 /// Register every native operator into systemdict and the operator table —
 /// the core PostScript Level 3 surface plus stet's PDF-imaging extensions
@@ -829,39 +829,66 @@ pub fn build_system_dict(ctx: &mut Context) {
 /// Call this from your PDF output pipeline (after [`build_system_dict`])
 /// and leave it out of the screen / viewer path. The non-PDF path keeps
 /// `pdfmark known` returning false so Distiller-aware PostScript files
-/// take their CMYK branch.
+/// take their CMYK branch. A context that serves both, one job at a time,
+/// calls this before each PDF job and [`remove_pdf_authoring_ops`] after
+/// it: `systemdict` is in global VM, so the job's `restore` does not take
+/// them out again.
+///
+/// Calling it again is cheap and adds nothing to the operator table; each
+/// operator keeps the opcode it was first given.
 pub fn register_pdf_authoring_ops(ctx: &mut Context) {
     let sd = ctx.systemdict;
-    register(ctx, sd, "pdfmark", pdfmark_ops::op_pdfmark);
-    register(
-        ctx,
-        sd,
-        "setdistillerparams",
-        param_ops::op_setdistillerparams,
-    );
-    register(
-        ctx,
-        sd,
-        "currentdistillerparams",
-        param_ops::op_currentdistillerparams,
-    );
+    for (name, func) in PDF_AUTHORING_OPS {
+        let name_id = ctx.names.intern(name.as_bytes());
+        let opcode = match ctx.operators.iter().position(|op| op.name == name_id) {
+            Some(index) => OpCode(index as u16),
+            None => push_operator(ctx, name_id, func),
+        };
+        ctx.dicts
+            .put(sd, DictKey::Name(name_id), PsObject::operator(opcode));
+    }
 }
 
+/// Take the PDF authoring operators out of `systemdict` again, so that
+/// `systemdict /pdfmark known` is false for the jobs that follow — the
+/// counterpart of [`register_pdf_authoring_ops`] for a context that renders
+/// to the screen as well as to PDF.
+pub fn remove_pdf_authoring_ops(ctx: &mut Context) {
+    let sd = ctx.systemdict;
+    for (name, _) in PDF_AUTHORING_OPS {
+        if let Some(name_id) = ctx.names.find(name.as_bytes()) {
+            ctx.dicts.remove(sd, &DictKey::Name(name_id));
+        }
+    }
+}
+
+/// An operator's implementation.
+type Operator = fn(&mut Context) -> Result<(), PsError>;
+
+/// The operators [`register_pdf_authoring_ops`] adds to `systemdict`.
+const PDF_AUTHORING_OPS: [(&str, Operator); 3] = [
+    ("pdfmark", pdfmark_ops::op_pdfmark),
+    ("setdistillerparams", param_ops::op_setdistillerparams),
+    (
+        "currentdistillerparams",
+        param_ops::op_currentdistillerparams,
+    ),
+];
+
 /// Register a single operator: add to operator table and systemdict.
-fn register(
-    ctx: &mut Context,
-    dict: stet_core::object::EntityId,
-    name: &str,
-    func: fn(&mut Context) -> Result<(), PsError>,
-) {
+fn register(ctx: &mut Context, dict: stet_core::object::EntityId, name: &str, func: Operator) {
     let name_id = ctx.names.intern(name.as_bytes());
-    let opcode = OpCode(ctx.operators.len() as u16);
-    ctx.operators.push(OpEntry {
-        func,
-        name: name_id,
-    });
+    let opcode = push_operator(ctx, name_id, func);
     let op_obj = PsObject::operator(opcode);
     ctx.dicts.put(dict, DictKey::Name(name_id), op_obj);
+}
+
+/// Add an operator to the operator table and return its opcode.
+fn push_operator(ctx: &mut Context, name: NameId, func: Operator) -> OpCode {
+    // Opcodes are `u16`: an opcode that wrapped would run another operator.
+    let opcode = OpCode(u16::try_from(ctx.operators.len()).expect("operator table is full"));
+    ctx.operators.push(OpEntry { func, name });
+    opcode
 }
 
 /// Set up default error handlers in errordict.

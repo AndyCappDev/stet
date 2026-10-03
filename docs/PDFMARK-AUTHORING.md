@@ -604,6 +604,14 @@ Internally this is the `register_pdf_authoring_ops` function in
 and the CLI's `run_pdf_mode` call it after `build_system_dict`. Screen
 rendering paths leave it out.
 
+The visibility is per job, not per interpreter. One `stet::Interpreter`
+can render to PDF and to the screen in turn, and `render_to_pdf` takes the
+three operators out of `systemdict` again with `remove_pdf_authoring_ops`
+when its job ends — `systemdict` is in global VM, so the job's `restore`
+would leave them in. A context assembled from `stet-ops` that does the same
+should do likewise; calling `register_pdf_authoring_ops` before each PDF
+job is cheap and registers each operator only once.
+
 ## Buffer lifecycle
 
 `pdfmark` records live on `Context::doc_structure`
