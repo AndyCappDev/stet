@@ -191,9 +191,18 @@ releasing local VM; see `crates/stet-cli/tests/vm_audit.rs`.
 `restore` truncates the string/array/dict payloads and their entity
 tables back to them, so the memory a save level allocated becomes
 available again. It also rewinds `gstate_store` and purges the
-entity-keyed caches (`glyph_caches`, `form_cache`), since an `EntityId`
-becomes reusable the moment a table shrinks. Global VM is untouched —
-save/restore never affects it.
+entity-keyed caches (`glyph_caches`, `form_cache`, `cid_glyph_metrics`),
+since an `EntityId` becomes reusable the moment a table shrinks. Global VM
+is untouched — save/restore never affects it.
+
+Before it changes anything, `restore` copies out the fonts shown since the
+last one (`Context::font_snapshots`, module `stet_core::font_snapshot`)
+when the output device reads fonts after the page is sent
+(`OutputDevice::keeps_text_fonts` — PDF output). The display list's `Text`
+elements outlive the restore, and the restore may reclaim their fonts or
+revert glyphs a page added to them (PLRM 3e §5.9.2), so `Text` names its
+font by copy (`TextParams::font_snapshot`), not only by the `EntityId` a
+later object may reuse.
 
 Truncation is sound because `check_invalidrestore` refuses any `restore`
 that would strand a reachable composite created after the save, and
@@ -518,6 +527,8 @@ pub trait OutputDevice {
     fn paint_patch_shading(&mut self, params: &PatchShadingParams) {}
     fn paint_pattern_fill(&mut self, params: &PatternFillParams) {}
     fn set_trim_box(&mut self, llx: f64, lly: f64, urx: f64, ury: f64) {}
+    fn writes_file_per_page(&self) -> bool { true }
+    fn keeps_text_fonts(&self) -> bool { false }
     fn replay_and_show(&mut self, list: DisplayList, path: &str) -> Result<(), String>;
     fn finish(&mut self) -> Result<(), String> { Ok(()) }
     fn finish_with_context(&mut self, ctx: &Context) -> Result<(), String> { self.finish() }
@@ -535,9 +546,12 @@ on `default_visible`. `Text` elements are ignored by rasterizers and only
 consumed by `PdfDevice`.
 
 `set_trim_box` is only meaningful for PDF output; other devices ignore
-it. `finish_with_context` gives devices a chance to run context-aware
-finalization (e.g., PDF output needs access to the font directory) and
-defaults to `finish()`. `as_any` is the downcast escape hatch for
+it. `keeps_text_fonts` asks the interpreter to copy each font as text is
+shown with it, for a device that reads fonts after the page is sent — PDF
+output, which embeds them at the end of the job, when a `restore` may have
+reclaimed them. `finish_with_context` gives devices a chance to run
+context-aware finalization (PDF output reads those font copies, the name
+table and the pdfmark records) and defaults to `finish()`. `as_any` is the downcast escape hatch for
 consumers that need the concrete device (e.g., reading `PdfDevice`'s
 in-memory bytes).
 
@@ -735,9 +749,9 @@ trait, but never pull in the interpreter (`stet-ops`, `stet-engine`):
 implement `OutputDevice`, whose `finish_with_context` hands a device the live
 interpreter `Context`. Rasterizing a `DisplayList` never needs it, so that
 impl sits behind the `ps-device` feature and a consumer who only renders can
-switch it off. `stet-pdf` genuinely needs the `Context` — it reads PostScript
-font dictionaries through it to subset and embed fonts — so its dependency is
-unconditional.
+switch it off. `stet-pdf` genuinely needs the `Context` — it reads the
+interpreter's copies of PostScript font dictionaries through it to subset and
+embed fonts — so its dependency is unconditional.
 
 **Interpreter-only** crates that rarely make sense to depend on in
 isolation: `stet-core` (PS VM types), `stet-ops` (operator

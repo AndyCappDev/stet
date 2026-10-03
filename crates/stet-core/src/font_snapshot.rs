@@ -27,8 +27,9 @@
 //! A copy keeps what PDF output reads from a font: the entries of each font
 //! dictionary, descending only into the values listed in [`FONT_KEYS`]
 //! (only `Encoding`, `FontBBox` and `FontMatrix` for a Type 3 font, whose
-//! glyph procedures can reach anything); any other dictionary is
-//! [`Frozen::NotKept`]. Copies share structure: freezing a font again
+//! glyph procedures can reach anything); any other composite value of a
+//! font dictionary is [`Frozen::NotKept`], and a dictionary inside a copied
+//! value is [`Frozen::Other`]. Copies share structure: freezing a font again
 //! compares it against its previous copy and reuses every part that has not
 //! changed, so a font shown on every page of a document that brackets each
 //! page with `save`/`restore` is stored once.
@@ -47,6 +48,8 @@ use crate::object::{EntityId, NameId, PsObject, PsValue};
 /// a font dictionary in its own right. Any other composite value of a font
 /// dictionary is [`Frozen::NotKept`]; scalars are always copied.
 pub const FONT_KEYS: &[&[u8]] = &[
+    b"FontName",
+    b"CIDFontName",
     b"Encoding",
     b"FontBBox",
     b"FontMatrix",
@@ -94,12 +97,15 @@ pub enum Frozen {
     PackedArray(Arc<[Frozen]>),
     /// A dictionary.
     Dict(Arc<FrozenDict>),
-    /// A value of a type PDF output never reads: an operator, a file, a font
-    /// ID, a mark, a `save` or `gstate` object.
+    /// A value PDF output never reads as data: an operator, a file, a font
+    /// ID, a mark, a `save` or `gstate` object; a dictionary inside a copied
+    /// value; or a reference back into an object being copied, where the
+    /// copy cuts a cycle.
     Other,
-    /// A composite the copy does not keep: the key is present, its value
-    /// was not copied. Reading one as data means [`FONT_KEYS`] is missing a
-    /// key, which the accessors assert in debug builds.
+    /// A composite value of a font dictionary under a key outside
+    /// [`FONT_KEYS`]: the key is present, its value was not copied. Reading
+    /// one as data means `FONT_KEYS` is missing the key, which the accessors
+    /// assert in debug builds.
     NotKept,
 }
 
@@ -144,6 +150,14 @@ impl Frozen {
         match self {
             Frozen::Int(v) => Some(*v as f64),
             Frozen::Real(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// The integer, as [`PsObject::as_i64`].
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Frozen::Int(v) => Some(*v),
             _ => None,
         }
     }
@@ -365,9 +379,9 @@ enum Role {
     /// A font dictionary: its entries, descending into [`FONT_KEYS`].
     Font,
     /// A value under one of those keys: copied in full, except that a
-    /// dictionary inside it is not kept.
+    /// dictionary inside it is [`Frozen::Other`].
     Data,
-    /// Inside a [`Role::Data`] value: dictionaries are not kept.
+    /// Inside a [`Role::Data`] value: dictionaries are [`Frozen::Other`].
     Inner,
     /// An array of fonts (`FDepVector`, `FDArray`): its dictionaries are
     /// fonts.
@@ -454,7 +468,7 @@ impl<'a> Freezer<'a> {
             }
             PsValue::Dict(entity) => match role {
                 Role::Font | Role::Data => self.dict(entity, role, hint),
-                Role::Inner | Role::Fonts => Frozen::NotKept,
+                Role::Inner | Role::Fonts => Frozen::Other,
             },
             _ => Frozen::Other,
         }
@@ -489,7 +503,7 @@ impl<'a> Freezer<'a> {
         }
         let visiting = (false, entity, start, len);
         if !self.active.insert(visiting) {
-            return Frozen::NotKept;
+            return Frozen::Other;
         }
         let hint = match hint {
             Some(Frozen::Array(h)) if !packed => Some(h),
@@ -541,7 +555,7 @@ impl<'a> Freezer<'a> {
         }
         let visiting = (true, entity, 0, 0);
         if !self.active.insert(visiting) {
-            return Frozen::NotKept;
+            return Frozen::Other;
         }
         let hint = match hint {
             Some(Frozen::Dict(h)) => Some(h),

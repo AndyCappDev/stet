@@ -29,10 +29,9 @@
 //! content stream positions text with, so the two agree by construction.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
-use stet_core::context::Context;
-use stet_core::dict::DictKey;
-use stet_core::object::{EntityId, PsObject, PsValue};
+use stet_core::font_snapshot::{Frozen, FrozenDict};
 use stet_fonts::cff_writer::{self, CidFont, FontDict, Glyph, PrivateDict};
 use stet_fonts::cid_type0::{self, CidMap};
 use stet_fonts::cid_unicode;
@@ -40,19 +39,24 @@ use stet_fonts::geometry::Matrix;
 use stet_fonts::type1_to_type2::{self, Type2Glyph};
 use stet_fonts::type2_charstring;
 
+use crate::font_data::FontData;
 use crate::font_tracker::FontUsage;
 use crate::pdf_objects::PdfObj;
 use crate::pdf_writer::PdfWriter;
 
 /// Whether `cidfont` is a CIDFontType 0 font this module embeds.
-pub(crate) fn handles(ctx: &Context, cidfont: EntityId) -> bool {
-    glyph_data(ctx, cidfont).is_some() || cff_data(ctx, cidfont).is_some()
+pub(crate) fn handles(fonts: &FontData, cidfont: &FrozenDict) -> bool {
+    glyph_data(fonts, cidfont).is_some() || cff_data(fonts, cidfont).is_some()
 }
 
 /// Widths of the used CIDs, in thousandths of text space, for positioning
 /// text in the content stream.
-pub(crate) fn widths(usage: &FontUsage, ctx: &Context, cidfont: EntityId) -> HashMap<u16, i32> {
-    match prepare(ctx, cidfont, &usage.used_codes) {
+pub(crate) fn widths(
+    usage: &FontUsage,
+    fonts: &FontData,
+    cidfont: &Arc<FrozenDict>,
+) -> HashMap<u16, i32> {
+    match prepare(fonts, cidfont, &usage.used_codes) {
         Ok(font) => usage
             .used_codes
             .iter()
@@ -67,10 +71,10 @@ pub(crate) fn widths(usage: &FontUsage, ctx: &Context, cidfont: EntityId) -> Has
 pub(crate) fn build(
     writer: &mut PdfWriter,
     usage: &FontUsage,
-    ctx: &Context,
-    cidfont: EntityId,
+    fonts: &FontData,
+    cidfont: &Arc<FrozenDict>,
 ) -> Option<u32> {
-    let font = match prepare(ctx, cidfont, &usage.used_codes) {
+    let font = match prepare(fonts, cidfont, &usage.used_codes) {
         Ok(font) => font,
         Err(e) => {
             eprintln!(
@@ -143,10 +147,10 @@ pub(crate) fn build(
     }
     if usage.wmode == 1 {
         let w2 = crate::font_embedder::w2_array(
-            ctx,
+            fonts,
             cidfont,
             &usage.used_codes,
-            &glyph_to_text(ctx, cidfont),
+            &glyph_to_text(fonts, cidfont),
         );
         if !w2.is_empty() {
             cid_font.push((b"W2".to_vec(), PdfObj::Array(w2)));
@@ -258,18 +262,22 @@ fn points(path: &stet_fonts::PsPath) -> Vec<(f64, f64)> {
     out
 }
 
-fn prepare(ctx: &Context, cidfont: EntityId, used: &HashSet<u16>) -> Result<Prepared, String> {
-    let mut font = if let Some(data) = glyph_data(ctx, cidfont) {
-        prepare_glyph_data(ctx, cidfont, data, used)
-    } else if let Some((data, name)) = cff_data(ctx, cidfont) {
+fn prepare(
+    fonts: &FontData,
+    cidfont: &Arc<FrozenDict>,
+    used: &HashSet<u16>,
+) -> Result<Prepared, String> {
+    let mut font = if let Some(data) = glyph_data(fonts, cidfont) {
+        prepare_glyph_data(fonts, cidfont, data, used)
+    } else if let Some((data, name)) = cff_data(fonts, cidfont) {
         prepare_cff(data, &name, used)
     } else {
         Err("neither GlyphData nor CFF data".into())
     }?;
     // A `CDevProc` may have shown a glyph with another width.
-    let fm = glyph_to_text(ctx, cidfont);
+    let fm = glyph_to_text(fonts, cidfont);
     for &cid in used {
-        if let Some(w) = crate::font_embedder::shown_width(ctx, cidfont, cid, &fm) {
+        if let Some(w) = crate::font_embedder::shown_width(fonts, cidfont, cid, &fm) {
             font.widths.insert(cid, w);
         }
     }
@@ -278,8 +286,8 @@ fn prepare(ctx: &Context, cidfont: EntityId, used: &HashSet<u16>) -> Result<Prep
 
 /// The CIDFont's glyph space to text space, its `FontMatrix`: the space
 /// the interpreter's glyph metrics are in.
-fn glyph_to_text(ctx: &Context, cidfont: EntityId) -> Matrix {
-    matrix(ctx, cidfont).unwrap_or(Matrix::scale(0.001, 0.001))
+fn glyph_to_text(fonts: &FontData, cidfont: &FrozenDict) -> Matrix {
+    matrix(fonts, cidfont).unwrap_or(Matrix::scale(0.001, 0.001))
 }
 
 /// One `FDArray` font of a GlyphData CIDFont.
@@ -292,14 +300,15 @@ struct SourceFd {
 
 /// A GlyphData (Type 1 charstring) CIDFont.
 fn prepare_glyph_data(
-    ctx: &Context,
-    cidfont: EntityId,
+    fonts: &FontData,
+    cidfont: &FrozenDict,
     data: &[u8],
     used: &HashSet<u16>,
 ) -> Result<Prepared, String> {
     let int = |key: &[u8]| {
-        get(ctx, cidfont, key)
-            .and_then(|o| o.as_i64())
+        fonts
+            .get(cidfont, key)
+            .and_then(Frozen::as_i64)
             .and_then(|v| usize::try_from(v).ok())
     };
     let map = CidMap::new(
@@ -308,16 +317,18 @@ fn prepare_glyph_data(
         int(b"FDBytes").ok_or("no FDBytes")?,
         int(b"GDBytes").ok_or("no GDBytes")?,
     )?;
-    let fds = match get(ctx, cidfont, b"FDArray").map(|o| o.value) {
-        Some(PsValue::Array { entity, start, len }) => (0..len)
-            .map(|i| match ctx.arrays.get_element(entity, start + i).value {
-                PsValue::Dict(fd) => source_fd(ctx, fd, data),
+    let fds = match fonts.get(cidfont, b"FDArray") {
+        Some(Frozen::Array(entries)) => entries
+            .iter()
+            .map(|entry| match entry {
+                Frozen::Dict(fd) => source_fd(fonts, fd, data),
                 _ => Err("FDArray entry is not a dict".to_string()),
             })
             .collect::<Result<Vec<_>, _>>()?,
         _ => return Err("no FDArray".into()),
     };
-    let font_matrix = matrix(ctx, cidfont).unwrap_or(Matrix::new(0.001, 0.0, 0.0, 0.001, 0.0, 0.0));
+    let font_matrix =
+        matrix(fonts, cidfont).unwrap_or(Matrix::new(0.001, 0.0, 0.0, 0.001, 0.0, 0.0));
     let combined: Vec<Matrix> = fds
         .iter()
         .map(|fd| font_matrix.multiply(&fd.matrix))
@@ -369,7 +380,7 @@ fn prepare_glyph_data(
         converted.push((cid, out, glyph));
     }
 
-    let mut cff = new_font(ctx, cidfont)?;
+    let mut cff = new_font(fonts, cidfont)?;
     cff.font_matrix = matrix_array(&top);
     cff.cid_count = cff
         .cid_count
@@ -405,8 +416,9 @@ fn prepare_glyph_data(
 
     // Without a CID 0 either, the interpreter advances by `DW` (1000 when
     // absent) through the CIDFont's matrix.
-    let dw = get(ctx, cidfont, b"DW")
-        .and_then(|o| o.as_f64())
+    let dw = fonts
+        .get(cidfont, b"DW")
+        .and_then(Frozen::as_f64)
         .unwrap_or(1000.0);
     let default_width = widths
         .get(&0)
@@ -473,56 +485,47 @@ fn text_width(width: f64, m: &Matrix) -> i32 {
 // PostScript dictionaries
 // ---------------------------------------------------------------------------
 
-fn get(ctx: &Context, dict: EntityId, key: &[u8]) -> Option<PsObject> {
-    let name = ctx.names.find(key)?;
-    ctx.dicts.get(dict, &DictKey::Name(name))
-}
-
 /// The CIDFont's `GlyphData` string.
-fn glyph_data(ctx: &Context, cidfont: EntityId) -> Option<&[u8]> {
-    match get(ctx, cidfont, b"GlyphData")?.value {
-        PsValue::String { entity, start, len } => Some(ctx.strings.get(entity, start, len)),
+fn glyph_data<'d>(fonts: &FontData, cidfont: &'d FrozenDict) -> Option<&'d [u8]> {
+    match fonts.get(cidfont, b"GlyphData")? {
+        Frozen::String(data) => Some(data),
         _ => None,
     }
 }
 
 /// The FontSet a CFF CIDFont was loaded from, and its name there.
-fn cff_data(ctx: &Context, cidfont: EntityId) -> Option<(&[u8], String)> {
-    let data = match get(ctx, cidfont, b"_CFFData")?.value {
-        PsValue::String { entity, start, len } => ctx.strings.get(entity, start, len),
+fn cff_data<'d>(fonts: &FontData, cidfont: &'d FrozenDict) -> Option<(&'d [u8], String)> {
+    let data = match fonts.get(cidfont, b"_CFFData")? {
+        Frozen::String(data) => data,
         _ => return None,
     };
-    let name = get(ctx, cidfont, b"FontName")
-        .or_else(|| get(ctx, cidfont, b"CIDFontName"))
-        .and_then(|o| bytes(ctx, &o))?;
+    let name = fonts
+        .get(cidfont, b"FontName")
+        .or_else(|| fonts.get(cidfont, b"CIDFontName"))
+        .and_then(|o| bytes(fonts, o))?;
     Some((data, String::from_utf8_lossy(&name).into_owned()))
 }
 
 /// The bytes of a name or string.
-fn bytes(ctx: &Context, obj: &PsObject) -> Option<Vec<u8>> {
-    match obj.value {
-        PsValue::Name(id) => Some(ctx.names.get_bytes(id).to_vec()),
-        PsValue::String { entity, start, len } => {
-            Some(ctx.strings.get(entity, start, len).to_vec())
-        }
+fn bytes(fonts: &FontData, obj: &Frozen) -> Option<Vec<u8>> {
+    match obj {
+        Frozen::Name(id) => Some(fonts.name(*id).to_vec()),
+        Frozen::String(s) => Some(s.to_vec()),
         _ => None,
     }
 }
 
 /// The numbers of an array.
-fn numbers(ctx: &Context, obj: &PsObject) -> Option<Vec<f64>> {
-    match obj.value {
-        PsValue::Array { entity, start, len } | PsValue::PackedArray { entity, start, len } => (0
-            ..len)
-            .map(|i| ctx.arrays.get_element(entity, start + i).as_f64())
-            .collect(),
+fn numbers(obj: &Frozen) -> Option<Vec<f64>> {
+    match obj {
+        Frozen::Array(a) | Frozen::PackedArray(a) => a.iter().map(Frozen::as_f64).collect(),
         _ => None,
     }
 }
 
 /// A dict's `FontMatrix`.
-fn matrix(ctx: &Context, dict: EntityId) -> Option<Matrix> {
-    match numbers(ctx, &get(ctx, dict, b"FontMatrix")?)?[..] {
+fn matrix(fonts: &FontData, dict: &FrozenDict) -> Option<Matrix> {
+    match numbers(fonts.get(dict, b"FontMatrix")?)?[..] {
         [a, b, c, d, tx, ty] => Some(Matrix::new(a, b, c, d, tx, ty)),
         _ => None,
     }
@@ -530,22 +533,23 @@ fn matrix(ctx: &Context, dict: EntityId) -> Option<Matrix> {
 
 /// A CFF font named after the CIDFont, with its `CIDSystemInfo`,
 /// `CIDCount` and `FontBBox`.
-fn new_font(ctx: &Context, cidfont: EntityId) -> Result<CidFont, String> {
-    let name = get(ctx, cidfont, b"CIDFontName")
-        .and_then(|o| bytes(ctx, &o))
+fn new_font(fonts: &FontData, cidfont: &FrozenDict) -> Result<CidFont, String> {
+    let name = fonts
+        .get(cidfont, b"CIDFontName")
+        .and_then(|o| bytes(fonts, o))
         .unwrap_or_else(|| b"CIDFont".to_vec());
-    let info = match get(ctx, cidfont, b"CIDSystemInfo").map(|o| o.value) {
-        Some(PsValue::Dict(info)) => Some(info),
+    let info = match fonts.get(cidfont, b"CIDSystemInfo") {
+        Some(Frozen::Dict(info)) => Some(info),
         _ => None,
     };
     let entry = |key: &[u8]| {
-        info.and_then(|i| get(ctx, i, key))
-            .and_then(|o| bytes(ctx, &o))
+        info.and_then(|i| fonts.get(i, key))
+            .and_then(|o| bytes(fonts, o))
             .map(|b| String::from_utf8_lossy(&b).into_owned())
     };
     let supplement = info
-        .and_then(|i| get(ctx, i, b"Supplement"))
-        .and_then(|o| o.as_i32())
+        .and_then(|i| fonts.get(i, b"Supplement"))
+        .and_then(Frozen::as_i32)
         .unwrap_or(0);
     let mut font = CidFont::new(
         &cff_name(&name),
@@ -553,10 +557,7 @@ fn new_font(ctx: &Context, cidfont: EntityId) -> Result<CidFont, String> {
         &entry(b"Ordering").unwrap_or_else(|| "Identity".into()),
         supplement,
     );
-    if let Some(&[a, b, c, d]) = get(ctx, cidfont, b"FontBBox")
-        .and_then(|o| numbers(ctx, &o))
-        .as_deref()
-    {
+    if let Some(&[a, b, c, d]) = fonts.get(cidfont, b"FontBBox").and_then(numbers).as_deref() {
         font.font_bbox = [a, b, c, d];
     }
     Ok(font)
@@ -582,9 +583,9 @@ fn cff_name(name: &[u8]) -> String {
 
 /// Resolve one `FDArray` font against the glyph data its subroutines live
 /// in.
-fn source_fd(ctx: &Context, fd: EntityId, data: &[u8]) -> Result<SourceFd, String> {
-    let matrix = matrix(ctx, fd).unwrap_or(Matrix::identity());
-    let Some(PsValue::Dict(private)) = get(ctx, fd, b"Private").map(|o| o.value) else {
+fn source_fd(fonts: &FontData, fd: &FrozenDict, data: &[u8]) -> Result<SourceFd, String> {
+    let matrix = matrix(fonts, fd).unwrap_or(Matrix::identity());
+    let Some(Frozen::Dict(private)) = fonts.get(fd, b"Private") else {
         return Ok(SourceFd {
             matrix,
             len_iv: 4,
@@ -592,7 +593,7 @@ fn source_fd(ctx: &Context, fd: EntityId, data: &[u8]) -> Result<SourceFd, Strin
             private: PrivateDict::default(),
         });
     };
-    let int = |key: &[u8]| get(ctx, private, key).and_then(|o| o.as_i64());
+    let int = |key: &[u8]| fonts.get(private, key).and_then(Frozen::as_i64);
     let len_iv = match int(b"lenIV") {
         Some(v) if v < 0 => usize::MAX,
         Some(v) => usize::try_from(v).map_err(|_| "bad lenIV")?,
@@ -619,18 +620,19 @@ fn source_fd(ctx: &Context, fd: EntityId, data: &[u8]) -> Result<SourceFd, Strin
         matrix,
         len_iv,
         subrs,
-        private: private_dict(ctx, private),
+        private: private_dict(fonts, private),
     })
 }
 
 /// The hint values of a Type 1 Private dict, in CFF terms.
-fn private_dict(ctx: &Context, private: EntityId) -> PrivateDict {
+fn private_dict(fonts: &FontData, private: &FrozenDict) -> PrivateDict {
     let array = |key: &[u8]| {
-        get(ctx, private, key)
-            .and_then(|o| numbers(ctx, &o))
+        fonts
+            .get(private, key)
+            .and_then(numbers)
             .unwrap_or_default()
     };
-    let number = |key: &[u8]| get(ctx, private, key).and_then(|o| o.as_f64());
+    let number = |key: &[u8]| fonts.get(private, key).and_then(Frozen::as_f64);
     // StdHW and StdVW are one-element arrays in Type 1, numbers in CFF.
     let first = |key: &[u8]| array(key).first().copied().or_else(|| number(key));
     let mut p = PrivateDict::default();
@@ -645,11 +647,10 @@ fn private_dict(ctx: &Context, private: EntityId) -> PrivateDict {
     p.std_vw = first(b"StdVW");
     p.stem_snap_h = array(b"StemSnapH");
     p.stem_snap_v = array(b"StemSnapV");
-    p.force_bold = matches!(
-        get(ctx, private, b"ForceBold").map(|o| o.value),
-        Some(PsValue::Bool(true))
-    );
-    p.language_group = get(ctx, private, b"LanguageGroup").and_then(|o| o.as_i32());
+    p.force_bold = matches!(fonts.get(private, b"ForceBold"), Some(Frozen::Bool(true)));
+    p.language_group = fonts
+        .get(private, b"LanguageGroup")
+        .and_then(Frozen::as_i32);
     p.expansion_factor = number(b"ExpansionFactor");
     p
 }

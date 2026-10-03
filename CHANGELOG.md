@@ -435,6 +435,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from its `/CreationDate`: a page's `/Font` resources were listed in an
   order that changed from run to run, and are now in their own order (`F0`,
   `F1`, …).
+- **PostScript → PDF no longer crashes on fonts a `restore` reclaimed**
+  (`--device pdf` and `Interpreter::render_to_pdf`). PDF output builds the
+  document at the end of the job and read each font out of the
+  interpreter's memory then, but a font defined inside a `save … restore`
+  is gone by that point: much of Ghostscript's `eps2write` and `ps2write`
+  output defines its fonts inside each page's `save`, and an EPS figure
+  placed on a page brings its fonts inside its own. The job panicked, about
+  2% of a PostScript corpus sample, in 0.8.x releases. A glyph a page added
+  to a font inside its `save` (PLRM 3e §5.9.2) was silently missing from the
+  PDF. The interpreter now copies each font as text is shown with it,
+  before a `restore` can change it, and PDF output embeds the copies.
 - **An EPS that calls `showpage` renders as one page** on the command line
   and in the library's PDF output. Both added a `showpage` of their own
   regardless, writing a blank second page (the `ps_samples` files

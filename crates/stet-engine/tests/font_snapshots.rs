@@ -309,7 +309,7 @@ fn a_cycle_is_cut() {
     let encoding = get(&c, &resolved.font(id).unwrap().root, "Encoding")
         .and_then(Frozen::as_array)
         .unwrap();
-    assert!(matches!(encoding[0], Frozen::NotKept));
+    assert!(matches!(encoding[0], Frozen::Other));
     assert_eq!(encoding[65].as_name(), c.names.find(b"A"));
 }
 

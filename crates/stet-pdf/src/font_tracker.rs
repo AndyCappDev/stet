@@ -5,11 +5,13 @@
 //! Font usage tracking for PDF text output.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
-use stet_core::context::Context;
-use stet_core::dict::DictKey;
-use stet_core::object::{EntityId, NameId, PsValue};
+use stet_core::font_snapshot::{Frozen, FrozenDict, FrozenFont};
+use stet_core::object::NameId;
 use stet_graphics::device::TextParams;
+
+use crate::font_data::FontData;
 
 /// Standard 14 PDF font names that don't require embedding.
 const STANDARD_14: &[&[u8]] = &[
@@ -38,19 +40,22 @@ pub struct FontUsage {
     pub font_name: Vec<u8>,
     /// FontType.
     pub font_type: i32,
-    /// Font dict entity ID (first instance seen — used for CharStrings/Private).
-    pub font_entity: EntityId,
-    /// The font dict instances this resource draws with: every instance of
-    /// the font whose encoding agrees with the others'. dvips creates
-    /// several re-encoded instances of one base font, each encoding a
-    /// different subset, so the resource's encoding, widths and ToUnicode
-    /// map merge all of them.
-    pub all_entities: Vec<EntityId>,
-    /// Every instance of the font, whatever its encoding: the glyphs to
-    /// embed. Instances whose encodings conflict become separate resources
-    /// but share this set, since a dvips instance may define glyphs another
-    /// one encodes.
-    pub program_entities: Vec<EntityId>,
+    /// The first instance seen.
+    pub font: FontId,
+    /// The first instance's font dictionary, as the interpreter copied it —
+    /// what CharStrings and Private are read from. `None` without a copy.
+    pub root: Option<Arc<FrozenDict>>,
+    /// The copied font dictionaries of the instances this resource draws
+    /// with: every instance of the font whose encoding agrees with the
+    /// others'. dvips creates several re-encoded instances of one base font,
+    /// each encoding a different subset, so the resource's encoding, widths
+    /// and ToUnicode map merge all of them.
+    pub all_fonts: Vec<Arc<FrozenDict>>,
+    /// The copies of every instance of the font, whatever its encoding: the
+    /// glyphs to embed. Instances whose encodings conflict become separate
+    /// resources but share this set, since a dvips instance may define
+    /// glyphs another one encodes.
+    pub program_fonts: Vec<Arc<FrozenDict>>,
     /// The glyph name at each code, merged over `all_entities` (`None`
     /// where none names a glyph). Empty when the encoding could not be
     /// read, which agrees with any other.
@@ -60,7 +65,7 @@ pub struct FontUsage {
     /// instances of a CIDFont are separate resources.
     pub wmode: u8,
     /// Whether `wmode` came from a font dict, rather than being assumed
-    /// for an instance registered without a [`Context`].
+    /// for an instance registered without its copy.
     wmode_known: bool,
     /// Set of character codes (or CIDs) used.
     pub used_codes: HashSet<u16>,
@@ -78,6 +83,24 @@ pub struct FontUsage {
 /// which page or scalefont/makefont created the font dict.
 type FontKey = (Vec<u8>, i32);
 
+/// A font instance as PDF output tells them apart: by the interpreter's copy
+/// of it, when there is one — the same font dictionary, unchanged, is one
+/// copy, while a font that reused a reclaimed one's id, or that a page
+/// changed, is another — else by its font dictionary's id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FontId {
+    /// The copy's address, stable while the job's copies are held.
+    Copy(usize),
+    /// The font dictionary's id, for text without a copy.
+    Entity(u32),
+}
+
+impl FontId {
+    fn of_copy(font: &FrozenFont) -> Self {
+        FontId::Copy(Arc::as_ptr(&font.root) as usize)
+    }
+}
+
 /// Tracks font usage across all pages in a PDF job.
 ///
 /// One PDF font resource serves every instance of a font whose encodings
@@ -90,9 +113,12 @@ pub struct FontTracker {
     fonts: Vec<FontUsage>,
     /// Font key → indices of its resources in `fonts`.
     by_key: HashMap<FontKey, Vec<usize>>,
-    /// Font entity → index of its resource (fast lookup during content
+    /// Font instance → index of its resource (fast lookup during content
     /// stream generation).
-    entity_to_font: HashMap<EntityId, usize>,
+    instance_to_font: HashMap<FontId, usize>,
+    /// Each copied instance a `Text` element names
+    /// ([`TextParams::font_snapshot`]), as told apart.
+    snapshot_ids: HashMap<u32, FontId>,
 }
 
 impl FontTracker {
@@ -100,21 +126,40 @@ impl FontTracker {
         Self {
             fonts: Vec::new(),
             by_key: HashMap::new(),
-            entity_to_font: HashMap::new(),
+            instance_to_font: HashMap::new(),
+            snapshot_ids: HashMap::new(),
         }
+    }
+
+    /// The instance a `Text` element's font is: its copy, once tracked,
+    /// else its font dictionary's id.
+    pub fn font_id(&self, params: &TextParams) -> FontId {
+        params
+            .font_snapshot
+            .and_then(|s| self.snapshot_ids.get(&s))
+            .copied()
+            .unwrap_or(FontId::Entity(params.font_entity))
     }
 
     /// Register a Text element's font and record character usage.
     /// Returns the PDF resource name for this font.
     ///
-    /// `ctx` supplies the font's encoding and writing mode, which decide
-    /// whether it can share a resource with another instance of the same
-    /// font; without it the instance joins the font's first resource.
-    pub fn track(&mut self, params: &TextParams, ctx: Option<&Context>) -> &str {
-        let entity = EntityId(params.font_entity);
-        let idx = match self.entity_to_font.get(&entity) {
+    /// `fonts` supplies the font's copy, whose encoding and writing mode
+    /// decide whether it can share a resource with another instance of the
+    /// same font; when `read` is false — or without a copy — the instance
+    /// joins the font's first resource.
+    pub fn track(&mut self, params: &TextParams, fonts: Option<&FontData>, read: bool) -> &str {
+        let copy = fonts.and_then(|f| f.fonts.font(params.font_snapshot?).map(|c| (f, c)));
+        let id = match copy {
+            Some((_, c)) => FontId::of_copy(c),
+            None => self.font_id(params),
+        };
+        if let (Some(s), Some(_)) = (params.font_snapshot, copy) {
+            self.snapshot_ids.insert(s, id);
+        }
+        let idx = match self.instance_to_font.get(&id) {
             Some(&idx) => idx,
-            None => self.add_instance(params, entity, ctx),
+            None => self.add_instance(params, id, copy.filter(|_| read), copy.map(|(_, c)| c)),
         };
         let usage = &mut self.fonts[idx];
 
@@ -137,21 +182,24 @@ impl FontTracker {
     }
 
     /// Place a font instance seen for the first time: in the first resource
-    /// of its font whose encoding agrees with it, or in a new one.
+    /// of its font whose encoding agrees with it, or in a new one. `read` is
+    /// the copy to read the encoding and writing mode from, `copy` the copy
+    /// the instance draws with.
     fn add_instance(
         &mut self,
         params: &TextParams,
-        entity: EntityId,
-        ctx: Option<&Context>,
+        id: FontId,
+        read: Option<(&FontData, &FrozenFont)>,
+        copy: Option<&FrozenFont>,
     ) -> usize {
         let key = (params.font_name.clone(), params.font_type);
         // A Type 0 font's Encoding picks descendant fonts, not glyphs.
-        let encoding = match ctx {
-            Some(ctx) if params.font_type != 0 => glyph_encoding(ctx, entity),
+        let encoding = match read {
+            Some((f, c)) if params.font_type != 0 => glyph_encoding(f, &c.root),
             _ => Vec::new(),
         };
-        let wmode = match ctx {
-            Some(ctx) if params.font_type == 0 => Some(writing_mode(ctx, entity)),
+        let wmode = match read {
+            Some((f, c)) if params.font_type == 0 => Some(writing_mode(f, &c.root)),
             _ => None,
         };
         let group = self.by_key.entry(key).or_default();
@@ -167,7 +215,9 @@ impl FontTracker {
                     usage.wmode = w;
                     usage.wmode_known = true;
                 }
-                usage.all_entities.push(entity);
+                if let Some(c) = copy {
+                    usage.all_fonts.push(c.root.clone());
+                }
                 i
             }
             None => {
@@ -176,9 +226,10 @@ impl FontTracker {
                     pdf_name: format!("F{idx}"),
                     font_name: params.font_name.clone(),
                     font_type: params.font_type,
-                    font_entity: entity,
-                    all_entities: vec![entity],
-                    program_entities: Vec::new(),
+                    font: id,
+                    root: copy.map(|c| c.root.clone()),
+                    all_fonts: copy.map(|c| c.root.clone()).into_iter().collect(),
+                    program_fonts: Vec::new(),
                     encoding,
                     wmode: wmode.unwrap_or(0),
                     wmode_known: wmode.is_some(),
@@ -193,21 +244,21 @@ impl FontTracker {
         };
         // Every resource of the font sees every instance's glyphs; a new
         // resource starts with those of the instances before it.
-        let program: Vec<EntityId> = group
+        let program: Vec<Arc<FrozenDict>> = group
             .iter()
-            .flat_map(|&i| self.fonts[i].all_entities.iter().copied())
+            .flat_map(|&i| self.fonts[i].all_fonts.iter().cloned())
             .collect();
         for &i in group.iter() {
-            self.fonts[i].program_entities.clone_from(&program);
+            self.fonts[i].program_fonts.clone_from(&program);
         }
-        self.entity_to_font.insert(entity, idx);
+        self.instance_to_font.insert(id, idx);
         idx
     }
 
-    /// Look up the PDF resource name for a font entity.
-    pub fn get_pdf_name(&self, entity: EntityId) -> Option<&str> {
-        self.entity_to_font
-            .get(&entity)
+    /// Look up the PDF resource name for a font instance.
+    pub fn get_pdf_name(&self, font: FontId) -> Option<&str> {
+        self.instance_to_font
+            .get(&font)
             .map(|&i| self.fonts[i].pdf_name.as_str())
     }
 
@@ -221,17 +272,17 @@ impl FontTracker {
         self.fonts.iter_mut()
     }
 
-    /// The writing mode of a font entity's resource: 1 for vertical.
-    pub fn wmode(&self, font_entity: EntityId) -> u8 {
-        self.entity_to_font
-            .get(&font_entity)
+    /// The writing mode of a font instance's resource: 1 for vertical.
+    pub fn wmode(&self, font: FontId) -> u8 {
+        self.instance_to_font
+            .get(&font)
             .map_or(0, |&i| self.fonts[i].wmode)
     }
 
-    /// Look up a glyph width for a font entity and character code.
+    /// Look up a glyph width for a font instance and character code.
     /// Returns width in 1000ths of a unit, or None if unavailable.
-    pub fn get_glyph_width(&self, font_entity: EntityId, code: u16) -> Option<i32> {
-        let &i = self.entity_to_font.get(&font_entity)?;
+    pub fn get_glyph_width(&self, font: FontId, code: u16) -> Option<i32> {
+        let &i = self.instance_to_font.get(&font)?;
         self.fonts[i].widths.get(&code).copied()
     }
 }
@@ -239,20 +290,15 @@ impl FontTracker {
 /// The glyph name a font dict's `Encoding` gives each code, `None` for
 /// `.notdef` and anything that is not a name. Empty when the font has no
 /// encoding array.
-fn glyph_encoding(ctx: &Context, font: EntityId) -> Vec<Option<NameId>> {
-    let Some(PsValue::Array { entity, start, len }) = ctx
-        .dicts
-        .get(font, &DictKey::Name(ctx.name_cache.n_encoding))
-        .map(|o| o.value)
-    else {
+fn glyph_encoding(fonts: &FontData, font: &FrozenDict) -> Vec<Option<NameId>> {
+    let Some(encoding) = fonts.get(font, b"Encoding").and_then(Frozen::as_array) else {
         return Vec::new();
     };
-    let notdef = ctx.names.find(b".notdef");
-    (0..len.min(256))
-        .map(|i| match ctx.arrays.get_element(entity, start + i).value {
-            PsValue::Name(id) if Some(id) != notdef => Some(id),
-            _ => None,
-        })
+    let notdef = fonts.find(b".notdef");
+    encoding
+        .iter()
+        .take(256)
+        .map(|o| o.as_name().filter(|&id| Some(id) != notdef))
         .collect()
 }
 
@@ -260,24 +306,16 @@ fn glyph_encoding(ctx: &Context, font: EntityId) -> Vec<Option<NameId>> {
 /// the root font's `WMode` is 1 and its CIDFont has writing-mode-1
 /// metrics, a `Metrics2` or a `CDevProc`; else 0. Without them "the WMode
 /// parameter is ignored" (PLRM 5.4), and the text runs horizontally.
-fn writing_mode(ctx: &Context, font: EntityId) -> u8 {
-    let get = |dict: EntityId, key: &[u8]| {
-        ctx.names
-            .find(key)
-            .and_then(|id| ctx.dicts.get(dict, &DictKey::Name(id)))
-    };
-    let wmode = get(font, b"WMode").and_then(|o| o.as_i32());
-    let cidfont = match get(font, b"FDepVector").map(|o| o.value) {
-        Some(PsValue::Array { entity, start, len }) if len > 0 => {
-            match ctx.arrays.get_element(entity, start).value {
-                PsValue::Dict(d) => Some(d),
-                _ => None,
-            }
-        }
-        _ => None,
-    };
-    let vertical_metrics =
-        cidfont.is_some_and(|d| get(d, b"Metrics2").is_some() || get(d, b"CDevProc").is_some());
+fn writing_mode(fonts: &FontData, font: &FrozenDict) -> u8 {
+    let wmode = fonts.get(font, b"WMode").and_then(Frozen::as_i32);
+    let cidfont = fonts
+        .get(font, b"FDepVector")
+        .and_then(Frozen::as_array)
+        .and_then(<[Frozen]>::first)
+        .and_then(Frozen::as_dict);
+    let vertical_metrics = cidfont.is_some_and(|d| {
+        fonts.get(d, b"Metrics2").is_some() || fonts.get(d, b"CDevProc").is_some()
+    });
     u8::from(wmode == Some(1) && vertical_metrics)
 }
 

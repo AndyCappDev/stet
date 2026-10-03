@@ -7,12 +7,13 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write as IoWrite;
 
+use crate::font_data::FontData;
 use crate::font_embedder;
+use crate::font_tracker::FontId;
 use crate::font_tracker::FontTracker;
 use crate::image_ops::{self, ImageXObject};
 use crate::pdf_objects::PdfObj;
 use crate::text_ops;
-use stet_core::context::Context;
 use stet_fonts::geometry::{Matrix, PsPath};
 use stet_graphics::color::{DeviceColor, FillRule, LineCap, LineJoin};
 use stet_graphics::device::{
@@ -401,7 +402,7 @@ impl<'tracker> Builder<'tracker> {
     /// Group / SoftMasked / OcgGroup arms.
     fn emit_list<'a>(&mut self, list: &'a DisplayList) {
         let mut text_batch: Vec<&'a TextParams> = Vec::new();
-        let mut batch_font: Option<u32> = None;
+        let mut batch_font: Option<FontId> = None;
         for element in list.elements() {
             self.emit_element(element, &mut text_batch, &mut batch_font);
         }
@@ -412,7 +413,7 @@ impl<'tracker> Builder<'tracker> {
         &mut self,
         element: &'a DisplayElement,
         text_batch: &mut Vec<&'a TextParams>,
-        batch_font: &mut Option<u32>,
+        batch_font: &mut Option<FontId>,
     ) {
         // Text-batching prelude. Text accumulates into the current
         // batch; non-Text elements flush the batch before processing.
@@ -422,13 +423,14 @@ impl<'tracker> Builder<'tracker> {
         // through to the main match.
         match element {
             DisplayElement::Text { params } => {
-                if *batch_font == Some(params.font_entity) {
+                let font = self.font_tracker.font_id(params);
+                if *batch_font == Some(font) {
                     text_batch.push(params);
                 } else {
                     flush_text_batch(text_batch, self.font_tracker, &mut self.buf, &mut self.gs);
                     text_batch.clear();
                     text_batch.push(params);
-                    *batch_font = Some(params.font_entity);
+                    *batch_font = Some(font);
                 }
                 return;
             }
@@ -1274,7 +1276,8 @@ fn scan_text_elements(
     list: &DisplayList,
     font_tracker: &mut FontTracker,
     page_font_names: &mut HashSet<String>,
-    ctx: Option<&Context>,
+    fonts: Option<&FontData>,
+    read: bool,
 ) -> bool {
     let mut has_text = false;
     for element in list.elements() {
@@ -1283,7 +1286,7 @@ fn scan_text_elements(
         // drawn: counting it would skip those fills and lose the text.
         if let DisplayElement::Text { params } = element {
             has_text = true;
-            let name = font_tracker.track(params, ctx).to_string();
+            let name = font_tracker.track(params, fonts, read).to_string();
             page_font_names.insert(name);
         }
     }
@@ -1293,14 +1296,14 @@ fn scan_text_elements(
 /// Generate PDF content stream bytes from a display list.
 ///
 /// Uses a shared document-level `FontTracker` to register fonts across pages.
-/// When `ctx` is available, pre-computes font widths for TJ kern values
+/// With the job's font copies, pre-computes font widths for TJ kern values
 /// and batches consecutive same-font text elements into single BT/ET blocks.
 pub fn build_content_stream(
     list: &DisplayList,
     page_w: u32,
     page_h: u32,
     dpi: f64,
-    ctx: Option<&Context>,
+    fonts: Option<&FontData>,
     font_tracker: &mut FontTracker,
     emit_page_box_clip: bool,
 ) -> ContentStreamResult {
@@ -1308,13 +1311,14 @@ pub fn build_content_stream(
     let page_h_pts = page_h as f64 * scale;
 
     let mut page_font_names: HashSet<String> = HashSet::new();
-    let has_text_elements = scan_text_elements(list, font_tracker, &mut page_font_names, ctx);
+    let has_text_elements =
+        scan_text_elements(list, font_tracker, &mut page_font_names, fonts, true);
 
-    // Pre-compute glyph widths for TJ kern values when Context is available
-    if let Some(c) = ctx {
+    // Pre-compute glyph widths for TJ kern values from the font copies
+    if let Some(f) = fonts {
         for usage in font_tracker.fonts_mut() {
             if usage.widths.is_empty() {
-                usage.widths = font_embedder::extract_widths(usage, c);
+                usage.widths = font_embedder::extract_widths(usage, f);
             }
         }
     }
@@ -1371,11 +1375,13 @@ pub fn build_content_stream(
 pub fn build_tile_content_stream(
     list: &DisplayList,
     font_tracker: &mut FontTracker,
+    fonts: Option<&FontData>,
 ) -> ContentStreamResult {
     let mut page_font_names: HashSet<String> = HashSet::new();
     // Tiles are built after the fonts are embedded, so their fonts can
     // only join resources that exist: no encoding, no new resource.
-    let has_text_elements = scan_text_elements(list, font_tracker, &mut page_font_names, None);
+    let has_text_elements =
+        scan_text_elements(list, font_tracker, &mut page_font_names, fonts, false);
 
     let mut builder = Builder::new(font_tracker, 0, 0, has_text_elements, true);
     builder.page_font_names = page_font_names;

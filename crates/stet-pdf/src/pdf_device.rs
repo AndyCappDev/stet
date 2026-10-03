@@ -13,6 +13,7 @@ use stet_graphics::display_list::DisplayList;
 use std::collections::{HashMap, HashSet};
 
 use crate::content_stream::{self, ContentStreamResult, ShadingRef};
+use crate::font_data::FontData;
 use crate::font_embedder;
 use crate::font_tracker::FontTracker;
 use crate::image_ops::ImageXObject;
@@ -283,6 +284,15 @@ impl PdfDevice {
     fn build_pdf(&self, ctx: Option<&Context>) -> Result<(PdfWriter, u32, u32), String> {
         let mut writer = PdfWriter::new();
 
+        // The fonts the text was shown with, as the interpreter copied them:
+        // a `restore` may have reclaimed the fonts themselves by now.
+        let resolved = ctx.map(|c| c.font_snapshots.resolve(c));
+        let font_data = ctx.zip(resolved.as_ref()).map(|(c, fonts)| FontData {
+            names: &c.names,
+            fonts,
+        });
+        let fonts = font_data.as_ref();
+
         // Pre-allocate catalog and pages objects
         let catalog_ref = writer.alloc_obj();
         let pages_ref = writer.alloc_obj();
@@ -298,7 +308,7 @@ impl PdfDevice {
                 page.page_w,
                 page.page_h,
                 page.dpi,
-                ctx,
+                fonts,
                 &mut font_tracker,
                 self.emit_page_box_clip,
             );
@@ -307,7 +317,7 @@ impl PdfDevice {
 
         // Embed each unique font once at document level
         let font_obj_map: HashMap<String, u32> =
-            self.embed_all_fonts(&mut writer, &font_tracker, ctx);
+            self.embed_all_fonts(&mut writer, &font_tracker, fonts);
 
         // Collect document-level Optional-Content state from every
         // page's OcgMarkerRef list and allocate one /OCG indirect per
@@ -438,6 +448,7 @@ impl PdfDevice {
                 &per_page_annots[i],
                 &per_page_overrides[i],
                 &ocg_id_to_ref,
+                fonts,
             )?;
         }
 
@@ -638,17 +649,20 @@ impl PdfDevice {
         &self,
         writer: &mut PdfWriter,
         font_tracker: &FontTracker,
-        ctx: Option<&Context>,
+        fonts: Option<&FontData>,
     ) -> HashMap<String, u32> {
         let mut map = HashMap::new();
         for usage in font_tracker.fonts() {
-            let font_ref = if let Some(c) = ctx {
-                font_embedder::build_font_resource(writer, usage, c).unwrap_or_else(|| {
-                    let tu = font_embedder::build_tounicode_for_fallback(writer, usage, c);
-                    self.build_font_reference(writer, usage, tu)
-                })
-            } else {
-                self.build_font_reference(writer, usage, None)
+            // A font is embedded from the interpreter's copy of it; text
+            // shown without one gets a reference to the font by name.
+            let font_ref = match fonts.filter(|_| usage.root.is_some()) {
+                Some(f) => {
+                    font_embedder::build_font_resource(writer, usage, f).unwrap_or_else(|| {
+                        let tu = font_embedder::build_tounicode_for_fallback(writer, usage, f);
+                        self.build_font_reference(writer, usage, tu)
+                    })
+                }
+                None => self.build_font_reference(writer, usage, None),
             };
             map.insert(usage.pdf_name.clone(), font_ref);
         }
@@ -673,6 +687,7 @@ impl PdfDevice {
         annot_refs: &[u32],
         overrides: &EffectivePageOverride,
         ocg_id_to_ref: &HashMap<u32, u32>,
+        fonts: Option<&FontData>,
     ) -> Result<(), String> {
         let ContentStreamResult {
             content,
@@ -886,7 +901,7 @@ impl PdfDevice {
             let mut pattern_entries: Vec<(Vec<u8>, PdfObj)> = Vec::new();
             for (i, pat_ref) in pattern_refs.iter().enumerate() {
                 let tile_result =
-                    content_stream::build_tile_content_stream(&pat_ref.tile, font_tracker);
+                    content_stream::build_tile_content_stream(&pat_ref.tile, font_tracker, fonts);
 
                 // Build tile resources
                 let mut tile_resources: Vec<(Vec<u8>, PdfObj)> = Vec::new();
@@ -1595,6 +1610,12 @@ impl OutputDevice for PdfDevice {
     /// single output name serves a multi-page document.
     fn writes_file_per_page(&self) -> bool {
         false
+    }
+
+    /// Fonts are embedded at the end of the job, from the copies the
+    /// interpreter keeps of them as text is shown.
+    fn keeps_text_fonts(&self) -> bool {
+        true
     }
 
     fn draw_image(&mut self, _sample_data: &[u8], _params: &ImageParams) {}

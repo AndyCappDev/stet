@@ -9,7 +9,6 @@
 
 use std::io::Write as IoWrite;
 
-use stet_core::object::EntityId;
 use stet_graphics::device::TextParams;
 
 use crate::content_stream::fmt_num;
@@ -25,7 +24,8 @@ pub fn emit_text_batch(buf: &mut Vec<u8>, batch: &[&TextParams], font_tracker: &
     }
 
     let first = batch[0];
-    let Some(pdf_font_name) = font_tracker.get_pdf_name(EntityId(first.font_entity)) else {
+    let font = font_tracker.font_id(first);
+    let Some(pdf_font_name) = font_tracker.get_pdf_name(font) else {
         return;
     };
 
@@ -36,11 +36,11 @@ pub fn emit_text_batch(buf: &mut Vec<u8>, batch: &[&TextParams], font_tracker: &
     // Check if widths are available for this font
     let has_widths = !font_tracker
         .fonts()
-        .find(|u| u.font_entity == EntityId(first.font_entity))
+        .find(|u| u.font == font)
         .is_none_or(|u| u.widths.is_empty());
     // Runs join along the horizontal advance, which vertical text does not
     // follow: each vertical string is placed on its own.
-    let joins_runs = has_widths && font_tracker.wmode(EntityId(first.font_entity)) == 0;
+    let joins_runs = has_widths && font_tracker.wmode(font) == 0;
 
     // Single BT/Tf block for the entire batch — Tf is the same for all
     // entries since they share the same font.
@@ -208,7 +208,7 @@ pub fn emit_text_batch(buf: &mut Vec<u8>, batch: &[&TextParams], font_tracker: &
 ///
 /// A Type 0 font's text is 2-byte CIDs, and its widths are keyed by CID.
 fn text_width(font_tracker: &FontTracker, params: &TextParams, strict: bool) -> Option<f64> {
-    let entity = EntityId(params.font_entity);
+    let font = font_tracker.font_id(params);
     let codes: Vec<u16> = if params.font_type == 0 {
         let (cids, _) = params.text.as_chunks::<2>();
         cids.iter().map(|&c| u16::from_be_bytes(c)).collect()
@@ -217,7 +217,7 @@ fn text_width(font_tracker: &FontTracker, params: &TextParams, strict: bool) -> 
     };
     let mut total = 0.0;
     for code in codes {
-        match font_tracker.get_glyph_width(entity, code) {
+        match font_tracker.get_glyph_width(font, code) {
             Some(w) => total += f64::from(w),
             None if strict => return None,
             None => {}
