@@ -178,7 +178,8 @@ fn setpagedevice_ends_the_old_device_and_erases() {
 
 /// Each output device's own `EndPage` consumes both its operands and
 /// answers true for a page, false for deactivation. `pdf.ps` used to leave
-/// the count behind at every page.
+/// the count behind at every page, and `null.ps` declined every page — which
+/// leaves it unerased, so `--device null` kept a whole document's marks.
 #[test]
 fn device_procedures_consume_their_operands() {
     for device in ["png", "pdf", "viewer", "null"] {
@@ -195,19 +196,7 @@ fn device_procedures_consume_their_operands() {
             .into_iter()
             .filter(|l| !l.starts_with("Creating"))
             .collect();
-        let produce = device != "null";
-        assert_eq!(
-            lines,
-            [
-                "1".to_string(),
-                produce.to_string(),
-                "1".to_string(),
-                produce.to_string(),
-                "1".to_string(),
-                "false".to_string(),
-            ],
-            "{device}"
-        );
+        assert_eq!(lines, ["1", "true", "1", "true", "1", "false"], "{device}");
     }
 }
 
