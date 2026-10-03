@@ -424,6 +424,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   built the document a second time for the bytes it returned, whose
   `/Title` was "output" after that file. It now builds the document once,
   in memory, with no `/Title` unless a `/DOCINFO` pdfmark sets one.
+- **PDF output is reproducible.** The same job gives the same PDF, apart
+  from its `/CreationDate`: a page's `/Font` resources were listed in an
+  order that changed from run to run, and are now in their own order (`F0`,
+  `F1`, …).
 - **An EPS that calls `showpage` renders as one page** on the command line
   and in the library's PDF output. Both added a `showpage` of their own
   regardless, writing a blank second page (the `ps_samples` files

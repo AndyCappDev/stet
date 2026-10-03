@@ -31,7 +31,7 @@ pub struct ContentStreamResult {
     /// Indices into the display list for shading elements, paired with
     /// the shading resource name index used in the content stream.
     pub shading_refs: Vec<ShadingRef>,
-    /// PDF font names used on this page (e.g., ["F0", "F2"]).
+    /// PDF font names used on this page, in resource order (e.g., ["F0", "F2", "F10"]).
     pub used_font_names: Vec<String>,
     /// ExtGState resource dicts used in the content stream.
     pub ext_gstate_dicts: Vec<ExtGStateDict>,
@@ -1118,11 +1118,16 @@ impl<'tracker> Builder<'tracker> {
     }
 
     fn finish(self) -> ContentStreamResult {
+        // The page's /Font dictionary is written in this order, so give it
+        // the resources' own (F0, F1, …, F10) rather than the set's, which
+        // changes from run to run.
+        let mut used_font_names: Vec<String> = self.page_font_names.into_iter().collect();
+        used_font_names.sort_by(|a, b| (a.len(), a).cmp(&(b.len(), b)));
         ContentStreamResult {
             content: self.buf,
             images: self.images,
             shading_refs: self.shading_refs,
-            used_font_names: self.page_font_names.into_iter().collect(),
+            used_font_names,
             ext_gstate_dicts: self.ext_gstates,
             color_spaces: self.color_spaces,
             icc_color_spaces: self.icc_color_spaces,
