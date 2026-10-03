@@ -275,6 +275,14 @@ pub struct Context {
     /// advances whatever `EndPage` returns, so the two part when an
     /// `EndPage` declines a page.
     pub showpage_count: i32,
+    /// The page device's `PageCount`: pages the device has produced since it
+    /// was installed, which `currentpagedevice` reports (PLRM 3e §6.2.6).
+    ///
+    /// Device state, not VM: Ghostscript's count survives a `restore` that
+    /// reinstates an earlier page device dictionary, and so does this. It was
+    /// held in the dictionary, which `setpagedevice` therefore had to put in
+    /// global VM — out of `restore`'s reach, but also out of reclamation's.
+    pub page_count: i32,
     /// The colour the last erase left on the page, when it is not white: a
     /// page-sized fill of gray 1 through a transfer function that maps it to
     /// something else (PLRM 3e, `erasepage`). `showpage`'s erase sets it,
@@ -1227,6 +1235,7 @@ impl Context {
             output_template: None,
             pages_emitted: 0,
             showpage_count: 0,
+            page_count: 0,
             page_erase_fill: None,
             page_filter: None,
             device_factory: None,

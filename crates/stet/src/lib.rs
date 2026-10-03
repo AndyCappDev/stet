@@ -307,17 +307,13 @@ impl Interpreter {
         // Routes showpage to the device; the in-memory device writes no file
         // and ignores the name.
         self.ctx.output_path = Some("output.pdf".to_string());
-        install_device(&mut self.ctx, dpi, page_w, page_h)?;
+        let save_id = self.begin_job(dpi, page_w, page_h)?;
 
         // PDF output: register pdfmark + distiller params so prologues that
         // branch on `systemdict /pdfmark known` see Distiller-equivalent
         // semantics. The screen/viewer path leaves these undefined so the
         // same prologue takes its CMYK→ICC branch instead.
         stet_ops::register_pdf_authoring_ops(&mut self.ctx);
-
-        // Save/restore isolation
-        let save_obj = self.ctx.vm_save();
-        let save_id = extract_save_id(&save_obj);
 
         let exec_result = if is_eps {
             if let Some((llx, lly, _, _)) = read_eps_bounding_box(ps_data) {
@@ -441,10 +437,7 @@ impl Interpreter {
         }
 
         self.ctx.output_path = Some("stet_output".to_string());
-        install_device(&mut self.ctx, dpi, page_w_pt, page_h_pt)?;
-
-        let save_obj = self.ctx.vm_save();
-        let save_id = extract_save_id(&save_obj);
+        let save_id = self.begin_job(dpi, page_w_pt, page_h_pt)?;
 
         let exec_result = parse_and_exec(&mut self.ctx, ps_data);
         let exec_result = job_result(&self.ctx, exec_result);
@@ -491,13 +484,12 @@ impl Interpreter {
         }
 
         self.ctx.output_path = Some("stet_output".to_string());
-        install_device(&mut self.ctx, dpi, w, h)?;
+        let save_id = self.begin_job(dpi, w, h)?;
 
-        let save_obj = self.ctx.vm_save();
-        let save_id = extract_save_id(&save_obj);
-
-        self.run_eps(ps_data, llx, lly)?;
-        let _ = self.end_page_device();
+        let exec_result = self.run_eps(ps_data, llx, lly);
+        if exec_result.is_ok() {
+            let _ = self.end_page_device();
+        }
 
         // Runs after the implicit `showpage` above, so it fires only if the
         // EPS painted more after its own showpage — a real dropped page.
@@ -514,6 +506,7 @@ impl Interpreter {
 
         end_job(&mut self.ctx, save_id);
 
+        exec_result?;
         Ok(result)
     }
 
@@ -526,6 +519,20 @@ impl Interpreter {
     /// page if it did not. An EPS need not call `showpage`; one that does
     /// must not get a second, blank page. The EPS's own errors are not the
     /// caller's: the page is rendered as far as it got.
+    /// Start a job: save VM, then install the device inside the save, as the
+    /// CLI does, so that the job's restore reclaims what `setpagedevice`
+    /// allocates. Returns the save to pass to [`end_job`]; if the device
+    /// cannot be installed, the job is ended here.
+    fn begin_job(&mut self, dpi: f64, width_pt: f64, height_pt: f64) -> Result<u32, StetError> {
+        let save_obj = self.ctx.vm_save();
+        let save_id = extract_save_id(&save_obj);
+        if let Err(e) = install_device(&mut self.ctx, dpi, width_pt, height_pt) {
+            end_job(&mut self.ctx, save_id);
+            return Err(e);
+        }
+        Ok(save_id)
+    }
+
     fn run_eps(&mut self, ps_data: &[u8], llx: f64, lly: f64) -> Result<(), StetError> {
         let wrapper = format!("gsave {} {} translate", -llx, -lly);
         parse_and_exec(&mut self.ctx, wrapper.as_bytes()).map_err(ps_err)?;

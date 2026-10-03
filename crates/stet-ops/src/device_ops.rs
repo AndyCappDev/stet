@@ -39,11 +39,9 @@ pub fn set_pd_array(ctx: &mut Context, key: &[u8], values: &[f64]) {
     if let Some(pd) = ctx.gstate.page_device {
         let name_id = ctx.names.intern(key);
         let items: Vec<PsObject> = values.iter().map(|&v| PsObject::real(v)).collect();
-        // Allocate in the page device's own VM, not the ambient `currentglobal`.
-        // `setpagedevice` promotes the page device into global VM, so allocating
-        // per the ambient mode would store a local array into a global dict —
-        // a PLRM 3.7.2 violation that leaves the page device pointing at
-        // storage a later `restore` releases.
+        // Allocate in the page device's own VM, not the ambient `currentglobal`:
+        // a local array stored into a global page device would be a PLRM 3.7.2
+        // violation, pointing at storage a later `restore` releases.
         let pd_global = pd.is_global();
         let entity = crate::vm_ops::alloc_array_from_in(ctx, &items, pd_global);
         let mut arr = PsObject::array(entity, items.len() as u32);
@@ -238,7 +236,7 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
             };
             if let Some(dev_entity) = dev_entity {
                 // Copy device resource dict, merge request entries on top
-                let new_pd = crate::vm_ops::alloc_dict(ctx, 50, b"pagedevice");
+                let new_pd = alloc_page_device(ctx);
                 copy_dict(ctx, dev_entity, new_pd);
                 merge_request_dict(ctx, req_entity, new_pd);
                 new_pd
@@ -250,7 +248,7 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
         }
     } else if let Some(old_pd) = ctx.gstate.page_device {
         // Incremental merge: COW copy of existing page device, then merge request
-        let new_pd = crate::vm_ops::alloc_dict(ctx, 50, b"pagedevice");
+        let new_pd = alloc_page_device(ctx);
         copy_dict(ctx, old_pd, new_pd);
         merge_request_dict(ctx, req_entity, new_pd);
         new_pd
@@ -259,36 +257,12 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
         req_entity
     };
 
-    // Store as current page device.
-    // Must be in global VM so save/restore COW doesn't revert PageCount etc.
-    // If the dict is local, copy it to a new global dict.
-    let base_pd = if !base_pd.is_global() {
-        // Deep copy: a shallow one would leave the global page device pointing
-        // at local values (`/PageSize [612 792]` and friends), and PLRM 3.7.2
-        // forbids that precisely because `restore` reclaims local VM out from
-        // under the surviving global dict.
-        let mut seen = std::collections::HashMap::new();
-        let promoted = crate::vm_ops::promote_to_global(
-            ctx,
-            PsObject {
-                value: PsValue::Dict(base_pd),
-                flags: stet_core::object::ObjFlags::literal_composite(),
-            },
-            &mut seen,
-            0,
-        );
-        match promoted.value {
-            PsValue::Dict(e) => e,
-            _ => base_pd,
-        }
-    } else {
-        base_pd
-    };
     ctx.gstate.page_device = Some(base_pd);
-    // A new device starts counting showpages afresh, as its PageCount does;
-    // a parameter change keeps both.
+    // A new device starts counting showpages and pages afresh; a parameter
+    // change keeps both.
     if need_full_reload {
         ctx.showpage_count = 0;
+        ctx.page_count = 0;
     }
 
     // Compute MediaSize from PageSize and HWResolution (with sensible defaults)
@@ -370,12 +344,20 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
 
 /// `currentpagedevice`: — → dict
 ///
-/// Returns a read-only copy of the current page device dictionary.
+/// Returns a read-only copy of the current page device dictionary, with the
+/// device's `PageCount`.
 pub fn op_currentpagedevice(ctx: &mut Context) -> Result<(), PsError> {
     if let Some(pd) = ctx.gstate.page_device {
-        // Create a read-only copy
-        let copy = crate::vm_ops::alloc_dict(ctx, 50, b"pagedevice");
+        // Create a read-only copy, in local VM for the reason the page
+        // device itself is there (`alloc_page_device`).
+        let copy = alloc_page_device(ctx);
         copy_dict(ctx, pd, copy);
+        // The count is the device's, not the dict's (`Context::page_count`).
+        let page_count = DictKey::Name(ctx.names.intern(b"PageCount"));
+        if ctx.dicts.known(copy, &page_count) {
+            ctx.dicts
+                .put(copy, page_count, PsObject::int(ctx.page_count));
+        }
         ctx.dicts.set_access(copy, ObjFlags::ACCESS_READ_ONLY);
         let mut obj = PsObject::dict(copy);
         obj.flags = ObjFlags::new(ObjFlags::ACCESS_READ_ONLY, false, false, false);
@@ -625,8 +607,8 @@ fn finish_page(ctx: &mut Context, copypage: bool) -> Result<(), PsError> {
 /// `PageCount`, which numbers the pages produced, and hand the display list
 /// to the device unless `--pages` leaves it out.
 fn transmit_page(ctx: &mut Context, operator: &str) -> Result<(), PsError> {
-    let page_count = get_pd_int(ctx, b"PageCount").unwrap_or(0) + 1;
-    set_pd_int(ctx, b"PageCount", page_count);
+    ctx.page_count += 1;
+    let page_count = ctx.page_count;
 
     // pdfmark: track completed-page count so /ANN pdfmarks issued without an
     // explicit /Page key can resolve to "the page being assembled right now"
@@ -727,6 +709,20 @@ fn copy_dict(ctx: &mut Context, src: EntityId, dst: EntityId) {
     for (key, value) in entries {
         ctx.dicts.put(dst, key, value);
     }
+}
+
+/// Allocate a page device dictionary, or a copy of one, in local VM.
+///
+/// Local, whatever `currentglobal` says, for two reasons. A page device made
+/// inside a `save` is then reclaimed by its `restore`, which reinstates the
+/// graphics state, and with it the page device, from before the `save`;
+/// stet has no garbage collector, so one in global VM would stay for the
+/// life of the process. And a local dict may hold the request's values
+/// whichever VM they are in, where a global one could not hold local ones
+/// (PLRM 3.7.2). `PageCount`, which must survive a `restore`, is kept in
+/// [`Context::page_count`] rather than here.
+fn alloc_page_device(ctx: &mut Context) -> EntityId {
+    crate::vm_ops::alloc_dict_in(ctx, 50, b"pagedevice", false)
 }
 
 /// Merge request dict entries into page device dict.

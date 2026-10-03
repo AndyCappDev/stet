@@ -446,6 +446,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   call until its 16-bit operator numbers wrapped, after 21 723 calls, and
   `pdfmark` ran another operator. They are now registered once and are in
   `systemdict` for PDF jobs only.
+- **`setpagedevice` no longer keeps every page device for the life of the
+  process.** It copied each page device dictionary into global VM, which
+  `restore` does not reclaim, so each call left about 8 KB behind — from
+  the command line too, and in every `render` call of an `Interpreter`,
+  whose own device setup also ran outside the job's `save`. Page devices
+  now live in local VM and go with the `restore` that ends their job, and
+  the library sets up its device inside the job.
+- **`PageCount` counts the pages a `restore` reaches back past.** After
+  `save … setpagedevice … showpage restore`, `currentpagedevice` reported
+  the count from before the page, since the count lived in the page device
+  dictionary the `restore` reinstated. It is now the device's count, as in
+  Ghostscript.
 - **PDF output is reproducible.** The same job gives the same PDF, apart
   from its `/CreationDate`: a page's `/Font` resources were listed in an
   order that changed from run to run, and are now in their own order (`F0`,

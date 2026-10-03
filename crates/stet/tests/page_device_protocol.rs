@@ -214,3 +214,17 @@ fn pdf_output_leaves_the_operand_stack_clean() {
         .unwrap();
     assert_eq!(log.lines(), ["0", "0", "0"]);
 }
+
+/// `PageCount` is the device's count, which a `restore` does not undo even
+/// when it reinstates the page device dictionary from before a page. It was
+/// held in that dictionary, so the outer one, never having seen the page,
+/// reported one too few.
+#[test]
+fn page_count_survives_a_restore() {
+    let (pages, log) = run("%!PS\n\
+         showpage currentpagedevice /PageCount get =\n\
+         save << /PageSize [300 300] >> setpagedevice showpage restore\n\
+         currentpagedevice /PageCount get =\n");
+    assert_eq!(pages.len(), 2);
+    assert_eq!(log, ["1", "2"]);
+}

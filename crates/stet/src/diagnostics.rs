@@ -115,7 +115,7 @@ pub fn dropped_final_page(ctx: &Context) -> Option<ExecWarning> {
     Some(ExecWarning {
         kind: ExecWarningKind::DroppedFinalPage {
             objects: ctx.display_list.len(),
-            pages_emitted: stet_ops::device_ops::get_pd_int(ctx, b"PageCount").unwrap_or(0),
+            pages_emitted: ctx.page_count,
         },
     })
 }
