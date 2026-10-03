@@ -1293,11 +1293,33 @@ fn scan_text_elements(
     has_text
 }
 
+/// Register the fonts of a page's text with the document's `FontTracker`,
+/// as [`build_content_stream`] does — for tracking every page before any is
+/// built, so the widths `TJ` kerns use are the final ones
+/// ([`measure_widths`]).
+pub fn track_fonts(list: &DisplayList, font_tracker: &mut FontTracker, fonts: Option<&FontData>) {
+    scan_text_elements(list, font_tracker, &mut HashSet::new(), fonts, true);
+}
+
+/// Measure each tracked font's widths, for the codes the document uses,
+/// from the functions that write its `/Widths` (or `/W`).
+///
+/// Once every page's text is tracked: a resource gains codes, and instances
+/// that encode more of them, page by page, and its widths must cover them
+/// all — a string whose glyph has no width cannot join a `TJ` run — and be
+/// the embedded font's.
+pub fn measure_widths(font_tracker: &mut FontTracker, fonts: &FontData) {
+    for usage in font_tracker.fonts_mut() {
+        usage.widths = font_embedder::glyph_widths(usage, fonts);
+    }
+}
+
 /// Generate PDF content stream bytes from a display list.
 ///
-/// Uses a shared document-level `FontTracker` to register fonts across pages.
-/// With the job's font copies, pre-computes font widths for TJ kern values
-/// and batches consecutive same-font text elements into single BT/ET blocks.
+/// Uses a shared document-level `FontTracker` to register fonts across pages,
+/// and batches consecutive same-font text elements into single BT/ET blocks,
+/// joining a baseline's strings into `TJ` runs with the widths
+/// [`measure_widths`] set.
 pub fn build_content_stream(
     list: &DisplayList,
     page_w: u32,
@@ -1313,15 +1335,6 @@ pub fn build_content_stream(
     let mut page_font_names: HashSet<String> = HashSet::new();
     let has_text_elements =
         scan_text_elements(list, font_tracker, &mut page_font_names, fonts, true);
-
-    // Pre-compute glyph widths for TJ kern values from the font copies
-    if let Some(f) = fonts {
-        for usage in font_tracker.fonts_mut() {
-            if usage.widths.is_empty() {
-                usage.widths = font_embedder::extract_widths(usage, f);
-            }
-        }
-    }
 
     let mut builder = Builder::new(font_tracker, page_w, page_h, has_text_elements, false);
     builder.page_font_names = page_font_names;

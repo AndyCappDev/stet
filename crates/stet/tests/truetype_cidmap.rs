@@ -16,83 +16,11 @@
 //! half-em-wide bar advancing 500. Its map sends CID 5 to glyph 2 and CID 7
 //! to glyph 1, and leaves CID 9 at glyph 0.
 
+mod common;
+
+use common::{hex, sfnt};
 use stet::{DisplayElement, Interpreter};
 use stet_fonts::geometry::PathSegment;
-
-/// A TrueType font with the three glyphs described above.
-fn sfnt() -> Vec<u8> {
-    let mut head = vec![0u8; 54];
-    head[12..16].copy_from_slice(&0x5F0F_3CF5u32.to_be_bytes());
-    head[18..20].copy_from_slice(&1000u16.to_be_bytes());
-    let mut hhea = vec![0u8; 36];
-    hhea[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
-    hhea[34..36].copy_from_slice(&3u16.to_be_bytes());
-    let mut hmtx = Vec::new();
-    for advance in [250u16, 1000, 500] {
-        hmtx.extend(advance.to_be_bytes());
-        hmtx.extend(0i16.to_be_bytes());
-    }
-    let mut maxp = vec![0u8; 6];
-    maxp[0..4].copy_from_slice(&0x0000_5000u32.to_be_bytes());
-    maxp[4..6].copy_from_slice(&3u16.to_be_bytes());
-
-    // One rectangle contour of `w` by 1000, four on-curve points.
-    let rect = |w: i16| {
-        let mut g = Vec::new();
-        for v in [1i16, 0, 0, w, 1000] {
-            g.extend(v.to_be_bytes()); // contours, xMin, yMin, xMax, yMax
-        }
-        g.extend(3u16.to_be_bytes()); // endPtsOfContours
-        g.extend(0u16.to_be_bytes()); // instructionLength
-        g.extend([1u8; 4]); // flags: on curve
-        for dx in [0i16, w, 0, -w] {
-            g.extend(dx.to_be_bytes());
-        }
-        for dy in [0i16, 0, 1000, 0] {
-            g.extend(dy.to_be_bytes());
-        }
-        g
-    };
-    let square = rect(1000);
-    let bar = rect(500);
-    let mut glyf = square.clone();
-    glyf.extend(&bar);
-    let mut loca = Vec::new();
-    for offset in [0, 0, square.len(), glyf.len()] {
-        loca.extend((offset as u16 / 2).to_be_bytes());
-    }
-
-    let tables: [(&[u8; 4], &[u8]); 6] = [
-        (b"glyf", &glyf),
-        (b"head", &head),
-        (b"hhea", &hhea),
-        (b"hmtx", &hmtx),
-        (b"loca", &loca),
-        (b"maxp", &maxp),
-    ];
-    let mut font = Vec::new();
-    font.extend(0x0001_0000u32.to_be_bytes());
-    font.extend((tables.len() as u16).to_be_bytes());
-    font.extend([0u8; 6]);
-    let mut offset = 12 + 16 * tables.len();
-    let mut bodies = Vec::new();
-    for (tag, body) in tables {
-        font.extend(tag);
-        font.extend(0u32.to_be_bytes());
-        font.extend((offset as u32).to_be_bytes());
-        font.extend((body.len() as u32).to_be_bytes());
-        let mut padded = body.to_vec();
-        padded.resize(body.len().div_ceil(4) * 4, 0);
-        offset += padded.len();
-        bodies.extend(padded);
-    }
-    font.extend(bodies);
-    font
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02X}")).collect()
-}
 
 /// The CIDMap for CIDs 0–9 (`GDBytes` 2): CID 5 → 2, CID 7 → 1.
 fn cid_map() -> Vec<u8> {
@@ -284,5 +212,46 @@ fn pdf_output_places_each_string_of_a_run_exactly() {
     assert_eq!(fills.len(), 7, "{fills:?}");
     for (pdf, ps) in fills.iter().zip(expected) {
         assert!(close(*pdf, ps), "PDF {pdf:?} PS {ps:?}");
+    }
+}
+
+/// Strings on one baseline join into a `TJ` run in a second instance of the
+/// font and for a CID first shown on a later page, and land where the
+/// PostScript puts them. Runs joined only in a font's first instance, and
+/// only for the CIDs its first page used.
+#[cfg(feature = "pdf-output")]
+#[test]
+fn pdf_output_joins_runs_in_any_instance_and_page() {
+    let map = format!("<{}>", hex(&cid_map()));
+    let ps = job(
+        &map,
+        "10 120 moveto <0005> show 70 120 moveto <0005> show 130 120 moveto <0005> show\n\
+         /F findfont 50 scalefont setfont\n\
+         10 40 moveto <0005> show 40 40 moveto <0005> show 70 40 moveto <0005> show\n\
+         showpage\n\
+         /F findfont 30 scalefont setfont\n\
+         10 120 moveto <0007> show 50 120 moveto <0007> show 90 120 moveto <0007> show",
+    );
+    let pages = Interpreter::builder()
+        .build()
+        .render_to_display_list(&ps, 72.0)
+        .expect("renders");
+    let pdf = Interpreter::builder()
+        .build()
+        .render_to_pdf(&ps, 72.0)
+        .expect("writes a PDF");
+    let doc = stet_pdf_reader::PdfDocument::from_bytes(&pdf).expect("reads back");
+    assert_eq!(doc.page_count(), 2);
+    for (i, page) in pages.iter().enumerate() {
+        let fills = boxes(doc.render_page(i, 72.0).expect("renders").elements().iter());
+        let expected = boxes(page.display_list.elements().iter());
+        assert_eq!(fills.len(), expected.len(), "page {i}: {fills:?}");
+        for (pdf, ps) in fills.iter().zip(expected) {
+            assert!(close(*pdf, ps), "page {i}: PDF {pdf:?} PS {ps:?}");
+        }
+        let contents = String::from_utf8_lossy(&doc.page_contents(i).unwrap()).into_owned();
+        let tj = contents.lines().filter(|l| l.ends_with(" TJ")).count();
+        let single = contents.lines().filter(|l| l.ends_with(" Tj")).count();
+        assert_eq!((tj, single), (2 - i, 0), "page {i}:\n{contents}");
     }
 }

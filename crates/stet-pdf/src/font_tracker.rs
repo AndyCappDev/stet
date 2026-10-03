@@ -73,8 +73,9 @@ pub struct FontUsage {
     pub is_standard_14: bool,
     /// First TextParams seen (used for font_size, ctm, font_matrix).
     pub sample_params: TextParams,
-    /// Glyph widths in 1000ths of a unit (char_code → width).
-    /// Populated by font_embedder::extract_widths() before content stream generation.
+    /// Glyph widths in 1000ths of a unit (char_code → width), for every
+    /// used code: set by `font_embedder::glyph_widths` once every page's text
+    /// is tracked, before any content stream is built.
     pub widths: HashMap<u16, i32>,
 }
 
@@ -277,6 +278,14 @@ impl FontTracker {
         self.instance_to_font
             .get(&font)
             .map_or(0, |&i| self.fonts[i].wmode)
+    }
+
+    /// Whether a font instance's resource has widths to kern its text with.
+    /// Any instance of the resource, not only the first.
+    pub fn has_widths(&self, font: FontId) -> bool {
+        self.instance_to_font
+            .get(&font)
+            .is_some_and(|&i| !self.fonts[i].widths.is_empty())
     }
 
     /// Look up a glyph width for a font instance and character code.

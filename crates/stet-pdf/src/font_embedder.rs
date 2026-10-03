@@ -759,39 +759,131 @@ pub fn build_font_resource(
     result
 }
 
+/// Where a Type 1 resource's glyphs are read from: the CharStrings of
+/// every instance of the font, since dvips re-encoded instances each hold a
+/// subset, and the first instance's Private dict.
+struct Type1Glyphs<'d> {
+    /// Every instance's CharStrings, the most complete first.
+    charstrings: Vec<&'d FrozenDict>,
+    private: Option<&'d FrozenDict>,
+    len_iv: usize,
+    /// The Private dict's Subrs, decrypted.
+    subrs: Vec<Vec<u8>>,
+}
+
+impl<'d> Type1Glyphs<'d> {
+    fn new(usage: &'d FontUsage, fonts: &FontData) -> Self {
+        let mut charstrings: Vec<&FrozenDict> = Vec::new();
+        for instance in &usage.program_fonts {
+            if let Some(cs) = dict_of(fonts, instance, b"CharStrings")
+                && !charstrings.iter().any(|c| std::ptr::eq(*c, &**cs))
+            {
+                charstrings.push(cs);
+            }
+        }
+        charstrings.sort_by_key(|cs| std::cmp::Reverse(cs.len()));
+        let private = usage
+            .all_fonts
+            .iter()
+            .find_map(|instance| dict_of(fonts, instance, b"Private"))
+            .map(|p| &**p);
+        let len_iv = private
+            .and_then(|pe| fonts.get(pe, b"lenIV"))
+            .and_then(Frozen::as_i32)
+            .unwrap_or(4) as usize;
+        let subrs = get_decrypted_subrs(fonts, private, len_iv);
+        Self {
+            charstrings,
+            private,
+            len_iv,
+            subrs,
+        }
+    }
+}
+
+/// The widths of a Type 1 resource's `codes`: the glyph the first instance
+/// whose encoding names one (not `.notdef`) puts at each code — dvips
+/// re-encoded instances each encode a subset — looked up in any instance's
+/// CharStrings.
+fn type1_widths(
+    glyphs: &Type1Glyphs,
+    usage: &FontUsage,
+    fonts: &FontData,
+    codes: impl IntoIterator<Item = u16> + Clone,
+) -> HashMap<u16, i32> {
+    let mut widths: HashMap<u16, i32> = HashMap::new();
+    if glyphs.charstrings.is_empty() {
+        return widths;
+    }
+    for instance in &usage.all_fonts {
+        let Some(enc) = encoding_of(fonts, instance) else {
+            continue;
+        };
+        for code in codes.clone() {
+            if widths.contains_key(&code) {
+                continue;
+            }
+            let Some(glyph_name_id) = glyph_at(enc, code) else {
+                continue;
+            };
+            // Skip .notdef — a later instance may have the real glyph at this code
+            if fonts.name(glyph_name_id) == b".notdef" {
+                continue;
+            }
+            let Some(cs_bytes) = glyphs
+                .charstrings
+                .iter()
+                .find_map(|cs| charstring(cs, glyph_name_id))
+            else {
+                continue;
+            };
+            let decrypted = decrypt_charstring(cs_bytes, glyphs.len_iv);
+            if let Some(w) = extract_charstring_width(&decrypted, &glyphs.subrs) {
+                widths.insert(code, w as i32);
+            }
+        }
+    }
+    widths
+}
+
+/// The widths of a Type 42 font's `codes`: Encoding to glyph name,
+/// CharStrings to glyph index, `hmtx` to advance. A code with no glyph has
+/// no width.
+fn type42_widths(
+    fonts: &FontData,
+    font: &FrozenDict,
+    font_data: &[u8],
+    codes: impl IntoIterator<Item = u16>,
+) -> HashMap<u16, i32> {
+    let scale = 1000.0 / truetype::get_units_per_em(font_data) as f64;
+    let mut widths: HashMap<u16, i32> = HashMap::new();
+    let (Some(enc), Some(cs)) = (
+        encoding_of(fonts, font),
+        dict_of(fonts, font, b"CharStrings"),
+    ) else {
+        return widths;
+    };
+    for code in codes {
+        let Some(glyph_name_id) = glyph_at(enc, code) else {
+            continue;
+        };
+        let Some(gid) = cs.get_name(glyph_name_id).and_then(Frozen::as_i32) else {
+            continue;
+        };
+        if let Some(aw) = truetype::get_advance_width(font_data, gid as u16) {
+            widths.insert(code, (aw as f64 * scale).round() as i32);
+        }
+    }
+    widths
+}
+
 /// Build a Type 1 font resource.
 fn build_type1_font(writer: &mut PdfWriter, usage: &FontUsage, fonts: &FontData) -> Option<u32> {
     let font = usage.root.as_deref()?;
     let font_name_str = String::from_utf8_lossy(&usage.font_name);
 
-    // Collect all CharStrings dicts from all instances. dvips re-encoded instances
-    // each have a subset of CharStrings — we need to search all of them.
-    let mut charstrings: Vec<&FrozenDict> = Vec::new();
-    for instance in &usage.program_fonts {
-        if let Some(cs) = dict_of(fonts, instance, b"CharStrings")
-            && !charstrings.iter().any(|c| std::ptr::eq(*c, &**cs))
-        {
-            charstrings.push(cs);
-        }
-    }
-    // Sort by entry count descending so the most complete dict is searched first
-    charstrings.sort_by_key(|cs| std::cmp::Reverse(cs.len()));
+    let glyphs = Type1Glyphs::new(usage, fonts);
 
-    let private = usage
-        .all_fonts
-        .iter()
-        .find_map(|instance| dict_of(fonts, instance, b"Private"))
-        .map(|p| &**p);
-
-    let len_iv = private
-        .and_then(|pe| fonts.get(pe, b"lenIV"))
-        .and_then(Frozen::as_i32)
-        .unwrap_or(4) as usize;
-
-    // Pre-decrypt Subrs for width extraction
-    let subrs = get_decrypted_subrs(fonts, private, len_iv);
-
-    // Compute widths for used character codes
     // Determine FirstChar/LastChar from used codes
     let mut first_char: u16 = 255;
     let mut last_char: u16 = 0;
@@ -806,42 +898,9 @@ fn build_type1_font(writer: &mut PdfWriter, usage: &FontUsage, fonts: &FontData)
         last_char = 0;
     }
 
-    // Extract widths for ALL characters in FirstChar..LastChar range
-    // (PDF viewers need correct widths for the entire range, not just used chars)
-    // Merge from all encodings (dvips re-encoded instances)
-    let mut widths: HashMap<u16, i32> = HashMap::new();
-    if !charstrings.is_empty() {
-        for instance in &usage.all_fonts {
-            let Some(enc) = encoding_of(fonts, instance) else {
-                continue;
-            };
-            for code in first_char..=last_char {
-                if widths.contains_key(&code) {
-                    continue;
-                }
-                let Some(glyph_name_id) = glyph_at(enc, code) else {
-                    continue;
-                };
-                // Skip .notdef — a later instance may have the real glyph at this code
-                if fonts.name(glyph_name_id) == b".notdef" {
-                    continue;
-                }
-
-                // Search all CharStrings dicts for this glyph
-                let Some(cs_bytes) = charstrings
-                    .iter()
-                    .find_map(|cs| charstring(cs, glyph_name_id))
-                else {
-                    continue;
-                };
-
-                let decrypted = decrypt_charstring(cs_bytes, len_iv);
-                if let Some(w) = extract_charstring_width(&decrypted, &subrs) {
-                    widths.insert(code, w as i32);
-                }
-            }
-        }
-    }
+    // Widths for every code in FirstChar..LastChar, not just the used ones:
+    // a viewer may read any of them.
+    let widths = type1_widths(&glyphs, usage, fonts, first_char..=last_char);
 
     // Build Widths array
     let widths_array: Vec<PdfObj> = (first_char..=last_char)
@@ -865,16 +924,16 @@ fn build_type1_font(writer: &mut PdfWriter, usage: &FontUsage, fonts: &FontData)
 
     // Build Type 1 font file (embedded font program)
     let font_file_ref = if !usage.is_standard_14 {
-        if !charstrings.is_empty() {
+        if !glyphs.charstrings.is_empty() {
             build_type1_font_file(
                 fonts,
                 font,
                 usage,
-                &charstrings,
+                &glyphs.charstrings,
                 &all_encodings,
-                private,
-                len_iv,
-                &subrs,
+                glyphs.private,
+                glyphs.len_iv,
+                &glyphs.subrs,
             )
             .map(|(data, len1, len2, len3)| {
                 let entries = vec![
@@ -931,35 +990,6 @@ fn build_type2_font(writer: &mut PdfWriter, usage: &FontUsage, fonts: &FontData)
     // Get encoding array
     let encoding = encoding_of(fonts, font);
 
-    // Get CharStrings dict
-    let charstrings = dict_of(fonts, font, b"CharStrings");
-
-    // Get Private dict → defaultWidthX, nominalWidthX, local Subrs
-    let private = dict_of(fonts, font, b"Private");
-
-    let mut default_width_x = 0.0;
-    let mut nominal_width_x = 0.0;
-    let mut local_subrs: Vec<Vec<u8>> = Vec::new();
-
-    if let Some(pe) = private {
-        if let Some(v) = fonts.get(pe, b"defaultWidthX").and_then(Frozen::as_f64) {
-            default_width_x = v;
-        }
-        if let Some(v) = fonts.get(pe, b"nominalWidthX").and_then(Frozen::as_f64) {
-            nominal_width_x = v;
-        }
-        if let Some(elems) = fonts.get(pe, b"Subrs").and_then(Frozen::as_array) {
-            local_subrs = strings(elems);
-        }
-    }
-
-    // Global subrs
-    let global_subrs: Vec<Vec<u8>> = fonts
-        .get(font, b"_cff_global_subrs")
-        .and_then(Frozen::as_array)
-        .map(strings)
-        .unwrap_or_default();
-
     // Determine FirstChar/LastChar from used codes
     let mut first_char: u16 = 255;
     let mut last_char: u16 = 0;
@@ -974,28 +1004,8 @@ fn build_type2_font(writer: &mut PdfWriter, usage: &FontUsage, fonts: &FontData)
         last_char = 0;
     }
 
-    // Extract widths for all characters in range using Type 2 charstring interpreter
-    let mut widths: HashMap<u16, i32> = HashMap::new();
-    if let (Some(enc), Some(cs)) = (encoding, charstrings) {
-        for code in first_char..=last_char {
-            let Some(glyph_name_id) = glyph_at(enc, code) else {
-                continue;
-            };
-            let Some(cs_bytes) = charstring(cs, glyph_name_id) else {
-                continue;
-            };
-            if let Ok(result) = type2_charstring::execute_type2_charstring(
-                cs_bytes,
-                &local_subrs,
-                &global_subrs,
-                default_width_x,
-                nominal_width_x,
-                false,
-            ) {
-                widths.insert(code, result.width_x as i32);
-            }
-        }
-    }
+    // Widths for every code in FirstChar..LastChar, not just the used ones.
+    let widths = type2_widths(fonts, font, first_char..=last_char);
 
     // Build Widths array
     let widths_array: Vec<PdfObj> = (first_char..=last_char)
@@ -1659,42 +1669,15 @@ fn build_cid_font(writer: &mut PdfWriter, usage: &FontUsage, fonts: &FontData) -
         return crate::cid_type0::build(writer, usage, fonts, cidfont);
     }
 
-    // Extract TrueType binary from sfnts array
-    let raw_font_data = concatenate_sfnts(fonts, cidfont)?;
-
-    // Check if glyf/loca tables exist — CUPS-style fonts store glyph data
-    // in PostScript GlyphDirectory instead of TrueType tables
-    let needs_reconstruction = truetype::find_table(&raw_font_data, b"glyf").is_none()
-        || truetype::find_table(&raw_font_data, b"loca").is_none();
-    let font_data = if needs_reconstruction {
-        match reconstruct_truetype(&raw_font_data, fonts, cidfont) {
-            Some(reconstructed) => reconstructed,
-            None => raw_font_data,
-        }
-    } else {
-        raw_font_data
-    };
-
+    let CidTrueType {
+        font_data,
+        rebuilt: needs_reconstruction,
+        cid_map,
+        cid_to_gid,
+    } = CidTrueType::new(fonts, cidfont, &usage.used_codes)?;
     let units_per_em = truetype::get_units_per_em(&font_data);
     let scale = 1000.0 / units_per_em as f64;
 
-    // Build CID → GID mapping: from the CIDFont's CIDMap, which is where a
-    // Type 2 CIDFont keeps it (PLRM Table 5.17). A font without one maps
-    // CIDs as stet always did — identically for fonts rebuilt from
-    // GlyphDirectory, through the TrueType cmap otherwise.
-    let cid_map = cid_map_gids(fonts, cidfont, &usage.used_codes);
-    let cid_to_gid = if let Some(map) = &cid_map {
-        map.clone()
-    } else if needs_reconstruction {
-        // Identity: CID = GID, just map used codes to themselves
-        usage
-            .used_codes
-            .iter()
-            .map(|&cid| (cid, cid))
-            .collect::<HashMap<u16, u16>>()
-    } else {
-        build_cid_to_gid_from_cmap(&font_data)
-    };
     let max_cid = usage.used_codes.iter().copied().max().unwrap_or(0);
 
     // Build /W array (compact widths)
@@ -2106,6 +2089,53 @@ fn parse_cmap_format12(font_data: &[u8], offset: usize, map: &mut HashMap<u16, u
 
 /// A TrueType CIDFont's widths for `used_codes`, in thousandths of text
 /// space: its `hmtx` advances, or what a `CDevProc` made of them.
+/// A CIDFontType 2 font's TrueType data and CID-to-glyph map, as the
+/// embedded font has them — so the widths the content stream kerns with are
+/// the widths of the font it embeds.
+struct CidTrueType {
+    /// The `sfnts` data, rebuilt from `GlyphDirectory` when it has no
+    /// `glyf`/`loca` (CUPS writes them so).
+    font_data: Vec<u8>,
+    /// Whether `font_data` lacked `glyf`/`loca`.
+    rebuilt: bool,
+    /// The CIDFont's own CIDMap, when it has one.
+    cid_map: Option<HashMap<u16, u16>>,
+    /// CID to glyph index: the CIDMap; else identity for a rebuilt font;
+    /// else through the TrueType `cmap`.
+    cid_to_gid: HashMap<u16, u16>,
+}
+
+impl CidTrueType {
+    fn new(fonts: &FontData, cidfont: &FrozenDict, cids: &HashSet<u16>) -> Option<Self> {
+        let raw_font_data = concatenate_sfnts(fonts, cidfont)?;
+        let rebuilt = truetype::find_table(&raw_font_data, b"glyf").is_none()
+            || truetype::find_table(&raw_font_data, b"loca").is_none();
+        let font_data = if rebuilt {
+            reconstruct_truetype(&raw_font_data, fonts, cidfont).unwrap_or(raw_font_data)
+        } else {
+            raw_font_data
+        };
+        // From the CIDFont's CIDMap, which is where a Type 2 CIDFont keeps
+        // it (PLRM Table 5.17). A font without one maps CIDs as stet always
+        // did — identically for fonts rebuilt from GlyphDirectory, through
+        // the TrueType cmap otherwise.
+        let cid_map = cid_map_gids(fonts, cidfont, cids);
+        let cid_to_gid = if let Some(map) = &cid_map {
+            map.clone()
+        } else if rebuilt {
+            cids.iter().map(|&cid| (cid, cid)).collect()
+        } else {
+            build_cid_to_gid_from_cmap(&font_data)
+        };
+        Some(Self {
+            font_data,
+            rebuilt,
+            cid_map,
+            cid_to_gid,
+        })
+    }
+}
+
 fn truetype_cid_widths(
     fonts: &FontData,
     cidfont: &Arc<FrozenDict>,
@@ -2346,29 +2376,8 @@ fn build_type42_font(writer: &mut PdfWriter, usage: &FontUsage, fonts: &FontData
         last_char = 0;
     }
 
-    // Extract widths via Encoding → CharStrings(glyph_name → GID) → hmtx
-    let mut widths: HashMap<u16, i32> = HashMap::new();
-    if let (Some(enc), Some(cs)) = (encoding, charstrings) {
-        for code in first_char..=last_char {
-            let Some(glyph_name_id) = glyph_at(enc, code) else {
-                continue;
-            };
-
-            // CharStrings maps glyph name → GID (integer) for Type 42
-            let Some(cs_obj) = cs.get_name(glyph_name_id) else {
-                continue;
-            };
-
-            let gid = match cs_obj.as_i32() {
-                Some(g) => g as u16,
-                None => continue,
-            };
-
-            if let Some(aw) = truetype::get_advance_width(&font_data, gid) {
-                widths.insert(code, (aw as f64 * scale).round() as i32);
-            }
-        }
-    }
+    // Widths for every code in FirstChar..LastChar, not just the used ones.
+    let widths = type42_widths(fonts, font, &font_data, first_char..=last_char);
 
     // Build Widths array
     let widths_array: Vec<PdfObj> = (first_char..=last_char)
@@ -2459,65 +2468,54 @@ fn build_type42_font(writer: &mut PdfWriter, usage: &FontUsage, fonts: &FontData
     Some(writer.add_object(&PdfObj::Dict(font_entries)))
 }
 
-/// Extract glyph widths for a font (in 1000ths of a unit) without building PDF objects.
+/// The widths of the codes (or CIDs) a resource's text uses, in
+/// thousandths of text space — the widths `TJ` kerns are computed from.
 ///
-/// Used to populate FontUsage::widths for TJ kern value computation.
-/// Returns a map from character code (or CID) to width in 1000ths of text space.
-pub fn extract_widths(usage: &FontUsage, fonts: &FontData) -> HashMap<u16, i32> {
+/// They come from the functions that write the font's `/Widths` (or a
+/// CIDFont's `/W`), dispatched as [`build_font_resource`] dispatches: a
+/// viewer advances by those widths, and a kern computed from any other
+/// would move the text after it. Call it once every page's text is
+/// tracked, so that the resource is the one that will be embedded.
+pub fn glyph_widths(usage: &FontUsage, fonts: &FontData) -> HashMap<u16, i32> {
     let Some(font) = usage.root.as_ref() else {
         return HashMap::new();
     };
+    let codes = usage.used_codes.iter().copied();
     match usage.font_type {
-        1 => extract_type1_widths(usage, fonts, font),
-        2 => extract_type2_widths(usage, fonts, font),
-        0 | 42 => extract_cid_widths(usage, fonts, font),
+        1 => type1_widths(&Type1Glyphs::new(usage, fonts), usage, fonts, codes),
+        2 => type2_widths(fonts, font, codes),
+        0 | 42 => match get_cidfont_descendant(fonts, font) {
+            Some(cidfont) => {
+                if concatenate_sfnts(fonts, cidfont).is_none()
+                    && crate::cid_type0::handles(fonts, cidfont)
+                {
+                    return crate::cid_type0::widths(usage, fonts, cidfont);
+                }
+                CidTrueType::new(fonts, cidfont, &usage.used_codes)
+                    .map(|tt| {
+                        truetype_cid_widths(
+                            fonts,
+                            cidfont,
+                            &tt.font_data,
+                            &usage.used_codes,
+                            &tt.cid_to_gid,
+                        )
+                    })
+                    .unwrap_or_default()
+            }
+            None => concatenate_sfnts(fonts, font)
+                .map(|data| type42_widths(fonts, font, &data, codes))
+                .unwrap_or_default(),
+        },
         _ => HashMap::new(),
     }
 }
 
-/// Extract widths from a Type 1 font via CharString interpretation.
-fn extract_type1_widths(
-    usage: &FontUsage,
+/// The widths of a Type 2 (CFF) font's `codes`, by its Type 2 charstrings.
+fn type2_widths(
     fonts: &FontData,
     font: &FrozenDict,
-) -> HashMap<u16, i32> {
-    let encoding = encoding_of(fonts, font);
-    let charstrings = dict_of(fonts, font, b"CharStrings");
-    let private = dict_of(fonts, font, b"Private").map(|p| &**p);
-
-    let len_iv = private
-        .and_then(|pe| fonts.get(pe, b"lenIV"))
-        .and_then(Frozen::as_i32)
-        .unwrap_or(4) as usize;
-
-    let subrs = get_decrypted_subrs(fonts, private, len_iv);
-
-    let mut widths: HashMap<u16, i32> = HashMap::new();
-    if let (Some(enc), Some(cs)) = (encoding, charstrings) {
-        for &code in &usage.used_codes {
-            if code > 255 {
-                continue;
-            }
-            let Some(glyph_name_id) = glyph_at(enc, code) else {
-                continue;
-            };
-            let Some(cs_bytes) = charstring(cs, glyph_name_id) else {
-                continue;
-            };
-            let decrypted = decrypt_charstring(cs_bytes, len_iv);
-            if let Some(w) = extract_charstring_width(&decrypted, &subrs) {
-                widths.insert(code, w as i32);
-            }
-        }
-    }
-    widths
-}
-
-/// Extract widths from a Type 2 (CFF) font via Type 2 charstring interpreter.
-fn extract_type2_widths(
-    usage: &FontUsage,
-    fonts: &FontData,
-    font: &FrozenDict,
+    codes: impl IntoIterator<Item = u16>,
 ) -> HashMap<u16, i32> {
     let encoding = encoding_of(fonts, font);
     let charstrings = dict_of(fonts, font, b"CharStrings");
@@ -2548,7 +2546,7 @@ fn extract_type2_widths(
 
     let mut widths: HashMap<u16, i32> = HashMap::new();
     if let (Some(enc), Some(cs)) = (encoding, charstrings) {
-        for &code in &usage.used_codes {
+        for code in codes {
             if code > 255 {
                 continue;
             }
@@ -2568,73 +2566,6 @@ fn extract_type2_widths(
             ) {
                 widths.insert(code, result.width_x as i32);
             }
-        }
-    }
-    widths
-}
-
-/// Extract widths from a CID/Type 42 font via TrueType hmtx table.
-fn extract_cid_widths(
-    usage: &FontUsage,
-    fonts: &FontData,
-    font: &Arc<FrozenDict>,
-) -> HashMap<u16, i32> {
-    // For Type 0, find CIDFont descendant
-    let cidfont = if usage.font_type == 0 {
-        get_cidfont_descendant(fonts, font).unwrap_or(font)
-    } else {
-        font
-    };
-
-    let font_data = match concatenate_sfnts(fonts, cidfont) {
-        Some(d) => d,
-        None if usage.font_type == 0 && crate::cid_type0::handles(fonts, cidfont) => {
-            return crate::cid_type0::widths(usage, fonts, cidfont);
-        }
-        None => return HashMap::new(),
-    };
-
-    if font_data.len() < 20 {
-        return HashMap::new();
-    }
-
-    let upm = truetype::get_units_per_em(&font_data);
-    let scale = 1000.0 / upm as f64;
-
-    let mut cid_to_gid: HashMap<u16, u16> = HashMap::new();
-
-    if usage.font_type == 0 {
-        cid_to_gid = cid_map_gids(fonts, cidfont, &usage.used_codes)
-            .unwrap_or_else(|| build_cid_to_gid_from_cmap(&font_data));
-    }
-
-    if usage.font_type == 42
-        && let (Some(enc), Some(cs)) = (
-            encoding_of(fonts, font),
-            dict_of(fonts, font, b"CharStrings"),
-        )
-    {
-        for &code in &usage.used_codes {
-            if code > 255 {
-                continue;
-            }
-            let Some(glyph_name_id) = glyph_at(enc, code) else {
-                continue;
-            };
-            if let Some(gid) = cs.get_name(glyph_name_id).and_then(Frozen::as_i32) {
-                cid_to_gid.insert(code, gid as u16);
-            }
-        }
-    }
-
-    if usage.font_type == 0 {
-        return truetype_cid_widths(fonts, cidfont, &font_data, &usage.used_codes, &cid_to_gid);
-    }
-    let mut widths: HashMap<u16, i32> = HashMap::new();
-    for &code in &usage.used_codes {
-        let gid = cid_to_gid.get(&code).copied().unwrap_or(code);
-        if let Some(aw) = truetype::get_advance_width(&font_data, gid) {
-            widths.insert(code, (aw as f64 * scale).round() as i32);
         }
     }
     widths

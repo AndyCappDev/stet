@@ -490,6 +490,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from its `/CreationDate`: a page's `/Font` resources were listed in an
   order that changed from run to run, and are now in their own order (`F0`,
   `F1`, …).
+- **PDF output joins a line's strings into `TJ` runs in every size of a
+  font and on every page.** Only a font's first instance joined — the same
+  face at a second size placed each string with its own `Tm` and `Tj` — and
+  only for the characters the font's first page used. Across 160 corpus
+  files, PS → PDF now writes 94% fewer `Tm` operators (241,429 → 15,708),
+  which keeps a line's text together for whatever extracts it and shrinks
+  the content streams. The kerns between a run's strings now come from the
+  same code as the font's `/Widths` (or `/W`), which a viewer advances by;
+  they were computed from a copy that had drifted from it for re-encoded
+  Type 1 instances, Type 42 codes without a glyph, and CIDFontType 2 fonts
+  rebuilt from `GlyphDirectory`, where a kern could move the text after it.
 - **PostScript → PDF no longer crashes on fonts a `restore` reclaimed**
   (`--device pdf` and `Interpreter::render_to_pdf`). PDF output builds the
   document at the end of the job and read each font out of the

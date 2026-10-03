@@ -300,7 +300,16 @@ impl PdfDevice {
         // Document-level font tracker — shared across all pages
         let mut font_tracker = FontTracker::new();
 
-        // First pass: build content streams and register fonts
+        // Track every page's fonts first, so each resource's widths cover
+        // every code the document uses before any page kerns with them.
+        for page in &self.pages {
+            content_stream::track_fonts(&page.display_list, &mut font_tracker, fonts);
+        }
+        if let Some(f) = fonts {
+            content_stream::measure_widths(&mut font_tracker, f);
+        }
+
+        // Then build the content streams
         let mut page_results: Vec<(ContentStreamResult, &PageData)> = Vec::new();
         for page in &self.pages {
             let result = content_stream::build_content_stream(

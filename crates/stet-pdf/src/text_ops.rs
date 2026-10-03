@@ -33,11 +33,7 @@ pub fn emit_text_batch(buf: &mut Vec<u8>, batch: &[&TextParams], font_tracker: &
         return;
     }
 
-    // Check if widths are available for this font
-    let has_widths = !font_tracker
-        .fonts()
-        .find(|u| u.font == font)
-        .is_none_or(|u| u.widths.is_empty());
+    let has_widths = font_tracker.has_widths(font);
     // Runs join along the horizontal advance, which vertical text does not
     // follow: each vertical string is placed on its own.
     let joins_runs = has_widths && font_tracker.wmode(font) == 0;
