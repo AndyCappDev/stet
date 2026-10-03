@@ -374,8 +374,17 @@ pub struct TextParams {
     pub start_x: f64,
     /// Device-space Y position at start of string.
     pub start_y: f64,
-    /// Font dict entity ID (raw u32 for VM independence).
+    /// The PostScript interpreter's id for the font dictionary the text was
+    /// shown with. Valid only while that font lives: a `restore` can reclaim
+    /// the font and a later one reuse the id, so a consumer that reads the
+    /// font after the page is sent uses [`font_snapshot`](Self::font_snapshot).
     pub font_entity: u32,
+    /// The font as it stood when the text was shown: an index into the
+    /// interpreter's font snapshots (`stet_core::font_snapshot`), which keep
+    /// a copy of every font shown while the output device asks for them —
+    /// PDF output, which embeds fonts at the end of the job. `None` when the
+    /// device did not ask, and for text from any other producer.
+    pub font_snapshot: Option<u32>,
     /// FontName bytes (e.g., b"Times-Roman").
     pub font_name: Vec<u8>,
     /// FontType (0, 1, 2, 3, 42).
@@ -1225,6 +1234,7 @@ impl Default for TextParams {
             start_x: 0.0,
             start_y: 0.0,
             font_entity: 0,
+            font_snapshot: None,
             font_name: Vec::new(),
             font_type: 1,
             font_size: 0.0,

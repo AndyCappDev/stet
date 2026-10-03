@@ -5502,11 +5502,20 @@ fn emit_text_element_with_fm(
     // Get PaintType and stroke width for PaintType 2 (stroked) fonts
     let (paint_type, stroke_width) = get_paint_info(ctx, font_entity, &fm, &ctm);
 
+    // A device that reads the font after the page is sent (PDF output) gets
+    // a copy taken before any `restore` can reclaim or revert it.
+    let font_snapshot = ctx
+        .device
+        .as_ref()
+        .is_some_and(|d| d.keeps_text_fonts())
+        .then(|| ctx.font_snapshots.note_shown(font_entity));
+
     let params = TextParams {
         text,
         start_x,
         start_y,
         font_entity: font_entity.0,
+        font_snapshot,
         font_name,
         font_type,
         font_size,

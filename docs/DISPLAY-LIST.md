@@ -123,7 +123,8 @@ the rasterizer (which renders text via Fill elements with glyph outlines).
 |-------|------|-------------|
 | `text` | `Vec<u8>` | Character bytes (or 2-byte CIDs for Type 0) |
 | `start_x`, `start_y` | `f64` | Device-space position |
-| `font_entity` | `u32` | Font dict entity ID |
+| `font_entity` | `u32` | The interpreter's id for the font dictionary. Valid only while the font lives: a `restore` can reclaim it and a later font reuse the id |
+| `font_snapshot` | `Option<u32>` | The font as it stood when shown: an index into the interpreter's font copies (`Context::font_snapshots`, see `stet_core::font_snapshot`), kept while the output device asks for them (`OutputDevice::keeps_text_fonts`, PDF output). `None` otherwise |
 | `font_name` | `Vec<u8>` | Font name bytes (e.g., `b"Times-Roman"`) |
 | `font_type` | `i32` | 0 (composite), 1 (Type 1), 2 (CFF), 3 (Type 3), 42 (TrueType) |
 | `font_size` | `f64` | Effective device-space font size |

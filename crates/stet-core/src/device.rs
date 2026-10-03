@@ -76,6 +76,18 @@ pub trait OutputDevice {
         true
     }
 
+    /// Whether the device reads the fonts of `Text` elements after their
+    /// page is sent — PDF output, which embeds fonts at the end of the job.
+    ///
+    /// When it does, the interpreter keeps a copy of each font as text is
+    /// shown with it ([`Context::font_snapshots`](crate::context::Context::font_snapshots)),
+    /// since a `restore` can reclaim or revert the font before then, and
+    /// marks each `Text` element with its copy
+    /// ([`TextParams::font_snapshot`]). Other devices pay nothing for it.
+    fn keeps_text_fonts(&self) -> bool {
+        false
+    }
+
     /// Page dimensions in device pixels.
     fn page_size(&self) -> (u32, u32);
 

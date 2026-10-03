@@ -79,6 +79,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   taken as bytes (`take_pdf_bytes_with_context`) rather than written to a
   file at the end of the job. It derives no output path from page names,
   and writes a `/Title` only when a pdfmark gives one.
+- **Font copies for devices that read fonts after the page is sent**:
+  `OutputDevice::keeps_text_fonts` and `Context::font_snapshots` in
+  `stet-core` (module `font_snapshot`), `TextParams::font_snapshot` in
+  `stet-graphics`. While the device asks, the interpreter copies each font
+  text is shown with before any `restore` can reclaim it or revert glyphs
+  added to it, and marks the `Text` element with its copy. The font's
+  `font_entity` is valid only while the font lives.
 
 ### Deprecated
 

@@ -1931,7 +1931,10 @@ fn execjob(
     ctx.loops.clear();
     ctx.d_stack.truncate(3);
 
-    // 3. Restore VM (reverts local VM + graphics state)
+    // 3. Restore VM (reverts local VM + graphics state). The device has read
+    //    the job's font copies; dropping them first spares the restore from
+    //    copying fonts no one will read.
+    ctx.font_snapshots.clear();
     let _ = ctx.vm_restore(save_id);
 
     // 4. Clear display list (rendering state, not VM)

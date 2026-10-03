@@ -54,6 +54,7 @@ pub mod eps;
 pub mod error;
 pub mod file_store;
 pub mod font_loader;
+pub mod font_snapshot;
 pub mod glyph_cache;
 pub mod graphics_state;
 pub mod name;

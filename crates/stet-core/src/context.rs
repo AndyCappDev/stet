@@ -333,9 +333,17 @@ pub struct Context {
     /// The metrics show operators gave CIDFont glyphs through the font's
     /// `Metrics2` or `CDevProc` (PLRM 5.9.2), by CIDFont and CID. An output
     /// device that writes the font rather than its outlines — PDF output —
-    /// needs them, since only the interpreter can run a `CDevProc`. Not VM
-    /// state: `save`/`restore` leave it alone.
+    /// needs them, since only the interpreter can run a `CDevProc`; it reads
+    /// them from [`Self::font_snapshots`], which copies them with the font.
+    /// Not VM state, but keyed by entity, so `restore` drops the entries of
+    /// CIDFonts it reclaims.
     pub cid_glyph_metrics: rustc_hash::FxHashMap<(EntityId, u32), CidGlyphMetrics>,
+    /// Copies of the fonts text was shown with, kept while the output device
+    /// asks for them ([`OutputDevice::keeps_text_fonts`]): PDF output reads
+    /// fonts at the end of the job, after `restore` may have reclaimed or
+    /// reverted them. `restore` freezes the fonts shown since the last one
+    /// before changing anything. See [`crate::font_snapshot`].
+    pub font_snapshots: crate::font_snapshot::FontSnapshots,
     // Type 3 cache mode: set by setcachedevice/setcharwidth during BuildChar
     pub char_cache_mode: Option<crate::glyph_cache::Type3CacheMode>,
 
@@ -1239,6 +1247,7 @@ impl Context {
             char_width_mode1: None,
             glyph_caches: rustc_hash::FxHashMap::default(),
             cid_glyph_metrics: rustc_hash::FxHashMap::default(),
+            font_snapshots: crate::font_snapshot::FontSnapshots::default(),
             char_cache_mode: None,
             cshow_pending_cid: None,
             cshow_pending_code: None,
@@ -1519,6 +1528,12 @@ impl Context {
             return Err(PsError::InvalidRestore);
         }
 
+        // Copy the fonts shown since the last restore before this one changes
+        // them: it may reclaim them, or revert glyphs added to them.
+        let mut font_snapshots = std::mem::take(&mut self.font_snapshots);
+        font_snapshots.freeze_live(self);
+        self.font_snapshots = font_snapshots;
+
         // Per PLRM: "restore can reset VM to the state represented by any
         // save object that is still valid, not necessarily the one produced
         // by the most recent save."  Pop the target level AND all newer
@@ -1583,11 +1598,13 @@ impl Context {
         // EntityIds become reusable the moment the tables shrink, so anything
         // keyed by one has to be dropped first -- otherwise a future entity
         // reusing the index would hit a stale entry belonging to a dead object.
-        // Both caches below are keyed by dict entities.
+        // The caches below are keyed by dict entities.
         let dict_mark = marks.dict_entities;
         let live_dict = |e: &EntityId| e.is_global() || e.raw_index() < dict_mark;
         self.glyph_caches.retain(|entity, _| live_dict(entity));
         self.form_cache.retain(|entity, _| live_dict(entity));
+        self.cid_glyph_metrics
+            .retain(|(cidfont, _), _| live_dict(cidfont));
 
         self.strings
             .local
