@@ -301,9 +301,11 @@ impl Interpreter {
         // Set up PdfDevice as the device factory
         let dpi_val = dpi;
         self.ctx.device_factory = Some(Box::new(move |w, h| {
-            Box::new(stet_pdf::PdfDevice::new(w, h, dpi_val)) as Box<dyn OutputDevice>
+            Box::new(stet_pdf::PdfDevice::in_memory(w, h, dpi_val)) as Box<dyn OutputDevice>
         }));
 
+        // Routes showpage to the device; the in-memory device writes no file
+        // and ignores the name.
         self.ctx.output_path = Some("output.pdf".to_string());
         install_device(&mut self.ctx, dpi, page_w, page_h)?;
 
@@ -332,10 +334,8 @@ impl Interpreter {
 
         self.record_end_of_job_warnings();
 
-        // Finish device and extract PDF bytes
-        let pdf_bytes = if let Some(mut dev) = self.ctx.device.take() {
-            let _ = dev.finish_with_context(&self.ctx);
-            // Get the PDF bytes from the device
+        // Build the document once, as bytes: the device writes no file
+        let pdf_bytes = if let Some(dev) = self.ctx.device.take() {
             let bytes = dev
                 .as_any()
                 .downcast_ref::<stet_pdf::PdfDevice>()

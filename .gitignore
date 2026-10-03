@@ -38,8 +38,6 @@ CLAUDE.md
 docs/PUBLISH-*.md
 docs/PLAN-*.md
 docs/TODO-*.md
-# Integration test artifact — render_to_pdf writes here when output_path is unset
-crates/stet/output.pdf
 
 # Bulk PS corpus for gs differential testing (regenerable, lives on /data)
 ps_corpus

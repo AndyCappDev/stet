@@ -56,6 +56,9 @@ pub struct PdfDevice {
     /// source content was already authored within the page and the implicit
     /// clip turns into a spurious top-level `Clip` element on re-read.
     emit_page_box_clip: bool,
+    /// The document is taken as bytes (`take_pdf_bytes*`), never written to
+    /// a file: see [`Self::in_memory`].
+    in_memory: bool,
 }
 
 impl PdfDevice {
@@ -71,6 +74,27 @@ impl PdfDevice {
             output_profile: None,
             output_intents: Vec::new(),
             emit_page_box_clip: true,
+            in_memory: false,
+        }
+    }
+
+    /// Create a PDF device whose document is taken as bytes rather than
+    /// written to a file.
+    ///
+    /// [`new`](Self::new) serves the command line: at the end of the job,
+    /// `finish` writes the document to an output path, derived from the page
+    /// names the interpreter passes when [`set_output_path`] has not pinned
+    /// one, and the `/Title` defaults to that file's name. A device made
+    /// here writes nothing, derives no path and invents no title (a pdfmark
+    /// `/DOCINFO /Title` still sets one); call
+    /// [`take_pdf_bytes_with_context`](Self::take_pdf_bytes_with_context)
+    /// when the job is done.
+    ///
+    /// [`set_output_path`]: Self::set_output_path
+    pub fn in_memory(width: u32, height: u32, dpi: f64) -> Self {
+        Self {
+            in_memory: true,
+            ..Self::new(width, height, dpi)
         }
     }
 
@@ -127,8 +151,8 @@ impl PdfDevice {
 
     /// Build the PDF document into a byte vector.
     ///
-    /// Returns the complete PDF file contents. The device must have at least
-    /// one page (call after `finish()` or `finish_with_context()`).
+    /// Returns the complete PDF file contents, or `None` if the device has
+    /// no pages. Each call builds the document afresh.
     pub fn take_pdf_bytes(&self) -> Option<Vec<u8>> {
         if self.pages.is_empty() {
             return None;
@@ -1581,7 +1605,7 @@ impl OutputDevice for PdfDevice {
 
     fn replay_and_show(&mut self, list: DisplayList, output_path: &str) -> Result<(), String> {
         // Capture output path from first page
-        if self.output_path.is_none() {
+        if self.output_path.is_none() && !self.in_memory {
             // Strip extension (.png or .pdf)
             let base = if let Some(pos) = output_path.rfind('.') {
                 &output_path[..pos]
@@ -1618,14 +1642,14 @@ impl OutputDevice for PdfDevice {
     }
 
     fn finish(&mut self) -> Result<(), String> {
-        if self.pages.is_empty() {
+        if self.pages.is_empty() || self.in_memory {
             return Ok(());
         }
         self.write_pdf(None)
     }
 
     fn finish_with_context(&mut self, ctx: &Context) -> Result<(), String> {
-        if self.pages.is_empty() {
+        if self.pages.is_empty() || self.in_memory {
             return Ok(());
         }
         self.write_pdf(Some(ctx))
@@ -2289,5 +2313,43 @@ fn build_ve_array(
             Some(&r) => PdfObj::Ref(r),
             None => PdfObj::Null,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A one-page display list.
+    fn page() -> DisplayList {
+        let mut list = DisplayList::new();
+        list.push(stet_graphics::display_list::DisplayElement::ErasePage);
+        list
+    }
+
+    /// The device for the command line writes the document at the end of
+    /// the job, to a name derived from the page names it is given; the
+    /// in-memory one writes nothing and its document is taken as bytes.
+    #[test]
+    fn only_the_file_device_writes_a_file() {
+        let dir = std::env::temp_dir().join(format!("stet-pdf-device-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let page_name = dir.join("job-0001.png");
+        let page_name = page_name.to_str().unwrap();
+
+        let mut memory = PdfDevice::in_memory(100, 100, 72.0);
+        memory.replay_and_show(page(), page_name).unwrap();
+        memory.finish().unwrap();
+        memory.finish_with_context(&Context::new()).unwrap();
+        assert!(std::fs::read_dir(&dir).unwrap().next().is_none());
+        assert!(memory.take_pdf_bytes().is_some());
+
+        let mut file = PdfDevice::new(100, 100, 72.0);
+        file.replay_and_show(page(), page_name).unwrap();
+        file.finish().unwrap();
+        assert!(dir.join("job.pdf").exists());
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

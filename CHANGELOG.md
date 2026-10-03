@@ -75,6 +75,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Fixed); a third-party renderer should apply it to the final RGB of fully
   opaque paints. Struct literals must add the field, under the same
   reader-not-writer policy as `rendering_intent`.
+- **`PdfDevice::in_memory`** in `stet-pdf`: a PDF device whose document is
+  taken as bytes (`take_pdf_bytes_with_context`) rather than written to a
+  file at the end of the job. It derives no output path from page names,
+  and writes a `/Title` only when a pdfmark gives one.
 
 ### Deprecated
 
@@ -413,6 +417,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (0.25 s → 0.14 s on `tiger.ps`, `escher.ps`, `grade.ps`, `colorcir.ps`),
   with the same pixels. The WASM build did the same and is fixed the same
   way.
+- **`Interpreter::render_to_pdf` returns the PDF and touches nothing
+  else.** It finished the job as the command line does, writing the
+  document to `output.pdf` in the working directory — overwriting any file
+  of that name — and printing `PDF written: output.pdf` to stderr, then
+  built the document a second time for the bytes it returned, whose
+  `/Title` was "output" after that file. It now builds the document once,
+  in memory, with no `/Title` unless a `/DOCINFO` pdfmark sets one.
 - **An EPS that calls `showpage` renders as one page** on the command line
   and in the library's PDF output. Both added a `showpage` of their own
   regardless, writing a blank second page (the `ps_samples` files
