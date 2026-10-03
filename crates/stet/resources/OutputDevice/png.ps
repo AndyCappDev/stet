@@ -25,16 +25,12 @@
     } bind
     /BeginPage {pop} bind
     /EndPage {
-        dup 0 eq { %% called from showpage
-            pop (showpage: Creating png file for page ) print
+        %% count reason -> bool. Consume both operands (PLRM 6.2.6).
+        2 eq { %% device deactivation: a page no showpage ended is not produced
+            pop false
+        } { %% showpage or copypage (both pass reason 0 in LanguageLevel 3)
+            (Creating png file for page ) print
             1 add 20 string cvs print (\n) print true
-        } {
-            1 eq { %% called from copypage
-                (copypage: Creating png file for page ) print
-                1 add 20 string cvs print (\n) print true
-            } { %% called from device deactivation
-                pop false
-            } ifelse
         } ifelse
     } bind
     /InputAttributes <<>>

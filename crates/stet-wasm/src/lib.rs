@@ -295,25 +295,22 @@ pub fn render(
         parse_and_exec(&mut interp.ctx, wrapper.as_bytes())
             .map_err(|e| JsValue::from_str(&format!("PS error (translate): {}", e)))?;
 
+        let showpages_before = interp.ctx.showpage_count;
         parse_and_exec(&mut interp.ctx, ps_data)
             .map_err(|e| JsValue::from_str(&format!("PS error (exec): {}", e)))?;
 
         // grestore to undo our translate; only call showpage if the EPS
-        // didn't already. Ask the captured display lists, as the `stet`
-        // facade does, not the device's page sink, which a background
-        // render may not have reached yet.
-        let need_showpage = interp
-            .ctx
-            .capture_display_lists
-            .as_ref()
-            .is_none_or(|v| v.is_empty());
-        if need_showpage {
+        // didn't already, as the CLI and the `stet` facade do.
+        if interp.ctx.showpage_count == showpages_before {
             parse_and_exec(&mut interp.ctx, b"grestore showpage")
                 .map_err(|e| JsValue::from_str(&format!("PS error (showpage): {}", e)))?;
         } else {
             parse_and_exec(&mut interp.ctx, b"grestore")
                 .map_err(|e| JsValue::from_str(&format!("PS error (grestore): {}", e)))?;
         }
+        // End of job: the page device's EndPage with reason 2 (PLRM 6.2.6).
+        stet_ops::device_ops::deactivate_page_device(&mut interp.ctx)
+            .map_err(|e| JsValue::from_str(&format!("PS error (EndPage): {}", e)))?;
 
         finish_device(&mut interp.ctx);
         let pages = extract_pages(&pages_ref);

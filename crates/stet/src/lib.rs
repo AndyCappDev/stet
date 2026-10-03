@@ -328,6 +328,7 @@ impl Interpreter {
             let result = parse_and_exec(&mut self.ctx, ps_data);
             job_result(&self.ctx, result)
         };
+        let exec_result = exec_result.and_then(|()| self.end_page_device());
 
         self.record_end_of_job_warnings();
 
@@ -444,6 +445,7 @@ impl Interpreter {
 
         let exec_result = parse_and_exec(&mut self.ctx, ps_data);
         let exec_result = job_result(&self.ctx, exec_result);
+        let exec_result = exec_result.and_then(|()| self.end_page_device());
 
         self.record_end_of_job_warnings();
         finish_device(&mut self.ctx);
@@ -491,25 +493,8 @@ impl Interpreter {
         let save_obj = self.ctx.vm_save();
         let save_id = extract_save_id(&save_obj);
 
-        let wrapper = format!("gsave {} {} translate", -llx, -lly);
-        parse_and_exec(&mut self.ctx, wrapper.as_bytes()).map_err(ps_err)?;
-        let _ = parse_and_exec(&mut self.ctx, ps_data);
-
-        // Call showpage if the EPS didn't already. Ask the captured display
-        // lists, which `showpage` adds to as it runs, not the device's page
-        // sink: the device renders in the background, so the sink may not
-        // have seen the page yet, and asking it added a blank page.
-        let need_showpage = self
-            .ctx
-            .capture_display_lists
-            .as_ref()
-            .is_none_or(|v| v.is_empty());
-
-        if need_showpage {
-            let _ = parse_and_exec(&mut self.ctx, b"grestore showpage");
-        } else {
-            let _ = parse_and_exec(&mut self.ctx, b"grestore");
-        }
+        self.run_eps(ps_data, llx, lly)?;
+        let _ = self.end_page_device();
 
         // Runs after the implicit `showpage` above, so it fires only if the
         // EPS painted more after its own showpage — a real dropped page.
@@ -531,11 +516,33 @@ impl Interpreter {
 
     #[cfg(feature = "pdf-output")]
     fn exec_eps(&mut self, ps_data: &[u8], llx: f64, lly: f64) -> Result<(), StetError> {
+        self.run_eps(ps_data, llx, lly)
+    }
+
+    /// Run an EPS with its bounding box's corner at the origin, and end its
+    /// page if it did not. An EPS need not call `showpage`; one that does
+    /// must not get a second, blank page. The EPS's own errors are not the
+    /// caller's: the page is rendered as far as it got.
+    fn run_eps(&mut self, ps_data: &[u8], llx: f64, lly: f64) -> Result<(), StetError> {
         let wrapper = format!("gsave {} {} translate", -llx, -lly);
         parse_and_exec(&mut self.ctx, wrapper.as_bytes()).map_err(ps_err)?;
+        let showpages_before = self.ctx.showpage_count;
         let _ = parse_and_exec(&mut self.ctx, ps_data);
-        let _ = parse_and_exec(&mut self.ctx, b"grestore showpage");
+        if self.ctx.showpage_count == showpages_before {
+            let _ = parse_and_exec(&mut self.ctx, b"grestore showpage");
+        } else {
+            let _ = parse_and_exec(&mut self.ctx, b"grestore");
+        }
         Ok(())
+    }
+
+    /// End of job deactivates the page device: its `EndPage` runs with
+    /// reason 2 and may transmit a page no `showpage` ended (PLRM 3e
+    /// §6.2.6). Call after a clean run, before the dropped-page check.
+    fn end_page_device(&mut self) -> Result<(), StetError> {
+        stet_ops::device_ops::deactivate_page_device(&mut self.ctx)
+            .map(|_| ())
+            .map_err(ps_err)
     }
 
     #[cfg(feature = "render")]

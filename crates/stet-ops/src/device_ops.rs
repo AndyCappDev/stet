@@ -165,6 +165,11 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
     };
     ctx.o_stack.pop()?;
 
+    // The outgoing device's EndPage, with reason 2 (PLRM 3e §6.2.6). Every
+    // setpagedevice deactivates the current device, as in Ghostscript,
+    // including one that only changes a parameter.
+    deactivate_page_device(ctx)?;
+
     // PLRM: when current device is not a page device (e.g. after nulldevice),
     // or when switching to a different output device, create a new device
     // dictionary from scratch before merging request params.
@@ -280,6 +285,11 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
         base_pd
     };
     ctx.gstate.page_device = Some(base_pd);
+    // A new device starts counting showpages afresh, as its PageCount does;
+    // a parameter change keeps both.
+    if need_full_reload {
+        ctx.showpage_count = 0;
+    }
 
     // Compute MediaSize from PageSize and HWResolution (with sensible defaults)
     let (pw, ph) = get_pd_f64_pair(ctx, b"PageSize").unwrap_or((612.0, 792.0));
@@ -324,27 +334,28 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
     ctx.gstate.ctm = saved_ctm;
     ctx.gstate.default_ctm = default_ctm;
 
-    // Init clip on device
+    // Init clip on device, and erase the page: whatever was painted before
+    // setpagedevice does not carry onto the new device's first page.
     if let Some(ref mut device) = ctx.device {
         device.init_clip();
         device.erase_page();
     }
+    ctx.display_list.clear();
 
     // Push Install and BeginPage procs on e_stack for execution.
     // e_stack is LIFO: last pushed runs first.
-    // We want execution order: Install first, then BeginPage (with PageCount on o_stack).
+    // We want execution order: Install first, then BeginPage (with the showpage count on o_stack).
     // So push order is: BeginPage setup (bottom), Install (top).
     let install_obj = get_pd_value(ctx, b"Install").filter(is_nonempty_proc);
     let begin_obj = get_pd_value(ctx, b"BeginPage").filter(is_nonempty_proc);
 
     // e_stack is LIFO: last pushed runs first.
-    // Desired execution order: Install, then push PageCount, then BeginPage.
-    // So push order (bottom→top): BeginPage, PageCount literal, Install.
+    // Desired execution order: Install, then push the count, then BeginPage.
+    // So push order (bottom→top): BeginPage, count literal, Install.
     if let Some(begin_obj) = begin_obj {
-        let page_count = get_pd_int(ctx, b"PageCount").unwrap_or(0);
         ctx.e_stack.push(begin_obj)?;
         // A literal int on e_stack gets pushed to o_stack by the eval loop
-        ctx.e_stack.push(PsObject::int(page_count))?;
+        ctx.e_stack.push(PsObject::int(ctx.showpage_count))?;
     }
 
     if let Some(install_obj) = install_obj {
@@ -464,10 +475,14 @@ pub fn op_flushpage(ctx: &mut Context) -> Result<(), PsError> {
 
 // ---------- copypage ----------
 
-/// `copypage`: — → — (copy current page without erasing)
+/// `copypage`: — → — (transmit the current page)
 ///
-/// Uses the EndPage/BeginPage protocol with reason code 1 if a page device
-/// with EndPage is active. Does NOT call erasepage or initgraphics afterward.
+/// In LanguageLevel 3, `copypage` is `showpage` without the `initgraphics`
+/// (PLRM 3e, `copypage`): it passes `EndPage` reason code 0 "as if the call
+/// were coming from `showpage`", erases the page once it is transmitted, and
+/// calls `BeginPage` last. Ghostscript behaves the same. The LanguageLevel 2
+/// behaviour — reason 1, the page kept for the next — is gone from the
+/// language stet implements.
 pub fn op_copypage(ctx: &mut Context) -> Result<(), PsError> {
     if !ctx.group_stack.is_empty() {
         return Err(PsError::RangeCheck);
@@ -476,14 +491,9 @@ pub fn op_copypage(ctx: &mut Context) -> Result<(), PsError> {
         return Ok(());
     }
 
-    if ctx.gstate.page_device.is_some()
-        && let Some(end_page) = get_pd_value(ctx, b"EndPage")
-        && is_nonempty_proc(&end_page)
-    {
-        let page_count = get_pd_int(ctx, b"PageCount").unwrap_or(0);
-        ctx.o_stack.push(PsObject::int(page_count))?;
-        ctx.o_stack.push(PsObject::int(1))?; // reason 1 = copypage
-
+    if let Some(end_page) = end_page_proc(ctx) {
+        ctx.o_stack.push(PsObject::int(ctx.showpage_count))?;
+        ctx.o_stack.push(PsObject::int(0))?; // reason 0, as for showpage
         let continue_name = ctx.names.intern(b".copypage_continue");
         if let Some(continue_op) = ctx.dict_load(&stet_core::dict::DictKey::Name(continue_name)) {
             ctx.e_stack.push(continue_op)?;
@@ -492,81 +502,135 @@ pub fn op_copypage(ctx: &mut Context) -> Result<(), PsError> {
         return Ok(());
     }
 
-    // Fallback: direct copy (replay but don't clear)
+    // No EndPage procedure: transmit and erase directly.
+    transmit_page_without_end_page(ctx);
+    Ok(())
+}
+
+/// `showpage` and `copypage` without an `EndPage` procedure: transmit the
+/// page, then erase it.
+pub(crate) fn transmit_page_without_end_page(ctx: &mut Context) {
+    ctx.showpage_count += 1;
     if ctx.device.is_some() {
         if ctx.output_path.is_some() {
             let list = ctx.take_display_list();
             let device = ctx.device.as_mut().unwrap();
             let path = ctx.output_path.as_ref().unwrap();
             if let Err(e) = device.replay_and_show(list, path) {
-                eprintln!("copypage error: {}", e);
+                eprintln!("showpage error: {}", e);
             }
         } else {
             let device = ctx.device.as_mut().unwrap();
             stet_core::device::replay_to_device(&ctx.display_list, device.as_mut());
+            ctx.display_list.clear();
         }
+        ctx.device.as_mut().unwrap().erase_page();
+    } else {
+        ctx.display_list.clear();
     }
-    Ok(())
+}
+
+/// The page device's `EndPage` procedure, if it has one.
+pub(crate) fn end_page_proc(ctx: &Context) -> Option<PsObject> {
+    ctx.gstate.page_device?;
+    get_pd_value(ctx, b"EndPage").filter(is_nonempty_proc)
 }
 
 // ---------- showpage continuation ----------
 
-/// `.showpage_continue`: internal operator called after EndPage proc completes.
-///
-/// Pops the bool result from EndPage. If true, renders the page and generates
-/// the output file. Then calls erasepage, initgraphics, and pushes BeginPage.
+/// `.showpage_continue`: internal operator run after `showpage`'s `EndPage`
+/// procedure, with its result on the operand stack.
 pub fn op_showpage_continue(ctx: &mut Context) -> Result<(), PsError> {
-    // Pop EndPage result (bool)
+    finish_page(ctx, false)
+}
+
+/// `.copypage_continue`: internal operator run after `copypage`'s `EndPage`
+/// procedure, with its result on the operand stack.
+pub fn op_copypage_continue(ctx: &mut Context) -> Result<(), PsError> {
+    finish_page(ctx, true)
+}
+
+/// The rest of `showpage` or `copypage` once `EndPage` has returned
+/// (PLRM 3e §6.2.6).
+///
+/// `true`: transmit the page, count it in `PageCount`, and erase it.
+/// `false`: neither transmit nor erase — the page carries over, which is
+/// how an `EndPage` accumulates several pages on one sheet. Either way
+/// `showpage` then performs `initgraphics`, `copypage` does not, and both
+/// call `BeginPage` last with the number of executions so far.
+fn finish_page(ctx: &mut Context, copypage: bool) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
     }
     let result = ctx.o_stack.pop()?;
-    let should_render = match result.value {
+    let transmit = match result.value {
         PsValue::Bool(b) => b,
         _ => true, // default to rendering if EndPage returned non-bool
     };
+    ctx.showpage_count += 1;
 
-    // Increment PageCount (always, even if filtered — tracks logical page number)
+    if transmit {
+        transmit_page(ctx, if copypage { "copypage" } else { "showpage" })?;
+        if let Some(ref mut device) = ctx.device {
+            device.erase_page();
+        }
+    }
+
+    if !copypage {
+        reinitialize_graphics(ctx);
+    }
+
+    // Note: gstate_stack is NOT cleared by showpage (per PLRM). Programs
+    // like dvi_ps rely on gsave/grestore around showpage to preserve
+    // coordinate system setup across page boundaries.
+
+    if let Some(begin_obj) = get_pd_value(ctx, b"BeginPage")
+        && is_nonempty_proc(&begin_obj)
+    {
+        ctx.o_stack.push(PsObject::int(ctx.showpage_count))?;
+        ctx.e_stack.push(begin_obj)?;
+    }
+
+    Ok(())
+}
+
+/// Transmit the current page, which `EndPage` has accepted: count it in
+/// `PageCount`, which numbers the pages produced, and hand the display list
+/// to the device unless `--pages` leaves it out.
+fn transmit_page(ctx: &mut Context, operator: &str) -> Result<(), PsError> {
     let page_count = get_pd_int(ctx, b"PageCount").unwrap_or(0) + 1;
     set_pd_int(ctx, b"PageCount", page_count);
 
-    // pdfmark: track completed-showpage count so /ANN pdfmarks issued
-    // without an explicit /Page key can resolve to "the page being
-    // assembled right now" via `current_page + 1`. After N showpages
-    // we are mid-assembly of page N+1; the operator uses that
-    // computation, not raw `current_page`.
+    // pdfmark: track completed-page count so /ANN pdfmarks issued without an
+    // explicit /Page key can resolve to "the page being assembled right now"
+    // via `current_page + 1`. After N pages we are mid-assembly of page N+1;
+    // the operator uses that computation, not raw `current_page`.
     ctx.doc_structure.current_page = page_count as u32;
 
-    // Check page filter — skip rendering if page not in the selected set
     let in_filter = ctx
         .page_filter
         .as_ref()
         .is_none_or(|f| f.contains(&page_count));
-
-    if should_render && in_filter {
-        // Replay display list and render
+    if in_filter {
         let list = ctx.take_display_list();
         let path = resolve_page_output(ctx, page_count)?;
         if let Some(ref mut device) = ctx.device
             && let Err(e) = device.replay_and_show(list, &path)
         {
-            eprintln!("showpage error: {}", e);
+            eprintln!("{operator} error: {e}");
         }
     } else {
         ctx.display_list.clear();
     }
+    Ok(())
+}
 
-    // Erase page (direct device call — post-showpage cleanup)
-    if let Some(ref mut device) = ctx.device {
-        device.erase_page();
-    }
-
-    // The equivalent of initgraphics (PLRM showpage, step 3).
+/// `showpage`'s `initgraphics`, with the CTM taken from the page device.
+fn reinitialize_graphics(ctx: &mut Context) {
     ctx.gstate.init_graphics();
     let page_device = ctx.gstate.page_device;
     let default_ctm = ctx.gstate.default_ctm;
 
-    // initmatrix from page_device
     if page_device.is_some() && !is_null_device(ctx) {
         if let Ok((_pw, ph)) = get_pd_f64_pair(ctx, b"PageSize")
             && let Ok((dpi_x, dpi_y)) = get_pd_f64_pair(ctx, b"HWResolution")
@@ -583,62 +647,42 @@ pub fn op_showpage_continue(ctx: &mut Context) -> Result<(), PsError> {
         ctx.gstate.default_ctm = default_ctm;
     }
 
-    // Init clip
     if let Some(ref mut device) = ctx.device {
         device.init_clip();
     }
-
-    // Note: gstate_stack is NOT cleared by showpage (per PLRM). Programs
-    // like dvi_ps rely on gsave/grestore around showpage to preserve
-    // coordinate system setup across page boundaries.
-
-    // Push BeginPage for execution
-    if let Some(begin_obj) = get_pd_value(ctx, b"BeginPage")
-        && is_nonempty_proc(&begin_obj)
-    {
-        let page_count = get_pd_int(ctx, b"PageCount").unwrap_or(0);
-        ctx.o_stack.push(PsObject::int(page_count))?;
-        ctx.e_stack.push(begin_obj)?;
-    }
-
-    Ok(())
 }
 
-/// `.copypage_continue`: internal operator called after EndPage for copypage.
+// ---------- device deactivation ----------
+
+/// Deactivate the page device (PLRM 3e §6.2.6): call its `EndPage` with
+/// reason code 2, and transmit the page if it returns `true` — an `EndPage`
+/// that gathers several pages on one sheet flushes the last, partial sheet
+/// this way. The standard procedures return `false`, discarding a page no
+/// `showpage` ended.
 ///
-/// Same as showpage_continue but does NOT erase page or call initgraphics.
-pub fn op_copypage_continue(ctx: &mut Context) -> Result<(), PsError> {
-    // Pop EndPage result (bool)
-    if ctx.o_stack.is_empty() {
+/// Called by `setpagedevice` before it replaces the device, and at the end
+/// of a job. The page is left in place either way; `setpagedevice` erases it,
+/// and at the end of a job nothing follows. Returns whether the page was
+/// transmitted.
+pub fn deactivate_page_device(ctx: &mut Context) -> Result<bool, PsError> {
+    if is_null_device(ctx) || !has_pd_key(ctx, b".IsPageDevice") {
+        return Ok(false);
+    }
+    let Some(end_page) = end_page_proc(ctx) else {
+        return Ok(false);
+    };
+    let depth = ctx.o_stack.len();
+    ctx.o_stack.push(PsObject::int(ctx.showpage_count))?;
+    ctx.o_stack.push(PsObject::int(2))?;
+    ctx.exec_sync(end_page)?;
+    if ctx.o_stack.len() <= depth {
         return Err(PsError::StackUnderflow);
     }
-    let result = ctx.o_stack.pop()?;
-    let should_render = match result.value {
-        PsValue::Bool(b) => b,
-        _ => true,
-    };
-    let page_count = get_pd_int(ctx, b"PageCount").unwrap_or(0) + 1;
-    set_pd_int(ctx, b"PageCount", page_count);
-
-    let in_filter = ctx
-        .page_filter
-        .as_ref()
-        .is_none_or(|f| f.contains(&page_count));
-
-    if should_render && in_filter {
-        // Replay display list (copypage preserves page content, but we must
-        // transfer ownership for pipelined rendering)
-        let list = ctx.take_display_list();
-        let path = resolve_page_output(ctx, page_count)?;
-        if let Some(ref mut device) = ctx.device
-            && let Err(e) = device.replay_and_show(list, &path)
-        {
-            eprintln!("copypage error: {}", e);
-        }
+    let transmit = !matches!(ctx.o_stack.pop()?.value, PsValue::Bool(false));
+    if transmit {
+        transmit_page(ctx, "end of page device")?;
     }
-
-    // copypage does NOT erase or call initgraphics
-    Ok(())
+    Ok(transmit)
 }
 
 // ---------- Internal helpers ----------

@@ -1854,20 +1854,23 @@ fn execjob(
     // --- Job execution (step 4) ---
     let exec_result = if is_eps {
         (|| {
-            if let Some((llx, lly, _urx, _ury)) = read_eps_bounding_box(ps_data) {
-                if llx != 0.0 || lly != 0.0 {
-                    let wrapper = format!("gsave {} {} translate", -llx, -lly);
-                    parse_and_exec(ctx, wrapper.as_bytes())?;
-                    parse_and_exec_file(ctx, ps_data, filename)?;
-                    parse_and_exec(ctx, b"grestore showpage")
-                } else {
-                    parse_and_exec_file(ctx, ps_data, filename)?;
-                    parse_and_exec(ctx, b"showpage")
-                }
+            // An EPS need not call showpage; add one only if it did not, or
+            // an EPS that does gets a second, blank page.
+            let showpages_before = ctx.showpage_count;
+            let translated =
+                read_eps_bounding_box(ps_data).filter(|&(llx, lly, _, _)| llx != 0.0 || lly != 0.0);
+            if let Some((llx, lly, _urx, _ury)) = translated {
+                let wrapper = format!("gsave {} {} translate", -llx, -lly);
+                parse_and_exec(ctx, wrapper.as_bytes())?;
+                parse_and_exec_file(ctx, ps_data, filename)?;
+                parse_and_exec(ctx, b"grestore")?;
             } else {
                 parse_and_exec_file(ctx, ps_data, filename)?;
-                parse_and_exec(ctx, b"showpage")
             }
+            if ctx.showpage_count == showpages_before {
+                parse_and_exec(ctx, b"showpage")?;
+            }
+            Ok(())
         })()
     } else {
         parse_and_exec_file(ctx, ps_data, filename)
@@ -1890,6 +1893,15 @@ fn execjob(
     };
 
     // --- Job cleanup (always runs, like a finally-block) ---
+
+    // End of job deactivates the page device: its EndPage runs with reason 2
+    // and may transmit a page no showpage ended (PLRM 3e §6.2.6). Only after
+    // a clean run — a job that failed is not asked for more output.
+    if job_result.is_ok()
+        && let Err(e) = stet_ops::device_ops::deactivate_page_device(ctx)
+    {
+        eprintln!("Error: {}: EndPage at end of job: {}", filename, e);
+    }
 
     // 0. Diagnose the dropped-final-page case: the program painted marks and
     //    then ended without a matching `showpage`, so the device was never

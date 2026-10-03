@@ -377,6 +377,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not, and the EPS came back with a second, blank page — every time, once
   the page was large enough to band (a 600 pt EPS at 300 dpi). They now
   ask whether the EPS's `showpage` ran.
+- **`copypage` follows LanguageLevel 3**: it passes `EndPage` reason code
+  0, as `showpage` does, counts as a `showpage` execution, and calls
+  `BeginPage` afterwards. It was passing the LanguageLevel 2 code, 1, and
+  skipping `BeginPage`.
+- **A page `EndPage` declines carries over.** When a job's `EndPage`
+  returns false, the page is neither sent nor erased (PLRM 6.2.6), so the
+  next page is drawn on top of it — how n-up imposition gathers pages. It
+  was erased. `PageCount` now counts pages produced, as in Ghostscript, and
+  numbers the output files; the count `BeginPage` and `EndPage` receive
+  still counts every `showpage`.
+- **`EndPage` runs with reason code 2 when the page device is
+  deactivated**: at the end of a job and when `setpagedevice` replaces it.
+  An `EndPage` that answers true there sends the page no `showpage` ended,
+  such as the last, partly filled sheet of an n-up job. `setpagedevice`
+  also erases marks made before it, as the PLRM and Ghostscript do; they
+  used to carry onto the next page.
+- **`--device pdf` no longer leaves an integer on the operand stack at
+  every page.** Its `EndPage` consumed the reason code but not the count.
+- **An EPS that calls `showpage` renders as one page** on the command line
+  and in the library's PDF output. Both added a `showpage` of their own
+  regardless, writing a blank second page (the `ps_samples` files
+  `golfer.ps`, `printerarea.ps`, `testprinter.ps` and `tiger.ps` did).
 - **Relative colorimetric CMYK rendered lighter than Ghostscript and
   Acrobat** with black-point compensation on, the default. Compensation
   maps the profile's black to sRGB black, and stet took that black to be

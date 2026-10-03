@@ -269,6 +269,12 @@ pub struct Context {
     /// number, which advances even for pages excluded by [`Self::page_filter`].
     /// A no-token `--output` template is only valid while this is 1.
     pub pages_emitted: u32,
+    /// Executions of `showpage` and `copypage` since the page device was
+    /// installed: the count `BeginPage` and `EndPage` receive (PLRM 3e
+    /// §6.2.6). The page device's `PageCount` counts pages produced; this
+    /// advances whatever `EndPage` returns, so the two part when an
+    /// `EndPage` declines a page.
+    pub showpage_count: i32,
     /// Page filter: if set, only render pages in this set (1-based).
     pub page_filter: Option<std::collections::HashSet<i32>>,
     /// Factory closure for creating raster devices (registered by CLI).
@@ -1205,6 +1211,7 @@ impl Context {
             output_path: None,
             output_template: None,
             pages_emitted: 0,
+            showpage_count: 0,
             page_filter: None,
             device_factory: None,
             font_directory,

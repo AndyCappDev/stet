@@ -699,15 +699,10 @@ pub fn op_showpage(ctx: &mut Context) -> Result<(), PsError> {
     }
 
     // If we have a page device with EndPage, use the continuation protocol
-    if ctx.gstate.page_device.is_some()
-        && let Some(end_page) = crate::device_ops::get_pd_value(ctx, b"EndPage")
-        && matches!(end_page.value, PsValue::Array { len, .. } if len > 0)
-        && end_page.flags.is_executable()
-    {
-        // Push args for EndPage: pagecount reason(0=showpage)
-        let page_count = crate::device_ops::get_pd_int(ctx, b"PageCount").unwrap_or(0);
-        ctx.o_stack.push(PsObject::int(page_count))?;
-        ctx.o_stack.push(PsObject::int(0))?; // reason 0 = showpage
+    if let Some(end_page) = crate::device_ops::end_page_proc(ctx) {
+        // Push args for EndPage: the showpage count, and reason 0 = showpage
+        ctx.o_stack.push(PsObject::int(ctx.showpage_count))?;
+        ctx.o_stack.push(PsObject::int(0))?;
 
         // Push .showpage_continue first (runs second), then EndPage (runs first)
         let continue_name = ctx.names.intern(b".showpage_continue");
@@ -721,23 +716,7 @@ pub fn op_showpage(ctx: &mut Context) -> Result<(), PsError> {
     }
 
     // Fallback: direct rendering (no page device or no EndPage proc)
-    if ctx.device.is_some() {
-        if ctx.output_path.is_some() {
-            let list = ctx.take_display_list();
-            let device = ctx.device.as_mut().unwrap();
-            let path = ctx.output_path.as_ref().unwrap();
-            if let Err(e) = device.replay_and_show(list, path) {
-                eprintln!("showpage error: {}", e);
-            }
-        } else {
-            let device = ctx.device.as_mut().unwrap();
-            stet_core::device::replay_to_device(&ctx.display_list, device.as_mut());
-            ctx.display_list.clear();
-        }
-        ctx.device.as_mut().unwrap().erase_page();
-    } else {
-        ctx.display_list.clear();
-    }
+    crate::device_ops::transmit_page_without_end_page(ctx);
 
     // The equivalent of initgraphics (PLRM showpage, step 3).
     ctx.gstate.init_graphics();
