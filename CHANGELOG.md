@@ -404,6 +404,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `setpagedevice` reinitializes the transfer function before it erases, so
   its erase stays white. Pages whose transfer function leaves white white
   are unchanged.
+- **The library renders each PostScript page once.** `Interpreter::render`
+  and `render_to_display_list` interpreted onto a `SkiaDevice` that
+  rasterised every page into a sink that threw the pixels away, only to
+  learn the page's size, and then `render` rasterised the page again. The
+  device installed while interpreting now records the size and nothing
+  else: `render` takes about 40% less time per page at 300 dpi
+  (0.25 s → 0.14 s on `tiger.ps`, `escher.ps`, `grade.ps`, `colorcir.ps`),
+  with the same pixels. The WASM build did the same and is fixed the same
+  way.
 - **An EPS that calls `showpage` renders as one page** on the command line
   and in the library's PDF output. Both added a `showpage` of their own
   regardless, writing a blank second page (the `ps_samples` files

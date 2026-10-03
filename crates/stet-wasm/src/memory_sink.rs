@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Scott Bowman
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Page sink for WASM builds.
+//! Page-size recording for WASM builds.
 //!
 //! Interpretation records page dimensions only — pixels are re-rendered on
 //! demand from the retained display lists by `render_viewport()`. Keeping a
@@ -11,7 +11,10 @@
 
 use std::sync::{Arc, Mutex};
 
-use stet_graphics::device::{PageSink, PageSinkFactory};
+use stet_core::device::OutputDevice;
+use stet_fonts::geometry::PsPath;
+use stet_graphics::device::{ClipParams, FillParams, ImageParams, StrokeParams};
+use stet_graphics::display_list::DisplayList;
 
 /// Rendered page data: the dimensions of one interpreted page.
 pub struct PageData {
@@ -19,68 +22,55 @@ pub struct PageData {
     pub height: u32,
 }
 
-/// Lightweight sink that records page dimensions but discards all pixel data.
-///
-/// Used during PostScript interpretation in the WASM viewport workflow where
-/// only display lists and page dimensions are needed — the actual rendering
-/// happens on demand via `render_viewport()`. This avoids accumulating ~33 MB
-/// of RGBA data per page, which would OOM on large documents (e.g. 139 pages
-/// at 300 DPI = ~4.6 GB).
-pub struct NullSink {
-    pages: Arc<Mutex<Vec<PageData>>>,
-    current_width: u32,
-    current_height: u32,
+/// A new, empty collection of page sizes, to share between the devices a
+/// job installs.
+pub fn new_page_collection() -> Arc<Mutex<Vec<PageData>>> {
+    Arc::new(Mutex::new(Vec::new()))
 }
 
-impl PageSink for NullSink {
-    fn begin_page(&mut self, width: u32, height: u32) -> Result<(), String> {
-        self.current_width = width;
-        self.current_height = height;
-        Ok(())
-    }
-
-    fn write_rows(&mut self, _rgba_rows: &[u8], _num_rows: u32) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn end_page(&mut self) -> Result<(), String> {
-        let page = PageData {
-            width: self.current_width,
-            height: self.current_height,
-        };
-        self.pages.lock().map_err(|e| e.to_string())?.push(page);
-        Ok(())
-    }
-}
-
-/// Factory that creates `NullSink` instances sharing a page collection.
-pub struct NullSinkFactory {
+/// The device installed while interpreting: it records each page's size and
+/// drops its display list, which the page-boundary capture has already kept
+/// for `render_viewport()`. Rendering pages here as well — as a
+/// `SkiaDevice` into a discarding sink once did — rasterised every page once
+/// for nothing.
+pub struct PageSizeRecorder {
+    width: u32,
+    height: u32,
     pages: Arc<Mutex<Vec<PageData>>>,
 }
 
-impl NullSinkFactory {
-    pub fn new() -> (Self, Arc<Mutex<Vec<PageData>>>) {
-        let pages = Arc::new(Mutex::new(Vec::new()));
-        (
-            Self {
-                pages: Arc::clone(&pages),
-            },
+impl PageSizeRecorder {
+    /// A device of `width` × `height` pixels recording into `pages`.
+    pub fn new(width: u32, height: u32, pages: Arc<Mutex<Vec<PageData>>>) -> Self {
+        Self {
+            width,
+            height,
             pages,
-        )
-    }
-
-    /// Create a factory that shares the same page collection as an existing one.
-    pub fn from_shared(pages: Arc<Mutex<Vec<PageData>>>) -> Self {
-        Self { pages }
+        }
     }
 }
 
-impl PageSinkFactory for NullSinkFactory {
-    fn create_sink(&self, _output_path: &str) -> Result<Box<dyn PageSink>, String> {
-        Ok(Box::new(NullSink {
-            pages: Arc::clone(&self.pages),
-            current_width: 0,
-            current_height: 0,
-        }))
+impl OutputDevice for PageSizeRecorder {
+    fn fill_path(&mut self, _path: &PsPath, _params: &FillParams) {}
+    fn stroke_path(&mut self, _path: &PsPath, _params: &StrokeParams) {}
+    fn clip_path(&mut self, _path: &PsPath, _params: &ClipParams) {}
+    fn init_clip(&mut self) {}
+    fn erase_page(&mut self) {}
+    fn show_page(&mut self, _output_path: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn draw_image(&mut self, _sample_data: &[u8], _params: &ImageParams) {}
+    fn page_size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+    fn replay_and_show(&mut self, _list: DisplayList, _output_path: &str) -> Result<(), String> {
+        self.pages
+            .lock()
+            .map_err(|e| e.to_string())?
+            .push(PageData {
+                width: self.width,
+                height: self.height,
+            });
+        Ok(())
     }
 }

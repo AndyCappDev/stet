@@ -25,7 +25,7 @@ use stet_graphics::display_list::DisplayList;
 use stet_graphics::icc::IccCache;
 use stet_render::{ImageCache, PreparedDisplayList, SkiaDevice};
 
-use memory_sink::{NullSinkFactory, PageData};
+use memory_sink::{PageData, PageSizeRecorder, new_page_collection};
 
 /// Embedded GhostScript default CMYK ICC profile for CMYK→sRGB conversion.
 const DEFAULT_CMYK_ICC: &[u8] = include_bytes!("default_cmyk.icc");
@@ -51,8 +51,8 @@ struct PsStreamState {
     /// VM save level captured before interpretation started; restored at
     /// end-of-program so per-file VM changes don't leak across renders.
     save_id: u32,
-    /// Shared page-data buffer populated by the NullSinkFactory as each
-    /// `end_page` fires. Drained (per step) to pair dimensions with the
+    /// Shared page-data buffer populated by the `PageSizeRecorder` as each
+    /// page is sent. Drained (per step) to pair dimensions with the
     /// newly-captured display lists.
     pages_ref: Arc<Mutex<Vec<PageData>>>,
     /// Flag set by `take_display_list` after each page is captured, causing
@@ -248,9 +248,9 @@ pub fn render(
     // Enable display list capture
     interp.ctx.capture_display_lists = Some(Vec::new());
 
-    // Set up shared page collection — NullSinkFactory records dimensions only,
-    // discarding rendered pixels since viewport rendering is done on demand.
-    let (_sink_factory, pages_ref) = NullSinkFactory::new();
+    // Set up shared page collection — the installed device records page
+    // dimensions only, since viewport rendering is done on demand.
+    let pages_ref = new_page_collection();
 
     // Strip DOS EPS header and check for EPS bounding box
     let ps_data = stet_core::eps::strip_dos_eps_header(ps_data);
@@ -273,14 +273,11 @@ pub fn render(
             llx, lly, urx, ury, w, h, dpi
         ));
 
-        // Set up device_factory with NullSinkFactory — pixels are discarded
+        // Set up device_factory: page sizes only, nothing is rasterised
         let pages_for_factory = pages_ref.clone();
-        let cmyk_for_factory = interp.system_cmyk_bytes.clone();
         interp.ctx.device_factory = Some(Box::new(move |w, h| {
-            let factory = NullSinkFactory::from_shared(pages_for_factory.clone());
-            let mut dev = SkiaDevice::with_sink_factory(w, h, Box::new(factory));
-            dev.set_system_cmyk_bytes(cmyk_for_factory.clone());
-            Box::new(dev) as Box<dyn OutputDevice>
+            Box::new(PageSizeRecorder::new(w, h, pages_for_factory.clone()))
+                as Box<dyn OutputDevice>
         }));
 
         install_device_via_setpagedevice(&mut interp.ctx, dpi, w, h)
@@ -328,12 +325,8 @@ pub fn render(
     // can service viewport-render requests for page 1 while we queue up
     // page 2's interpretation.
     let pages_for_factory = pages_ref.clone();
-    let cmyk_for_factory = interp.system_cmyk_bytes.clone();
     interp.ctx.device_factory = Some(Box::new(move |w, h| {
-        let factory = NullSinkFactory::from_shared(pages_for_factory.clone());
-        let mut dev = SkiaDevice::with_sink_factory(w, h, Box::new(factory));
-        dev.set_system_cmyk_bytes(cmyk_for_factory.clone());
-        Box::new(dev) as Box<dyn OutputDevice>
+        Box::new(PageSizeRecorder::new(w, h, pages_for_factory.clone())) as Box<dyn OutputDevice>
     }));
 
     install_device_via_setpagedevice(&mut interp.ctx, dpi, 612.0, 792.0)

@@ -83,6 +83,7 @@ mod init;
 use std::sync::{Arc, Mutex};
 
 use stet_core::context::Context;
+#[cfg(any(feature = "render", feature = "pdf-output"))]
 use stet_core::device::OutputDevice;
 use stet_core::eps::{content_is_epsf, read_eps_bounding_box, strip_dos_eps_header};
 use stet_core::error::PsError;
@@ -155,7 +156,6 @@ pub struct RenderedPage {
 /// for custom configuration. Reusable across multiple `render` calls.
 pub struct Interpreter {
     ctx: Context,
-    use_icc: bool,
     #[cfg(feature = "render")]
     page_background: PageBackground,
     warnings: Vec<ExecWarning>,
@@ -547,14 +547,12 @@ impl Interpreter {
 
     #[cfg(feature = "render")]
     fn setup_capture_device_factory(&mut self, pages_ref: Arc<Mutex<Vec<PageDims>>>) {
-        let use_icc = self.use_icc;
         self.ctx.device_factory = Some(Box::new(move |w, h| {
-            let factory = NullSinkFactory(pages_ref.clone());
-            let mut dev = stet_render::SkiaDevice::with_sink_factory(w, h, Box::new(factory));
-            if use_icc {
-                dev.set_system_cmyk_bytes(Arc::new(embedded_resources::DEFAULT_CMYK_ICC.to_vec()));
-            }
-            Box::new(dev) as Box<dyn OutputDevice>
+            Box::new(PageSizeRecorder {
+                width: w,
+                height: h,
+                pages: pages_ref.clone(),
+            }) as Box<dyn OutputDevice>
         }));
     }
 
@@ -638,7 +636,6 @@ impl InterpreterBuilder {
         ctx.set_default_rendering_intent(self.default_rendering_intent);
         Interpreter {
             ctx,
-            use_icc: self.use_icc,
             #[cfg(feature = "render")]
             page_background: self.page_background,
             warnings: Vec::new(),
@@ -646,64 +643,59 @@ impl InterpreterBuilder {
     }
 }
 
-// --- Page dimension tracking (NullSink) ---
+// --- Page dimension tracking ---
 
-/// Recorded page dimensions from the null sink.
+/// Recorded page dimensions, one per page the job sends.
 #[cfg(feature = "render")]
 struct PageDims {
     width: u32,
     height: u32,
 }
 
-/// A PageSinkFactory that discards pixels but records page dimensions.
+/// The device the facade's raster calls install: it records each page's
+/// size and drops its display list. The facade renders the captured display
+/// lists itself (`Context::capture_display_lists`), so a device that also
+/// rasterised them — as a `SkiaDevice` into a discarding sink once did —
+/// rendered every page twice.
 #[cfg(feature = "render")]
-struct NullSinkFactory(Arc<Mutex<Vec<PageDims>>>);
-
-#[cfg(feature = "render")]
-unsafe impl Send for NullSinkFactory {}
-#[cfg(feature = "render")]
-unsafe impl Sync for NullSinkFactory {}
-
-#[cfg(feature = "render")]
-impl stet_graphics::device::PageSinkFactory for NullSinkFactory {
-    fn create_sink(
-        &self,
-        _output_path: &str,
-    ) -> Result<Box<dyn stet_graphics::device::PageSink>, String> {
-        // We don't know the pixel dimensions here — they'll be set by begin_page.
-        // Use 0x0 as placeholders; the actual dimensions come from the device.
-        let pages = self.0.clone();
-        Ok(Box::new(NullSink {
-            width: 0,
-            height: 0,
-            pages,
-        }))
-    }
-}
-
-#[cfg(feature = "render")]
-struct NullSink {
+struct PageSizeRecorder {
     width: u32,
     height: u32,
     pages: Arc<Mutex<Vec<PageDims>>>,
 }
 
 #[cfg(feature = "render")]
-unsafe impl Send for NullSink {}
-
-#[cfg(feature = "render")]
-impl stet_graphics::device::PageSink for NullSink {
-    fn begin_page(&mut self, width: u32, height: u32) -> Result<(), String> {
-        self.width = width;
-        self.height = height;
+impl OutputDevice for PageSizeRecorder {
+    fn fill_path(
+        &mut self,
+        _path: &stet_fonts::geometry::PsPath,
+        _params: &stet_graphics::device::FillParams,
+    ) {
+    }
+    fn stroke_path(
+        &mut self,
+        _path: &stet_fonts::geometry::PsPath,
+        _params: &stet_graphics::device::StrokeParams,
+    ) {
+    }
+    fn clip_path(
+        &mut self,
+        _path: &stet_fonts::geometry::PsPath,
+        _params: &stet_graphics::device::ClipParams,
+    ) {
+    }
+    fn init_clip(&mut self) {}
+    fn erase_page(&mut self) {}
+    fn show_page(&mut self, _output_path: &str) -> Result<(), String> {
         Ok(())
     }
-    fn write_rows(&mut self, _rows: &[u8], _num_rows: u32) -> Result<(), String> {
-        Ok(())
+    fn draw_image(&mut self, _sample_data: &[u8], _params: &stet_graphics::device::ImageParams) {}
+    fn page_size(&self) -> (u32, u32) {
+        (self.width, self.height)
     }
-    fn end_page(&mut self) -> Result<(), String> {
-        if let Ok(mut guard) = self.pages.lock() {
-            guard.push(PageDims {
+    fn replay_and_show(&mut self, _list: DisplayList, _output_path: &str) -> Result<(), String> {
+        if let Ok(mut pages) = self.pages.lock() {
+            pages.push(PageDims {
                 width: self.width,
                 height: self.height,
             });
