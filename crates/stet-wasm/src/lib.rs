@@ -298,8 +298,15 @@ pub fn render(
         parse_and_exec(&mut interp.ctx, ps_data)
             .map_err(|e| JsValue::from_str(&format!("PS error (exec): {}", e)))?;
 
-        // grestore to undo our translate; only call showpage if the EPS didn't already
-        let need_showpage = pages_ref.lock().map(|g| g.is_empty()).unwrap_or(true);
+        // grestore to undo our translate; only call showpage if the EPS
+        // didn't already. Ask the captured display lists, as the `stet`
+        // facade does, not the device's page sink, which a background
+        // render may not have reached yet.
+        let need_showpage = interp
+            .ctx
+            .capture_display_lists
+            .as_ref()
+            .is_none_or(|v| v.is_empty());
         if need_showpage {
             parse_and_exec(&mut interp.ctx, b"grestore showpage")
                 .map_err(|e| JsValue::from_str(&format!("PS error (showpage): {}", e)))?;

@@ -360,6 +360,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per page rather than once per band: a 3000×3000 CMYK image in a layer at
   300 dpi went from 2.3 s and 1.5 GB to 1.3 s and 240 MB, the same as
   outside one. Images in layers that are hidden are no longer converted.
+- **Small PostScript pages render as larger ones do.** The CLI's PNG
+  output drew a page small enough to need no banding (Letter below about
+  80 dpi, or a small EPS) onto what the previous page left behind, unlike
+  every other page and unlike the library. Over a blank page, blend modes
+  blended with white paper rather than a transparent page (ISO 32000-1
+  §11.4.7: red under `/Difference` came out cyan); a page sent with
+  `copypage` showed under the next one, which LanguageLevel 3 erases; and
+  `flushpage` painted the page twice, doubling translucent paint. These
+  pages now render banded, from a clear page. Anti-aliased edges on them
+  can shift by a level or two, as on larger pages.
+- **An EPS that calls `showpage` renders as one page in the library.**
+  `Interpreter::render` and `render_to_display_list` add a `showpage` when
+  an EPS leaves one out, and decided by asking the device whether it had
+  received a page; the device renders in the background, so it often had
+  not, and the EPS came back with a second, blank page — every time, once
+  the page was large enough to band (a 600 pt EPS at 300 dpi). They now
+  ask whether the EPS's `showpage` ran.
 - **Relative colorimetric CMYK rendered lighter than Ghostscript and
   Acrobat** with black-point compensation on, the default. Compensation
   maps the profile's black to sRGB black, and stet took that black to be

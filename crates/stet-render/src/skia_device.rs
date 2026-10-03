@@ -154,16 +154,6 @@ impl PageBackground {
     fn is_transparent(self) -> bool {
         matches!(self, PageBackground::Transparent)
     }
-
-    /// Only `SkiaDevice` clears a pixmap to paper; the render functions
-    /// start every band transparent and finish with `finish_page_pixels`.
-    #[cfg(feature = "ps-device")]
-    fn paper_color(self) -> Color {
-        match self {
-            PageBackground::White => Color::WHITE,
-            PageBackground::Transparent => Color::TRANSPARENT,
-        }
-    }
 }
 
 #[cfg(feature = "ps-device")]
@@ -271,8 +261,9 @@ impl SkiaDevice {
                 return;
             };
             self.pixmap = pixmap;
-            let paper = self.paper_color();
-            self.pixmap.fill(paper);
+            // Clear, not paper: the page is an isolated group, composited
+            // onto paper by `show_page` (ISO 32000-1 §11.4.7).
+            self.pixmap.fill(Color::TRANSPARENT);
         }
     }
 
@@ -305,14 +296,6 @@ impl SkiaDevice {
     /// always composites onto paper.
     pub fn set_page_background(&mut self, background: PageBackground) {
         self.page_background = background;
-    }
-
-    /// The colour a cleared pixmap starts from. Every site that clears one
-    /// reads it: a page erased to white after `showpage` comes back opaque
-    /// however the device was configured, which is what happened to every
-    /// page after the first on the full-page path.
-    fn paper_color(&self) -> Color {
-        self.page_background.paper_color()
     }
 }
 
@@ -6934,10 +6917,11 @@ impl OutputDevice for SkiaDevice {
     }
 
     fn erase_page(&mut self) {
-        // Only fill the full pixmap when it's actually allocated (non-banded path).
-        // During banding, self.pixmap is a 1×1 placeholder — filling it is harmless.
-        let paper = self.paper_color();
-        self.pixmap.fill(paper);
+        // The pixmap holds only what the direct paint methods draw
+        // (`replay_to_device`, for `flushpage`); `replay_and_show` renders
+        // each page from its own clear bands. Clear it, as a band starts:
+        // `show_page` puts it on paper.
+        self.pixmap.fill(Color::TRANSPARENT);
         if let Some(ClipRegion::Mask(mask)) = self.clip_region.take() {
             self.spare_mask = Some(mask);
         }
@@ -7181,57 +7165,15 @@ impl OutputDevice for SkiaDevice {
             self.bpc_mode,
         );
 
-        // If banding not worthwhile, render the full page as a single band.
-        // This still uses render_element (same as banded path) so that Group
-        // and SoftMasked elements get proper offscreen compositing.
-        if band_h >= page_h {
-            self.ensure_full_pixmap();
-            let ctx = RenderContext {
-                vp_x: 0.0,
-                vp_y: 0.0,
-                scale_x: 1.0,
-                scale_y: 1.0,
-                out_w: page_w,
-                out_h: page_h,
-                effective_dpi: self.dpi,
-                icc: Some(&icc_cache),
-                image_cache: None,
-                preprocessed: None,
-                elem_idx: 0,
-                no_aa: self.no_aa,
-                opm_zero_transparent: false,
-                knockout_painter_pass: KnockoutPainterPass::None,
-                parent_group_isolated: false,
-                alpha_extraction_pass: false,
-                layer_set: &self.layer_set,
-                transfer_suppressed: false,
-            };
-            let cmyk_buffer = page_needs_cmyk_buffer(&list)
-                .then(|| vec![0.0f32; page_w as usize * page_h as usize * 4]);
-            let mut band_state = BandState {
-                clip_region: None,
-                spare_mask: None,
-                clip_mask_cache: HashMap::new(),
-                clip_mask_seen: HashSet::new(),
-                mask_pool: Vec::new(),
-                cmyk_buffer,
-                op_bg_snapshot: None,
-                op_touched: None,
-                spot_mask: None,
-            };
-            for (idx, elem) in list.elements().iter().enumerate() {
-                let elem_ctx = RenderContext {
-                    elem_idx: idx,
-                    ..ctx
-                };
-                render_element(&mut self.pixmap, &mut band_state, elem, &elem_ctx);
-            }
-            return self.show_page(output_path);
-        }
-
-        // Banded path: shrink self.pixmap to free memory — we use a
-        // band-sized pixmap instead. This avoids holding a multi-GB
-        // full-page buffer during rendering.
+        // Every page renders banded, however small — a single band if it
+        // fits — from clear bands, as the library's render functions do.
+        // Drawing small pages into `self.pixmap` instead put them on
+        // whatever it held: white paper (so blend modes blended with it),
+        // the page before a `copypage`, or a `flushpage` replay.
+        //
+        // Shrink self.pixmap to free memory — the bands have their own
+        // pixmaps. This avoids holding a multi-GB full-page buffer during
+        // rendering.
         if self.pixmap.width() > 1 {
             self.pixmap = Pixmap::new(1, 1).expect("Failed to create placeholder pixmap");
         }
@@ -14159,10 +14101,10 @@ mod tests {
         let left_pixel = dev.pixmap().pixel(25, 50).unwrap();
         assert_eq!(left_pixel.red(), 255);
 
-        // Right half should still be white
+        // Right half should still be unpainted: clear, until `show_page`
+        // puts the page on paper
         let right_pixel = dev.pixmap().pixel(75, 50).unwrap();
-        assert_eq!(right_pixel.red(), 255);
-        assert_eq!(right_pixel.green(), 255); // white
+        assert_eq!(right_pixel.alpha(), 0);
     }
 
     #[cfg(feature = "ps-device")]
@@ -14200,11 +14142,9 @@ mod tests {
 
         dev.erase_page();
 
-        // Should be white again
+        // Should be clear again
         let pixel = dev.pixmap().pixel(50, 50).unwrap();
-        assert_eq!(pixel.red(), 255);
-        assert_eq!(pixel.green(), 255);
-        assert_eq!(pixel.blue(), 255);
+        assert_eq!(pixel.alpha(), 0);
     }
 
     #[cfg(feature = "ps-device")]
@@ -14317,31 +14257,33 @@ mod tests {
         assert_eq!(pixel(&clear, 5, 10), [0, 0, 0, 255]);
     }
 
-    /// render_to_rgba_with_background is always banded, so it never reaches
-    /// SkiaDevice's own full-page path — where a page erased after `showpage`
-    /// used to come back on white paper, leaving every page but the first
-    /// opaque. A page small enough to skip banding exercises that path.
+    /// The device's own pixmap, which only the direct paint methods draw
+    /// into (`replay_to_device`, for `flushpage`), starts clear and is
+    /// erased clear, whatever the background: `show_page` puts it on paper.
+    /// Erasing it to white used to leave every page but the first opaque
+    /// under `--transparent`, and blend modes blending with the paper.
     #[cfg(feature = "ps-device")]
     #[test]
-    fn test_skia_device_keeps_later_pages_transparent_on_the_full_page_path() {
-        let mut device = SkiaDevice::new(200, 200);
-        device.set_page_background(PageBackground::Transparent);
-        assert_eq!(device.paper_color(), Color::TRANSPARENT);
+    fn test_skia_device_pixmap_starts_and_is_erased_clear() {
+        for background in [PageBackground::White, PageBackground::Transparent] {
+            let mut device = SkiaDevice::new(200, 200);
+            device.set_page_background(background);
 
-        device.ensure_full_pixmap();
-        assert_eq!(
-            device.pixmap().pixel(0, 0).map(|p| p.alpha()),
-            Some(0),
-            "the first page starts clear"
-        );
+            device.ensure_full_pixmap();
+            assert_eq!(
+                device.pixmap().pixel(0, 0).map(|p| p.alpha()),
+                Some(0),
+                "the first page starts clear"
+            );
 
-        // What the interpreter does between one showpage and the next.
-        device.erase_page();
-        assert_eq!(
-            device.pixmap().pixel(0, 0).map(|p| p.alpha()),
-            Some(0),
-            "a page erased for the next showpage must stay clear"
-        );
+            // What the interpreter does between one showpage and the next.
+            device.erase_page();
+            assert_eq!(
+                device.pixmap().pixel(0, 0).map(|p| p.alpha()),
+                Some(0),
+                "a page erased for the next showpage must stay clear"
+            );
+        }
     }
 
     #[test]
@@ -14699,6 +14641,7 @@ mod tests {
 
     /// A custom spot overprinting a cyan square: the spot's process
     /// contribution is zero, so the cyan plate beneath it must survive.
+    #[cfg(feature = "ps-device")]
     fn spot_over_cyan_list() -> DisplayList {
         let mut cyan = fill(rect_path(10.0, 10.0, 60.0, 60.0), 1.0, 0);
         if let DisplayElement::Fill { params, .. } = &mut cyan {
@@ -14716,10 +14659,11 @@ mod tests {
         dl(vec![cyan, spot])
     }
 
-    /// The PostScript device renders a page too small to band as one full
-    /// band. That path built its own `BandState` and never allocated the CMYK
-    /// buffer, so overprint silently turned off whenever the page was small —
-    /// the same file overprinted at 600 dpi and knocked out at 72.
+    /// A page too small to band renders as one band, as larger pages and
+    /// the library's render functions do. It used to take a path of its
+    /// own, which built its own `BandState` and never allocated the CMYK
+    /// buffer, so overprint silently turned off whenever the page was small
+    /// — the same file overprinted at 600 dpi and knocked out at 72.
     #[cfg(feature = "ps-device")]
     #[test]
     fn single_band_device_path_simulates_overprint_like_banded() {

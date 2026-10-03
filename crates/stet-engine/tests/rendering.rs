@@ -76,6 +76,12 @@ fn render_to_png(source: &[u8], width: u32, height: u32) -> Vec<u8> {
     }
 
     stet_engine::eval::parse_and_exec(&mut ctx, &full_source).expect("PS execution failed");
+    // The device writes pages in the background; wait for them.
+    ctx.device
+        .as_mut()
+        .unwrap()
+        .finish()
+        .expect("finish rendering");
 
     let png_data = std::fs::read(&path_str).expect("read output PNG");
     std::fs::remove_file(&path_str).ok();

@@ -495,15 +495,15 @@ impl Interpreter {
         parse_and_exec(&mut self.ctx, wrapper.as_bytes()).map_err(ps_err)?;
         let _ = parse_and_exec(&mut self.ctx, ps_data);
 
-        // Call showpage if the EPS didn't already
-        #[cfg(feature = "render")]
-        let need_showpage = pages_ref.lock().map(|g| g.is_empty()).unwrap_or(true);
-        #[cfg(not(feature = "render"))]
+        // Call showpage if the EPS didn't already. Ask the captured display
+        // lists, which `showpage` adds to as it runs, not the device's page
+        // sink: the device renders in the background, so the sink may not
+        // have seen the page yet, and asking it added a blank page.
         let need_showpage = self
             .ctx
             .capture_display_lists
             .as_ref()
-            .map_or(true, |v| v.is_empty());
+            .is_none_or(|v| v.is_empty());
 
         if need_showpage {
             let _ = parse_and_exec(&mut self.ctx, b"grestore showpage");
