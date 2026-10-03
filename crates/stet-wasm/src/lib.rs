@@ -347,6 +347,7 @@ pub fn render(
     // exec stack. Future step_ps_page calls just re-enter eval — the File
     // stays on e_stack and the StringSource's cursor preserves position.
     let file_entity = interp.ctx.files.create_string_source(ps_data.to_vec());
+    let file_entity = interp.ctx.adopt_file(file_entity);
     if let Err(e) = interp.ctx.e_stack.push(PsObject {
         value: PsValue::File(file_entity),
         flags: ObjFlags::executable_composite(),

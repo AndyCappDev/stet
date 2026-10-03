@@ -471,6 +471,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   open, as Ghostscript does, except ReusableStreamDecode, which reads it
   eagerly and closes it. `readstring` on a closed file answers `() false`
   rather than `ioerror`, like `read`.
+- **`restore` closes the files made since its `save`**, as PLRM 3e `file`
+  says, and reclaims them, so the file table no longer grows with every
+  file a job opens — three for each library render call, and every file and
+  filter a command-line job opened. A file not read to its end, such as a
+  real file's descriptor or a filter's buffers, was kept until the process
+  exited. Writes are flushed, as `closefile` would.
+- **File objects are in local or global VM**, like other composites, by
+  `currentglobal` when they are made. `gcheck` answered true for every file,
+  while `def`, `put` and the other stores refused every file as local; now
+  a global file can be stored in global VM and a local one cannot (PLRM
+  3.7.2), and a `restore` that a local file made since its `save` would
+  outlive on a stack is an `invalidrestore`. A filter over a local source is
+  local even under `true setglobal`, and the standard files are global, as
+  in Ghostscript. The job's own file is local (Ghostscript's is global), so
+  `currentfile gcheck` answers false.
 - **PDF output is reproducible.** The same job gives the same PDF, apart
   from its `/CreationDate`: a page's `/Font` resources were listed in an
   order that changed from run to run, and are now in their own order (`F0`,

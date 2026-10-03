@@ -127,6 +127,9 @@ fn is_newer_local(ctx: &Context, obj: &PsObject, save_id: u32) -> bool {
         PsValue::String { entity, .. } if !entity.is_global() => {
             ctx.strings.entity_meta(entity).created_after_save >= save_id
         }
+        PsValue::File(entity) if !entity.is_global() => {
+            ctx.files.created_after_save(entity) >= save_id
+        }
         _ => false,
     }
 }
@@ -183,6 +186,7 @@ pub fn op_gcheck(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::String { entity, .. } => entity.is_global(),
         PsValue::Array { entity, .. } | PsValue::PackedArray { entity, .. } => entity.is_global(),
         PsValue::Dict(entity) => entity.is_global(),
+        PsValue::File(entity) => entity.is_global(),
         // Simple types are not in VM — always global per PLRM
         _ => true,
     };

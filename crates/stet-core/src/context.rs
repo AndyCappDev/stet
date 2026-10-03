@@ -1498,6 +1498,7 @@ impl Context {
             array_entities: self.arrays.local.entities.len(),
             dict_slots: self.dicts.local.dict_slots(),
             dict_entities: self.dicts.local.entities.len(),
+            files: self.files.len(),
         }
     }
 
@@ -1627,8 +1628,31 @@ impl Context {
 
         self.invalidate_name_cache();
         self.close_restored_proc_sources();
+        self.files.reclaim(marks.files);
         self.debug_assert_no_dangling_refs();
         Ok(())
+    }
+
+    /// Place a file the `FileStore` just made in VM: global or local by
+    /// `currentglobal`, stamped with the current save, as the allocation
+    /// helpers do for the other composites. Returns its id, which carries the
+    /// VM as the other stores' ids do — what `gcheck`, the PLRM 3.7.2 checks
+    /// and `restore` read.
+    ///
+    /// Every file object stet hands to PostScript goes through here. A file
+    /// that skipped it would be local and unstamped, so the `restore` of an
+    /// enclosing save would close it.
+    pub fn adopt_file(&mut self, entity: EntityId) -> EntityId {
+        self.adopt_file_in(entity, self.vm_alloc_mode)
+    }
+
+    /// [`Self::adopt_file`] into an explicitly chosen VM — for a filter,
+    /// which is local whatever `currentglobal` says when its source is: a
+    /// global filter would refer to a local file (PLRM 3.7.2), and
+    /// Ghostscript makes it local too.
+    pub fn adopt_file_in(&mut self, entity: EntityId, global: bool) -> EntityId {
+        let save_id = self.save_stack.last_save_id();
+        self.files.adopt(entity, global, save_id)
     }
 
     /// Close any procedure data source whose procedure the restore just

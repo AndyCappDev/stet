@@ -230,3 +230,44 @@ currentfile line 0 gt [true] assert
 (ft_eof_test.ps) deletefile
 (ft_eof_hex.txt) deletefile
 (ft_eof_lines.txt) deletefile
+
+
+%% =============================================================================
+%% file VM: a file object is local or global like any composite, and
+%% `restore` closes the local files made since its `save` (PLRM 3e `file`).
+%% Expected values are Ghostscript 10.05's, except `currentfile`, which stet
+%% makes local (a global job file could never be reclaimed).
+%% =============================================================================
+
+(ft_vm_test.txt) (w) file dup (616263) writestring closefile
+
+%% file vm - gcheck follows currentglobal; the standard files are global %%
+{(ft_vm_test.txt) (r) file gcheck} [false] assert
+{true setglobal (ft_vm_test.txt) (r) file false setglobal gcheck} [true] assert
+{(%stdout) (w) file gcheck (%stdin) (r) file gcheck} [true true] assert
+
+%% file vm - a filter over a local file is local, even in global VM %%
+{true setglobal (61>) /ASCIIHexDecode filter false setglobal gcheck} [true] assert
+{(ft_vm_test.txt) (r) file true setglobal /ASCIIHexDecode filter false setglobal gcheck} [false] assert
+
+%% file vm - a local file cannot go into a global array (PLRM 3.7.2) %%
+{true setglobal 1 array false setglobal 0 (ft_vm_test.txt) (r) file {put} stopped pop
+ 3 {pop} repeat $error /errorname get $error /newerror false put} [/invalidaccess] assert
+{true setglobal 1 array dup 0 (ft_vm_test.txt) (r) file put false setglobal 0 get gcheck} [true] assert
+
+%% file vm - a global file made inside a save survives its restore, open %%
+{true setglobal 1 array false setglobal
+ save exch dup 0 true setglobal (ft_vm_test.txt) (r) file false setglobal put exch restore
+ 0 get status} [true] assert
+
+%% file vm - restore closes, and flushes, a local file made since the save %%
+{save (ft_vm_out.txt) (w) file (xyz) writestring restore
+ (ft_vm_out.txt) (r) file 10 string readstring pop} [(xyz)] assert
+
+%% file vm - a local file newer than the save on the stack: invalidrestore %%
+{/ft_vm_sv save def (ft_vm_test.txt) (r) file {ft_vm_sv restore} stopped
+ 3 1 roll pop pop $error /errorname get $error /newerror false put ft_vm_sv restore}
+ [true /invalidrestore] assert
+
+(ft_vm_test.txt) deletefile
+(ft_vm_out.txt) deletefile

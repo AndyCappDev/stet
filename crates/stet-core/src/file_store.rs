@@ -240,6 +240,15 @@ pub struct FileEntry {
     /// start of the next token read so that `line` reports the line the
     /// current token is on, not the line after it.
     pub pending_newlines: u32,
+    /// Whether the file object is in global VM, as its `EntityId` also says
+    /// (see [`crate::context::Context::adopt_file`]). `restore` closes and
+    /// reclaims local files only.
+    pub global: bool,
+    /// The save that was current when the file was made
+    /// ([`SaveStack::last_save_id`](crate::save_stack::SaveStack::last_save_id)),
+    /// as `EntityMeta::created_after_save` is for the other composites;
+    /// 0 when no save was outstanding.
+    pub created_after_save: u32,
 }
 
 /// Storage for all open PostScript files.
@@ -257,10 +266,11 @@ pub struct FileStore {
     embedded_files: HashMap<String, &'static [u8]>,
 }
 
-/// Well-known file entity IDs.
-pub const FILE_STDIN: EntityId = EntityId(0);
-pub const FILE_STDOUT: EntityId = EntityId(1);
-pub const FILE_STDERR: EntityId = EntityId(2);
+/// Well-known file entity IDs. The standard files are in global VM, as in
+/// Ghostscript: no `restore` closes them.
+pub const FILE_STDIN: EntityId = EntityId::global(0);
+pub const FILE_STDOUT: EntityId = EntityId::global(1);
+pub const FILE_STDERR: EntityId = EntityId::global(2);
 
 impl FileStore {
     /// Create a new FileStore with stdin/stdout/stderr pre-allocated.
@@ -277,6 +287,8 @@ impl FileStore {
             mode: "r".to_string(),
             line_num: 1,
             pending_newlines: 0,
+            global: true,
+            created_after_save: 0,
         });
         store.files.push(FileEntry {
             handle: FileHandle::Stdout,
@@ -284,6 +296,8 @@ impl FileStore {
             mode: "w".to_string(),
             line_num: 1,
             pending_newlines: 0,
+            global: true,
+            created_after_save: 0,
         });
         store.files.push(FileEntry {
             handle: FileHandle::Stderr,
@@ -291,6 +305,8 @@ impl FileStore {
             mode: "w".to_string(),
             line_num: 1,
             pending_newlines: 0,
+            global: true,
+            created_after_save: 0,
         });
         store
     }
@@ -388,6 +404,8 @@ impl FileStore {
                 mode: mode.to_string(),
                 line_num: 1,
                 pending_newlines: 0,
+                global: false,
+                created_after_save: 0,
             });
             return Ok(id);
         }
@@ -413,6 +431,8 @@ impl FileStore {
             mode: mode.to_string(),
             line_num: 1,
             pending_newlines: 0,
+            global: false,
+            created_after_save: 0,
         });
         Ok(id)
     }
@@ -435,6 +455,8 @@ impl FileStore {
             mode: "r".to_string(),
             line_num: 1,
             pending_newlines: 0,
+            global: false,
+            created_after_save: 0,
         });
         id
     }
@@ -462,6 +484,8 @@ impl FileStore {
             mode: "r".to_string(),
             line_num: 1,
             pending_newlines: 0,
+            global: false,
+            created_after_save: 0,
         });
         id
     }
@@ -484,6 +508,8 @@ impl FileStore {
             mode: "w".to_string(),
             line_num: 1,
             pending_newlines: 0,
+            global: false,
+            created_after_save: 0,
         });
         id
     }
@@ -497,6 +523,8 @@ impl FileStore {
             mode: "r".to_string(),
             line_num: 1,
             pending_newlines: 0,
+            global: false,
+            created_after_save: 0,
         });
         id
     }
@@ -515,6 +543,8 @@ impl FileStore {
             mode: "r".to_string(),
             line_num: 1,
             pending_newlines: 0,
+            global: false,
+            created_after_save: 0,
         });
         id
     }
@@ -534,7 +564,7 @@ impl FileStore {
         // The chain is built by `filter`, one link per nested filter, so it is
         // short; the bound is only here so a malformed cycle cannot hang.
         for _ in 0..256 {
-            match self.files.get(cur.0 as usize).map(|e| &e.handle) {
+            match self.files.get(cur.raw_index()).map(|e| &e.handle) {
                 Some(FileHandle::PendingProc { proc }) => {
                     return Some((cur, *proc, saw_flate));
                 }
@@ -558,7 +588,7 @@ impl FileStore {
     /// procedure lives in the local VM the restore just reclaimed, so the
     /// handle has to go rather than be left pointing at a retired array.
     pub fn close_pending_proc(&mut self, entity: EntityId) {
-        let entry = &mut self.files[entity.0 as usize];
+        let entry = &mut self.files[entity.raw_index()];
         if matches!(entry.handle, FileHandle::PendingProc { .. }) {
             entry.handle = FileHandle::Closed;
             self.pending_procs = self.pending_procs.saturating_sub(1);
@@ -578,7 +608,7 @@ impl FileStore {
             .iter()
             .enumerate()
             .filter_map(|(i, e)| match e.handle {
-                FileHandle::PendingProc { proc } => Some((EntityId(i as u32), proc)),
+                FileHandle::PendingProc { proc } => Some((self.id_of(i), proc)),
                 _ => None,
             })
             .collect()
@@ -586,7 +616,7 @@ impl FileStore {
 
     /// Replace a `PendingProc` handle with the bytes its procedure produced.
     pub fn install_proc_data(&mut self, entity: EntityId, data: Vec<u8>) {
-        let entry = &mut self.files[entity.0 as usize];
+        let entry = &mut self.files[entity.raw_index()];
         debug_assert!(
             matches!(entry.handle, FileHandle::PendingProc { .. }),
             "install_proc_data on a handle that is not a pending procedure source"
@@ -600,7 +630,7 @@ impl FileStore {
     /// Returns a borrowed slice of the remaining bytes (from `pos` to end).
     /// For non-StringSource files, returns an empty slice.
     pub fn get_remaining_bytes(&self, entity: EntityId) -> &[u8] {
-        let entry = &self.files[entity.0 as usize];
+        let entry = &self.files[entity.raw_index()];
         match &entry.handle {
             FileHandle::StringSource { data, pos } => &data[*pos..],
             _ => &[],
@@ -609,7 +639,7 @@ impl FileStore {
 
     /// Advance the read position of a StringSource file by `n` bytes.
     pub fn advance_position(&mut self, entity: EntityId, n: usize) {
-        let entry = &mut self.files[entity.0 as usize];
+        let entry = &mut self.files[entity.raw_index()];
         if let FileHandle::StringSource { pos, .. } = &mut entry.handle {
             *pos += n;
         }
@@ -617,19 +647,19 @@ impl FileStore {
 
     /// Get the current line number (1-based) for a file.
     pub fn line_num(&self, entity: EntityId) -> u32 {
-        self.files[entity.0 as usize].line_num
+        self.files[entity.raw_index()].line_num
     }
 
     /// Record newlines as pending. They will be applied to `line_num` at the
     /// start of the next token read via `flush_pending_newlines`.
     pub fn add_pending_newlines(&mut self, entity: EntityId, count: u32) {
-        self.files[entity.0 as usize].pending_newlines += count;
+        self.files[entity.raw_index()].pending_newlines += count;
     }
 
     /// Apply any pending newlines to `line_num`. Call this at the start of
     /// each token read so the line number reflects the current token's line.
     pub fn flush_pending_newlines(&mut self, entity: EntityId) {
-        let entry = &mut self.files[entity.0 as usize];
+        let entry = &mut self.files[entity.raw_index()];
         entry.line_num += entry.pending_newlines;
         entry.pending_newlines = 0;
     }
@@ -638,14 +668,14 @@ impl FileStore {
     pub fn close(&mut self, entity: EntityId) -> io::Result<()> {
         // Check if this is an encode filter that needs finalization
         let is_encode = matches!(
-            &self.files[entity.0 as usize].handle,
+            &self.files[entity.raw_index()].handle,
             FileHandle::Filter(state) if state.kind.is_encode()
         );
         if is_encode {
             return self.close_encode_filter(entity);
         }
 
-        let entry = &mut self.files[entity.0 as usize];
+        let entry = &mut self.files[entity.raw_index()];
         match &entry.handle {
             FileHandle::Stdin | FileHandle::Stdout | FileHandle::Stderr => Ok(()),
             FileHandle::Closed => Ok(()),
@@ -677,7 +707,7 @@ impl FileStore {
     /// what releases what the file holds: a string source's bytes, a filter's
     /// buffers, a real file's descriptor.
     pub fn close_at_eof(&mut self, entity: EntityId) {
-        if self.files[entity.0 as usize].mode.starts_with('r') {
+        if self.files[entity.raw_index()].mode.starts_with('r') {
             let _ = self.close(entity);
         }
     }
@@ -685,14 +715,14 @@ impl FileStore {
     /// Make `filter` the owner of its source, so closing it closes the
     /// source too (see [`FilterState::owns_source`]).
     pub fn set_owns_source(&mut self, filter: EntityId) {
-        if let FileHandle::Filter(state) = &mut self.files[filter.0 as usize].handle {
+        if let FileHandle::Filter(state) = &mut self.files[filter.raw_index()].handle {
             state.owns_source = true;
         }
     }
 
     /// Read one byte from a file. Returns None on EOF.
     pub fn read_byte(&mut self, entity: EntityId) -> io::Result<Option<u8>> {
-        let entry = &mut self.files[entity.0 as usize];
+        let entry = &mut self.files[entity.raw_index()];
         match &mut entry.handle {
             FileHandle::Real(f) => {
                 let mut buf = [0u8; 1];
@@ -728,7 +758,7 @@ impl FileStore {
 
     /// Read a byte from a filter file (handles temporary swap to avoid &mut aliasing).
     fn read_byte_filter(&mut self, entity: EntityId) -> io::Result<Option<u8>> {
-        let entry = &mut self.files[entity.0 as usize];
+        let entry = &mut self.files[entity.raw_index()];
         let mut state = match std::mem::replace(&mut entry.handle, FileHandle::Closed) {
             FileHandle::Filter(s) => s,
             other => {
@@ -740,7 +770,7 @@ impl FileStore {
         // 1. Return from putback buffer if non-empty
         if let Some(b) = state.putback.pop() {
             state.bytes_read += 1;
-            self.files[entity.0 as usize].handle = FileHandle::Filter(state);
+            self.files[entity.raw_index()].handle = FileHandle::Filter(state);
             return Ok(Some(b));
         }
 
@@ -749,13 +779,13 @@ impl FileStore {
             let b = state.output_buf[state.output_pos];
             state.output_pos += 1;
             state.bytes_read += 1;
-            self.files[entity.0 as usize].handle = FileHandle::Filter(state);
+            self.files[entity.raw_index()].handle = FileHandle::Filter(state);
             return Ok(Some(b));
         }
 
         // 3. If already at EOF, done
         if state.eof {
-            self.files[entity.0 as usize].handle = FileHandle::Filter(state);
+            self.files[entity.raw_index()].handle = FileHandle::Filter(state);
             return Ok(None);
         }
 
@@ -771,13 +801,13 @@ impl FileStore {
             Ok(None)
         };
 
-        self.files[entity.0 as usize].handle = FileHandle::Filter(state);
+        self.files[entity.raw_index()].handle = FileHandle::Filter(state);
         result
     }
 
     /// Read into a buffer. Returns number of bytes actually read.
     pub fn read_into(&mut self, entity: EntityId, buf: &mut [u8]) -> io::Result<usize> {
-        let entry = &mut self.files[entity.0 as usize];
+        let entry = &mut self.files[entity.raw_index()];
         match &mut entry.handle {
             FileHandle::Real(f) => f.read(buf),
             FileHandle::Stdin => {
@@ -827,13 +857,13 @@ impl FileStore {
     pub fn write_from(&mut self, entity: EntityId, buf: &[u8]) -> io::Result<()> {
         // Check if this is an encode filter (needs swap-out pattern)
         let is_encode = matches!(
-            &self.files[entity.0 as usize].handle,
+            &self.files[entity.raw_index()].handle,
             FileHandle::Filter(state) if state.kind.is_encode()
         );
         if is_encode {
             return self.encode_write(entity, buf);
         }
-        let entry = &mut self.files[entity.0 as usize];
+        let entry = &mut self.files[entity.raw_index()];
         match &mut entry.handle {
             FileHandle::Real(f) => f.get_mut().write_all(buf),
             FileHandle::Stdout => io::stdout().write_all(buf),
@@ -846,7 +876,7 @@ impl FileStore {
     /// Write data through an encode filter using swap-out pattern.
     fn encode_write(&mut self, entity: EntityId, data: &[u8]) -> io::Result<()> {
         // Swap out filter state to avoid borrow conflicts
-        let entry = &mut self.files[entity.0 as usize];
+        let entry = &mut self.files[entity.raw_index()];
         let mut state = match std::mem::replace(&mut entry.handle, FileHandle::Closed) {
             FileHandle::Filter(s) => s,
             other => {
@@ -1006,14 +1036,14 @@ impl FileStore {
         };
 
         // Put state back
-        self.files[entity.0 as usize].handle = FileHandle::Filter(state);
+        self.files[entity.raw_index()].handle = FileHandle::Filter(state);
         result
     }
 
     /// Finalize and close an encode filter, flushing remaining data and EOD markers.
     fn close_encode_filter(&mut self, entity: EntityId) -> io::Result<()> {
         // Swap out filter state
-        let entry = &mut self.files[entity.0 as usize];
+        let entry = &mut self.files[entity.raw_index()];
         let mut state = match std::mem::replace(&mut entry.handle, FileHandle::Closed) {
             FileHandle::Filter(s) => s,
             other => {
@@ -1211,7 +1241,7 @@ impl FileStore {
 
     /// Get file position.
     pub fn position(&mut self, entity: EntityId) -> io::Result<u64> {
-        let entry = &mut self.files[entity.0 as usize];
+        let entry = &mut self.files[entity.raw_index()];
         match &mut entry.handle {
             FileHandle::Real(f) => f.stream_position(),
             FileHandle::StringSource { pos, .. } => Ok(*pos as u64),
@@ -1222,7 +1252,7 @@ impl FileStore {
 
     /// Set file position.
     pub fn set_position(&mut self, entity: EntityId, pos: u64) -> io::Result<()> {
-        let entry = &mut self.files[entity.0 as usize];
+        let entry = &mut self.files[entity.raw_index()];
         match &mut entry.handle {
             FileHandle::Real(f) => {
                 f.seek(io::SeekFrom::Start(pos))?;
@@ -1238,10 +1268,10 @@ impl FileStore {
 
     /// Flush a file.
     pub fn flush(&mut self, entity: EntityId) -> io::Result<()> {
-        let entry = &self.files[entity.0 as usize];
+        let entry = &self.files[entity.raw_index()];
         match &entry.handle {
             FileHandle::Real(_) => {
-                let entry = &mut self.files[entity.0 as usize];
+                let entry = &mut self.files[entity.raw_index()];
                 if entry.mode.starts_with('r') {
                     // Read file: consume remaining data and close (PLRM)
                     entry.handle = FileHandle::Closed;
@@ -1266,7 +1296,7 @@ impl FileStore {
             }
             FileHandle::StringSource { .. } => {
                 // For string sources, advance to EOF
-                let entry = &mut self.files[entity.0 as usize];
+                let entry = &mut self.files[entity.raw_index()];
                 if let FileHandle::StringSource { data, pos } = &mut entry.handle {
                     *pos = data.len();
                 }
@@ -1278,19 +1308,19 @@ impl FileStore {
 
     /// Check if a file entity is valid (not closed).
     pub fn is_open(&self, entity: EntityId) -> bool {
-        if (entity.0 as usize) >= self.files.len() {
+        if (entity.raw_index()) >= self.files.len() {
             return false;
         }
-        !matches!(self.files[entity.0 as usize].handle, FileHandle::Closed)
+        !matches!(self.files[entity.raw_index()].handle, FileHandle::Closed)
     }
 
     /// Check if a file entity is readable (open, not stdout/stderr).
     pub fn is_readable(&self, entity: EntityId) -> bool {
-        if (entity.0 as usize) >= self.files.len() {
+        if (entity.raw_index()) >= self.files.len() {
             return false;
         }
         !matches!(
-            self.files[entity.0 as usize].handle,
+            self.files[entity.raw_index()].handle,
             FileHandle::Closed | FileHandle::Stdout | FileHandle::Stderr
         )
     }
@@ -1311,7 +1341,7 @@ impl FileStore {
     /// For filters, uses the filter's putback buffer. For StringSource,
     /// decrements position.
     pub fn putback_bytes(&mut self, entity: EntityId, bytes: &[u8]) {
-        let entry = &mut self.files[entity.0 as usize];
+        let entry = &mut self.files[entity.raw_index()];
         match &mut entry.handle {
             FileHandle::Filter(state) => {
                 // Push in reverse so they come out in the right order (LIFO)
@@ -1332,14 +1362,14 @@ impl FileStore {
 
     /// Check if a file entity is seekable (disk file).
     pub fn is_seekable(&self, entity: EntityId) -> bool {
-        matches!(self.files[entity.0 as usize].handle, FileHandle::Real(_))
+        matches!(self.files[entity.raw_index()].handle, FileHandle::Real(_))
     }
 
     /// Get bytes available for reading. Returns -1 for stdin/filters/unknown,
     /// closed files, write-only files, and files at EOF.
     /// For disk files opened for reading, returns remaining bytes.
     pub fn bytes_available(&mut self, entity: EntityId) -> i32 {
-        let entry = &mut self.files[entity.0 as usize];
+        let entry = &mut self.files[entity.raw_index()];
         // Write-only files return -1
         if entry.mode.starts_with('w') || entry.mode.starts_with('a') {
             return -1;
@@ -1373,22 +1403,113 @@ impl FileStore {
 
     /// Get the name of a file.
     pub fn name(&self, entity: EntityId) -> &str {
-        &self.files[entity.0 as usize].name
+        &self.files[entity.raw_index()].name
     }
 
     /// Set the name of a file (e.g. to record the resolved path for `run`).
     pub fn set_name(&mut self, entity: EntityId, name: String) {
-        self.files[entity.0 as usize].name = name;
+        self.files[entity.raw_index()].name = name;
     }
 
     /// Get the mode of a file.
     pub fn mode(&self, entity: EntityId) -> &str {
-        &self.files[entity.0 as usize].mode
+        &self.files[entity.raw_index()].mode
     }
 
     /// Number of files allocated.
     pub fn len(&self) -> usize {
         self.files.len()
+    }
+
+    /// Every open filter with the source it reads from or writes to, as
+    /// `(filter, source)`, for the VM audit.
+    pub fn open_filter_sources(&self) -> Vec<(EntityId, EntityId)> {
+        self.files
+            .iter()
+            .enumerate()
+            .filter_map(|(i, entry)| match &entry.handle {
+                FileHandle::Filter(state) => Some((self.id_of(i), state.source)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The id of the file at `index`, tagged with its VM.
+    pub fn id_of(&self, index: usize) -> EntityId {
+        let index = index as u32;
+        if self.files[index as usize].global {
+            EntityId::global(index)
+        } else {
+            EntityId::local(index)
+        }
+    }
+
+    /// Record the VM a new file object is in, and the save current when it
+    /// was made, and return its id tagged with that VM. A source the filter
+    /// owns goes with it. See
+    /// [`Context::adopt_file`](crate::context::Context::adopt_file).
+    pub fn adopt(&mut self, entity: EntityId, global: bool, save_id: u32) -> EntityId {
+        // `(%stdout) (w) file` and its kin hand back the standard files,
+        // which are global for good.
+        if entity.raw_index() <= FILE_STDERR.raw_index() {
+            return self.id_of(entity.raw_index());
+        }
+        let entry = &mut self.files[entity.raw_index()];
+        entry.global = global;
+        entry.created_after_save = save_id;
+        if let FileHandle::Filter(state) = &entry.handle
+            && state.owns_source
+        {
+            let source = state.source;
+            self.adopt(source, global, save_id);
+        }
+        self.id_of(entity.raw_index())
+    }
+
+    /// The save that was current when `entity` was made; see
+    /// [`FileEntry::created_after_save`].
+    pub fn created_after_save(&self, entity: EntityId) -> u32 {
+        self.files[entity.raw_index()].created_after_save
+    }
+
+    /// Close and reclaim the local files made since a `save` whose mark —
+    /// the table's length then — is `mark` (PLRM 3e `file`: "A file is also
+    /// closed by `restore` if the file object was created more recently than
+    /// the `save` snapshot being restored").
+    ///
+    /// Closing flushes, as `closefile` does: an encode filter writes out what
+    /// it holds. The newest close first, so a filter closes before the file
+    /// it writes to or reads from. A global file made since the save survives
+    /// — `restore` does not touch global VM. No global filter reads from a
+    /// local file: a filter over a local source is local
+    /// (`Context::adopt_file_in`).
+    ///
+    /// The table then shrinks back to `mark`, or to just above the highest
+    /// surviving global file, below which the reclaimed local files stay as
+    /// empty, closed slots. File ids above the new length become reusable,
+    /// so nothing may still name one; `check_invalidrestore` and PLRM 3.7.2
+    /// are what ensure that, as for the other stores.
+    pub fn reclaim(&mut self, mark: usize) {
+        let len = self.files.len();
+        if mark >= len {
+            return;
+        }
+        for i in (mark..len).rev() {
+            if !self.files[i].global {
+                let _ = self.close(EntityId::local(i as u32));
+            }
+        }
+        let keep = (mark..len)
+            .rev()
+            .find(|&i| self.files[i].global)
+            .map_or(mark, |i| i + 1);
+        self.files.truncate(keep);
+        for entry in &mut self.files[mark..] {
+            if !entry.global {
+                entry.name = String::new();
+                entry.mode = String::new();
+            }
+        }
     }
 
     /// Whether no files are allocated.
@@ -1398,7 +1519,7 @@ impl FileStore {
 
     /// Push a byte back onto a filter's putback buffer.
     pub fn putback_byte(&mut self, entity: EntityId, byte: u8) {
-        let entry = &mut self.files[entity.0 as usize];
+        let entry = &mut self.files[entity.raw_index()];
         if let FileHandle::Filter(ref mut state) = entry.handle {
             state.putback.push(byte);
         }

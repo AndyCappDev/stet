@@ -42,6 +42,9 @@ pub struct VmMarks {
     pub array_entities: usize,
     pub dict_slots: usize,
     pub dict_entities: usize,
+    /// Length of the file table: the files made since are the ones
+    /// `restore` closes and reclaims ([`FileStore::reclaim`](crate::file_store::FileStore::reclaim)).
+    pub files: usize,
 }
 
 /// Interpreter state captured by `save` and reinstated by `restore`.

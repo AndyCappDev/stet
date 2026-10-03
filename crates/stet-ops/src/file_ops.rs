@@ -175,6 +175,7 @@ pub fn op_file(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
 
+    let file_entity = ctx.adopt_file(file_entity);
     let file_obj = PsObject {
         value: PsValue::File(file_entity),
         flags: ObjFlags::literal_composite(),
@@ -1073,6 +1074,8 @@ pub fn op_eexec(ctx: &mut Context) -> Result<(), PsError> {
     if owns_source {
         ctx.files.set_owns_source(filter_entity);
     }
+    let global = crate::filter_ops::filter_vm(ctx, &obj, source_entity);
+    let filter_entity = ctx.adopt_file_in(filter_entity, global);
 
     // Push systemdict on d_stack (PLRM: eexec pushes systemdict)
     let sd = *ctx.d_stack.first().unwrap_or(&ctx.systemdict);

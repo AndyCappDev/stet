@@ -1108,6 +1108,7 @@ pub fn token_to_object(ctx: &mut Context, token: Token) -> Result<PsObject, PsEr
 /// the source — this is correct for top-level execution of PS files.
 pub fn parse_and_exec(ctx: &mut Context, source: &[u8]) -> Result<(), PsError> {
     let file_entity = ctx.files.create_string_source(source.to_vec());
+    let file_entity = ctx.adopt_file(file_entity);
     ctx.e_stack.push(PsObject {
         value: PsValue::File(file_entity),
         flags: ObjFlags::executable_composite(),
@@ -1128,6 +1129,7 @@ pub fn parse_and_exec_file(ctx: &mut Context, source: &[u8], path: &str) -> Resu
         .unwrap_or_else(|_| std::path::PathBuf::from(path));
     ctx.files
         .set_name(file_entity, canonical.to_string_lossy().to_string());
+    let file_entity = ctx.adopt_file(file_entity);
     ctx.e_stack.push(PsObject {
         value: PsValue::File(file_entity),
         flags: ObjFlags::executable_composite(),

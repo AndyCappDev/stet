@@ -239,6 +239,7 @@ pub fn op_run(ctx: &mut Context) -> Result<(), PsError> {
     if let Some(data) = ctx.files.get_embedded_file(&filename) {
         let ps_data = stet_core::eps::strip_dos_eps_header(data);
         let file_entity = ctx.files.create_string_source(ps_data.to_vec());
+        let file_entity = ctx.adopt_file(file_entity);
         ctx.e_stack.push(PsObject {
             value: PsValue::File(file_entity),
             flags: stet_core::object::ObjFlags::executable_composite(),
@@ -266,6 +267,7 @@ pub fn op_run(ctx: &mut Context) -> Result<(), PsError> {
             .to_string_lossy()
             .to_string(),
     );
+    let file_entity = ctx.adopt_file(file_entity);
     ctx.e_stack.push(PsObject {
         value: PsValue::File(file_entity),
         flags: stet_core::object::ObjFlags::executable_composite(),
@@ -807,7 +809,7 @@ pub fn op_packedarray(ctx: &mut Context) -> Result<(), PsError> {
         let top_idx = slice.len() - 1; // count is at top
         for i in 0..count {
             let elem = &slice[top_idx - 1 - i];
-            if elem.is_composite() && !elem.flags.is_global() {
+            if elem.is_composite() && !elem.is_global_vm() {
                 return Err(PsError::InvalidAccess);
             }
         }

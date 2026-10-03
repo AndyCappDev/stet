@@ -355,7 +355,7 @@ pub fn op_execstack(ctx: &mut Context) -> Result<(), PsError> {
     if arr_is_global {
         let e_slice = ctx.e_stack.as_slice();
         for elem in e_slice {
-            if elem.is_composite() && !elem.flags.is_global() {
+            if elem.is_composite() && !elem.is_global_vm() {
                 return Err(PsError::InvalidAccess);
             }
         }

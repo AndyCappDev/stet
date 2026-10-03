@@ -104,6 +104,7 @@ pub fn local_composite_entity(obj: &PsObject) -> Option<EntityId> {
         PsValue::String { entity, .. } => entity,
         PsValue::Array { entity, .. } | PsValue::PackedArray { entity, .. } => entity,
         PsValue::Dict(entity) => entity,
+        PsValue::File(entity) => entity,
         _ => return None,
     };
     if entity.is_global() {
@@ -137,6 +138,7 @@ fn is_reclaimable(ctx: &Context, obj: &PsObject, entity: EntityId) -> bool {
             ctx.arrays.local.entities.get(entity)
         }
         PsValue::Dict(_) => ctx.dicts.local.entities.get(entity),
+        PsValue::File(_) => return ctx.files.created_after_save(entity) != 0,
         _ => return false,
     };
     meta.created_after_save != 0
@@ -267,6 +269,8 @@ fn table_len_for(ctx: &Context, obj: &PsObject) -> Option<(usize, usize)> {
                 ctx.dicts.local.entities.len()
             },
         ),
+        // One table for both VMs; `restore` shrinks it as it does the others.
+        PsValue::File(entity) => (entity, ctx.files.len()),
         _ => return None,
     };
     Some((entity.raw_index(), len))
@@ -508,6 +512,22 @@ pub fn audit_dangling_refs(ctx: &Context) -> Vec<DanglingRef> {
             &proc,
             "pending procedure data source",
             format!("file #{}", entity.raw_index()),
+            &mut out,
+        );
+    }
+
+    // An open filter names its source by id, outside any object, so a source
+    // the restore reclaimed would leave it reading whichever file next takes
+    // the slot. `FileStore::reclaim` closes such filters.
+    for (filter, source) in ctx.files.open_filter_sources() {
+        check_ref(
+            ctx,
+            &PsObject {
+                value: crate::object::PsValue::File(source),
+                flags: crate::object::ObjFlags::literal_composite(),
+            },
+            "filter source",
+            format!("file #{}", filter.raw_index()),
             &mut out,
         );
     }

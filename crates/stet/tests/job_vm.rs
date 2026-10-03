@@ -10,12 +10,15 @@
 //! what that `setpagedevice` allocated. And `setpagedevice` copied every page
 //! device into global VM, which `restore` never reclaims and stet has no
 //! garbage collector for — about 8 KB per call, from the CLI as well.
+//!
+//! Files too: a job's files are closed when read to their end, and the
+//! job's `restore` closes the rest and reclaims their slots (PLRM 3e `file`).
 
 use stet::Interpreter;
 
-/// Entities in each of the six VM stores: local then global dicts, arrays
-/// and strings.
-fn vm(interp: &mut Interpreter) -> [usize; 6] {
+/// Entities in each of the six VM stores — local then global dicts, arrays
+/// and strings — and files.
+fn vm(interp: &mut Interpreter) -> [usize; 7] {
     let c = interp.context();
     [
         c.dicts.local.entities.len(),
@@ -24,14 +27,17 @@ fn vm(interp: &mut Interpreter) -> [usize; 6] {
         c.dicts.global.entities.len(),
         c.arrays.global.entities.len(),
         c.strings.global.entities.len(),
+        c.files.len(),
     ]
 }
 
-const JOBS: [&str; 3] = [
+const JOBS: [&str; 4] = [
     "%!PS\n",
     "%!PS\n<< /PageSize [300 300] >> setpagedevice 0 0 10 10 rectfill showpage\n",
     "%!PS\nsave << /PageSize [200 200] >> setpagedevice showpage restore \
      << >> setpagedevice currentpagedevice pop showpage\n",
+    // Files left open, which only the job's restore closes.
+    "%!PS\n(616263>) /ASCIIHexDecode filter (abc) 0 () /SubFileDecode filter pop pop\n",
 ];
 
 /// Runs `call` once to load what a first call loads, then checks that

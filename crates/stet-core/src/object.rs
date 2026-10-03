@@ -167,7 +167,7 @@ impl EntityId {
     const INDEX_MASK: u32 = !(1 << 31);
 
     /// Create a local VM entity ID.
-    pub fn local(index: u32) -> Self {
+    pub const fn local(index: u32) -> Self {
         debug_assert!(
             index & Self::GLOBAL_BIT == 0,
             "index overflows into tag bit"
@@ -176,7 +176,7 @@ impl EntityId {
     }
 
     /// Create a global VM entity ID.
-    pub fn global(index: u32) -> Self {
+    pub const fn global(index: u32) -> Self {
         debug_assert!(
             index & Self::GLOBAL_BIT == 0,
             "index overflows into tag bit"
@@ -480,6 +480,7 @@ impl PsObject {
                 entity.is_global()
             }
             PsValue::String { entity, .. } => entity.is_global(),
+            PsValue::File(entity) => entity.is_global(),
             _ => self.flags.is_global(),
         }
     }

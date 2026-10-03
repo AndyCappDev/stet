@@ -116,6 +116,8 @@ pub fn op_filter(ctx: &mut Context) -> Result<(), PsError> {
     if owns_source(&source_obj) {
         ctx.files.set_owns_source(filter_entity);
     }
+    let global = filter_vm(ctx, &source_obj, source_entity);
+    let filter_entity = ctx.adopt_file_in(filter_entity, global);
 
     // Push the filter file object
     let file_obj = PsObject {
@@ -185,6 +187,8 @@ fn create_subfile_filter(ctx: &mut Context) -> Result<(), PsError> {
     if owns_source(&source_obj) {
         ctx.files.set_owns_source(filter_entity);
     }
+    let global = filter_vm(ctx, &source_obj, source_entity);
+    let filter_entity = ctx.adopt_file_in(filter_entity, global);
 
     ctx.o_stack.push(PsObject {
         value: PsValue::File(filter_entity),
@@ -248,6 +252,7 @@ fn create_reusable_stream(ctx: &mut Context) -> Result<(), PsError> {
     ctx.files.close_at_eof(source_entity);
 
     let entity = ctx.files.create_string_source(data);
+    let entity = ctx.adopt_file(entity);
     ctx.o_stack.push(PsObject {
         value: PsValue::File(entity),
         flags: ObjFlags::literal_composite(),
@@ -266,6 +271,14 @@ fn is_valid_source(obj: &PsObject) -> bool {
 /// reach, and closes with its filter.
 fn owns_source(source: &PsObject) -> bool {
     !matches!(source.value, PsValue::File(_))
+}
+
+/// Whether a filter over `source` goes in global VM: when `currentglobal`
+/// says so and the source is global too, or is a private copy the filter
+/// owns. A global filter over a local file would be a reference from global
+/// to local VM (PLRM 3.7.2); Ghostscript makes such a filter local.
+pub(crate) fn filter_vm(ctx: &Context, source: &PsObject, source_entity: EntityId) -> bool {
+    ctx.vm_alloc_mode && (owns_source(source) || source_entity.is_global())
 }
 
 /// Resolve a data source object to a `FileStore` `EntityId`.

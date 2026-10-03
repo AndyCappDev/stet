@@ -195,6 +195,16 @@ entity-keyed caches (`glyph_caches`, `form_cache`, `cid_glyph_metrics`),
 since an `EntityId` becomes reusable the moment a table shrinks. Global VM
 is untouched — save/restore never affects it.
 
+Files are composites too. A file object is local or global by
+`currentglobal` when it is made (`Context::adopt_file`; a filter over a
+local source is local whatever `currentglobal` says, and the standard files
+are global), and its id carries the VM bit as the other stores' ids do.
+`restore` closes the local files made since the save — flushing them, as
+`closefile` would — and shrinks the file table back to its mark
+(`FileStore::reclaim`; PLRM 3e `file`). The job's own file is local, unlike
+Ghostscript's, so that the job's `restore` reclaims it. Independently of
+`restore`, a file is closed when reading or executing it reaches its end.
+
 Before it changes anything, `restore` copies out the fonts shown since the
 last one (`Context::font_snapshots`, module `stet_core::font_snapshot`)
 when the output device reads fonts after the page is sent
