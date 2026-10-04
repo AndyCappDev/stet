@@ -621,6 +621,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now written once for each, since viewers disagree on one object shared
   between the two (Ghostscript keeps its first placement, poppler places
   it per stream).
+- **A soft mask inside a pattern tile renders wherever the tile lands.**
+  A tile's contents are moved into device space by their transform, their
+  paths left in pattern space, and the soft mask's raster was bounded by
+  the raw paths — built where the cell sits in pattern space, not where it
+  is drawn — so it masked everything out. A tile whose device origin was
+  at x = 0 rendered nothing; elsewhere it happened to take another route
+  and rendered. PostScript and PDF alike.
 - **PostScript → PDF no longer crashes on fonts a `restore` reclaimed**
   (`--device pdf` and `Interpreter::render_to_pdf`). PDF output builds the
   document at the end of the job and read each font out of the

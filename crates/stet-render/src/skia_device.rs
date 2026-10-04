@@ -9817,67 +9817,7 @@ fn precompute_full_bboxes(list: &DisplayList, dpi: f64) -> Vec<Option<BBox2D>> {
         .iter()
         .map(|elem| match elem {
             DisplayElement::Fill { path, params } => fill_device_full_bbox(path, &params.ctm),
-            DisplayElement::Stroke { path, params } => {
-                path_full_bbox(path).map(|mut bbox| {
-                    // Use effective line width: actual width or hairline minimum
-                    let effective_lw = params.line_width.max(hairline_min_width(&params.ctm, dpi));
-                    let expand = effective_lw * params.miter_limit * 0.5;
-                    let m = &params.ctm;
-                    let is_identity = m.a == 1.0
-                        && m.b == 0.0
-                        && m.c == 0.0
-                        && m.d == 1.0
-                        && m.tx == 0.0
-                        && m.ty == 0.0;
-                    if is_identity {
-                        bbox.x_min -= expand;
-                        bbox.x_max += expand;
-                        bbox.y_min -= expand;
-                        bbox.y_max += expand;
-                    } else {
-                        // Path is in user space — expand for stroke, then
-                        // transform bbox corners through CTM to device space.
-                        let col_x_len = (m.a * m.a + m.b * m.b).sqrt().max(1.0);
-                        let col_y_len = (m.c * m.c + m.d * m.d).sqrt().max(1.0);
-                        let expand_x = effective_lw * col_x_len * params.miter_limit * 0.5;
-                        let expand_y = effective_lw * col_y_len * params.miter_limit * 0.5;
-                        bbox.x_min -= expand_x;
-                        bbox.x_max += expand_x;
-                        bbox.y_min -= expand_y;
-                        bbox.y_max += expand_y;
-                        // Transform all 4 corners to device space
-                        let corners = [
-                            (
-                                m.a * bbox.x_min + m.c * bbox.y_min + m.tx,
-                                m.b * bbox.x_min + m.d * bbox.y_min + m.ty,
-                            ),
-                            (
-                                m.a * bbox.x_max + m.c * bbox.y_min + m.tx,
-                                m.b * bbox.x_max + m.d * bbox.y_min + m.ty,
-                            ),
-                            (
-                                m.a * bbox.x_min + m.c * bbox.y_max + m.tx,
-                                m.b * bbox.x_min + m.d * bbox.y_max + m.ty,
-                            ),
-                            (
-                                m.a * bbox.x_max + m.c * bbox.y_max + m.tx,
-                                m.b * bbox.x_max + m.d * bbox.y_max + m.ty,
-                            ),
-                        ];
-                        bbox.x_min = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
-                        bbox.x_max = corners
-                            .iter()
-                            .map(|c| c.0)
-                            .fold(f64::NEG_INFINITY, f64::max);
-                        bbox.y_min = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
-                        bbox.y_max = corners
-                            .iter()
-                            .map(|c| c.1)
-                            .fold(f64::NEG_INFINITY, f64::max);
-                    }
-                    bbox
-                })
-            }
+            DisplayElement::Stroke { path, params } => stroke_device_full_bbox(path, params, dpi),
             DisplayElement::Image { params, .. } => image_full_bbox(params),
             DisplayElement::AxialShading { params } => shading_full_bbox(&params.bbox, &params.ctm),
             DisplayElement::RadialShading { params } => {
@@ -10025,7 +9965,7 @@ fn intersect_bbox(a: &BBox2D, b: &BBox2D) -> Option<BBox2D> {
 ///
 /// Returns `None` when the list contains no paintable elements or when
 /// no element survives clip culling.
-fn compute_paint_bounds(list: &DisplayList, _dpi: f64) -> Option<BBox2D> {
+fn compute_paint_bounds(list: &DisplayList, dpi: f64) -> Option<BBox2D> {
     // Active clip stack: each entry is the intersection so far. The
     // current clip is `clip_stack.last()`; an empty stack means
     // "unbounded" (no clip established yet, or just after InitClip).
@@ -10079,18 +10019,17 @@ fn compute_paint_bounds(list: &DisplayList, _dpi: f64) -> Option<BBox2D> {
             DisplayElement::InitClip | DisplayElement::ErasePage => {
                 clip_stack.clear();
             }
-            DisplayElement::Fill { path, .. } => {
-                if let Some(b) = path_full_bbox(path) {
+            // Bounded through each element's CTM, as `precompute_full_bboxes`
+            // does: a pattern tile's elements are moved into device space by
+            // their CTM alone (`transform_element_ctm`), their paths left in
+            // pattern space.
+            DisplayElement::Fill { path, params } => {
+                if let Some(b) = fill_device_full_bbox(path, &params.ctm) {
                     push_paint(&mut union, &clip_stack, b);
                 }
             }
             DisplayElement::Stroke { path, params } => {
-                if let Some(mut b) = path_full_bbox(path) {
-                    let expand = params.line_width * params.miter_limit * 0.5;
-                    b.x_min -= expand;
-                    b.x_max += expand;
-                    b.y_min -= expand;
-                    b.y_max += expand;
+                if let Some(b) = stroke_device_full_bbox(path, params, dpi) {
                     push_paint(&mut union, &clip_stack, b);
                 }
             }
@@ -10182,6 +10121,67 @@ fn compute_paint_bounds(list: &DisplayList, _dpi: f64) -> Option<BBox2D> {
 /// Compute device-space 2D bounds for a Fill element, accounting for CTM.
 /// Paths may be stored in device space (identity CTM) or user space
 /// (non-identity CTM, e.g. synthesized annotation appearances).
+/// A stroke's bounds in device space: its path expanded by the line
+/// width — at least the hairline minimum at `dpi` — and taken through
+/// its CTM when the path is in user space.
+fn stroke_device_full_bbox(path: &PsPath, params: &StrokeParams, dpi: f64) -> Option<BBox2D> {
+    path_full_bbox(path).map(|mut bbox| {
+        // Use effective line width: actual width or hairline minimum
+        let effective_lw = params.line_width.max(hairline_min_width(&params.ctm, dpi));
+        let expand = effective_lw * params.miter_limit * 0.5;
+        let m = &params.ctm;
+        let is_identity =
+            m.a == 1.0 && m.b == 0.0 && m.c == 0.0 && m.d == 1.0 && m.tx == 0.0 && m.ty == 0.0;
+        if is_identity {
+            bbox.x_min -= expand;
+            bbox.x_max += expand;
+            bbox.y_min -= expand;
+            bbox.y_max += expand;
+        } else {
+            // Path is in user space — expand for stroke, then
+            // transform bbox corners through CTM to device space.
+            let col_x_len = (m.a * m.a + m.b * m.b).sqrt().max(1.0);
+            let col_y_len = (m.c * m.c + m.d * m.d).sqrt().max(1.0);
+            let expand_x = effective_lw * col_x_len * params.miter_limit * 0.5;
+            let expand_y = effective_lw * col_y_len * params.miter_limit * 0.5;
+            bbox.x_min -= expand_x;
+            bbox.x_max += expand_x;
+            bbox.y_min -= expand_y;
+            bbox.y_max += expand_y;
+            // Transform all 4 corners to device space
+            let corners = [
+                (
+                    m.a * bbox.x_min + m.c * bbox.y_min + m.tx,
+                    m.b * bbox.x_min + m.d * bbox.y_min + m.ty,
+                ),
+                (
+                    m.a * bbox.x_max + m.c * bbox.y_min + m.tx,
+                    m.b * bbox.x_max + m.d * bbox.y_min + m.ty,
+                ),
+                (
+                    m.a * bbox.x_min + m.c * bbox.y_max + m.tx,
+                    m.b * bbox.x_min + m.d * bbox.y_max + m.ty,
+                ),
+                (
+                    m.a * bbox.x_max + m.c * bbox.y_max + m.tx,
+                    m.b * bbox.x_max + m.d * bbox.y_max + m.ty,
+                ),
+            ];
+            bbox.x_min = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
+            bbox.x_max = corners
+                .iter()
+                .map(|c| c.0)
+                .fold(f64::NEG_INFINITY, f64::max);
+            bbox.y_min = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
+            bbox.y_max = corners
+                .iter()
+                .map(|c| c.1)
+                .fold(f64::NEG_INFINITY, f64::max);
+        }
+        bbox
+    })
+}
+
 fn fill_device_full_bbox(path: &PsPath, ctm: &Matrix) -> Option<BBox2D> {
     let bbox = path_full_bbox(path)?;
     let is_identity = ctm.a == 1.0
