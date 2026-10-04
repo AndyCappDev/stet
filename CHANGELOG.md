@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.4] — 2026-10-04
+
 ### Added
 
 - **`rendering_intent` on the shading parameter structs**
@@ -46,6 +48,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the current colour in an ICCBased space, kept so `setrenderingintent`
   can convert them again. Adding it breaks struct literals of
   `GraphicsState`, under the same reader-not-writer policy.
+- **`FileEntry.global`, `FileEntry.created_after_save`,
+  `FilterState.owns_source` and `VmMarks.files`** in `stet-core`: a file
+  now belongs to local or global VM, so `restore` can close and reclaim
+  the local files a save level opened, and a filter knows whether closing
+  it closes its source. These are interpreter internals that happen to be
+  public; adding the fields breaks struct literals of the four types,
+  under the same reader-not-writer policy.
 - **`SkiaDevice::set_bpc_mode` and `build_icc_cache_for_list_with_bpc`**
   in `stet-render`: the black-point compensation mode for colours the
   renderer converts, which `build_icc_cache_for_list` leaves at the
