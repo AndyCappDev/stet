@@ -147,9 +147,9 @@ impl FontTracker {
     ///
     /// `fonts` supplies the font's copy, whose encoding and writing mode
     /// decide whether it can share a resource with another instance of the
-    /// same font; when `read` is false — or without a copy — the instance
-    /// joins the font's first resource.
-    pub fn track(&mut self, params: &TextParams, fonts: Option<&FontData>, read: bool) -> &str {
+    /// same font; without a copy, the instance joins the font's first
+    /// resource.
+    pub fn track(&mut self, params: &TextParams, fonts: Option<&FontData>) -> &str {
         let copy = fonts.and_then(|f| f.fonts.font(params.font_snapshot?).map(|c| (f, c)));
         let id = match copy {
             Some((_, c)) => FontId::of_copy(c),
@@ -160,7 +160,7 @@ impl FontTracker {
         }
         let idx = match self.instance_to_font.get(&id) {
             Some(&idx) => idx,
-            None => self.add_instance(params, id, copy.filter(|_| read), copy.map(|(_, c)| c)),
+            None => self.add_instance(params, id, copy),
         };
         let usage = &mut self.fonts[idx];
 
@@ -184,15 +184,15 @@ impl FontTracker {
 
     /// Place a font instance seen for the first time: in the first resource
     /// of its font whose encoding agrees with it, or in a new one. `read` is
-    /// the copy to read the encoding and writing mode from, `copy` the copy
-    /// the instance draws with.
+    /// the copy the instance draws with, to read the encoding and writing
+    /// mode from.
     fn add_instance(
         &mut self,
         params: &TextParams,
         id: FontId,
         read: Option<(&FontData, &FrozenFont)>,
-        copy: Option<&FrozenFont>,
     ) -> usize {
+        let copy = read.map(|(_, c)| c);
         let key = (params.font_name.clone(), params.font_type);
         // A Type 0 font's Encoding picks descendant fonts, not glyphs.
         let encoding = match read {

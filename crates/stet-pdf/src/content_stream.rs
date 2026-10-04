@@ -1267,38 +1267,56 @@ fn emit_group_composite_gs(
     writeln!(buf, "/GS{} gs", idx).unwrap();
 }
 
-/// Pre-pass: register fonts referenced by Text elements and detect
-/// whether the list has any Text at all. The page-side path emits paired
-/// `DisplayElement::Text` + glyph-path `Fill`; the PDF reader path emits
-/// only the glyph-path Fill. When the list has no Text, glyph fills fall
-/// through to be emitted as filled paths instead of being skipped.
-fn scan_text_elements(
-    list: &DisplayList,
-    font_tracker: &mut FontTracker,
-    page_font_names: &mut HashSet<String>,
-    fonts: Option<&FontData>,
-    read: bool,
-) -> bool {
-    let mut has_text = false;
+/// Visit each `Text` a display list draws, in order: through its groups,
+/// soft masks (mask, then content) and layers, whose Form XObjects and
+/// marked content belong to the list's own content stream, and, with
+/// `tiles`, through each pattern's tile, a content stream of its own.
+fn visit_text<'a>(list: &'a DisplayList, tiles: bool, f: &mut dyn FnMut(&'a TextParams)) {
     for element in list.elements() {
-        // Only `Text` counts. A `TextRun` carries no font to re-emit, and
-        // the PDF reader records it beside glyph fills that must still be
-        // drawn: counting it would skip those fills and lose the text.
-        if let DisplayElement::Text { params } = element {
-            has_text = true;
-            let name = font_tracker.track(params, fonts, read).to_string();
-            page_font_names.insert(name);
+        match element {
+            DisplayElement::Text { params } => f(params),
+            DisplayElement::Group { elements, .. } | DisplayElement::OcgGroup { elements, .. } => {
+                visit_text(elements, tiles, f)
+            }
+            DisplayElement::SoftMasked { mask, content, .. } => {
+                visit_text(mask, tiles, f);
+                visit_text(content, tiles, f);
+            }
+            DisplayElement::PatternFill { params } if tiles => visit_text(&params.tile, tiles, f),
+            _ => {}
         }
     }
-    has_text
 }
 
-/// Register the fonts of a page's text with the document's `FontTracker`,
-/// as [`build_content_stream`] does — for tracking every page before any is
-/// built, so the widths `TJ` kerns use are the final ones
-/// ([`measure_widths`]).
+/// The fonts a content stream's text names, and whether it has any: the
+/// text of the list and of its groups, soft masks and layers, which share
+/// its resources — not its patterns' tiles, which have their own. Every
+/// font is tracked already ([`track_fonts`]).
+///
+/// The PostScript side emits each glyph as a `Text` and a glyph-path
+/// `Fill`; the PDF reader emits only the `Fill`. So a stream with `Text`
+/// anywhere skips its glyph fills, and one without draws them as paths.
+fn stream_fonts(list: &DisplayList, font_tracker: &FontTracker) -> (bool, HashSet<String>) {
+    let mut has_text = false;
+    let mut names = HashSet::new();
+    visit_text(list, false, &mut |params| {
+        has_text = true;
+        let name = font_tracker.get_pdf_name(font_tracker.font_id(params));
+        debug_assert!(name.is_some(), "text in an untracked font");
+        names.extend(name.map(str::to_string));
+    });
+    (has_text, names)
+}
+
+/// Register the fonts of a page's text with the document's `FontTracker` —
+/// all of it, in groups, soft masks, layers and pattern tiles — so that
+/// every font and code the document draws is tracked before any widths are
+/// measured ([`measure_widths`]), any content stream is built, or any font
+/// is embedded.
 pub fn track_fonts(list: &DisplayList, font_tracker: &mut FontTracker, fonts: Option<&FontData>) {
-    scan_text_elements(list, font_tracker, &mut HashSet::new(), fonts, true);
+    visit_text(list, true, &mut |params| {
+        font_tracker.track(params, fonts);
+    });
 }
 
 /// Measure each tracked font's widths, for the codes the document uses,
@@ -1325,16 +1343,13 @@ pub fn build_content_stream(
     page_w: u32,
     page_h: u32,
     dpi: f64,
-    fonts: Option<&FontData>,
     font_tracker: &mut FontTracker,
     emit_page_box_clip: bool,
 ) -> ContentStreamResult {
     let scale = 72.0 / dpi;
     let page_h_pts = page_h as f64 * scale;
 
-    let mut page_font_names: HashSet<String> = HashSet::new();
-    let has_text_elements =
-        scan_text_elements(list, font_tracker, &mut page_font_names, fonts, true);
+    let (has_text_elements, page_font_names) = stream_fonts(list, font_tracker);
 
     let mut builder = Builder::new(font_tracker, page_w, page_h, has_text_elements, false);
     builder.page_font_names = page_font_names;
@@ -1388,13 +1403,8 @@ pub fn build_content_stream(
 pub fn build_tile_content_stream(
     list: &DisplayList,
     font_tracker: &mut FontTracker,
-    fonts: Option<&FontData>,
 ) -> ContentStreamResult {
-    let mut page_font_names: HashSet<String> = HashSet::new();
-    // Tiles are built after the fonts are embedded, so their fonts can
-    // only join resources that exist: no encoding, no new resource.
-    let has_text_elements =
-        scan_text_elements(list, font_tracker, &mut page_font_names, fonts, false);
+    let (has_text_elements, page_font_names) = stream_fonts(list, font_tracker);
 
     let mut builder = Builder::new(font_tracker, 0, 0, has_text_elements, true);
     builder.page_font_names = page_font_names;

@@ -300,8 +300,10 @@ impl PdfDevice {
         // Document-level font tracker — shared across all pages
         let mut font_tracker = FontTracker::new();
 
-        // Track every page's fonts first, so each resource's widths cover
-        // every code the document uses before any page kerns with them.
+        // Track every page's fonts first — the text in its groups, soft
+        // masks, layers and pattern tiles too — so each resource's widths
+        // cover every code the document uses before any page kerns with
+        // them, and every font a stream names is embedded.
         for page in &self.pages {
             content_stream::track_fonts(&page.display_list, &mut font_tracker, fonts);
         }
@@ -317,7 +319,6 @@ impl PdfDevice {
                 page.page_w,
                 page.page_h,
                 page.dpi,
-                fonts,
                 &mut font_tracker,
                 self.emit_page_box_clip,
             );
@@ -457,7 +458,6 @@ impl PdfDevice {
                 &per_page_annots[i],
                 &per_page_overrides[i],
                 &ocg_id_to_ref,
-                fonts,
             )?;
         }
 
@@ -696,7 +696,6 @@ impl PdfDevice {
         annot_refs: &[u32],
         overrides: &EffectivePageOverride,
         ocg_id_to_ref: &HashMap<u32, u32>,
-        fonts: Option<&FontData>,
     ) -> Result<(), String> {
         let ContentStreamResult {
             content,
@@ -910,7 +909,7 @@ impl PdfDevice {
             let mut pattern_entries: Vec<(Vec<u8>, PdfObj)> = Vec::new();
             for (i, pat_ref) in pattern_refs.iter().enumerate() {
                 let tile_result =
-                    content_stream::build_tile_content_stream(&pat_ref.tile, font_tracker, fonts);
+                    content_stream::build_tile_content_stream(&pat_ref.tile, font_tracker);
 
                 // Build tile resources
                 let mut tile_resources: Vec<(Vec<u8>, PdfObj)> = Vec::new();

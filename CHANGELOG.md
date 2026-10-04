@@ -507,6 +507,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only in the device's top-left corner — at 300 dpi, the first 24% of the
   page across and down — in every output. It now takes the page as
   `clippath` does.
+- **PostScript → PDF writes the text inside transparency groups, soft
+  masks, layers and pattern tiles.** Only a page's top-level text had its
+  fonts tracked. Text inside a group, soft mask or layer in a font used
+  nowhere else vanished from the PDF; characters used only there were
+  missing from the font's `/Widths`, so viewers drew them on top of one
+  another; and a page whose only text was in a group drew it twice — as
+  glyph outlines and as text in a font its resources did not name. A
+  pattern tile's fonts were tracked after the fonts were embedded, so a
+  font used only in a tile was named but never written: pdftops output
+  that fills glyphs with a pattern of text came out with the glyphs empty.
 - **PostScript → PDF no longer crashes on fonts a `restore` reclaimed**
   (`--device pdf` and `Interpreter::render_to_pdf`). PDF output builds the
   document at the end of the job and read each font out of the
