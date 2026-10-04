@@ -612,6 +612,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   group's form continued the clip scope the page had open, so a clip set
   and restored inside it closed the page's `q` from inside the form;
   viewers reported "Restoring state when no valid states to pop".
+- **A pattern painted inside a transparency group or soft mask is placed
+  correctly in PDF output.** A pattern's matrix maps to the space of the
+  content stream painting it — for a form, the form's — but every pattern
+  was given the page's: in PostScript → PDF at 300 dpi a pattern filled
+  inside a group came out at about a quarter of its size, and at 72 dpi
+  flipped and shifted. A pattern used both on the page and inside a form is
+  now written once for each, since viewers disagree on one object shared
+  between the two (Ghostscript keeps its first placement, poppler places
+  it per stream).
 - **PostScript → PDF no longer crashes on fonts a `restore` reclaimed**
   (`--device pdf` and `Interpreter::render_to_pdf`). PDF output builds the
   document at the end of the job and read each font out of the

@@ -370,3 +370,121 @@ fn a_form_keeps_to_its_own_clips() {
     );
     assert_balanced(&pdf(&job));
 }
+
+/// Every pattern fill's matrix, pattern space to device space, at every
+/// depth.
+fn pattern_matrices(list: &PsDisplayList, out: &mut Vec<[f64; 6]>) {
+    for e in list.elements() {
+        match e {
+            DisplayElement::PatternFill { params } => {
+                let m = &params.pattern_matrix;
+                out.push([m.a, m.b, m.c, m.d, m.tx, m.ty]);
+                pattern_matrices(&params.tile, out);
+            }
+            DisplayElement::Group { elements, .. } | DisplayElement::OcgGroup { elements, .. } => {
+                pattern_matrices(elements, out)
+            }
+            DisplayElement::SoftMasked { mask, content, .. } => {
+                pattern_matrices(mask, out);
+                pattern_matrices(content, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The job's PDF places its patterns where the PostScript does. A
+/// pattern's matrix maps to the space of the content stream it is painted
+/// in, which for a form is the form's (ISO 32000-1 § 8.7.3.1).
+fn patterns_placed(job: &str) {
+    let ps = Interpreter::new()
+        .render_to_display_list(job.as_bytes(), 72.0)
+        .unwrap();
+    let mut want = Vec::new();
+    pattern_matrices(&ps[0].display_list, &mut want);
+    assert!(!want.is_empty());
+
+    let bytes = pdf(job);
+    let doc = PdfDocument::from_bytes(&bytes).unwrap();
+    let mut got = Vec::new();
+    pattern_matrices(&doc.render_page(0, 72.0).unwrap(), &mut got);
+    assert_eq!(got.len(), want.len());
+    for (g, w) in got.iter().zip(&want) {
+        assert!(
+            g.iter().zip(w).all(|(a, b)| (a - b).abs() < 1e-3),
+            "PDF {g:?}, PS {w:?}"
+        );
+    }
+}
+
+/// A pattern filled inside a group was placed by the page's transform
+/// twice: flipped and shifted at 72 dpi, and shrunk as well above it.
+#[test]
+fn a_pattern_in_a_group_is_placed_in_the_groups_space() {
+    patterns_placed(&format!(
+        "{PAGE}{}<< >> begintransparencygroup p setpattern 20 20 200 200 rectfill \
+         endtransparencygroup showpage\n",
+        cell("p", "0 0 1 setrgbcolor 0 0 60 60 rectfill")
+    ));
+}
+
+/// The pattern objects the page's content selects, and those its forms'
+/// content selects.
+fn pattern_objects(bytes: &[u8]) -> (Vec<u32>, Vec<u32>) {
+    let doc = PdfDocument::from_bytes(bytes).unwrap();
+    let r = doc.resolver();
+    let dict = |o: &PdfObj| match r.deref(o).unwrap() {
+        PdfObj::Dict(d) => d,
+        PdfObj::Stream { dict, .. } => dict,
+        other => panic!("expected a dict, got {other:?}"),
+    };
+    let selected = |content: &[u8], resources: &PdfDict| -> Vec<u32> {
+        let patterns = dict(resources.get(b"Pattern").unwrap());
+        named_resources(content)
+            .into_iter()
+            .filter(|(category, _)| *category == "Pattern")
+            .map(|(_, name)| patterns.get_ref(name.as_bytes()).unwrap().0)
+            .collect()
+    };
+    let (mut page, mut forms) = (Vec::new(), Vec::new());
+    for num in 1..r.xref_len() as u32 {
+        match r.resolve(num, 0) {
+            Ok(PdfObj::Dict(d)) if d.get_name(b"Type") == Some(b"Page") => {
+                let (contents, _) = d.get_ref(b"Contents").unwrap();
+                let res = dict(d.get(b"Resources").unwrap());
+                page.extend(selected(&r.stream_data(contents, 0).unwrap(), &res));
+            }
+            Ok(PdfObj::Stream { dict: d, .. }) if d.get_name(b"Subtype") == Some(b"Form") => {
+                let res = dict(d.get(b"Resources").unwrap());
+                forms.extend(selected(&r.stream_data(num, 0).unwrap(), &res));
+            }
+            _ => {}
+        }
+    }
+    (page, forms)
+}
+
+/// One pattern used on the page and inside a group and a soft mask needs a
+/// pattern object for each space. Viewers disagree on one object shared
+/// between them — Ghostscript, and stet's reader, keep its first
+/// placement; poppler places it per stream — so the placement check alone
+/// cannot see a shared one.
+#[test]
+fn a_pattern_used_on_the_page_and_in_forms_is_placed_in_each() {
+    let job = format!(
+        "{PAGE}{}p setpattern 0 0 50 50 rectfill \
+         << >> begintransparencygroup p setpattern 60 60 100 100 rectfill \
+         endtransparencygroup \
+         << /Subtype /Luminosity /BBox [0 0 300 300] >> beginsoftmask \
+         p setpattern 0 0 300 150 rectfill endsoftmask \
+         0 setgray 170 170 100 100 rectfill clearsoftmask showpage\n",
+        cell("p", "1 setgray 0 0 60 60 rectfill")
+    );
+    let (page, forms) = pattern_objects(&pdf(&job));
+    assert!(!page.is_empty() && !forms.is_empty());
+    assert!(
+        page.iter().all(|p| !forms.contains(p)),
+        "page {page:?} and forms {forms:?} share a pattern object"
+    );
+    patterns_placed(&job);
+}

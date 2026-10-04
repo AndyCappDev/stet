@@ -177,6 +177,9 @@ pub struct PatternRef {
     pub ystep: f64,
     /// Paint type: 1 = colored, 2 = uncolored.
     pub paint_type: i32,
+    /// Painted inside a Form, whose space is device space, rather than on
+    /// the page, whose default space is the initial `cm`'s.
+    pub in_form: bool,
 }
 
 /// An ExtGState resource used in the content stream.
@@ -352,7 +355,9 @@ struct Builder<'tracker> {
     icc_color_spaces: Vec<(String, stet_graphics::device::IccColorSpace)>,
     icc_cs_name_map: HashMap<Vec<u8>, String>,
     pattern_refs: Vec<PatternRef>,
-    pattern_map: HashMap<u32, usize>,
+    /// Patterns already referenced, by `pattern_id` and whether the use is
+    /// inside a form: one pattern used in both spaces is two objects.
+    pattern_map: HashMap<(u32, bool), usize>,
     pattern_cs_names: Vec<(String, PdfObj)>,
     pattern_cs_set: HashSet<String>,
     transfer_refs: Vec<TransferFunctionRef>,
@@ -369,6 +374,10 @@ struct Builder<'tracker> {
     /// True when emitting a Pattern XObject tile. `ErasePage` is a no-op
     /// in this mode — tiles have no page background.
     in_tile: bool,
+    /// True while emitting a Form's content (a group, or a soft mask's
+    /// mask). The Form is invoked under the page's initial `cm`, so its
+    /// space — the one its patterns' matrices map to — is device space.
+    in_form: bool,
     font_tracker: &'tracker mut FontTracker,
 }
 
@@ -444,6 +453,7 @@ impl<'tracker> Builder<'tracker> {
             page_w,
             page_h,
             in_tile,
+            in_form: false,
             font_tracker,
         }
     }
@@ -990,6 +1000,7 @@ impl<'tracker> Builder<'tracker> {
                     &mut self.pattern_map,
                     &mut self.pattern_cs_names,
                     &mut self.pattern_cs_set,
+                    self.in_form,
                     self.font_tracker,
                 );
             }
@@ -1004,9 +1015,11 @@ impl<'tracker> Builder<'tracker> {
                 let saved_buf = std::mem::take(&mut self.buf);
                 let saved_gs = std::mem::replace(&mut self.gs, GState::new());
                 let clips = self.open_clip_frame();
+                let was_in_form = std::mem::replace(&mut self.in_form, true);
 
                 self.emit_list(elements);
 
+                self.in_form = was_in_form;
                 self.close_clip_frame(clips);
                 let form_content = std::mem::replace(&mut self.buf, saved_buf);
                 self.gs = saved_gs;
@@ -1074,9 +1087,11 @@ impl<'tracker> Builder<'tracker> {
                 let saved_buf = std::mem::take(&mut self.buf);
                 let saved_gs = std::mem::replace(&mut self.gs, GState::new());
                 let clips = self.open_clip_frame();
+                let was_in_form = std::mem::replace(&mut self.in_form, true);
 
                 self.emit_list(mask);
 
+                self.in_form = was_in_form;
                 self.close_clip_frame(clips);
                 let mask_content = std::mem::replace(&mut self.buf, saved_buf);
                 self.gs = saved_gs;
@@ -1420,8 +1435,11 @@ pub fn build_content_stream(
     // pixels → PDF points. The PDF spec says Pattern /Matrix maps pattern
     // space → the initial (pre-cm) coordinate system. So: pdf_matrix =
     // pattern_matrix × initial_cm (row-vector convention).
+    // A pattern painted inside a Form maps to the Form's space instead,
+    // which is device space: every Form is invoked under the initial `cm`
+    // alone (ISO 32000-1 § 8.7.3.1).
     let initial_cm = Matrix::new(scale, 0.0, 0.0, -scale, 0.0, page_h_pts);
-    for pat_ref in &mut builder.pattern_refs {
+    for pat_ref in builder.pattern_refs.iter_mut().filter(|p| !p.in_form) {
         pat_ref.pattern_matrix = initial_cm.concat(&pat_ref.pattern_matrix);
     }
 
@@ -2162,14 +2180,19 @@ fn emit_pattern_fill(
     params: &PatternFillParams,
     gs: &mut GState,
     pattern_refs: &mut Vec<PatternRef>,
-    pattern_map: &mut HashMap<u32, usize>,
+    pattern_map: &mut HashMap<(u32, bool), usize>,
     pattern_cs_names: &mut Vec<(String, PdfObj)>,
     pattern_cs_set: &mut HashSet<String>,
+    in_form: bool,
     font_tracker: &mut FontTracker,
 ) {
-    // Dedup by pattern_id — each makepattern call gets a unique ID,
-    // so same-pattern reuses share one Pattern XObject.
-    let pat_idx = if let Some(&idx) = pattern_map.get(&params.pattern_id) {
+    // Dedup by pattern_id — each makepattern call gets a unique ID, so
+    // same-pattern reuses share one Pattern XObject — within one space: a
+    // pattern's matrix maps to the space of the stream painting it, and
+    // viewers differ on a pattern object shared between two (Ghostscript
+    // keeps its first placement, poppler places it per stream).
+    let key = (params.pattern_id, in_form);
+    let pat_idx = if let Some(&idx) = pattern_map.get(&key) {
         idx
     } else {
         let idx = pattern_refs.len();
@@ -2180,8 +2203,9 @@ fn emit_pattern_fill(
             xstep: params.xstep,
             ystep: params.ystep,
             paint_type: params.paint_type,
+            in_form,
         });
-        pattern_map.insert(params.pattern_id, idx);
+        pattern_map.insert(key, idx);
         idx
     };
 
