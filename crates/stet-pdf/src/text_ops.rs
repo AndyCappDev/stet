@@ -18,7 +18,14 @@ use crate::font_tracker::FontTracker;
 ///
 /// Groups texts into baseline runs and uses TJ arrays with kern values
 /// for text on the same line. Separate BT/ET blocks for different baselines.
-pub fn emit_text_batch(buf: &mut Vec<u8>, batch: &[&TextParams], font_tracker: &FontTracker) {
+/// With `colored` false — an uncoloured pattern's tile, whose content may
+/// set no colour — the text's colours are left out.
+pub fn emit_text_batch(
+    buf: &mut Vec<u8>,
+    batch: &[&TextParams],
+    font_tracker: &FontTracker,
+    colored: bool,
+) {
     if batch.is_empty() {
         return;
     }
@@ -111,7 +118,9 @@ pub fn emit_text_batch(buf: &mut Vec<u8>, batch: &[&TextParams], font_tracker: &
         let cur_color = color_key(&text_obj.color, text_obj.paint_type);
         if last_color.as_ref() != Some(&cur_color) || last_paint_type != text_obj.paint_type {
             if text_obj.paint_type == 2 {
-                emit_stroke_color(buf, text_obj);
+                if colored {
+                    emit_stroke_color(buf, text_obj);
+                }
                 fmt_num(buf, text_obj.stroke_width);
                 buf.extend(b" w\n");
                 buf.extend(b"1 Tr\n");
@@ -119,7 +128,9 @@ pub fn emit_text_batch(buf: &mut Vec<u8>, batch: &[&TextParams], font_tracker: &
                 if last_paint_type == 2 {
                     buf.extend(b"0 Tr\n");
                 }
-                emit_text_color(buf, text_obj);
+                if colored {
+                    emit_text_color(buf, text_obj);
+                }
             }
             last_color = Some(cur_color);
             last_paint_type = text_obj.paint_type;

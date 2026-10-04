@@ -241,6 +241,12 @@ struct GState {
     halftone_key: Vec<u8>,
     /// Dedup key for current BG/UCR state.
     bg_ucr_key: Vec<u8>,
+    /// The stream is an uncoloured (PaintType 2) pattern's tile, whose
+    /// content may set no colour (ISO 32000-1 § 8.7.3.3): the colour comes
+    /// from where the pattern is used. Every colour operator is left out.
+    /// Kept across `reset`, and carried into the fresh trackers a Form's
+    /// content starts with.
+    uncolored: bool,
 }
 
 impl GState {
@@ -266,11 +272,21 @@ impl GState {
             transfer_key: Vec::new(),
             halftone_key: Vec::new(),
             bg_ucr_key: Vec::new(),
+            uncolored: false,
+        }
+    }
+
+    /// A tracker for a stream starting afresh, in a stream that is
+    /// `uncolored` or not.
+    fn fresh(uncolored: bool) -> Self {
+        Self {
+            uncolored,
+            ..Self::new()
         }
     }
 
     fn reset(&mut self) {
-        *self = Self::new();
+        *self = Self::fresh(self.uncolored);
     }
 }
 
@@ -1013,7 +1029,8 @@ impl<'tracker> Builder<'tracker> {
                 // given this stream's /Resources, so we never have to
                 // duplicate them.
                 let saved_buf = std::mem::take(&mut self.buf);
-                let saved_gs = std::mem::replace(&mut self.gs, GState::new());
+                let fresh = GState::fresh(self.gs.uncolored);
+                let saved_gs = std::mem::replace(&mut self.gs, fresh);
                 let clips = self.open_clip_frame();
                 let was_in_form = std::mem::replace(&mut self.in_form, true);
 
@@ -1085,7 +1102,8 @@ impl<'tracker> Builder<'tracker> {
                 // CS choice is harmless for Alpha SMasks since only the
                 // alpha channel is read).
                 let saved_buf = std::mem::take(&mut self.buf);
-                let saved_gs = std::mem::replace(&mut self.gs, GState::new());
+                let fresh = GState::fresh(self.gs.uncolored);
+                let saved_gs = std::mem::replace(&mut self.gs, fresh);
                 let clips = self.open_clip_frame();
                 let was_in_form = std::mem::replace(&mut self.in_form, true);
 
@@ -1130,7 +1148,7 @@ impl<'tracker> Builder<'tracker> {
                 let pre_q_gs = self.gs.clone();
                 self.buf.extend(b"q\n");
                 writeln!(self.buf, "/GS{} gs", ext_gstate_idx).unwrap();
-                self.gs = GState::new();
+                self.gs = GState::fresh(self.gs.uncolored);
                 let clips = self.open_clip_frame();
 
                 self.emit_list(content);
@@ -1449,14 +1467,18 @@ pub fn build_content_stream(
 /// Generate PDF content stream bytes from a tile display list (for Pattern XObjects).
 ///
 /// Unlike `build_content_stream`, this emits no initial CTM or page clip —
-/// tile coordinates are already in pattern space.
+/// tile coordinates are already in pattern space. An `uncolored` tile — a
+/// PaintType 2 pattern's — sets no colour: it takes the colour the pattern
+/// is used with.
 pub fn build_tile_content_stream(
     list: &DisplayList,
     font_tracker: &mut FontTracker,
+    uncolored: bool,
 ) -> ContentStreamResult {
     let (has_text_elements, page_font_names) = stream_fonts(list, font_tracker);
 
     let mut builder = Builder::new(font_tracker, (0.0, 0.0), has_text_elements, true);
+    builder.gs.uncolored = uncolored;
     builder.page_font_names = page_font_names;
 
     builder.emit_list(list);
@@ -1478,7 +1500,7 @@ fn flush_text_batch(
     if batch.is_empty() {
         return;
     }
-    text_ops::emit_text_batch(buf, batch, font_tracker);
+    text_ops::emit_text_batch(buf, batch, font_tracker, !gs.uncolored);
     // Text blocks emit color operators (g/rg/k) that change the PDF's current
     // color space. Reset all color tracking to force re-emission.
     gs.fill_color = None;
@@ -1489,6 +1511,9 @@ fn flush_text_batch(
 
 /// Emit a non-stroking (fill) color command.
 fn emit_fill_color(buf: &mut Vec<u8>, color: &DeviceColor, painted_channels: u8, gs: &mut GState) {
+    if gs.uncolored {
+        return;
+    }
     let pc = color_to_pdf_with_channels(color, painted_channels);
     if gs.fill_color.as_ref() == Some(&pc) {
         return;
@@ -1527,6 +1552,9 @@ fn emit_stroke_color(
     painted_channels: u8,
     gs: &mut GState,
 ) {
+    if gs.uncolored {
+        return;
+    }
     let pc = color_to_pdf_with_channels(color, painted_channels);
     if gs.stroke_color.as_ref() == Some(&pc) {
         return;
@@ -1606,6 +1634,9 @@ fn emit_fill_color_spot(
     cs_map: &mut HashMap<Vec<u8>, String>,
     color_spaces: &mut Vec<(String, SpotColorSpace)>,
 ) {
+    if gs.uncolored {
+        return;
+    }
     let cs_name = get_or_create_cs_name(spot, cs_map, color_spaces);
     if gs.fill_cs_name.as_deref() != Some(&cs_name) {
         writeln!(buf, "/{} cs", cs_name).unwrap();
@@ -1627,6 +1658,9 @@ fn emit_stroke_color_spot(
     cs_map: &mut HashMap<Vec<u8>, String>,
     color_spaces: &mut Vec<(String, SpotColorSpace)>,
 ) {
+    if gs.uncolored {
+        return;
+    }
     let cs_name = get_or_create_cs_name(spot, cs_map, color_spaces);
     if gs.stroke_cs_name.as_deref() != Some(&cs_name) {
         writeln!(buf, "/{} CS", cs_name).unwrap();
@@ -1666,6 +1700,9 @@ fn emit_fill_color_icc(
     icc_cs_map: &mut HashMap<Vec<u8>, String>,
     icc_color_spaces: &mut Vec<(String, stet_graphics::device::IccColorSpace)>,
 ) {
+    if gs.uncolored {
+        return;
+    }
     let cs_name = get_or_create_icc_cs_name(icc, icc_cs_map, icc_color_spaces);
     if gs.fill_cs_name.as_deref() != Some(&cs_name) {
         writeln!(buf, "/{} cs", cs_name).unwrap();
@@ -1687,6 +1724,9 @@ fn emit_stroke_color_icc(
     icc_cs_map: &mut HashMap<Vec<u8>, String>,
     icc_color_spaces: &mut Vec<(String, stet_graphics::device::IccColorSpace)>,
 ) {
+    if gs.uncolored {
+        return;
+    }
     let cs_name = get_or_create_icc_cs_name(icc, icc_cs_map, icc_color_spaces);
     if gs.stroke_cs_name.as_deref() != Some(&cs_name) {
         writeln!(buf, "/{} CS", cs_name).unwrap();
@@ -2197,7 +2237,7 @@ fn emit_pattern_fill(
     } else {
         let idx = pattern_refs.len();
         pattern_refs.push(PatternRef {
-            tile: build_tile_content_stream(&params.tile, font_tracker),
+            tile: build_tile_content_stream(&params.tile, font_tracker, params.paint_type == 2),
             pattern_matrix: params.pattern_matrix,
             bbox: params.bbox,
             xstep: params.xstep,

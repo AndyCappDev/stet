@@ -488,3 +488,67 @@ fn a_pattern_used_on_the_page_and_in_forms_is_placed_in_each() {
     );
     patterns_placed(&job);
 }
+
+/// The colour operators in each uncoloured (PaintType 2) pattern's
+/// content: there should be none, since such a tile takes its colour from
+/// where the pattern is used (ISO 32000-1 § 8.7.3.3). poppler obeys one if
+/// it is there, painting the pattern in the colour the PostScript happened
+/// to set rather than the one it filled with.
+fn uncoloured_tile_colours(bytes: &[u8]) -> Vec<(u32, String)> {
+    let doc = PdfDocument::from_bytes(bytes).unwrap();
+    let r = doc.resolver();
+    let mut found = Vec::new();
+    let mut tiles = 0;
+    for num in 1..r.xref_len() as u32 {
+        let Ok(PdfObj::Stream { dict, .. }) = r.resolve(num, 0) else {
+            continue;
+        };
+        if dict.get_name(b"Type") != Some(b"Pattern") || dict.get_int(b"PaintType") != Some(2) {
+            continue;
+        }
+        tiles += 1;
+        let content = r.stream_data(num, 0).unwrap();
+        for token in String::from_utf8_lossy(&content).split_whitespace() {
+            if matches!(
+                token,
+                "g" | "rg" | "k" | "G" | "RG" | "K" | "cs" | "CS" | "sc" | "scn" | "SC" | "SCN"
+            ) {
+                found.push((num, token.to_string()));
+            }
+        }
+    }
+    assert!(tiles > 0, "the job draws no uncoloured pattern");
+    found
+}
+
+/// An uncoloured pattern whose cell fills, strokes and shows text. Its
+/// PaintProc may set no colour (PLRM), but each mark still carries the
+/// colour current when the tile was captured, and that was written.
+const UNCOLOURED: &str = "/u << /PatternType 1 /PaintType 2 /TilingType 1 /BBox [0 0 40 40] \
+    /XStep 40 /YStep 40 /PaintProc { pop 0 0 10 10 rectfill \
+    2 setlinewidth 15 15 10 10 rectstroke \
+    /Courier findfont 12 scalefont setfont 2 28 moveto (Ab) show } >> def\n";
+
+#[test]
+fn an_uncoloured_pattern_sets_no_colour() {
+    let job = format!(
+        "{PAGE}{UNCOLOURED}[/Pattern /DeviceRGB] setcolorspace \
+         0 0.5 0 u matrix makepattern setcolor 20 20 250 250 rectfill showpage\n"
+    );
+    assert_eq!(uncoloured_tile_colours(&pdf(&job)), vec![]);
+    round_trips(&job);
+}
+
+#[test]
+fn an_uncoloured_pattern_in_a_tile_sets_no_colour() {
+    let job = format!(
+        "{PAGE}{UNCOLOURED}{}outer {FILL}",
+        cell(
+            "outer",
+            "[/Pattern /DeviceRGB] setcolorspace 0 0.5 0 u matrix makepattern setcolor \
+             0 0 100 100 rectfill"
+        )
+    );
+    assert_eq!(uncoloured_tile_colours(&pdf(&job)), vec![]);
+    round_trips(&job);
+}

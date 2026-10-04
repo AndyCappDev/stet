@@ -628,6 +628,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is drawn — so it masked everything out. A tile whose device origin was
   at x = 0 rendered nothing; elsewhere it happened to take another route
   and rendered. PostScript and PDF alike.
+- **An uncoloured pattern's tile sets no colour in PDF output.** A
+  PaintType 2 pattern takes its colour from where it is used, and its
+  content may not set one (ISO 32000-1 § 8.7.3.3), but stet wrote each
+  mark's captured colour into the tile — usually black. Ghostscript
+  ignores it; poppler obeys it, so the pattern painted black, or in
+  whatever colour the PostScript last set, rather than the colour it was
+  filled with.
 - **PostScript → PDF no longer crashes on fonts a `restore` reclaimed**
   (`--device pdf` and `Interpreter::render_to_pdf`). PDF output builds the
   document at the end of the job and read each font out of the
