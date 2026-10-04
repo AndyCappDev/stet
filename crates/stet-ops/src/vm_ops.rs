@@ -53,6 +53,23 @@ pub fn op_restore(ctx: &mut Context) -> Result<(), PsError> {
         return Err(e);
     }
 
+    // The page device the save's graphics state holds: if it is another
+    // one, the current page device's EndPage runs now, before the restore
+    // may reclaim it.
+    let incoming = ctx
+        .save_stack
+        .levels_ref()
+        .iter()
+        .find(|l| l.save_id == save_id)
+        .and_then(|l| l.gstate.page_device);
+    let how = match crate::device_ops::begin_reinstate(ctx, incoming) {
+        Ok(how) => how,
+        Err(e) => {
+            let _ = ctx.o_stack.push(save_obj);
+            return Err(e);
+        }
+    };
+
     // Capture clip version before restore so we can emit InitClip+Clip if it changed
     let old_clip_version = ctx.gstate.clip_path_version;
 
@@ -70,7 +87,7 @@ pub fn op_restore(ctx: &mut Context) -> Result<(), PsError> {
     // including clip_path, but doesn't update the display list)
     crate::graphics_state_ops::restore_device_clip(ctx, old_clip_version);
 
-    Ok(())
+    crate::device_ops::finish_reinstate(ctx, how)
 }
 
 /// Check if any stack contains local composite objects newer than the save being restored.

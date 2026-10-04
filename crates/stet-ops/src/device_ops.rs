@@ -6,7 +6,6 @@
 //! and internal continuation operators for showpage/copypage protocol.
 
 use stet_core::context::Context;
-use stet_core::device::NullDevice;
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
 use stet_core::object::{EntityId, ObjFlags, PsObject, PsValue};
@@ -65,13 +64,7 @@ pub fn has_pd_key(ctx: &Context, key: &[u8]) -> bool {
 
 /// Check if the current page device is a null device.
 pub fn is_null_device(ctx: &Context) -> bool {
-    if let Some(pd) = ctx.gstate.page_device
-        && let Some(name_id) = ctx.names.find(b".NullDevice")
-        && let Some(obj) = ctx.dicts.get(pd, &DictKey::Name(name_id))
-    {
-        return matches!(obj.value, PsValue::Bool(true));
-    }
-    false
+    ctx.null_device_active()
 }
 
 /// Read an integer from the page device dict.
@@ -182,6 +175,20 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
 
     let mut need_full_reload = !cur_has_is_page;
 
+    // Back from the null device to the output device it replaced: the same
+    // physical device, so its counts carry on, as in Ghostscript.
+    let returning_from_null = is_null_device(ctx) && {
+        let prev_od = ctx.names.intern(b".PrevOutputDevice");
+        let prev = ctx
+            .gstate
+            .page_device
+            .and_then(|pd| ctx.dicts.get(pd, &DictKey::Name(prev_od)));
+        match ctx.dicts.get(req_entity, &DictKey::Name(od_name)) {
+            None => true,
+            Some(req) => prev.is_some_and(|p| p.value == req.value),
+        }
+    };
+
     // Also reload when switching to a different output device
     if !need_full_reload {
         let req_od = ctx.dicts.get(req_entity, &DictKey::Name(od_name));
@@ -259,38 +266,16 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
 
     ctx.gstate.page_device = Some(base_pd);
     // A new device starts counting showpages and pages afresh; a parameter
-    // change keeps both.
-    if need_full_reload {
+    // change keeps both, and so does a return from the null device.
+    if need_full_reload && !returning_from_null {
         ctx.showpage_count = 0;
         ctx.page_count = 0;
     }
 
-    // Compute MediaSize from PageSize and HWResolution (with sensible defaults)
-    let (pw, ph) = get_pd_f64_pair(ctx, b"PageSize").unwrap_or((612.0, 792.0));
-    let (pw, ph) = clamp_page_size(pw, ph);
-    let (dpi_x, dpi_y) = get_pd_f64_pair(ctx, b"HWResolution").unwrap_or((72.0, 72.0));
-    let media_w = (pw * dpi_x / 72.0).round() as u32;
-    let media_h = (ph * dpi_y / 72.0).round() as u32;
+    let (media_w, media_h, dpi_x, dpi_y) = configure_device(ctx);
     set_pd_array(ctx, b"MediaSize", &[media_w as f64, media_h as f64]);
-
-    // Update page_width/page_height for fallback code
-    ctx.page_width = pw as u32;
-    ctx.page_height = ph as u32;
-
-    // Resize the current device if it keeps itself — the PDF device holds
-    // every page of the job, which a new device would lose — or make a new
-    // one from the factory.
-    let media = (media_w, media_h);
-    let kept = ctx
-        .device
-        .as_mut()
-        .is_some_and(|device| device.resize_page(media, (pw, ph)));
-    if !kept && let Some(factory) = ctx.device_factory.take() {
-        let mut device = factory(media_w, media_h);
-        device.resize_page(media, (pw, ph));
-        ctx.device = Some(device);
-        ctx.device_factory = Some(factory);
-    }
+    // Whatever the null device was given goes nowhere, here as anywhere.
+    ctx.discard_null_marks();
 
     // Compute CTM from HWResolution
     let scale_x = dpi_x / 72.0;
@@ -405,15 +390,11 @@ pub fn op_nulldevice(ctx: &mut Context) -> Result<(), PsError> {
     let arr_obj = crate::vm_ops::make_array_obj(ctx, arr_entity, 2);
     ctx.dicts.put(pd, DictKey::Name(ps_name), arr_obj);
 
+    // The output device stays: the null device is this graphics state's,
+    // and reinstating a graphics state with a page device brings that back
+    // (PLRM Example 6.2). Meanwhile marks go nowhere
+    // (`Context::current_display_list_mut`) and no page is sent.
     ctx.gstate.page_device = Some(pd);
-
-    // Replace device with NullDevice
-    let (w, h) = if let Some(ref dev) = ctx.device {
-        dev.page_size()
-    } else {
-        (ctx.page_width, ctx.page_height)
-    };
-    ctx.device = Some(Box::new(NullDevice::new(w, h)));
 
     // Set CTM and default CTM to identity matrix
     ctx.gstate.ctm = Matrix::identity();
@@ -481,6 +462,7 @@ pub fn op_copypage(ctx: &mut Context) -> Result<(), PsError> {
         return Err(PsError::RangeCheck);
     }
     if crate::device_ops::is_null_device(ctx) {
+        ctx.discard_null_marks();
         return Ok(());
     }
 
@@ -671,6 +653,111 @@ fn reinitialize_graphics(ctx: &mut Context) {
 }
 
 // ---------- device deactivation ----------
+
+/// Set the output device up for the current page device: its `PageSize`
+/// and `HWResolution` give the page in device pixels. The device takes the
+/// new size if it keeps itself — the PDF device holds every page of the job,
+/// which a new device would lose — or a new one comes from the factory.
+/// Returns the media size in pixels and the resolution.
+fn configure_device(ctx: &mut Context) -> (u32, u32, f64, f64) {
+    let (pw, ph) = get_pd_f64_pair(ctx, b"PageSize").unwrap_or((612.0, 792.0));
+    let (pw, ph) = clamp_page_size(pw, ph);
+    let (dpi_x, dpi_y) = get_pd_f64_pair(ctx, b"HWResolution").unwrap_or((72.0, 72.0));
+    let media_w = (pw * dpi_x / 72.0).round() as u32;
+    let media_h = (ph * dpi_y / 72.0).round() as u32;
+
+    // Update page_width/page_height for fallback code
+    ctx.page_width = pw as u32;
+    ctx.page_height = ph as u32;
+
+    let media = (media_w, media_h);
+    let kept = ctx
+        .device
+        .as_mut()
+        .is_some_and(|device| device.resize_page(media, (pw, ph)));
+    if !kept && let Some(factory) = ctx.device_factory.take() {
+        let mut device = factory(media_w, media_h);
+        device.resize_page(media, (pw, ph));
+        ctx.device = Some(device);
+        ctx.device_factory = Some(factory);
+    }
+    (media_w, media_h, dpi_x, dpi_y)
+}
+
+/// What reinstating a graphics state does to the device, decided by
+/// [`begin_reinstate`] and finished by [`finish_reinstate`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Reactivation {
+    /// The same page device, or the null device: nothing.
+    None,
+    /// From the null device (or none) to a page device: the device takes
+    /// its parameters, and nothing else happens (PLRM Example 6.2).
+    FromNull,
+    /// From one page device to another (PLRM Example 6.1): the outgoing
+    /// one's `EndPage` has run; the page is erased and the incoming one's
+    /// `BeginPage` runs.
+    FromPage,
+}
+
+/// Whether `pd` is the null device's page device dictionary.
+fn is_null_page_device(ctx: &Context, pd: EntityId) -> bool {
+    ctx.names.find(b".NullDevice").is_some_and(|key| {
+        ctx.dicts
+            .get(pd, &DictKey::Name(key))
+            .is_some_and(|o| matches!(o.value, PsValue::Bool(true)))
+    })
+}
+
+/// Before `grestore`, `grestoreall`, `restore` or `setgstate` reinstates a
+/// graphics state whose page device is `incoming`: the device being
+/// deactivated, if it is a page device, runs its `EndPage` with reason 2
+/// while it is still current (PLRM 3e §6.2.6). Call this before changing
+/// the graphics state — for `restore`, before the VM is restored, which may
+/// reclaim the outgoing page device — and pass the result to
+/// [`finish_reinstate`] after.
+///
+/// A device is the page device dictionary `setpagedevice` made, so the
+/// same dictionary is the same device: reinstating the graphics state
+/// ps2write captures after each `setpagedevice` switches nothing.
+pub(crate) fn begin_reinstate(
+    ctx: &mut Context,
+    incoming: Option<EntityId>,
+) -> Result<Reactivation, PsError> {
+    let outgoing = ctx.gstate.page_device;
+    let Some(incoming) = incoming else {
+        return Ok(Reactivation::None);
+    };
+    if outgoing == Some(incoming) || is_null_page_device(ctx, incoming) {
+        return Ok(Reactivation::None);
+    }
+    if outgoing.is_none_or(|pd| is_null_page_device(ctx, pd)) {
+        return Ok(Reactivation::FromNull);
+    }
+    deactivate_page_device(ctx)?;
+    Ok(Reactivation::FromPage)
+}
+
+/// After the graphics state is reinstated: set the device up for the
+/// reinstated page device, which brings its parameters with it; and, after
+/// a switch between page devices, erase the page and run the incoming
+/// `BeginPage` with the count of `showpage`s so far.
+pub(crate) fn finish_reinstate(ctx: &mut Context, how: Reactivation) -> Result<(), PsError> {
+    if how == Reactivation::None {
+        return Ok(());
+    }
+    ctx.discard_null_marks();
+    configure_device(ctx);
+    if how == Reactivation::FromPage {
+        ctx.display_list.clear();
+        erase_sent_page(ctx);
+        if let Some(begin_obj) = get_pd_value(ctx, b"BeginPage").filter(is_nonempty_proc) {
+            ctx.e_stack.push(begin_obj)?;
+            // A literal int on e_stack gets pushed to o_stack by the eval loop
+            ctx.e_stack.push(PsObject::int(ctx.showpage_count))?;
+        }
+    }
+    Ok(())
+}
 
 /// Deactivate the page device (PLRM 3e §6.2.6): call its `EndPage` with
 /// reason code 2, and transmit the page if it returns `true` — an `EndPage`

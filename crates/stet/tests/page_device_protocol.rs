@@ -7,6 +7,14 @@
 //!
 //! Each test logs the calls a job's own procedures receive and checks the
 //! sequence against Ghostscript 10's for the same job.
+//!
+//! The device is part of the graphics state (PLRM 3e §6.1): `grestore`,
+//! `grestoreall`, `restore` and `setgstate` reactivate the page device of
+//! the state they reinstate, with its parameters, and switching between two
+//! page devices runs `EndPage` (reason 2) and `BeginPage` and erases the
+//! page; switching to or from the null device runs neither and leaves the
+//! page alone. stet reinstated only the dictionary, and `nulldevice`
+//! replaced the output device for the rest of the job.
 
 use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -227,4 +235,217 @@ fn page_count_survives_a_restore() {
          currentpagedevice /PageCount get =\n");
     assert_eq!(pages.len(), 2);
     assert_eq!(log, ["1", "2"]);
+}
+
+/// PLRM Example 6.1: `grestore` reactivates the outer device, ending the
+/// inner one; the next page has the outer device's size. It came out at
+/// the inner size, blank.
+#[test]
+fn grestore_reactivates_the_outer_page_device() {
+    let (pages, log) = run(&format!(
+        "{}gsave << /PageSize [60 40] >> setpagedevice \
+           1 0 0 setrgbcolor 0 0 60 40 rectfill showpage grestore \
+         0 0 1 setrgbcolor 0 0 100 100 rectfill showpage",
+        device(STANDARD)
+    ));
+    assert_eq!(
+        log,
+        [
+            "BeginPage 0",
+            "EndPage 0 2",
+            "BeginPage 0",
+            "EndPage 0 0",
+            "BeginPage 1",
+            "EndPage 1 2",
+            "BeginPage 1",
+            "EndPage 1 0",
+            "BeginPage 2",
+            "EndPage 2 2",
+        ]
+    );
+    let sizes: Vec<_> = pages.iter().map(|p| (p.width, p.height)).collect();
+    assert_eq!(sizes, [(60, 40), (100, 100)]);
+    assert_eq!(at(&pages[1], 75, 75), BLUE);
+}
+
+/// `restore` reactivates the saved page device as `grestore` does — the
+/// shape pdftops gives each page.
+#[test]
+fn restore_reactivates_the_saved_page_device() {
+    let (pages, log) = run(&format!(
+        "{}save << /PageSize [60 40] >> setpagedevice showpage restore \
+         0 0 1 setrgbcolor 0 0 100 100 rectfill showpage",
+        device(STANDARD)
+    ));
+    assert_eq!(
+        log,
+        [
+            "BeginPage 0",
+            "EndPage 0 2",
+            "BeginPage 0",
+            "EndPage 0 0",
+            "BeginPage 1",
+            "EndPage 1 2",
+            "BeginPage 1",
+            "EndPage 1 0",
+            "BeginPage 2",
+            "EndPage 2 2",
+        ]
+    );
+    let sizes: Vec<_> = pages.iter().map(|p| (p.width, p.height)).collect();
+    assert_eq!(sizes, [(60, 40), (100, 100)]);
+    assert_eq!(at(&pages[1], 75, 75), BLUE);
+}
+
+/// PLRM Example 6.2: the null device leaves the page device undisturbed —
+/// no `EndPage` or `BeginPage`, the page kept — and what is drawn on it
+/// goes nowhere. Every page after it was lost.
+#[test]
+fn the_null_device_leaves_the_page_device_undisturbed() {
+    let (pages, log) = run(&format!(
+        "{}1 0 0 setrgbcolor 0 0 50 100 rectfill \
+         gsave nulldevice 0 0 1 setrgbcolor 0 0 100 100 rectfill grestore showpage \
+         gsave nulldevice grestore 0 0 1 setrgbcolor 50 0 50 100 rectfill showpage",
+        device(STANDARD)
+    ));
+    assert_eq!(
+        log,
+        [
+            "BeginPage 0",
+            "EndPage 0 0",
+            "BeginPage 1",
+            "EndPage 1 0",
+            "BeginPage 2",
+            "EndPage 2 2",
+        ]
+    );
+    assert_eq!(pages.len(), 2);
+    assert_eq!([at(&pages[0], 25, 50), at(&pages[0], 75, 50)], [RED, PAPER]);
+    assert_eq!(
+        [at(&pages[1], 25, 50), at(&pages[1], 75, 50)],
+        [PAPER, BLUE]
+    );
+}
+
+/// `setgstate` into a graphics state of the null device, and back: no
+/// procedures, and only what was drawn on the page device shows.
+#[test]
+fn setgstate_into_the_null_device_and_back() {
+    let (pages, log) = run(&format!(
+        "{}/g0 gstate def gsave nulldevice /gn gstate def grestore \
+         gn setgstate 1 0 0 setrgbcolor 0 0 100 100 rectfill \
+         g0 setgstate 0 0 1 setrgbcolor 50 0 50 100 rectfill showpage",
+        device(STANDARD)
+    ));
+    assert_eq!(
+        log,
+        ["BeginPage 0", "EndPage 0 0", "BeginPage 1", "EndPage 1 2"]
+    );
+    assert_eq!(pages.len(), 1);
+    assert_eq!(
+        [at(&pages[0], 25, 50), at(&pages[0], 75, 50)],
+        [PAPER, BLUE]
+    );
+}
+
+/// `setgstate` to a graphics state of another page device — of the same
+/// size — switches devices, and the switch erases the page, as in
+/// Ghostscript.
+#[test]
+fn setgstate_to_another_page_device_erases_the_page() {
+    let (pages, log) = run(&format!(
+        "{}/g gstate def << /PageSize [100 100] >> setpagedevice \
+         1 0 0 setrgbcolor 0 0 50 100 rectfill \
+         gsave g setgstate grestore \
+         0 0 1 setrgbcolor 50 0 50 100 rectfill showpage",
+        device(STANDARD)
+    ));
+    assert_eq!(
+        log,
+        [
+            "BeginPage 0",
+            "EndPage 0 2",
+            "BeginPage 0",
+            "EndPage 0 2",
+            "BeginPage 0",
+            "EndPage 0 2",
+            "BeginPage 0",
+            "EndPage 0 0",
+            "BeginPage 1",
+            "EndPage 1 2",
+        ]
+    );
+    assert_eq!(
+        [at(&pages[0], 25, 50), at(&pages[0], 75, 50)],
+        [PAPER, BLUE]
+    );
+}
+
+/// `setgstate` to a graphics state of the current page device switches
+/// nothing — what ps2write does in every pattern, with a `gstate` it
+/// captures after each `setpagedevice`.
+#[test]
+fn setgstate_to_the_same_page_device_switches_nothing() {
+    let (pages, log) = run(&format!(
+        "{}/g gstate def 1 0 0 setrgbcolor 0 0 50 100 rectfill \
+         gsave g setgstate grestore showpage",
+        device(STANDARD)
+    ));
+    assert_eq!(
+        log,
+        ["BeginPage 0", "EndPage 0 0", "BeginPage 1", "EndPage 1 2"]
+    );
+    assert_eq!(at(&pages[0], 25, 50), RED);
+}
+
+/// From the null device to another page device, `setgstate` runs no
+/// procedures, and the device takes the reinstated device's parameters
+/// (PLRM: a reactivated device "brings its device parameters with it").
+/// Ghostscript reports the new size but keeps printing at the old one.
+#[test]
+fn from_the_null_device_another_page_device_brings_its_size() {
+    let (pages, log) = run(&format!(
+        "{}gsave << /PageSize [60 40] >> setpagedevice /gb gstate def grestore \
+         nulldevice gb setgstate showpage",
+        device(STANDARD)
+    ));
+    assert_eq!(
+        log,
+        [
+            "BeginPage 0",
+            "EndPage 0 2",
+            "BeginPage 0",
+            "EndPage 0 2",
+            "BeginPage 0",
+            "EndPage 0 0",
+            "BeginPage 1",
+            "EndPage 1 2",
+        ]
+    );
+    let sizes: Vec<_> = pages.iter().map(|p| (p.width, p.height)).collect();
+    assert_eq!(sizes, [(60, 40)]);
+}
+
+/// `setpagedevice` from the null device: no `EndPage` (the device being
+/// deactivated is the null device), a `BeginPage`, and the count carried on
+/// — the output device is the same one.
+#[test]
+fn setpagedevice_after_nulldevice_carries_the_count() {
+    let (pages, log) = run(&format!(
+        "{0}showpage nulldevice {0}showpage",
+        device(STANDARD)
+    ));
+    assert_eq!(
+        log,
+        [
+            "BeginPage 0",
+            "EndPage 0 0",
+            "BeginPage 1",
+            "BeginPage 1",
+            "EndPage 1 0",
+            "BeginPage 2",
+            "EndPage 2 2",
+        ]
+    );
+    assert_eq!(pages.len(), 2);
 }

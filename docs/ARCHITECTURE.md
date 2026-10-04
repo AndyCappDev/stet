@@ -618,6 +618,18 @@ ctx.device_factory = Some(Box::new(|w, h| {
 }));
 ```
 
+**When the interpreter makes a new device.** The page device — and with it
+the device's size — changes at `setpagedevice`, and when `grestore`,
+`grestoreall`, `restore` or `setgstate` reinstates a graphics state holding
+another page device (the device is part of the graphics state, PLRM 3e
+§6.1). Each time, the current device is first offered the new size through
+`OutputDevice::resize_page`. The default declines, and the factory makes a
+new device — right for a device that writes each page as it is shown. A
+device that holds the job's pages until the end, as `PdfDevice` does,
+accepts and stays. `nulldevice` does not replace the device: while the null
+device is current, marks go to a list of their own
+(`Context::current_display_list_mut`) and no page is sent.
+
 ## Rendering Pipeline (stet-render)
 
 The rasterizer in `stet-render` uses a multi-stage pipeline:

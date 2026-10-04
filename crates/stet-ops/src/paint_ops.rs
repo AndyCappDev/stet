@@ -733,8 +733,9 @@ pub fn op_showpage(ctx: &mut Context) -> Result<(), PsError> {
     if !ctx.group_stack.is_empty() {
         return Err(PsError::RangeCheck);
     }
-    // Check for null device
+    // The null device sends no page; what was drawn on it goes nowhere.
     if crate::device_ops::is_null_device(ctx) {
+        ctx.discard_null_marks();
         return Ok(());
     }
 

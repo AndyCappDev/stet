@@ -40,16 +40,19 @@ pub fn op_grestore(ctx: &mut Context) -> Result<(), PsError> {
         return Ok(());
     }
     if let Some(top) = ctx.gstate_stack.last() {
+        let how = crate::device_ops::begin_reinstate(ctx, top.state.page_device)?;
         let old_version = ctx.gstate.clip_path_version;
-        if top.saved_by_save {
+        if let Some(top) = ctx.gstate_stack.last()
+            && top.saved_by_save
+        {
             // save-created entry: restore from it but don't pop
             ctx.gstate = top.state.clone();
-        } else {
+        } else if let Some(entry) = ctx.gstate_stack.pop() {
             // gsave-created entry: restore and pop
-            let entry = ctx.gstate_stack.pop().unwrap();
             ctx.gstate = entry.state;
         }
         restore_device_clip(ctx, old_version);
+        crate::device_ops::finish_reinstate(ctx, how)?;
     }
     Ok(())
 }
@@ -64,6 +67,17 @@ pub fn op_grestoreall(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.gstate_stack.is_empty() {
         return Ok(());
     }
+
+    // The state it ends in: the topmost save-created entry, else the bottom.
+    let incoming = ctx
+        .gstate_stack
+        .iter()
+        .rev()
+        .find(|e| e.saved_by_save)
+        .unwrap_or(&ctx.gstate_stack[0])
+        .state
+        .page_device;
+    let how = crate::device_ops::begin_reinstate(ctx, incoming)?;
 
     let old_version = ctx.gstate.clip_path_version;
 
@@ -86,7 +100,7 @@ pub fn op_grestoreall(ctx: &mut Context) -> Result<(), PsError> {
     }
 
     restore_device_clip(ctx, old_version);
-    Ok(())
+    crate::device_ops::finish_reinstate(ctx, how)
 }
 
 /// Restore device clip after grestore/grestoreall/restore.
@@ -149,12 +163,16 @@ pub fn op_setgstate(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::Gstate(i) => i as usize,
         _ => return Err(PsError::TypeCheck),
     };
+    if idx >= ctx.gstate_store.len() {
+        return Err(PsError::InvalidAccess);
+    }
+    let how = crate::device_ops::begin_reinstate(ctx, ctx.gstate_store[idx].page_device)?;
     let old_version = ctx.gstate.clip_path_version;
     // Deep copy from gstate store — modifications to current state won't affect the stored gstate
     ctx.gstate = ctx.gstate_store[idx].clone();
     ctx.o_stack.pop()?;
     restore_device_clip(ctx, old_version);
-    Ok(())
+    crate::device_ops::finish_reinstate(ctx, how)
 }
 
 /// `setlinewidth`: num → —

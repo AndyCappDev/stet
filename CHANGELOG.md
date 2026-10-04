@@ -559,6 +559,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `restore` reverts like a `currentgstate`. A `gstate` was not `eq` to
   itself, `==` raised `undefined`, and `pstack` printed `--nostringval--`;
   they print `-gstate-`, as in Ghostscript.
+- **The page device comes back with the graphics state, and `nulldevice`
+  no longer ends the job's output.** PLRM 3e §6.1 makes the device part of
+  the graphics state; stet restored only the page device dictionary.
+  - `grestore`, `grestoreall`, `restore` and `setgstate` now reactivate the
+    page device of the state they reinstate, with its page size: after
+    `gsave … setpagedevice … grestore` the next page came out at the inner
+    device's size, its marks off the page. Switching between two page
+    devices runs the outgoing `EndPage` (reason 2) and the incoming
+    `BeginPage` and erases the page; switching to or from the null device
+    runs neither and leaves the page alone (PLRM Examples 6.1, 6.2). The
+    calls match Ghostscript's, which differs in one case: reinstating
+    another page device from under the null device, Ghostscript keeps
+    printing at the old page size while reporting the new one; stet takes
+    the new one.
+  - `nulldevice` replaced the output device for the rest of the job, so
+    after `gsave nulldevice … grestore` no page was written — PNG output
+    lost every later page, PDF output wrote nothing. Marks made under the
+    null device, such as a string `show`n to measure it, now go nowhere
+    rather than onto the page.
+  - `setpagedevice` back from the null device keeps counting pages, as in
+    Ghostscript; it started again from 0.
 - **PostScript → PDF no longer crashes on fonts a `restore` reclaimed**
   (`--device pdf` and `Interpreter::render_to_pdf`). PDF output builds the
   document at the end of the job and read each font out of the

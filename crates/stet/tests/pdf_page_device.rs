@@ -184,3 +184,19 @@ fn an_eps_page_is_its_high_resolution_bounding_box() {
         [0.0, 0.0, 556.4937, 556.4942]
     );
 }
+
+/// `gsave nulldevice … grestore` between pages: both pages reach the PDF —
+/// the null device replaced the PDF device for the rest of the job, so
+/// nothing did — and what was drawn on the null device, a string measured
+/// with `show` as programs do, is not among them.
+#[test]
+fn the_null_device_neither_ends_the_document_nor_adds_to_it() {
+    let job = format!(
+        "%!PS\n{FONT}72 72 moveto (one) show showpage\n\
+         gsave nulldevice 72 72 moveto (hidden) show grestore\n\
+         72 72 moveto (two) show showpage\n"
+    );
+    let got = pages(&job);
+    let text: Vec<_> = got.iter().map(|(_, t)| t.clone()).collect();
+    assert_eq!(text, [["one"], ["two"]]);
+}

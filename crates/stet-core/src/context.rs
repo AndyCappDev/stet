@@ -478,6 +478,16 @@ pub struct Context {
     /// In order of the saves, oldest first.
     gstate_backups: Vec<GstateBackup>,
 
+    /// `.NullDevice`, the key that marks the null device's page device
+    /// dictionary: [`Context::null_device_active`].
+    null_device_key: NameId,
+
+    /// The marks made while the null device is current, which go nowhere
+    /// (PLRM `nulldevice`): kept off the page, so that reinstating the page
+    /// device does not bring them onto it. Emptied by
+    /// [`Context::discard_null_marks`].
+    null_marks: DisplayList,
+
     /// When true, each successful `showpage` / `copypage` sets `interrupt_flag`
     /// after capturing the display list, so the eval loop yields back to the
     /// caller one page at a time. The caller clears the flag and re-enters
@@ -930,6 +940,7 @@ impl Context {
     /// Call `build_system_dict` afterward to populate operators.
     pub fn new() -> Self {
         let mut names = NameTable::new();
+        let null_device_key = names.intern(b".NullDevice");
 
         let name_cache = NameCache {
             n_def: names.intern(b"def"),
@@ -1290,6 +1301,8 @@ impl Context {
             deadline: None,
             steps_to_deadline_check: DEADLINE_CHECK_INTERVAL,
             gstate_backups: Vec::new(),
+            null_device_key,
+            null_marks: DisplayList::new(),
             yield_after_showpage: false,
             text_extraction: stet_graphics::device::TextExtraction::Off,
             text_capture: None,
@@ -1421,14 +1434,17 @@ impl Context {
 
     /// Return the display list paint operators should currently append to.
     ///
-    /// While a transparency group is active (`group_stack` non-empty),
-    /// the topmost frame's display list is returned. Otherwise the
-    /// page-level `display_list` is returned. Every paint-emitting
-    /// operator must route through this helper to keep group capture
-    /// correct.
+    /// While the null device is current, a list of marks that go nowhere
+    /// ([`Self::null_device_active`]). While a transparency group is
+    /// active (`group_stack` non-empty), the topmost frame's display list.
+    /// Otherwise the page-level `display_list`. Every paint-emitting
+    /// operator must route through this helper to keep group capture and
+    /// the null device correct.
     #[inline]
     pub fn current_display_list_mut(&mut self) -> &mut DisplayList {
-        if let Some(frame) = self.group_stack.last_mut() {
+        if self.null_device_active() {
+            &mut self.null_marks
+        } else if let Some(frame) = self.group_stack.last_mut() {
             &mut frame.display_list
         } else {
             &mut self.display_list
@@ -1438,11 +1454,32 @@ impl Context {
     /// Read-only counterpart to [`Self::current_display_list_mut`].
     #[inline]
     pub fn current_display_list(&self) -> &DisplayList {
-        if let Some(frame) = self.group_stack.last() {
+        if self.null_device_active() {
+            &self.null_marks
+        } else if let Some(frame) = self.group_stack.last() {
             &frame.display_list
         } else {
             &self.display_list
         }
+    }
+
+    /// Whether the null device is current: the graphics state's page device
+    /// is the one `nulldevice` installs, which produces no output. Follows
+    /// the graphics state, so `grestore`, `restore` and `setgstate` leave it
+    /// as they reinstate a page device.
+    #[inline]
+    pub fn null_device_active(&self) -> bool {
+        self.gstate.page_device.is_some_and(|pd| {
+            self.dicts
+                .get(pd, &DictKey::Name(self.null_device_key))
+                .is_some_and(|o| matches!(o.value, PsValue::Bool(true)))
+        })
+    }
+
+    /// Drop the marks made under the null device. Call where a page would
+    /// be sent, and when the null device stops being current.
+    pub fn discard_null_marks(&mut self) {
+        self.null_marks.clear();
     }
 
     /// Take the display list, optionally capturing a clone for viewport re-rendering.
