@@ -595,6 +595,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   vertices was lost, the colours written converted to RGB. The shading now
   names its function again, sampled in its own colour space, so a spot
   shading keeps its tints.
+- **PDF output writes what a pattern tile contains.** A tile's resources
+  were written from a partial copy of the page's, so a pattern whose cell
+  held a transparency group, a soft mask, a layer or another pattern named
+  resources it did not have: the group and the nested pattern drew
+  nothing, the soft mask's content drew unmasked, an uncoloured nested
+  pattern had no colour space, and the layer was missing from the
+  document's layers. PDF → PDF lost the whole page of one corpus file,
+  and charts and nested patterns in others; PostScript that nests
+  patterns, as Ghostscript's `eps2write` does for nested PDF patterns,
+  lost the inner one. Each form (group or soft-mask mask) now names its
+  resources too, rather than relying on the PDF 1.1 rule that a form
+  without them takes the page's, which inside a tile is not where they
+  are.
+- **A clip restored inside a group no longer unbalances the PDF.** The
+  group's form continued the clip scope the page had open, so a clip set
+  and restored inside it closed the page's `q` from inside the form;
+  viewers reported "Restoring state when no valid states to pop".
 - **PostScript → PDF no longer crashes on fonts a `restore` reclaimed**
   (`--device pdf` and `Interpreter::render_to_pdf`). PDF output builds the
   document at the end of the job and read each font out of the

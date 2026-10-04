@@ -62,20 +62,33 @@ pub struct ContentStreamResult {
     /// or `/OCMD` indirect objects and wires them through the page's
     /// `/Resources /Properties` dict + the Catalog's `/OCProperties`.
     pub ocg_marker_refs: Vec<OcgMarkerRef>,
-    /// Form XObjects emitted for `DisplayElement::Group` and the content
-    /// portion of `DisplayElement::SoftMasked`. The Forms inherit the
-    /// page's `/Resources` (PDF 1.7 § 7.8.3), so they carry no `/Resources`
-    /// dict of their own; whatever fonts / images / ext-gstates the Form's
-    /// content stream references is already in the page-level
-    /// resource lists above.
+    /// Form XObjects emitted for `DisplayElement::Group` and the mask of
+    /// `DisplayElement::SoftMasked`. A Form's content is emitted by the same
+    /// Builder as the stream that invokes it, so its resources are in the
+    /// lists above, and `pdf_device.rs` gives each Form the stream's
+    /// `/Resources` rather than relying on the PDF 1.1 rule that a Form
+    /// without them takes the page's — which inside a pattern tile is not
+    /// where they are.
     pub form_xobjects: Vec<FormXObject>,
+}
+
+impl ContentStreamResult {
+    /// The stream's Optional-Content markers, then those of its patterns'
+    /// tiles, depth first.
+    pub fn ocg_markers(&self) -> Vec<&OcgMarkerRef> {
+        let mut out: Vec<&OcgMarkerRef> = self.ocg_marker_refs.iter().collect();
+        for pattern in &self.pattern_refs {
+            out.extend(pattern.tile.ocg_markers());
+        }
+        out
+    }
 }
 
 /// A PDF Form XObject — a self-contained content stream wrapped as an
 /// indirect object so it can be invoked via `/Xn Do`. stet emits one for
 /// each `DisplayElement::Group` and for the mask portion of
-/// `DisplayElement::SoftMasked`. The Form's resources are inherited from
-/// the enclosing page, so this struct carries only the per-form data.
+/// `DisplayElement::SoftMasked`. Its resources are those of the stream
+/// that invokes it, so this struct carries only the per-form data.
 pub struct FormXObject {
     /// Raw content stream bytes (before compression).
     pub content: Vec<u8>,
@@ -150,8 +163,10 @@ pub struct SoftMaskRef {
 
 /// Reference to a tiling pattern that needs a PDF Pattern XObject.
 pub struct PatternRef {
-    /// Pre-rendered display list for a single tile.
-    pub tile: DisplayList,
+    /// The tile's content stream and resources, built when the pattern is
+    /// first used — its own patterns' tiles in turn, so the whole tree of
+    /// streams exists before any resources are written.
+    pub tile: ContentStreamResult,
     /// Pattern matrix (pattern space → device space).
     pub pattern_matrix: Matrix,
     /// Bounding box of one tile in pattern space [llx, lly, urx, ury].
@@ -357,7 +372,42 @@ struct Builder<'tracker> {
     font_tracker: &'tracker mut FontTracker,
 }
 
+/// The clip state of an enclosing stream or `q … Q` scope, set aside while
+/// a nested one is emitted.
+struct ClipFrame {
+    depth: u32,
+    gs_stack: Vec<GState>,
+    scopes: Vec<Vec<stet_fonts::geometry::PsPath>>,
+    pending_replay: std::collections::VecDeque<stet_fonts::geometry::PsPath>,
+}
+
 impl<'tracker> Builder<'tracker> {
+    /// Start a nested stream — a Form's content, or a soft mask's scope —
+    /// with no clips open. Its clips cannot join a scope the enclosing
+    /// stream opened, and its `InitClip` cannot close one: that `Q` would
+    /// have no `q` in the Form, or would pop the enclosing scope's.
+    fn open_clip_frame(&mut self) -> ClipFrame {
+        ClipFrame {
+            depth: std::mem::take(&mut self.clip_depth),
+            gs_stack: std::mem::take(&mut self.clip_gs_stack),
+            scopes: std::mem::take(&mut self.clip_scopes),
+            pending_replay: std::mem::take(&mut self.pending_replay_clips),
+        }
+    }
+
+    /// Close the clips the nested stream left open — a Form's implicit
+    /// restore would balance them, but the stream is well-formed on its
+    /// own — and return to the enclosing stream's clip state.
+    fn close_clip_frame(&mut self, frame: ClipFrame) {
+        for _ in 0..self.clip_depth {
+            self.buf.extend(b"Q\n");
+        }
+        self.clip_depth = frame.depth;
+        self.clip_gs_stack = frame.gs_stack;
+        self.clip_scopes = frame.scopes;
+        self.pending_replay_clips = frame.pending_replay;
+    }
+
     fn new(
         font_tracker: &'tracker mut FontTracker,
         (page_w, page_h): (f64, f64),
@@ -940,6 +990,7 @@ impl<'tracker> Builder<'tracker> {
                     &mut self.pattern_map,
                     &mut self.pattern_cs_names,
                     &mut self.pattern_cs_set,
+                    self.font_tracker,
                 );
             }
             DisplayElement::Text { .. } => unreachable!(), // handled in prelude
@@ -947,28 +998,18 @@ impl<'tracker> Builder<'tracker> {
             DisplayElement::Group { elements, params } => {
                 // Build the Form XObject's content stream by swapping in
                 // a fresh buffer and recursing. Resources (images, fonts,
-                // ext_gstates, …) stay on the page-level Builder; the
-                // Form inherits the page's /Resources per PDF 1.7
-                // § 7.8.3, so we never have to duplicate them.
+                // ext_gstates, …) stay on this Builder, and the Form is
+                // given this stream's /Resources, so we never have to
+                // duplicate them.
                 let saved_buf = std::mem::take(&mut self.buf);
                 let saved_gs = std::mem::replace(&mut self.gs, GState::new());
-                let saved_clip_depth = std::mem::replace(&mut self.clip_depth, 0);
-                let saved_clip_gs_stack = std::mem::take(&mut self.clip_gs_stack);
+                let clips = self.open_clip_frame();
 
                 self.emit_list(elements);
 
-                // Close any clips still open at the end of the form's
-                // content stream — the implicit Q after the form's body
-                // would balance them out anyway, but explicit close keeps
-                // the stream well-formed under viewer inspection.
-                for _ in 0..self.clip_depth {
-                    self.buf.extend(b"Q\n");
-                }
-
+                self.close_clip_frame(clips);
                 let form_content = std::mem::replace(&mut self.buf, saved_buf);
                 self.gs = saved_gs;
-                self.clip_depth = saved_clip_depth;
-                self.clip_gs_stack = saved_clip_gs_stack;
 
                 let form_idx = self.form_xobjects.len();
                 let form_name = format!("X{}", form_idx);
@@ -1032,19 +1073,13 @@ impl<'tracker> Builder<'tracker> {
                 // alpha channel is read).
                 let saved_buf = std::mem::take(&mut self.buf);
                 let saved_gs = std::mem::replace(&mut self.gs, GState::new());
-                let saved_clip_depth = std::mem::replace(&mut self.clip_depth, 0);
-                let saved_clip_gs_stack = std::mem::take(&mut self.clip_gs_stack);
+                let clips = self.open_clip_frame();
 
                 self.emit_list(mask);
 
-                for _ in 0..self.clip_depth {
-                    self.buf.extend(b"Q\n");
-                }
-
+                self.close_clip_frame(clips);
                 let mask_content = std::mem::replace(&mut self.buf, saved_buf);
                 self.gs = saved_gs;
-                self.clip_depth = saved_clip_depth;
-                self.clip_gs_stack = saved_clip_gs_stack;
 
                 let mask_form_idx = self.form_xobjects.len();
                 let mask_group_entries: Vec<(Vec<u8>, PdfObj)> = vec![
@@ -1081,17 +1116,11 @@ impl<'tracker> Builder<'tracker> {
                 self.buf.extend(b"q\n");
                 writeln!(self.buf, "/GS{} gs", ext_gstate_idx).unwrap();
                 self.gs = GState::new();
-                let saved_clip_depth = std::mem::replace(&mut self.clip_depth, 0);
-                let saved_clip_gs_stack = std::mem::take(&mut self.clip_gs_stack);
+                let clips = self.open_clip_frame();
 
                 self.emit_list(content);
 
-                for _ in 0..self.clip_depth {
-                    self.buf.extend(b"Q\n");
-                }
-
-                self.clip_depth = saved_clip_depth;
-                self.clip_gs_stack = saved_clip_gs_stack;
+                self.close_clip_frame(clips);
                 self.buf.extend(b"Q\n");
                 self.gs = pre_q_gs;
             }
@@ -2127,6 +2156,7 @@ fn is_identity(m: &Matrix) -> bool {
 }
 
 /// Emit a tiling pattern fill: set pattern color space, select pattern, emit path + fill.
+#[expect(clippy::too_many_arguments)]
 fn emit_pattern_fill(
     buf: &mut Vec<u8>,
     params: &PatternFillParams,
@@ -2135,6 +2165,7 @@ fn emit_pattern_fill(
     pattern_map: &mut HashMap<u32, usize>,
     pattern_cs_names: &mut Vec<(String, PdfObj)>,
     pattern_cs_set: &mut HashSet<String>,
+    font_tracker: &mut FontTracker,
 ) {
     // Dedup by pattern_id — each makepattern call gets a unique ID,
     // so same-pattern reuses share one Pattern XObject.
@@ -2143,7 +2174,7 @@ fn emit_pattern_fill(
     } else {
         let idx = pattern_refs.len();
         pattern_refs.push(PatternRef {
-            tile: params.tile.clone(),
+            tile: build_tile_content_stream(&params.tile, font_tracker),
             pattern_matrix: params.pattern_matrix,
             bbox: params.bbox,
             xstep: params.xstep,

@@ -362,7 +362,7 @@ impl PdfDevice {
             self.embed_all_fonts(&mut writer, &font_tracker, fonts);
 
         // Collect document-level Optional-Content state from every
-        // page's OcgMarkerRef list and allocate one /OCG indirect per
+        // page's OcgMarkerRef list — its pattern tiles' too and allocate one /OCG indirect per
         // unique ocg_id. The Catalog's /OCProperties references all of
         // them; per-page /Properties dicts (built in build_page below)
         // map the page-local resource names (P0, P1, …) to these refs.
@@ -370,7 +370,7 @@ impl PdfDevice {
         let mut ocg_default_off: HashSet<u32> = HashSet::new();
         let mut ocg_order: Vec<u32> = Vec::new();
         for (result, _) in &page_results {
-            for marker in &result.ocg_marker_refs {
+            for marker in result.ocg_markers() {
                 let mut visit = |ocg_id: u32, default_visible: bool| {
                     if let std::collections::hash_map::Entry::Vacant(e) =
                         ocg_id_to_ref.entry(ocg_id)
@@ -486,7 +486,6 @@ impl PdfDevice {
                 page_refs[i],
                 result,
                 &font_obj_map,
-                &mut font_tracker,
                 &per_page_annots[i],
                 &per_page_overrides[i],
                 &ocg_id_to_ref,
@@ -710,27 +709,22 @@ impl PdfDevice {
         map
     }
 
-    /// Build PDF objects for a single page. The page's indirect object
-    /// number is pre-allocated by the caller (so annotations can target
-    /// the page before its dict is written), and the per-page
-    /// annotation refs are passed in for inclusion in the page's
-    /// `/Annots` array.
-    #[expect(clippy::too_many_arguments)]
-    fn build_page(
+    /// Write the resources of a content stream — a page's or a pattern
+    /// tile's — and return the indirect object of its resource dictionary.
+    ///
+    /// Every kind the stream's content and its forms name is written here,
+    /// for pages and tiles alike; a pattern's tile has its resources written
+    /// the same way, so patterns nest. The dictionary is allocated first so
+    /// the stream's forms can name it as their own `/Resources`.
+    fn write_resources(
         &self,
         writer: &mut PdfWriter,
-        page: &PageData,
-        pages_ref: u32,
-        page_ref: u32,
         result: &ContentStreamResult,
         font_obj_map: &HashMap<String, u32>,
-        font_tracker: &mut FontTracker,
-        annot_refs: &[u32],
-        overrides: &EffectivePageOverride,
         ocg_id_to_ref: &HashMap<u32, u32>,
-    ) -> Result<(), String> {
+    ) -> u32 {
         let ContentStreamResult {
-            content,
+            content: _,
             images,
             shading_refs,
             used_font_names,
@@ -746,12 +740,13 @@ impl PdfDevice {
             ocg_marker_refs,
             form_xobjects,
         } = result;
+        let resources_ref = writer.alloc_obj();
 
-        // Build image XObjects and Form XObjects (Group / SoftMasked
-        // content). Both share the page's /XObject resource dict; the
-        // Forms inherit /Resources from the page per PDF 1.7 § 7.8.3.
-        // Capture each form's indirect ref alongside the resource entries
-        // so the soft-mask /SMask patches below can wire them up.
+        // Image XObjects and Form XObjects (groups and soft-mask masks)
+        // share the /XObject dict. Each Form names this same resource dict:
+        // its content was emitted by the Builder that emitted the stream
+        // invoking it. Capture each form's indirect ref so the soft-mask
+        // /SMask patches below can wire them up.
         let mut xobject_entries: Vec<(Vec<u8>, PdfObj)> = Vec::new();
         for (i, img) in images.iter().enumerate() {
             let img_ref = self.build_image_xobject(writer, img);
@@ -759,7 +754,7 @@ impl PdfDevice {
         }
         let mut form_obj_refs: Vec<u32> = Vec::with_capacity(form_xobjects.len());
         for (i, form) in form_xobjects.iter().enumerate() {
-            let form_ref = build_form_xobject(writer, form);
+            let form_ref = build_form_xobject(writer, form, resources_ref);
             form_obj_refs.push(form_ref);
             xobject_entries.push((format!("X{}", i).into_bytes(), PdfObj::Ref(form_ref)));
         }
@@ -936,132 +931,13 @@ impl PdfDevice {
             resources.push((b"Properties".to_vec(), PdfObj::Dict(props_entries)));
         }
 
-        // Build Pattern XObject resources
+        // Pattern resources: each tile's content stream, with its own
+        // resources written by this same function.
         if !pattern_refs.is_empty() {
             let mut pattern_entries: Vec<(Vec<u8>, PdfObj)> = Vec::new();
             for (i, pat_ref) in pattern_refs.iter().enumerate() {
-                let tile_result =
-                    content_stream::build_tile_content_stream(&pat_ref.tile, font_tracker);
-
-                // Build tile resources
-                let mut tile_resources: Vec<(Vec<u8>, PdfObj)> = Vec::new();
-
-                // Tile images
-                if !tile_result.images.is_empty() {
-                    let mut tile_xobj: Vec<(Vec<u8>, PdfObj)> = Vec::new();
-                    for (j, img) in tile_result.images.iter().enumerate() {
-                        let img_ref = self.build_image_xobject(writer, img);
-                        tile_xobj.push((format!("Im{}", j).into_bytes(), PdfObj::Ref(img_ref)));
-                    }
-                    tile_resources.push((b"XObject".to_vec(), PdfObj::Dict(tile_xobj)));
-                }
-
-                // Tile shadings
-                if !tile_result.shading_refs.is_empty() {
-                    let mut tile_sh: Vec<(Vec<u8>, PdfObj)> = Vec::new();
-                    for (j, sh_ref) in tile_result.shading_refs.iter().enumerate() {
-                        let sh_obj = match sh_ref {
-                            ShadingRef::Axial(p) => shading_ops::build_axial_shading(writer, p),
-                            ShadingRef::Radial(p) => shading_ops::build_radial_shading(writer, p),
-                            ShadingRef::Mesh(p) => shading_ops::build_mesh_shading(writer, p),
-                            ShadingRef::Patch(p) => shading_ops::build_patch_shading(writer, p),
-                        };
-                        tile_sh.push((format!("Sh{}", j).into_bytes(), PdfObj::Ref(sh_obj)));
-                    }
-                    tile_resources.push((b"Shading".to_vec(), PdfObj::Dict(tile_sh)));
-                }
-
-                // Tile fonts
-                if !tile_result.used_font_names.is_empty() {
-                    let mut tile_fonts: Vec<(Vec<u8>, PdfObj)> = Vec::new();
-                    for name in &tile_result.used_font_names {
-                        if let Some(&obj_ref) = font_obj_map.get(name) {
-                            tile_fonts.push((name.clone().into_bytes(), PdfObj::Ref(obj_ref)));
-                        }
-                    }
-                    if !tile_fonts.is_empty() {
-                        tile_resources.push((b"Font".to_vec(), PdfObj::Dict(tile_fonts)));
-                    }
-                }
-
-                // Tile ExtGState
-                if !tile_result.ext_gstate_dicts.is_empty() {
-                    let mut tile_gs: Vec<(Vec<u8>, PdfObj)> = Vec::new();
-                    for (j, gs_dict) in tile_result.ext_gstate_dicts.iter().enumerate() {
-                        let mut entries: Vec<(Vec<u8>, PdfObj)> = gs_dict
-                            .entries
-                            .iter()
-                            .map(|(k, v)| {
-                                let obj = match v {
-                                    PdfObj::Bool(b) => PdfObj::Bool(*b),
-                                    PdfObj::Int(n) => PdfObj::Int(*n),
-                                    PdfObj::Real(r) => PdfObj::Real(*r),
-                                    PdfObj::Name(n) => PdfObj::Name(n.clone()),
-                                    PdfObj::Ref(r) => PdfObj::Ref(*r),
-                                    _ => PdfObj::Null,
-                                };
-                                (k.clone(), obj)
-                            })
-                            .collect();
-                        if let Some(tr) = tile_result
-                            .transfer_refs
-                            .iter()
-                            .find(|r| r.ext_gstate_idx == j)
-                        {
-                            let tr2_value = build_transfer_tr2(writer, &tr.tables, tr.is_color);
-                            entries.push((b"TR2".to_vec(), tr2_value));
-                        }
-                        if let Some(hr) = tile_result
-                            .halftone_refs
-                            .iter()
-                            .find(|r| r.ext_gstate_idx == j)
-                        {
-                            let ht_value = build_halftone_ht(writer, &hr.state);
-                            entries.push((b"HT".to_vec(), ht_value));
-                        }
-                        if let Some(br) = tile_result
-                            .bg_ucr_refs
-                            .iter()
-                            .find(|r| r.ext_gstate_idx == j)
-                        {
-                            if let Some(ref bg) = br.state.bg {
-                                let func_ref = build_type0_function(writer, bg);
-                                entries.push((b"BG2".to_vec(), PdfObj::Ref(func_ref)));
-                            }
-                            if let Some(ref ucr) = br.state.ucr {
-                                let func_ref = build_type0_function_signed(writer, ucr);
-                                entries.push((b"UCR2".to_vec(), PdfObj::Ref(func_ref)));
-                            }
-                        }
-                        let gs_ref = writer.add_object(&PdfObj::Dict(entries));
-                        tile_gs.push((format!("GS{}", j).into_bytes(), PdfObj::Ref(gs_ref)));
-                    }
-                    tile_resources.push((b"ExtGState".to_vec(), PdfObj::Dict(tile_gs)));
-                }
-
-                // Tile color spaces (Separation/DeviceN + ICCBased)
-                if !tile_result.color_spaces.is_empty() || !tile_result.icc_color_spaces.is_empty()
-                {
-                    let mut tile_cs: Vec<(Vec<u8>, PdfObj)> = Vec::new();
-                    for (name, spot_cs) in &tile_result.color_spaces {
-                        let cs_obj = build_spot_colorspace(spot_cs, writer);
-                        tile_cs.push((name.clone().into_bytes(), cs_obj));
-                    }
-                    for (name, icc_cs) in &tile_result.icc_color_spaces {
-                        let icc_ref = writer.add_stream(
-                            vec![(b"N".to_vec(), PdfObj::Int(icc_cs.n as i64))],
-                            &icc_cs.profile_data,
-                            true,
-                        );
-                        tile_cs.push((
-                            name.clone().into_bytes(),
-                            PdfObj::Array(vec![PdfObj::name("ICCBased"), PdfObj::Ref(icc_ref)]),
-                        ));
-                    }
-                    tile_resources.push((b"ColorSpace".to_vec(), PdfObj::Dict(tile_cs)));
-                }
-
-                // Build Pattern stream object
+                let tile_resources =
+                    self.write_resources(writer, &pat_ref.tile, font_obj_map, ocg_id_to_ref);
                 let m = &pat_ref.pattern_matrix;
                 let pat_dict = vec![
                     (b"Type".to_vec(), PdfObj::name("Pattern")),
@@ -1095,18 +971,40 @@ impl PdfDevice {
                             PdfObj::Real(m.ty),
                         ]),
                     ),
-                    (b"Resources".to_vec(), PdfObj::Dict(tile_resources)),
+                    (b"Resources".to_vec(), PdfObj::Ref(tile_resources)),
                 ];
-
-                let pat_obj = writer.add_stream(pat_dict, &tile_result.content, true);
+                let pat_obj = writer.add_stream(pat_dict, &pat_ref.tile.content, true);
                 pattern_entries.push((format!("P{}", i).into_bytes(), PdfObj::Ref(pat_obj)));
             }
-
             resources.push((b"Pattern".to_vec(), PdfObj::Dict(pattern_entries)));
         }
 
+        writer.set_object(resources_ref, &PdfObj::Dict(resources));
+        resources_ref
+    }
+
+    /// Build PDF objects for a single page. The page's indirect object
+    /// number is pre-allocated by the caller (so annotations can target
+    /// the page before its dict is written), and the per-page
+    /// annotation refs are passed in for inclusion in the page's
+    /// `/Annots` array.
+    #[expect(clippy::too_many_arguments)]
+    fn build_page(
+        &self,
+        writer: &mut PdfWriter,
+        page: &PageData,
+        pages_ref: u32,
+        page_ref: u32,
+        result: &ContentStreamResult,
+        font_obj_map: &HashMap<String, u32>,
+        annot_refs: &[u32],
+        overrides: &EffectivePageOverride,
+        ocg_id_to_ref: &HashMap<u32, u32>,
+    ) -> Result<(), String> {
+        let resources_ref = self.write_resources(writer, result, font_obj_map, ocg_id_to_ref);
+
         // Content stream
-        let content_ref = writer.add_stream(Vec::new(), content, true);
+        let content_ref = writer.add_stream(Vec::new(), &result.content, true);
 
         // Page object
         let mut page_entries = vec![
@@ -1122,7 +1020,7 @@ impl PdfDevice {
                 ]),
             ),
             (b"Contents".to_vec(), PdfObj::Ref(content_ref)),
-            (b"Resources".to_vec(), PdfObj::Dict(resources)),
+            (b"Resources".to_vec(), PdfObj::Ref(resources_ref)),
         ];
         // Page-level transparency group. PDF/X-1a sources set a
         // /Group << /S /Transparency /CS DeviceCMYK >> on the page so
@@ -2217,10 +2115,16 @@ fn collect_docinfo(ctx: &Context) -> stet_graphics::document_structure::DocInfoR
 }
 
 /// Build a PDF Form XObject indirect from a captured Form content stream.
-/// The Form has no /Resources entry — it inherits the enclosing page's
-/// resources (PDF 1.7 § 7.8.3), which is how stet keeps the writer's
-/// per-page resource lists shared across the page and its nested groups.
-fn build_form_xobject(writer: &mut PdfWriter, form: &crate::content_stream::FormXObject) -> u32 {
+/// Its `/Resources` is `resources`, the dictionary of the stream invoking
+/// it: one Builder emits both, so they share one resource namespace. It is
+/// named rather than left to the PDF 1.1 rule that a Form without
+/// `/Resources` takes the page's (ISO 32000-1 § 7.8.3; deprecated in
+/// 32000-2), which inside a pattern tile is not where they are.
+fn build_form_xobject(
+    writer: &mut PdfWriter,
+    form: &crate::content_stream::FormXObject,
+    resources: u32,
+) -> u32 {
     let mut entries: Vec<(Vec<u8>, PdfObj)> = vec![
         (b"Type".to_vec(), PdfObj::name("XObject")),
         (b"Subtype".to_vec(), PdfObj::name("Form")),
@@ -2242,6 +2146,7 @@ fn build_form_xobject(writer: &mut PdfWriter, form: &crate::content_stream::Form
             .collect();
         entries.push((b"Group".to_vec(), PdfObj::Dict(entries_clone)));
     }
+    entries.push((b"Resources".to_vec(), PdfObj::Ref(resources)));
     writer.add_stream(entries, &form.content, true)
 }
 
