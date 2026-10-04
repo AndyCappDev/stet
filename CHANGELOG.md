@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `..Default::default()`); as with `GraphicsState.overprint_mode` in
   0.8.3, the policy is that outside code reads these structs rather than
   writes them.
+- **`color_lut_components` on `MeshShadingParams` and
+  `PatchShadingParams`**: the shading's function sampled at the
+  `color_lut` inputs as components of the shading's own colour space —
+  gray, spot tints, CMYK — before conversion, for writers that emit the
+  function again. Struct literals must add it (or use
+  `..Default::default()`), under the same policy.
 - **CMYK conversions that take a rendering intent:**
   `IccCache::convert_cmyk_with_intent`, `convert_cmyk_readonly_with_intent`
   and `DeviceColor::from_cmyk_icc_with_intent` in `stet-graphics`.
@@ -580,6 +586,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     rather than onto the page.
   - `setpagedevice` back from the null device keeps counting pages, as in
     Ghostscript; it started again from 0.
+- **PDF output keeps the function of a mesh or patch shading.** For a
+  Type 4–7 shading whose colours come from a `/Function`, the writer wrote
+  each vertex's function input as its colour and dropped the function. A
+  gray or spot shading came out as a ramp of that input — a flat 0.8 gray
+  as black to white, a soft mask that should pass everything as a radial
+  ball — and in any other colour space the function's curve between
+  vertices was lost, the colours written converted to RGB. The shading now
+  names its function again, sampled in its own colour space, so a spot
+  shading keeps its tints.
 - **PostScript → PDF no longer crashes on fonts a `restore` reclaimed**
   (`--device pdf` and `Interpreter::render_to_pdf`). PDF output builds the
   document at the end of the job and read each font out of the

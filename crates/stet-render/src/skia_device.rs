@@ -13150,6 +13150,7 @@ fn render_patch_shading(
             overprint_mode: params.overprint_mode,
             painted_channels: params.painted_channels,
             color_lut: params.color_lut.clone(),
+            color_lut_components: params.color_lut_components.clone(),
             alpha: params.alpha,
             blend_mode: params.blend_mode,
             alpha_is_shape: params.alpha_is_shape,

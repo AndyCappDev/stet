@@ -350,6 +350,19 @@ DeviceRGB, DeviceCMYK, or ICCBased with embedded profile data). Gradient
 color stops are pre-sampled from PostScript functions. Mesh and patch data
 includes per-vertex colors and coordinates in device space.
 
+A mesh or patch shading whose colours come from a single-input function
+(PDF `/Function`) carries `color_lut`, the function sampled at 256 inputs
+over `[0, 1]` and converted to `DeviceColor`. Each vertex's
+`raw_components[0]` (a patch corner's `raw_colors[i][0]`) is then the
+function's input, normalised to `[0, 1]`, not a colour: a renderer
+interpolates the input and looks the colour up, so the function's curve
+holds between vertices. `color_lut_components` holds the same samples as
+components of the shading's `color_space`, before conversion — a gray
+shading's gray, a spot shading's tints — for a writer that emits the
+function again, as stet's PDF output does. It is `None` when the colour
+space stands in for one stet does not carry; a writer then has only the
+converted colours.
+
 Each also carries `transfer`, the transfer function in force, which the
 renderer applies to each colour the shading evaluates (see "Print
 Production State"), and `rendering_intent` (see "Rendering intent"

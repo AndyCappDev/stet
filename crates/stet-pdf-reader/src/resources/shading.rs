@@ -419,6 +419,7 @@ fn handle_mesh(
     // PDF spec says vertex colors are linearly interpolated, but for non-linear
     // functions (e.g., stitching with thresholds), interpolating raw function
     // inputs per-pixel then applying the function produces correct results.
+    let mut lut_components = None;
     let color_lut = if let Some(ref func) = function {
         if n_comps == 1 {
             // Get the color decode range (the last pair in the Decode array)
@@ -441,6 +442,8 @@ fn handle_mesh(
                 );
                 lut.push(color);
             }
+
+            lut_components = shading_lut_components(func, resolved_cs, &cs, d_min, d_max, &lut);
 
             // Normalize vertex raw values to [0, 1] for LUT indexing
             for t in &mut triangles {
@@ -539,6 +542,7 @@ fn handle_mesh(
             overprint_mode: gstate.overprint_mode,
             painted_channels: painted_channels_for_cs(resolved_cs),
             color_lut,
+            color_lut_components: lut_components,
             alpha: gstate.fill_alpha,
             blend_mode: gstate.blend_mode,
             alpha_is_shape: gstate.alpha_is_shape,
@@ -603,6 +607,7 @@ fn handle_patches(
     // (matching the mesh shading approach) so non-linear functions (e.g. N=3)
     // produce correct color transitions.  Corner raw_colors keep the
     // normalized function input for bilinear interpolation in the renderer.
+    let mut lut_components = None;
     let color_lut = if let Some(ref func) = function {
         if n_comps == 1 {
             let d_min = decode.get(4).copied().unwrap_or(0.0);
@@ -623,6 +628,8 @@ fn handle_patches(
                 );
                 lut.push(color);
             }
+
+            lut_components = shading_lut_components(func, resolved_cs, &cs, d_min, d_max, &lut);
 
             // Normalize vertex raw values to [0, 1] for LUT indexing
             for p in &mut patches {
@@ -692,6 +699,7 @@ fn handle_patches(
             overprint_mode: gstate.overprint_mode,
             painted_channels: painted_channels_for_cs(resolved_cs),
             color_lut,
+            color_lut_components: lut_components,
             alpha: gstate.fill_alpha,
             blend_mode: gstate.blend_mode,
             alpha_is_shape: gstate.alpha_is_shape,
@@ -895,6 +903,55 @@ fn resolve_shading_resolved_cs(dict: &PdfDict, resolver: &Resolver) -> ResolvedC
 /// Convert ResolvedColorSpace to ShadingColorSpace for the display list.
 /// ICCBased colors are already converted through the profile at stop/pixel level,
 /// so we map them to the equivalent device space for the renderer.
+/// The shading function at each `color_lut` input, as components of the
+/// display list's colour space `cs`, so a writer can emit the function
+/// again: the function's own outputs where `cs` is the source's space,
+/// the converted colours where `cs` is the DeviceRGB stand-in for one
+/// stet does not carry. `None` when neither applies.
+fn shading_lut_components(
+    func: &PdfFunction,
+    resolved_cs: &ResolvedColorSpace,
+    cs: &ShadingColorSpace,
+    d_min: f64,
+    d_max: f64,
+    lut: &[stet_graphics::color::DeviceColor],
+) -> Option<Arc<Vec<Vec<f64>>>> {
+    let n = cs.num_components();
+    let last = lut.len().saturating_sub(1).max(1) as f64;
+    let samples: Vec<Vec<f64>> = if shading_cs_is_source(resolved_cs) {
+        (0..lut.len())
+            .map(|i| func.evaluate(&[d_min + i as f64 / last * (d_max - d_min)]))
+            .collect()
+    } else if matches!(cs, ShadingColorSpace::DeviceRGB) {
+        lut.iter().map(|c| vec![c.r, c.g, c.b]).collect()
+    } else {
+        return None;
+    };
+    if samples.iter().any(|s| s.len() < n) {
+        return None;
+    }
+    Some(Arc::new(
+        samples.into_iter().map(|s| s[..n].to_vec()).collect(),
+    ))
+}
+
+/// Whether [`resolved_cs_to_shading_cs`] keeps `cs` itself — its
+/// components mean the same in the display list's colour space — rather
+/// than standing DeviceRGB or DeviceCMYK in for it.
+fn shading_cs_is_source(cs: &ResolvedColorSpace) -> bool {
+    match cs {
+        ResolvedColorSpace::DeviceGray
+        | ResolvedColorSpace::DeviceRGB
+        | ResolvedColorSpace::DeviceCMYK
+        | ResolvedColorSpace::ICCBased { .. } => true,
+        ResolvedColorSpace::Separation { alt, tint_fn, .. }
+        | ResolvedColorSpace::DeviceN { alt, tint_fn, .. } => {
+            tint_fn.is_some() && matches!(**alt, ResolvedColorSpace::DeviceCMYK)
+        }
+        _ => false,
+    }
+}
+
 fn resolved_cs_to_shading_cs(cs: &ResolvedColorSpace) -> ShadingColorSpace {
     match cs {
         ResolvedColorSpace::DeviceGray => ShadingColorSpace::DeviceGray,

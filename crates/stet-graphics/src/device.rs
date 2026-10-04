@@ -1065,6 +1065,14 @@ pub struct MeshShadingParams {
     /// function input. The renderer interpolates this per-pixel, then
     /// indexes the LUT instead of Gouraud-interpolating DeviceColor.
     pub color_lut: Option<Arc<Vec<DeviceColor>>>,
+    /// The shading's function at the same inputs as `color_lut`, as
+    /// components of `color_space` — before any conversion, so a spot or
+    /// gray shading keeps its own values. For writers that re-emit the
+    /// function, as stet's PDF output does; renderers use `color_lut`.
+    /// Present only with `color_lut`, each entry
+    /// `color_space.num_components()` long; when absent, a writer has only
+    /// the converted vertex colours.
+    pub color_lut_components: Option<Arc<Vec<Vec<f64>>>>,
     /// Fill alpha from graphics state (0.0–1.0). Default 1.0.
     pub alpha: f64,
     /// Blend mode (0=Normal, …, 15=Luminosity). Default 0.
@@ -1105,6 +1113,8 @@ pub struct PatchShadingParams {
     /// function input. The renderer interpolates this per-pixel, then
     /// indexes the LUT for per-pixel non-linear function evaluation.
     pub color_lut: Option<Arc<Vec<DeviceColor>>>,
+    /// See [`MeshShadingParams::color_lut_components`].
+    pub color_lut_components: Option<Arc<Vec<Vec<f64>>>>,
     /// Fill alpha from graphics state (0.0–1.0). Default 1.0.
     pub alpha: f64,
     /// Blend mode (0=Normal, …, 15=Luminosity). Default 0.
@@ -1358,6 +1368,7 @@ impl Default for MeshShadingParams {
             overprint_mode: 0,
             painted_channels: 0,
             color_lut: None,
+            color_lut_components: None,
             alpha: 1.0,
             blend_mode: 0,
             alpha_is_shape: false,
@@ -1378,6 +1389,7 @@ impl Default for PatchShadingParams {
             overprint_mode: 0,
             painted_channels: 0,
             color_lut: None,
+            color_lut_components: None,
             alpha: 1.0,
             blend_mode: 0,
             alpha_is_shape: false,

@@ -235,6 +235,11 @@ pub fn build_radial_shading(writer: &mut PdfWriter, params: &RadialShadingParams
 pub fn build_mesh_shading(writer: &mut PdfWriter, params: &MeshShadingParams) -> u32 {
     let n_comps = params.color_space.num_components();
     let cs_obj = shading_color_space_to_pdf(writer, &params.color_space);
+    let function = lut_function(
+        params.color_lut.is_some(),
+        params.color_lut_components.as_deref(),
+        n_comps,
+    );
 
     if params.triangles.is_empty() {
         return writer.add_object(&PdfObj::Dict(vec![
@@ -273,8 +278,14 @@ pub fn build_mesh_shading(writer: &mut PdfWriter, params: &MeshShadingParams) ->
             data.extend(encode_coord_16(v.x, x_min, x_max).to_be_bytes());
             // Y coordinate (16-bit)
             data.extend(encode_coord_16(v.y, y_min, y_max).to_be_bytes());
-            // Color components (8-bit each)
-            encode_color_components(&v.raw_components, &v.color, n_comps, &mut data);
+            encode_vertex_color(
+                &v.raw_components,
+                &v.color,
+                n_comps,
+                params.color_lut.is_some(),
+                function.is_some(),
+                &mut data,
+            );
         }
     }
 
@@ -285,19 +296,27 @@ pub fn build_mesh_shading(writer: &mut PdfWriter, params: &MeshShadingParams) ->
         PdfObj::Real(y_min),
         PdfObj::Real(y_max),
     ];
-    for _ in 0..n_comps {
+    // A vertex carries the function's input, or the colour's components.
+    for _ in 0..if function.is_some() { 1 } else { n_comps } {
         decode_array.push(PdfObj::Int(0));
         decode_array.push(PdfObj::Int(1));
     }
 
-    let dict_entries = vec![
+    let mut dict_entries = vec![
         (b"ShadingType".to_vec(), PdfObj::Int(4)),
         (b"ColorSpace".to_vec(), cs_obj),
         (b"BitsPerCoordinate".to_vec(), PdfObj::Int(16)),
-        (b"BitsPerComponent".to_vec(), PdfObj::Int(8)),
+        (
+            b"BitsPerComponent".to_vec(),
+            PdfObj::Int(if function.is_some() { 16 } else { 8 }),
+        ),
         (b"BitsPerFlag".to_vec(), PdfObj::Int(8)),
         (b"Decode".to_vec(), PdfObj::Array(decode_array)),
     ];
+    if let Some(samples) = function {
+        let f = build_lut_function(writer, samples, n_comps);
+        dict_entries.push((b"Function".to_vec(), PdfObj::Ref(f)));
+    }
 
     writer.add_stream(dict_entries, &data, true)
 }
@@ -307,6 +326,11 @@ pub fn build_mesh_shading(writer: &mut PdfWriter, params: &MeshShadingParams) ->
 pub fn build_patch_shading(writer: &mut PdfWriter, params: &PatchShadingParams) -> u32 {
     let n_comps = params.color_space.num_components();
     let cs_obj = shading_color_space_to_pdf(writer, &params.color_space);
+    let function = lut_function(
+        params.color_lut.is_some(),
+        params.color_lut_components.as_deref(),
+        n_comps,
+    );
 
     if params.patches.is_empty() {
         return writer.add_object(&PdfObj::Dict(vec![
@@ -353,7 +377,14 @@ pub fn build_patch_shading(writer: &mut PdfWriter, params: &PatchShadingParams) 
         }
         // Corner colors (4 corners × N components)
         for (i, color) in patch.colors.iter().enumerate() {
-            encode_color_components(&patch.raw_colors[i], color, n_comps, &mut data);
+            encode_vertex_color(
+                &patch.raw_colors[i],
+                color,
+                n_comps,
+                params.color_lut.is_some(),
+                function.is_some(),
+                &mut data,
+            );
         }
     }
 
@@ -364,19 +395,27 @@ pub fn build_patch_shading(writer: &mut PdfWriter, params: &PatchShadingParams) 
         PdfObj::Real(y_min),
         PdfObj::Real(y_max),
     ];
-    for _ in 0..n_comps {
+    // A vertex carries the function's input, or the colour's components.
+    for _ in 0..if function.is_some() { 1 } else { n_comps } {
         decode_array.push(PdfObj::Int(0));
         decode_array.push(PdfObj::Int(1));
     }
 
-    let dict_entries = vec![
+    let mut dict_entries = vec![
         (b"ShadingType".to_vec(), PdfObj::Int(shading_type)),
         (b"ColorSpace".to_vec(), cs_obj),
         (b"BitsPerCoordinate".to_vec(), PdfObj::Int(16)),
-        (b"BitsPerComponent".to_vec(), PdfObj::Int(8)),
+        (
+            b"BitsPerComponent".to_vec(),
+            PdfObj::Int(if function.is_some() { 16 } else { 8 }),
+        ),
         (b"BitsPerFlag".to_vec(), PdfObj::Int(8)),
         (b"Decode".to_vec(), PdfObj::Array(decode_array)),
     ];
+    if let Some(samples) = function {
+        let f = build_lut_function(writer, samples, n_comps);
+        dict_entries.push((b"Function".to_vec(), PdfObj::Ref(f)));
+    }
 
     writer.add_stream(dict_entries, &data, true)
 }
@@ -507,6 +546,69 @@ fn get_stop_components(stop: &ColorStop, n_comps: usize, use_source: bool) -> Ve
 
 /// Encode color components as 8-bit values into the output buffer.
 /// Uses raw_components if available, falls back to DeviceColor.
+/// The samples of the function a mesh or patch shading's colours come
+/// from, when the display list kept them in the shading's colour space
+/// (`color_lut_components`): each vertex then carries the function's
+/// input, and the shading names the function, as its source did.
+fn lut_function(
+    has_lut: bool,
+    samples: Option<&Vec<Vec<f64>>>,
+    n_comps: usize,
+) -> Option<&[Vec<f64>]> {
+    let samples = samples.filter(|_| has_lut)?;
+    (samples.len() >= 2 && samples.iter().all(|s| s.len() == n_comps)).then_some(samples.as_slice())
+}
+
+/// Write a vertex's colour: the function input `raw[0]` as 16 bits when
+/// the shading names its function, else the colour's components. With a
+/// `color_lut` but no function to name, `raw` holds the function input,
+/// not components, so the converted colour is written instead.
+fn encode_vertex_color(
+    raw: &[f64],
+    color: &stet_graphics::color::DeviceColor,
+    n_comps: usize,
+    has_lut: bool,
+    function: bool,
+    data: &mut Vec<u8>,
+) {
+    if function {
+        let t = raw.first().copied().unwrap_or(0.0);
+        data.extend((((t.clamp(0.0, 1.0)) * 65535.0).round() as u16).to_be_bytes());
+    } else if has_lut {
+        encode_color_components(&[], color, n_comps, data);
+    } else {
+        encode_color_components(raw, color, n_comps, data);
+    }
+}
+
+/// A shading's function, `samples` taken at evenly spaced inputs over
+/// `[0, 1]`, as a sampled (Type 0) function with 16-bit samples.
+fn build_lut_function(writer: &mut PdfWriter, samples: &[Vec<f64>], n_comps: usize) -> u32 {
+    let mut data = Vec::with_capacity(samples.len() * n_comps * 2);
+    for sample in samples {
+        for &c in sample {
+            data.extend((((c.clamp(0.0, 1.0)) * 65535.0).round() as u16).to_be_bytes());
+        }
+    }
+    let range = (0..n_comps)
+        .flat_map(|_| [PdfObj::Int(0), PdfObj::Int(1)])
+        .collect();
+    let dict_entries = vec![
+        (b"FunctionType".to_vec(), PdfObj::Int(0)),
+        (
+            b"Domain".to_vec(),
+            PdfObj::Array(vec![PdfObj::Int(0), PdfObj::Int(1)]),
+        ),
+        (b"Range".to_vec(), PdfObj::Array(range)),
+        (
+            b"Size".to_vec(),
+            PdfObj::Array(vec![PdfObj::Int(samples.len() as i64)]),
+        ),
+        (b"BitsPerSample".to_vec(), PdfObj::Int(16)),
+    ];
+    writer.add_stream(dict_entries, &data, true)
+}
+
 fn encode_color_components(
     raw: &[f64],
     color: &stet_graphics::color::DeviceColor,
