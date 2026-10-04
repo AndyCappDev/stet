@@ -60,7 +60,9 @@ fn ctx(keeps_fonts: bool) -> (Context, Rc<RefCell<Vec<DisplayList>>>) {
     stet_ops::build_system_dict(&mut ctx);
     ctx.exec_sync_fn = Some(stet_engine::eval::exec_sync);
     let fonts = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../stet/resources/Font");
-    ctx.font_resource_path = Some(fonts.canonicalize().unwrap().to_string_lossy().into_owned());
+    // Not canonicalized: on Windows that gives a `\\?\` verbatim path, in
+    // which the `/` the font loader joins file names with is not a separator.
+    ctx.font_resource_path = Some(fonts.to_string_lossy().into_owned());
     let pages = Rc::new(RefCell::new(Vec::new()));
     ctx.device = Some(Box::new(Pages {
         keeps_fonts,
