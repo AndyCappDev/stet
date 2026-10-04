@@ -78,13 +78,17 @@ in — the rest of the command is the same for all four:
 ```bash
 ASSET=stet-0.8.4-x86_64-unknown-linux-musl.tar.gz     # see the table above
 
-curl -L "https://github.com/AndyCappDev/stet/releases/download/v0.8.4/$ASSET" | tar xz
+curl -fL "https://github.com/AndyCappDev/stet/releases/download/v0.8.4/$ASSET" | tar xz
 cd "${ASSET%.tar.gz}"
 ./stet --version
 ```
 
 On macOS, `uname -m` tells you which to take: `arm64` → `aarch64-apple-darwin`,
 `x86_64` → `x86_64-apple-darwin`.
+
+`-f` makes `curl` fail on a missing file: a mistyped name, or a release not
+yet published, stops with `curl: (22) … 404` instead of handing GitHub's
+"Not Found" page to `tar`, which reports only "not in gzip format".
 
 **Use `curl` on macOS rather than a browser.** The binaries are unsigned, and
 Gatekeeper quarantines whatever a browser downloads, so a double-click gives
@@ -98,7 +102,7 @@ different arguments — so call `curl.exe` explicitly. Windows 10 1803 and later
 ship both it and `tar`:
 
 ```powershell
-curl.exe -L -O https://github.com/AndyCappDev/stet/releases/download/v0.8.4/stet-0.8.4-x86_64-pc-windows-msvc.zip
+curl.exe -fL -O https://github.com/AndyCappDev/stet/releases/download/v0.8.4/stet-0.8.4-x86_64-pc-windows-msvc.zip
 tar -xf stet-0.8.4-x86_64-pc-windows-msvc.zip
 cd stet-0.8.4-x86_64-pc-windows-msvc
 .\stet.exe --version
@@ -117,8 +121,8 @@ file first:
 ASSET=stet-0.8.4-x86_64-unknown-linux-musl.tar.gz     # see the table above
 URL=https://github.com/AndyCappDev/stet/releases/download/v0.8.4/
 
-curl -L -O "$URL$ASSET"
-curl -L -O "${URL}SHA256SUMS"
+curl -fL -O "$URL$ASSET"
+curl -fL -O "${URL}SHA256SUMS"
 grep "$ASSET" SHA256SUMS | sha256sum -c -             # prints "<file>: OK"
 tar xzf "$ASSET"
 ```
@@ -131,7 +135,7 @@ case-folded:
 
 ```powershell
 $name = "stet-0.8.4-x86_64-pc-windows-msvc.zip"
-curl.exe -L -O https://github.com/AndyCappDev/stet/releases/download/v0.8.4/SHA256SUMS
+curl.exe -fL -O https://github.com/AndyCappDev/stet/releases/download/v0.8.4/SHA256SUMS
 $want = ((Select-String -Path SHA256SUMS -SimpleMatch $name).Line -split '\s+')[0]
 $got  = (Get-FileHash $name -Algorithm SHA256).Hash.ToLower()
 if ($got -eq $want) { "OK" } else { "MISMATCH" }

@@ -15,7 +15,7 @@ verified"). Installing with `curl` avoids it entirely, because the quarantine
 attribute is set by the downloading application and `curl` does not set one:
 
 ```
-curl -L <asset-url> | tar xz
+curl -fL <asset-url> | tar xz
 ```
 
 If you already downloaded it in a browser, clear the flag with
