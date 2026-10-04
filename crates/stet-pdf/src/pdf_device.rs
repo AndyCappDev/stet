@@ -25,10 +25,12 @@ use crate::shading_ops;
 /// at finalize time when Context is available for font width extraction.
 struct PageData {
     display_list: DisplayList,
+    /// The page — the MediaBox — in points.
     width_pts: f64,
     height_pts: f64,
-    page_w: u32,
-    page_h: u32,
+    /// The device space the display list is drawn in, in device units.
+    device_w: f64,
+    device_h: f64,
     dpi: f64,
     trim_box: Option<(f64, f64, f64, f64)>,
 }
@@ -39,6 +41,15 @@ pub struct PdfDevice {
     pages: Vec<PageData>,
     page_w: u32,
     page_h: u32,
+    /// The device space the next page's display list is drawn in, in device
+    /// units: `page_w` × `page_h` for the interpreter, whose default matrix
+    /// maps the page onto whole pixels; the exact page for a display list
+    /// drawn at the page's own size.
+    device_size: (f64, f64),
+    /// The next page in points, written as its MediaBox. Not derived from
+    /// the pixels: a page that is not a whole number of them at this
+    /// resolution — A4 at 300 dpi — would be rounded.
+    page_size_pts: (f64, f64),
     dpi: f64,
     output_path: Option<String>,
     pending_trim_box: Option<(f64, f64, f64, f64)>,
@@ -69,6 +80,8 @@ impl PdfDevice {
             pages: Vec::new(),
             page_w: width,
             page_h: height,
+            device_size: (width as f64, height as f64),
+            page_size_pts: (width as f64 * 72.0 / dpi, height as f64 * 72.0 / dpi),
             dpi,
             output_path: None,
             pending_trim_box: None,
@@ -125,14 +138,33 @@ impl PdfDevice {
         self.pending_trim_box = Some((llx, lly, urx, ury));
     }
 
-    /// Set the page dimensions used for the next page. The PS interpreter
-    /// path drives this implicitly through `setpagedevice` + device-factory
-    /// re-creation; direct API users (e.g. PDF→PDF rewriting) call this
-    /// before each `replay_and_show` so per-page sizes can vary across
-    /// pages in the same output PDF.
+    /// Set the page dimensions used for the next page, in device pixels.
+    /// The PS interpreter path drives this through `setpagedevice`
+    /// ([`OutputDevice::resize_page`]); direct API users call this, or
+    /// [`set_page_size_in_points`](Self::set_page_size_in_points), before
+    /// each `replay_and_show` so per-page sizes can vary across pages in
+    /// the same output PDF. The page is `width` × `height` × 72 / dpi
+    /// points.
     pub fn set_page_size(&mut self, width: u32, height: u32) {
         self.page_w = width;
         self.page_h = height;
+        self.device_size = (width as f64, height as f64);
+        self.page_size_pts = (
+            width as f64 * 72.0 / self.dpi,
+            height as f64 * 72.0 / self.dpi,
+        );
+    }
+
+    /// Set the next page's size in points, for a display list drawn at
+    /// exactly that size (`width` × `height` × dpi / 72 device units, not
+    /// rounded to pixels) — as `stet_pdf_reader` renders a page. The MediaBox
+    /// is the page itself, rather than the page rounded to whole pixels.
+    pub fn set_page_size_in_points(&mut self, width: f64, height: f64) {
+        let scale = self.dpi / 72.0;
+        self.device_size = (width * scale, height * scale);
+        self.page_w = (width * scale).round().max(1.0) as u32;
+        self.page_h = (height * scale).round().max(1.0) as u32;
+        self.page_size_pts = (width, height);
     }
 
     /// Set an ICC output profile.
@@ -316,8 +348,8 @@ impl PdfDevice {
         for page in &self.pages {
             let result = content_stream::build_content_stream(
                 &page.display_list,
-                page.page_w,
-                page.page_h,
+                (page.device_w, page.device_h),
+                (page.width_pts, page.height_pts),
                 page.dpi,
                 &mut font_tracker,
                 self.emit_page_box_clip,
@@ -1633,9 +1665,12 @@ impl OutputDevice for PdfDevice {
     }
 
     /// The document holds every page of the job, so a new page size resizes
-    /// this device rather than replacing it.
-    fn resize_page(&mut self, media: (u32, u32), _page_size: (f64, f64)) -> bool {
+    /// this device rather than replacing it. The interpreter draws on the
+    /// `media` pixels; the MediaBox is `page_size`, unrounded.
+    fn resize_page(&mut self, media: (u32, u32), page_size: (f64, f64)) -> bool {
         (self.page_w, self.page_h) = media;
+        self.device_size = (media.0 as f64, media.1 as f64);
+        self.page_size_pts = page_size;
         true
     }
 
@@ -1662,14 +1697,12 @@ impl OutputDevice for PdfDevice {
             self.output_path = Some(format!("{}.pdf", base));
         }
 
-        let scale = 72.0 / self.dpi;
-
         self.pages.push(PageData {
             display_list: list,
-            width_pts: self.page_w as f64 * scale,
-            height_pts: self.page_h as f64 * scale,
-            page_w: self.page_w,
-            page_h: self.page_h,
+            width_pts: self.page_size_pts.0,
+            height_pts: self.page_size_pts.1,
+            device_w: self.device_size.0,
+            device_h: self.device_size.1,
             dpi: self.dpi,
             trim_box: self.pending_trim_box.take(),
         });

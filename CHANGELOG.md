@@ -96,6 +96,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the device factory. A device that holds the job's pages until the end
   takes the size and returns true; the default, false, keeps the old
   behaviour. A new device from the factory is told its size the same way.
+- **`PdfDevice::set_page_size_in_points`** in `stet-pdf`: the next page's
+  size in points, for a display list drawn at exactly that size, as
+  `stet_pdf_reader` renders a page. `set_page_size` takes whole device
+  pixels, which rounds a page such as A4.
 
 ### Deprecated
 
@@ -531,6 +535,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pdftops` document 3 pages of 264. `Interpreter::render_to_pdf` lost
   them the same way. An EPS also lost the TrimBox of its bounding box if
   its program called `setpagedevice`.
+- **PDF output writes each page's exact size.** The MediaBox was the page
+  rounded to the device's pixels, so at the command line's 300 dpi an A4
+  `[595 842]` page came out 594.96 × 841.92, and an EPS 556.56 square
+  instead of its 556.49 `%%HiResBoundingBox`; only page sizes that are
+  whole pixels, such as letter, were exact. PDF → PDF rounded each page to
+  whole points instead — 595.276 × 841.89 became 595 × 842 — and moved its
+  content by the difference. Content placement from PostScript is
+  unchanged.
 - **PostScript → PDF no longer crashes on fonts a `restore` reclaimed**
   (`--device pdf` and `Interpreter::render_to_pdf`). PDF output builds the
   document at the end of the job and read each font out of the

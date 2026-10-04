@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! PDF output keeps every page of a job that calls `setpagedevice` more
-//! than once.
+//! than once, each at its exact size.
 //!
 //! Every `setpagedevice` replaced the device with a new one from the device
 //! factory. A raster device has written its pages by then; the PDF device
@@ -11,9 +11,13 @@
 //! page before it. Ghostscript's `ps2write` calls `setpagedevice` before
 //! every page, and a document whose page sizes change calls it between
 //! them: only the pages after the last call reached the PDF.
+//!
+//! And the MediaBox was the page rounded to the device's pixels: A4 at the
+//! command line's 300 dpi came out 594.96 × 841.92.
 #![cfg(feature = "pdf-output")]
 
 use stet::{DisplayElement, Interpreter, PsDisplayList, TextExtraction};
+use stet_fonts::geometry::PathSegment;
 
 /// The text of each run, at every depth.
 fn texts(list: &PsDisplayList, out: &mut Vec<String>) {
@@ -69,12 +73,7 @@ fn a_change_of_page_size_keeps_the_pages_before_it() {
     let got = pages(&job);
     let text: Vec<_> = got.iter().map(|(_, t)| t.clone()).collect();
     assert_eq!(text, [["one"], ["two"], ["three"]]);
-    // To the device pixel at 300 dpi: exact page sizes are a separate fix.
-    assert_sizes(
-        &got,
-        &[(612.0, 792.0), (595.0, 842.0), (300.0, 200.0)],
-        0.24,
-    );
+    assert_sizes(&got, &[(612.0, 792.0), (595.0, 842.0), (300.0, 200.0)], 0.0);
 }
 
 /// `setpagedevice` with the page size the job already has, before every
@@ -106,4 +105,82 @@ fn each_job_gets_its_own_document() {
     let pdf = interp.render_to_pdf(second.as_bytes(), 300.0).unwrap();
     let doc = stet_pdf_reader::PdfDocument::from_bytes(&pdf).unwrap();
     assert_eq!(doc.page_count(), 1);
+}
+
+/// Each fill's bounding box, at the top level.
+fn boxes(list: &PsDisplayList) -> Vec<[f64; 4]> {
+    list.elements()
+        .iter()
+        .filter_map(|e| match e {
+            DisplayElement::Fill { path, .. } => {
+                let mut b = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+                for s in &path.segments {
+                    let pts: &[(f64, f64)] = match s {
+                        PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => &[(*x, *y)],
+                        PathSegment::CurveTo { x3, y3, .. } => &[(*x3, *y3)],
+                        PathSegment::ClosePath => &[],
+                    };
+                    for &(x, y) in pts {
+                        b = [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)];
+                    }
+                }
+                Some(b)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Page sizes that are not whole pixels at 300 dpi are the MediaBox
+/// exactly, and the glyphs sit where the PostScript puts them — near the
+/// bottom-left corner and the top-right one, which a mismatch between the
+/// box and the content's placement would move apart.
+#[test]
+fn the_media_box_is_the_page_size_and_the_content_stays_put() {
+    for (w, h) in [(595.0, 842.0), (300.0, 200.0), (595.276, 841.89)] {
+        let job = format!(
+            "%!PS\n<< /PageSize [{w} {h}] >> setpagedevice {FONT}\
+             10 10 moveto (low) show {x} {y} moveto (high) show showpage\n",
+            x = w - 60.0,
+            y = h - 25.0
+        );
+        let pdf = Interpreter::new()
+            .render_to_pdf(job.as_bytes(), 300.0)
+            .unwrap();
+        let doc = stet_pdf_reader::PdfDocument::from_bytes(&pdf).unwrap();
+        assert_eq!(doc.page_boxes(0).unwrap().media_box, [0.0, 0.0, w, h]);
+        // At 72 dpi the PDF's device space is its page, `h` points tall from
+        // the top; the PostScript's is `h.round()` pixels. Measured from the
+        // bottom, where both put user space's origin, they agree.
+        let from_pdf = boxes(&doc.render_page(0, 72.0).unwrap());
+        let ps = Interpreter::new()
+            .render_to_display_list(job.as_bytes(), 72.0)
+            .unwrap();
+        let from_ps = boxes(&ps[0].display_list);
+        assert_eq!(from_pdf.len(), from_ps.len());
+        let dy = h - h.round();
+        for (pdf, ps) in from_pdf.iter().zip(&from_ps) {
+            let shifted = [ps[0], ps[1] + dy, ps[2], ps[3] + dy];
+            assert!(
+                pdf.iter().zip(shifted).all(|(a, b)| (a - b).abs() < 0.02),
+                "{w} × {h}: PDF {pdf:?}, PS {shifted:?}"
+            );
+        }
+    }
+}
+
+/// An EPS's page is its `%%HiResBoundingBox`.
+#[test]
+fn an_eps_page_is_its_high_resolution_bounding_box() {
+    let eps = "%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 557 557\n\
+               %%HiResBoundingBox: 0 0 556.4937 556.4942\n\
+               0 0 moveto 556 556 lineto stroke\n";
+    let pdf = Interpreter::new()
+        .render_to_pdf(eps.as_bytes(), 300.0)
+        .unwrap();
+    let doc = stet_pdf_reader::PdfDocument::from_bytes(&pdf).unwrap();
+    assert_eq!(
+        doc.page_boxes(0).unwrap().media_box,
+        [0.0, 0.0, 556.4937, 556.4942]
+    );
 }

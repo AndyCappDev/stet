@@ -2792,10 +2792,10 @@ fn run_pdf_input_pdf(
                 }
             };
 
-            // dpi=72 above means the DisplayList is in points; treat the
-            // PDF writer's pixel dims as points by keeping the device at
-            // dpi=72 too (scale = 1.0 throughout).
-            device.set_page_size(w_pts.round().max(1.0) as u32, h_pts.round().max(1.0) as u32);
+            // dpi=72 above means the DisplayList is in points, drawn at the
+            // page's exact size; the device is at dpi=72 too (scale = 1.0
+            // throughout), so the page is its own size, not rounded.
+            device.set_page_size_in_points(w_pts, h_pts);
 
             if let Err(e) = device.replay_and_show(display_list, &output_path) {
                 eprintln!("  Page {}: replay error: {}", page_1based, e);

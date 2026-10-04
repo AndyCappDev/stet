@@ -109,3 +109,73 @@ fn an_eps_keeps_its_trim_box_across_setpagedevice() {
         .unwrap();
     assert_eq!(boxes.trim_box, Some([0.0, 0.0, 200.0, 100.0]));
 }
+
+/// Each fill's bounding box on page 0 of `bytes`, rendered at 72 dpi.
+fn fill_boxes(bytes: &[u8]) -> Vec<[f64; 4]> {
+    use stet_fonts::geometry::PathSegment;
+    use stet_graphics::display_list::DisplayElement;
+    let doc = stet_pdf_reader::PdfDocument::from_bytes(bytes).unwrap();
+    doc.render_page(0, 72.0)
+        .unwrap()
+        .elements()
+        .iter()
+        .filter_map(|e| match e {
+            DisplayElement::Fill { path, .. } => {
+                let mut b = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+                for s in &path.segments {
+                    let pts: &[(f64, f64)] = match s {
+                        PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => &[(*x, *y)],
+                        PathSegment::CurveTo { x3, y3, .. } => &[(*x3, *y3)],
+                        PathSegment::ClosePath => &[],
+                    };
+                    for &(x, y) in pts {
+                        b = [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)];
+                    }
+                }
+                Some(b)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// PDF → PDF keeps a page that is not whole points — it was rounded to
+/// them, MediaBox and content — with the content where the source has it.
+#[test]
+fn pdf_to_pdf_keeps_the_exact_page_size() {
+    let job = "%!PS\n<< /PageSize [595.276 841.89] >> setpagedevice\n\
+               /Times-Roman findfont 20 scalefont setfont\n\
+               10 10 moveto (low) show 535 817 moveto (high) show showpage\n";
+    let dir = run("pdf2pdf", &[("source.ps", job)]);
+    let source = pdf(&dir, "source.pdf");
+    let output = dir.path().join("copy.pdf");
+    let out = Command::new(stet_bin())
+        .args(["--device", "pdf", "-o"])
+        .arg(&output)
+        .arg(dir.path().join("source.pdf"))
+        .output()
+        .expect("run stet");
+    assert!(
+        out.status.success(),
+        "stet failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let copy = pdf(&dir, "copy.pdf");
+    let media_box = |bytes: &[u8]| {
+        stet_pdf_reader::PdfDocument::from_bytes(bytes)
+            .unwrap()
+            .page_boxes(0)
+            .unwrap()
+            .media_box
+    };
+    assert_eq!(media_box(&source), [0.0, 0.0, 595.276, 841.89]);
+    assert_eq!(media_box(&copy), [0.0, 0.0, 595.276, 841.89]);
+    let (a, b) = (fill_boxes(&source), fill_boxes(&copy));
+    assert_eq!(a.len(), b.len());
+    for (a, b) in a.iter().zip(&b) {
+        assert!(
+            a.iter().zip(b).all(|(x, y)| (x - y).abs() < 0.02),
+            "source {a:?}, copy {b:?}"
+        );
+    }
+}

@@ -348,8 +348,9 @@ struct Builder<'tracker> {
     form_xobjects: Vec<FormXObject>,
     page_font_names: HashSet<String>,
     has_text_elements: bool,
-    page_w: u32,
-    page_h: u32,
+    /// The device space, in device units: what `ErasePage` paints.
+    page_w: f64,
+    page_h: f64,
     /// True when emitting a Pattern XObject tile. `ErasePage` is a no-op
     /// in this mode — tiles have no page background.
     in_tile: bool,
@@ -359,8 +360,7 @@ struct Builder<'tracker> {
 impl<'tracker> Builder<'tracker> {
     fn new(
         font_tracker: &'tracker mut FontTracker,
-        page_w: u32,
-        page_h: u32,
+        (page_w, page_h): (f64, f64),
         has_text_elements: bool,
         in_tile: bool,
     ) -> Self {
@@ -462,9 +462,9 @@ impl<'tracker> Builder<'tracker> {
                     return;
                 }
                 self.buf.extend(b"1 g 0 0 ");
-                fmt_num(&mut self.buf, self.page_w as f64);
+                fmt_num(&mut self.buf, self.page_w);
                 self.buf.push(b' ');
-                fmt_num(&mut self.buf, self.page_h as f64);
+                fmt_num(&mut self.buf, self.page_h);
                 self.buf.extend(b" re f\n");
                 self.gs.fill_color = Some(PdfColor::Gray(10000));
             }
@@ -1338,21 +1338,38 @@ pub fn measure_widths(font_tracker: &mut FontTracker, fonts: &FontData) {
 /// and batches consecutive same-font text elements into single BT/ET blocks,
 /// joining a baseline's strings into `TJ` runs with the widths
 /// [`measure_widths`] set.
+///
+/// `device` is the device space the list is drawn in, in device units at
+/// `dpi`; `page` the page in points, its MediaBox.
 pub fn build_content_stream(
     list: &DisplayList,
-    page_w: u32,
-    page_h: u32,
+    device: (f64, f64),
+    page: (f64, f64),
     dpi: f64,
     font_tracker: &mut FontTracker,
     emit_page_box_clip: bool,
 ) -> ContentStreamResult {
     let scale = 72.0 / dpi;
-    let page_h_pts = page_h as f64 * scale;
+    let page_h_pts = device.1 * scale;
 
     let (has_text_elements, page_font_names) = stream_fonts(list, font_tracker);
 
-    let mut builder = Builder::new(font_tracker, page_w, page_h, has_text_elements, false);
+    let mut builder = Builder::new(font_tracker, device, has_text_elements, false);
     builder.page_font_names = page_font_names;
+
+    // Clip to the page, in PDF space. The rasterizer implicitly clips to the
+    // pixmap, but PDF has no implicit page clip. Suppressed in PDF→PDF
+    // round-trip — the source already constrained content to the page and
+    // the implicit clip would re-parse as a spurious top-level `Clip`
+    // element, perturbing the DisplayList and the renderer's overprint /
+    // transparency-group decisions downstream.
+    if emit_page_box_clip {
+        builder.buf.extend(b"0 0 ");
+        fmt_num(&mut builder.buf, page.0);
+        builder.buf.push(b' ');
+        fmt_num(&mut builder.buf, page.1);
+        builder.buf.extend(b" re W n\n");
+    }
 
     // Initial CTM: device space (Y-down, pixels) → PDF space (Y-up, points)
     fmt_num(&mut builder.buf, scale);
@@ -1361,20 +1378,6 @@ pub fn build_content_stream(
     builder.buf.extend(b" 0 ");
     fmt_num(&mut builder.buf, page_h_pts);
     builder.buf.extend(b" cm\n");
-
-    // Clip to page bounds (device coordinates). The rasterizer implicitly
-    // clips to the pixmap, but PDF has no implicit page clip. Suppressed in
-    // PDF→PDF round-trip — the source already constrained content to the page
-    // and the implicit clip would re-parse as a spurious top-level `Clip`
-    // element, perturbing the DisplayList and the renderer's overprint /
-    // transparency-group decisions downstream.
-    if emit_page_box_clip {
-        builder.buf.extend(b"0 0 ");
-        fmt_num(&mut builder.buf, page_w as f64);
-        builder.buf.push(b' ');
-        fmt_num(&mut builder.buf, page_h as f64);
-        builder.buf.extend(b" re W n\n");
-    }
 
     builder.emit_list(list);
 
@@ -1406,7 +1409,7 @@ pub fn build_tile_content_stream(
 ) -> ContentStreamResult {
     let (has_text_elements, page_font_names) = stream_fonts(list, font_tracker);
 
-    let mut builder = Builder::new(font_tracker, 0, 0, has_text_elements, true);
+    let mut builder = Builder::new(font_tracker, (0.0, 0.0), has_text_elements, true);
     builder.page_font_names = page_font_names;
 
     builder.emit_list(list);
