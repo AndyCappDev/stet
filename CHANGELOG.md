@@ -100,6 +100,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   size in points, for a display list drawn at exactly that size, as
   `stet_pdf_reader` renders a page. `set_page_size` takes whole device
   pixels, which rounds a page such as A4.
+- **`Context::set_gstate_object`** in `stet-core`: replace a `gstate`
+  object's state so that `restore` can revert it, backing up what the
+  object held if it predates the current `save`. Write `gstate_store`
+  through it, as dictionaries are written through `dict_put_cow`.
 
 ### Deprecated
 
@@ -543,6 +547,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whole points instead — 595.276 × 841.89 became 595 × 842 — and moved its
   content by the difference. Content placement from PostScript is
   unchanged.
+- **`restore` reverts `currentgstate`, and no longer leaves a `gstate`
+  naming what it reclaimed.** `currentgstate` into a `gstate` made before a
+  `save` kept the state from inside the save after the `restore`, with the
+  fonts, colour spaces and page device the restore had reclaimed;
+  reinstating it could panic the interpreter (`g setgstate
+  currentpagedevice` after a `setpagedevice` inside the save). PLRM 3.7.3:
+  `restore` undoes changes to such an object, as Ghostscript does.
+- **`gstate` objects work with `copy`, `eq`, `==` and `pstack`.**
+  `gstate1 gstate2 copy` raised `typecheck`; it now copies the state, which
+  `restore` reverts like a `currentgstate`. A `gstate` was not `eq` to
+  itself, `==` raised `undefined`, and `pstack` printed `--nostringval--`;
+  they print `-gstate-`, as in Ghostscript.
 - **PostScript → PDF no longer crashes on fonts a `restore` reclaimed**
   (`--device pdf` and `Interpreter::render_to_pdf`). PDF output builds the
   document at the end of the job and read each font out of the

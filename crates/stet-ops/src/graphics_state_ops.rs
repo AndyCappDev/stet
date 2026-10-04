@@ -132,8 +132,10 @@ pub fn op_currentgstate(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::Gstate(i) => i as usize,
         _ => return Err(PsError::TypeCheck),
     };
-    // Replace the stored graphics state with current state
-    ctx.gstate_store[idx] = ctx.gstate.clone();
+    // Replace the stored graphics state with the current one, backed up
+    // first if the object predates the current save, so restore reverts it
+    let state = ctx.gstate.clone();
+    ctx.set_gstate_object(idx, state);
     // Leave the gstate object on the stack
     Ok(())
 }

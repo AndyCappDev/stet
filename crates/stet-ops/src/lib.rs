@@ -954,7 +954,8 @@ fn op_copy_dispatch(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::String { .. }
         | PsValue::Array { .. }
         | PsValue::PackedArray { .. }
-        | PsValue::Dict(_) => composite_ops::op_copy_composite(ctx),
+        | PsValue::Dict(_)
+        | PsValue::Gstate(_) => composite_ops::op_copy_composite(ctx),
         _ => Err(PsError::TypeCheck),
     }
 }

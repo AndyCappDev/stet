@@ -345,9 +345,11 @@ fn check_color_space(
 /// A `GraphicsState` is the largest non-VM root the interpreter keeps: fonts,
 /// halftone and transfer procedures, the colour space, and the page device
 /// are all VM objects held by raw handle. `restore` reinstates `gstate` and
-/// `gstate_stack` from the save record, but `gstate_store` — the backing
-/// array for `PsValue::Gstate` objects — is not rewound, so a `gstate`
-/// captured after the save keeps whatever was current when it was taken.
+/// `gstate_stack` from the save record, and rewinds `gstate_store` — the
+/// backing array for `PsValue::Gstate` objects — reclaiming the objects made
+/// since the save and reverting writes to older ones
+/// ([`Context::set_gstate_object`]). A write that bypasses that method keeps
+/// whatever was current inside the save.
 fn check_gstate(
     ctx: &Context,
     gs: &crate::graphics_state::GraphicsState,
@@ -558,8 +560,9 @@ pub fn audit_dangling_refs(ctx: &Context) -> Vec<DanglingRef> {
     }
 
     // The graphics state and everything that clones it. `gstate_store` backs
-    // `PsValue::Gstate`; unlike `gstate` / `gstate_stack` it is not rewound by
-    // `restore`, so it is the one of the three that can outlive its contents.
+    // `PsValue::Gstate`; `restore` rewinds it through the backups
+    // `Context::set_gstate_object` takes, so a write that bypasses them is the
+    // one way any of the three can outlive its contents.
     check_gstate(ctx, &ctx.gstate, "graphics state", &mut out);
     for (index, entry) in ctx.gstate_stack.iter().enumerate() {
         check_gstate(

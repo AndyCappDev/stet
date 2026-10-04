@@ -437,6 +437,7 @@ pub fn op_putinterval(ctx: &mut Context) -> Result<(), PsError> {
 /// PLRM: array1 array2 copy subarray2
 ///       dict1 dict2 copy dict2
 ///       string1 string2 copy substring2
+///       gstate1 gstate2 copy gstate2
 /// Errors: invalidaccess, rangecheck, stackoverflow, stackunderflow, typecheck
 ///
 /// This is registered separately from the stack-form `copy` in stack_ops.
@@ -455,7 +456,10 @@ pub fn op_copy_composite(ctx: &mut Context) -> Result<(), PsError> {
 
     // Access checks: read source, write dest
     match src_obj.value {
-        PsValue::Array { .. } | PsValue::PackedArray { .. } | PsValue::String { .. } => {
+        PsValue::Array { .. }
+        | PsValue::PackedArray { .. }
+        | PsValue::String { .. }
+        | PsValue::Gstate(_) => {
             src_obj.flags.require_read()?;
         }
         PsValue::Dict(e) => {
@@ -464,7 +468,7 @@ pub fn op_copy_composite(ctx: &mut Context) -> Result<(), PsError> {
         _ => {}
     }
     match dest_obj.value {
-        PsValue::Array { .. } | PsValue::String { .. } => {
+        PsValue::Array { .. } | PsValue::String { .. } | PsValue::Gstate(_) => {
             dest_obj.flags.require_write()?;
         }
         PsValue::Dict(e) => {
@@ -574,6 +578,13 @@ pub fn op_copy_composite(ctx: &mut Context) -> Result<(), PsError> {
                 ctx.dicts.put(de, k, v);
             }
             ctx.o_stack.push(PsObject::dict(de))?;
+        }
+        (PsValue::Gstate(si), PsValue::Gstate(di)) => {
+            let state = ctx.gstate_store[si as usize].clone();
+            ctx.o_stack.pop()?;
+            ctx.o_stack.pop()?;
+            ctx.set_gstate_object(di as usize, state);
+            ctx.o_stack.push(dest_obj)?;
         }
         _ => return Err(PsError::TypeCheck),
     }

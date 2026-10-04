@@ -66,6 +66,9 @@ fn objects_equal(ctx: &Context, a: &PsObject, b: &PsObject) -> bool {
         // Dict — same entity
         (PsValue::Dict(a), PsValue::Dict(b)) => a == b,
 
+        // Gstate — same object
+        (PsValue::Gstate(a), PsValue::Gstate(b)) => a == b,
+
         // Array — same entity, start, len (identity comparison)
         (
             PsValue::Array {

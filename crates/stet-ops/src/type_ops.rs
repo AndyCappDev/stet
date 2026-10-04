@@ -542,6 +542,9 @@ pub fn write_obj_equal(ctx: &Context, obj: &PsObject, out: &mut dyn Write) {
         PsValue::FontID(v) => {
             write!(out, "-fontID:{}-", v).ok();
         }
+        PsValue::Gstate(_) => {
+            write!(out, "-gstate-").ok();
+        }
         _ => {
             write!(out, "--nostringval--").ok();
         }

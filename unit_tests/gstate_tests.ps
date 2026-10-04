@@ -327,6 +327,54 @@ copy_test setgstate /currentlinewidth [14] assert  % Original gstate unchanged
 true /setgstate [true /typecheck] assert
 
 
+%% gstate objects and save/restore %%
+% restore reverts a currentgstate into a gstate made before the save (PLRM 3.7.3)
+1 setlinewidth gstate /rv_gs exch def
+{ save 5 setlinewidth rv_gs currentgstate pop restore
+  gsave rv_gs setgstate currentlinewidth grestore } [1] assert
+
+% Nested saves: each restore puts back the state at its own save
+1 setlinewidth gstate /nest_gs exch def
+{ save 2 setlinewidth nest_gs currentgstate pop
+  save 3 setlinewidth nest_gs currentgstate pop
+  restore gsave nest_gs setgstate currentlinewidth grestore exch
+  restore gsave nest_gs setgstate currentlinewidth grestore } [2 1] assert
+
+% A font the save made, which restore reclaims, does not stay in the gstate
+/Courier findfont 10 scalefont setfont gstate /font_gs exch def
+{ save
+    /Times-Roman findfont 13 scalefont setfont
+    font_gs currentgstate pop
+  restore
+  50 { 10 dict pop } repeat
+  gsave font_gs setgstate currentfont grestore currentfont eq } [true] assert
+
+% A gstate made after the save needs no backup: restore reclaims it
+{ save gstate pop restore } [] assert
+
+% eq: a gstate is equal to itself, not to another gstate
+{ font_gs font_gs eq } [true] assert
+{ font_gs gstate eq } [false] assert
+
+%% copy (gstate) %%
+% gstate1 gstate2 copy replaces gstate2's state and returns gstate2
+3 setlinewidth gstate /copy_a exch def
+4 setlinewidth gstate /copy_b exch def
+{ copy_a copy_b copy type } [/gstatetype] assert
+{ gsave copy_b setgstate currentlinewidth grestore } [3] assert
+
+% restore reverts a copy into a gstate made before the save
+5 setlinewidth gstate /copy_c exch def
+6 setlinewidth gstate /copy_d exch def
+{ save copy_c copy_d copy pop restore
+  gsave copy_d setgstate currentlinewidth grestore } [6] assert
+
+% Error conditions - typecheck when only one operand is a gstate
+{ copy_a [] copy } [copy_a [] /typecheck] assert
+{ [] copy_a copy } [[] copy_a /typecheck] assert
+{ copy_a (abc) copy } [copy_a (abc) /typecheck] assert
+
+
 %% Integration Tests %%
 % Test gstate operators work with traditional graphics state stack
 15 setlinewidth gsave

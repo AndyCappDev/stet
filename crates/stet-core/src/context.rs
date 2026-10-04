@@ -112,6 +112,13 @@ pub type ExecSyncFn = fn(&mut Context, PsObject) -> Result<(), PsError>;
 /// of the sampled range, as raw bits so the key stays hashable.
 pub type CieDecodeKey = (u64, u64, u32, u64, u64);
 
+/// A `gstate` object's state before a write in the save level `save_id`.
+struct GstateBackup {
+    save_id: u32,
+    index: usize,
+    state: GraphicsState,
+}
+
 pub struct Context {
     // Stacks
     pub o_stack: Stack,
@@ -203,6 +210,8 @@ pub struct Context {
     pub default_rendering_intent: stet_graphics::rendering_intent::RenderingIntent,
     pub gstate_stack: Vec<crate::graphics_state::GstateEntry>,
     /// Storage for gstate objects (PsValue::Gstate indexes into this).
+    /// Replace an object's state through [`Context::set_gstate_object`], or
+    /// `restore` cannot revert the write.
     pub gstate_store: Vec<GraphicsState>,
     pub device: Option<Box<dyn OutputDevice>>,
     pub display_list: DisplayList,
@@ -463,6 +472,11 @@ pub struct Context {
     /// only when it reaches zero costs one decrement and one
     /// perfectly-predicted branch, which does not show up in corpus timings.
     steps_to_deadline_check: u32,
+
+    /// The state each `gstate` object held before its first write in a save
+    /// level, for `restore` to put back: [`Context::set_gstate_object`].
+    /// In order of the saves, oldest first.
+    gstate_backups: Vec<GstateBackup>,
 
     /// When true, each successful `showpage` / `copypage` sets `interrupt_flag`
     /// after capturing the display list, so the eval loop yields back to the
@@ -1275,6 +1289,7 @@ impl Context {
             max_local_vm: DEFAULT_MAX_LOCAL_VM,
             deadline: None,
             steps_to_deadline_check: DEADLINE_CHECK_INTERVAL,
+            gstate_backups: Vec::new(),
             yield_after_showpage: false,
             text_extraction: stet_graphics::device::TextExtraction::Off,
             text_capture: None,
@@ -1586,6 +1601,14 @@ impl Context {
         self.gstate = target.gstate.clone();
         self.gstate_stack = target.gstate_stack.clone();
 
+        // Put back the gstate objects written since the save. The backups of
+        // every level being restored are the newest ones; undoing them newest
+        // first leaves each object as the oldest backup has it — its state at
+        // the save.
+        while let Some(backup) = self.gstate_backups.pop_if(|b| b.save_id >= save_id) {
+            self.gstate_store[backup.index] = backup.state;
+        }
+
         // Reclaim gstate objects created after the save. `check_invalidrestore`
         // has already refused the restore if any of them is still reachable, so
         // truncating here can only drop slots nothing can name.
@@ -1814,6 +1837,30 @@ impl Context {
             copy: copy_id,
             store_type: StoreType::Dict,
         });
+    }
+
+    /// Replace the state of the `gstate` object at `index` (`currentgstate`,
+    /// `copy`), first backing up what it held if it predates the current
+    /// `save`, so that `restore` reverts the write (PLRM 3.7.3) — what
+    /// [`cow_check_dict`](Self::cow_check_dict) does for a dictionary. A
+    /// `gstate` made since the save needs none: `restore` reclaims it.
+    pub fn set_gstate_object(&mut self, index: usize, state: GraphicsState) {
+        if let Some(level) = self.save_stack.levels_ref().last()
+            && index < level.gstate_store_len
+            && !self
+                .gstate_backups
+                .iter()
+                .rev()
+                .take_while(|b| b.save_id == level.save_id)
+                .any(|b| b.index == index)
+        {
+            self.gstate_backups.push(GstateBackup {
+                save_id: level.save_id,
+                index,
+                state: self.gstate_store[index].clone(),
+            });
+        }
+        self.gstate_store[index] = state;
     }
 
     // --- Token conversion ---
