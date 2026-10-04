@@ -1917,12 +1917,14 @@ fn execjob(
         eprintln!("         {}", w.hint());
     }
 
-    // 1. Flush device BEFORE restore (restore reverts gstate.page_device)
-    if let Some(mut dev) = ctx.device.take() {
-        if let Err(e) = dev.finish_with_context(ctx) {
-            eprintln!("render error: {}", e);
-        }
-        ctx.device = Some(dev);
+    // 1. Flush device BEFORE restore (restore reverts gstate.page_device).
+    //    The device belongs to this job: the next one gets its own from the
+    //    factory. A PDF device would otherwise be resized by the next job's
+    //    `setpagedevice` and keep this job's pages.
+    if let Some(mut dev) = ctx.device.take()
+        && let Err(e) = dev.finish_with_context(ctx)
+    {
+        eprintln!("render error: {}", e);
     }
 
     // 2. Clear execution state

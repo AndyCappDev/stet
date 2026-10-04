@@ -91,6 +91,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `systemdict`, for a context that runs screen jobs after PDF ones.
   `register_pdf_authoring_ops` may now be called again; it adds nothing to
   the operator table the second time.
+- **`OutputDevice::resize_page`** in `stet-core`: `setpagedevice` offers
+  a new page size to the current device before replacing it with one from
+  the device factory. A device that holds the job's pages until the end
+  takes the size and returns true; the default, false, keeps the old
+  behaviour. A new device from the factory is told its size the same way.
 
 ### Deprecated
 
@@ -517,6 +522,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pattern tile's fonts were tracked after the fonts were embedded, so a
   font used only in a tile was named but never written: pdftops output
   that fills glyphs with a pattern of text came out with the glyphs empty.
+- **PostScript → PDF keeps every page of a job that calls `setpagedevice`
+  more than once.** Each call replaced the PDF device, and with it every
+  page so far, so only the pages after the last call reached the PDF.
+  Ghostscript's `ps2write` calls `setpagedevice` before every page, and
+  documents whose page sizes change call it between them: in a 120-file
+  corpus sample, 6 PDFs were short — 4 of 12 `ps2write` files, one
+  `pdftops` document 3 pages of 264. `Interpreter::render_to_pdf` lost
+  them the same way. An EPS also lost the TrimBox of its bounding box if
+  its program called `setpagedevice`.
 - **PostScript → PDF no longer crashes on fonts a `restore` reclaimed**
   (`--device pdf` and `Interpreter::render_to_pdf`). PDF output builds the
   document at the end of the job and read each font out of the

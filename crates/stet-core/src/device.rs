@@ -91,6 +91,21 @@ pub trait OutputDevice {
     /// Page dimensions in device pixels.
     fn page_size(&self) -> (u32, u32);
 
+    /// The page device changed: `setpagedevice` asks for a page of `media`
+    /// device pixels, `page_size` (the `PageSize`) in default user space
+    /// units.
+    ///
+    /// A device that must stay the same instance for the whole job — one
+    /// that holds the job's pages until the end, as PDF output does — takes
+    /// the new size and returns true. The default, false, has the
+    /// interpreter replace the device with a new one from the device
+    /// factory, which suits a device that writes each page as it is shown.
+    /// A device the factory has just made is told its size the same way,
+    /// and its answer ignored.
+    fn resize_page(&mut self, _media: (u32, u32), _page_size: (f64, f64)) -> bool {
+        false
+    }
+
     /// Replay a display list and write output in one step.
     fn replay_and_show(&mut self, list: DisplayList, output_path: &str) -> Result<(), String> {
         for element in list.elements() {

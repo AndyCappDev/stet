@@ -277,9 +277,17 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
     ctx.page_width = pw as u32;
     ctx.page_height = ph as u32;
 
-    // Create/recreate the device via factory
-    if let Some(factory) = ctx.device_factory.take() {
-        let device = factory(media_w, media_h);
+    // Resize the current device if it keeps itself — the PDF device holds
+    // every page of the job, which a new device would lose — or make a new
+    // one from the factory.
+    let media = (media_w, media_h);
+    let kept = ctx
+        .device
+        .as_mut()
+        .is_some_and(|device| device.resize_page(media, (pw, ph)));
+    if !kept && let Some(factory) = ctx.device_factory.take() {
+        let mut device = factory(media_w, media_h);
+        device.resize_page(media, (pw, ph));
         ctx.device = Some(device);
         ctx.device_factory = Some(factory);
     }

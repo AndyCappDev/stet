@@ -1632,6 +1632,13 @@ impl OutputDevice for PdfDevice {
         (self.page_w, self.page_h)
     }
 
+    /// The document holds every page of the job, so a new page size resizes
+    /// this device rather than replacing it.
+    fn resize_page(&mut self, media: (u32, u32), _page_size: (f64, f64)) -> bool {
+        (self.page_w, self.page_h) = media;
+        true
+    }
+
     fn replay_and_show(&mut self, list: DisplayList, output_path: &str) -> Result<(), String> {
         // Capture output path from first page
         if self.output_path.is_none() && !self.in_memory {
