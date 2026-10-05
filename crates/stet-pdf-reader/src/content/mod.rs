@@ -4318,6 +4318,11 @@ impl<'a> ContentInterpreter<'a> {
         // 8-bit data. An index is never scaled; 16-bit Indexed is outside
         // the spec, and keeps its high byte. JPEG and JPEG 2000 data is
         // 8-bit whatever `/BitsPerComponent` says.
+        //
+        // The spec allows 1, 2, 4, 8 and 16 bits. Any other depth up to 16
+        // is unpacked the same way, bit by bit, and scaled to 8 bits: the
+        // display list carries a byte per sample, and samples handed on as
+        // they are packed would be read as bytes.
         let (sample_data, display_bpc) = if bpc == 8 || bpc == 0 || already_8bit {
             (sample_data, if already_8bit { 8 } else { bpc })
         } else if bpc == 16 {
@@ -4332,8 +4337,6 @@ impl<'a> ContentInterpreter<'a> {
                 sample_data.as_chunks::<2>().0.iter().map(reduce).collect(),
                 8,
             )
-        } else if bpc > 8 {
-            (sample_data, bpc)
         } else {
             (
                 expand_bits_to_bytes(
@@ -5601,7 +5604,8 @@ impl<'a> ContentInterpreter<'a> {
         let data = self.resolver.stream_data_from_obj(&smask_ref)?;
 
         // Expand non-8-bit BPC: sub-byte (1/2/4) are packed bits;
-        // 16-bit needs downsampling to 8-bit for alpha channel use.
+        // 16-bit needs downsampling to 8-bit for alpha channel use. A depth
+        // outside the spec is unpacked bit by bit, as an image's is.
         let mut data = if bpc == 8 {
             data
         } else if bpc == 16 {
@@ -5610,10 +5614,8 @@ impl<'a> ContentInterpreter<'a> {
                 .iter()
                 .map(|c| image_samples::to_8bit(u16::from_be_bytes(*c), 16))
                 .collect()
-        } else if bpc < 8 {
-            expand_bits_to_bytes(&data, bpc, sw, sh, 1, false)
         } else {
-            data
+            expand_bits_to_bytes(&data, bpc, sw, sh, 1, false)
         };
 
         // Apply /Decode array if present (e.g. [1 0] inverts the mask)

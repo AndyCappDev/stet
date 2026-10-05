@@ -92,9 +92,9 @@ share the sample buffer without copying.
 #### Sample depth
 
 `sample_data` holds one byte per sample, whatever depth the source image
-had: stet's PostScript and PDF front ends expand 1-, 2- and 4-bit samples
-and reduce 12- and 16-bit ones before the image reaches the display list,
-and set `bits_per_component` to 8. The one other layout a renderer is
+had: stet's PostScript and PDF front ends expand samples of fewer than 8
+bits and reduce deeper ones to the nearest 8-bit value before the image
+reaches the display list, and set `bits_per_component` to 8. The one other layout a renderer is
 asked to read is `bits_per_component: 16` with `DeviceGray` or
 `DeviceRGB`: two bytes per sample, high byte first. stet's renderer paints
 such a sample with its high byte. Every other colour space is one byte per

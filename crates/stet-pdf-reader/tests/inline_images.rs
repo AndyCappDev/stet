@@ -178,6 +178,11 @@ fn inline_images_paint_as_xobjects_do() {
             "/ColorSpace /DeviceGray /BitsPerComponent 16",
             &[0x10, 0xFF, 0x81, 0x01],
         ),
+        // A depth outside the spec: two 12-bit samples in three bytes.
+        (
+            "/ColorSpace /DeviceGray /BitsPerComponent 12",
+            &[0x10, 0xF8, 0x01],
+        ),
         (
             "/ColorSpace /DeviceRGB /BitsPerComponent 8",
             &[1, 2, 3, 4, 5, 6],

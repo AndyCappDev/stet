@@ -200,6 +200,111 @@ fn indexed_samples_are_not_scaled() {
     assert_eq!(samples, [3, 15]);
 }
 
+// ------------------------------------------------- depths outside the spec
+
+/// `samples` of `bpc` bits each, packed most significant bit first, a row
+/// of `per_row` samples starting on a byte.
+fn pack(samples: &[u16], bpc: u32, per_row: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    for row in samples.chunks(per_row) {
+        let (mut bits, mut n) = (0u32, 0u32);
+        for &s in row {
+            bits = (bits << bpc) | u32::from(s);
+            n += bpc;
+            while n >= 8 {
+                out.push((bits >> (n - 8)) as u8);
+                n -= 8;
+            }
+            bits &= (1 << n) - 1;
+        }
+        if n > 0 {
+            out.push((bits << (8 - n)) as u8);
+        }
+    }
+    out
+}
+
+/// A sample of `bpc` bits as the nearest 8-bit value.
+fn nearest_8bit(v: u16, bpc: u32) -> u8 {
+    let max = (1u32 << bpc) - 1;
+    ((u32::from(v) * 255 + max / 2) / max) as u8
+}
+
+/// PDF allows 1, 2, 4, 8 and 16 bits per component. Any other depth is
+/// unpacked bit by bit and reduced to the nearest 8-bit value, as 16-bit
+/// samples are: the display list carries a byte per sample, and the packed
+/// bytes read as samples are noise.
+#[test]
+fn samples_of_any_depth_are_unpacked_and_rounded() {
+    for bpc in [3, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15] {
+        let max = (1u16 << bpc) - 1;
+        // Two rows of three, so the second row shows whether rows start on
+        // a byte: black, a value just above half, white; then low values.
+        let samples = [0, max / 2 + 1, max, 1, max / 16 + 1, max - 1];
+        let pdf = document(
+            &format!("/Width 3 /Height 2 /ColorSpace /DeviceGray /BitsPerComponent {bpc}"),
+            &pack(&samples, bpc, 3),
+            &[],
+        );
+        let elements = elements(&pdf);
+        let [
+            DisplayElement::Image {
+                sample_data,
+                params,
+            },
+        ] = elements.as_slice()
+        else {
+            panic!("{bpc} bits: one image expected, got {elements:?}");
+        };
+        assert_eq!(params.bits_per_component, 8, "{bpc} bits");
+        let want: Vec<u8> = samples.iter().map(|&v| nearest_8bit(v, bpc)).collect();
+        assert_eq!(sample_data.as_slice(), want, "{bpc} bits");
+    }
+}
+
+/// The same with three components to a pixel.
+#[test]
+fn twelve_bit_rgb_is_unpacked_and_rounded() {
+    let samples = [0x000, 0x800, 0xFFF, 0x10F, 0x7FF, 0x001];
+    let pdf = document(
+        "/Width 2 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 12",
+        &pack(&samples, 12, 6),
+        &[],
+    );
+    assert_eq!(painted(&pdf).samples, [0, 128, 255, 17, 127, 0]);
+}
+
+/// A soft mask of such a depth is unpacked the same way.
+#[test]
+fn twelve_bit_soft_masks_are_unpacked_and_rounded() {
+    // 0x10F and 0x801 in three bytes.
+    let smask = "<< /Type /XObject /Subtype /Image /Width 2 /Height 1 /ColorSpace /DeviceGray \
+                 /BitsPerComponent 12 /Filter /ASCIIHexDecode /Length 7 >>\nstream\n10F801>\nendstream";
+    let pdf = document(
+        "/Width 2 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /SMask 4 0 R",
+        &[0, 0],
+        &[smask.to_string()],
+    );
+    assert_eq!(painted(&pdf).soft_mask.unwrap(), [17, 128]);
+}
+
+/// A colour key names 12-bit samples at 12 bits, and `/Decode` applies to
+/// the samples after they are unpacked, as for the depths the spec allows.
+#[test]
+fn twelve_bit_samples_take_a_colour_key_and_a_decode() {
+    let data = pack(&[0x800, 0x801], 12, 2);
+    // 0x800 and 0x801 are both 128 at 8 bits; the key picks one of them.
+    assert_eq!(masked(&gray(12, &data, "[2049 2049]", "")), [false, true]);
+    assert_eq!(masked(&gray(12, &data, "[2048 2048]", "")), [true, false]);
+
+    let pdf = document(
+        "/Width 2 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 12 /Decode [1 0]",
+        &pack(&[0x000, 0x10F], 12, 2),
+        &[],
+    );
+    assert_eq!(painted(&pdf).samples, [255, 238]);
+}
+
 // ---------------------------------------------------------- colour keys
 
 /// The key is at the image's own depth: `[15 15]` is a 4-bit sample's

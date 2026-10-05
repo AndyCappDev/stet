@@ -42,6 +42,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sample layouts and keys a renderer is given ("Sample depth"); it listed
   depths of 1, 2 and 4 bits that no display list carries.
 
+- **A PDF image declaring 9 to 15 bits per component rendered as noise.**
+  PDF allows 1, 2, 4, 8 and 16; the reader unpacked the first three and
+  reduced 16-bit samples, but handed any depth in between on as packed
+  bytes, which were then read as 8-bit samples. Such an image, or soft
+  mask, is now unpacked bit by bit and reduced to the nearest 8-bit
+  value, as the other depths are, and a colour key or `/Decode` on it
+  applies as it does to them. Ghostscript draws nothing for these files
+  and poppler keeps the low 8 bits of each sample.
+
 ## [0.8.4] — 2026-10-04
 
 ### Added
