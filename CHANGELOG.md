@@ -9,19 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Images inside soft masks and transparency groups are converted once
-  per page, not once per band.** Every PDF image with an `/SMask` is drawn
-  through a soft mask, so this is the ordinary path for an image with
-  alpha. Each band that touched such an image converted the whole of it,
-  and bands run in parallel, so memory grew with the thread count: a
-  4500×6442 image with a soft mask, rendered 800 pixels wide, peaked at
-  1,075 MB on 24 threads and now peaks at 327 MB on any number. On the
-  hundred test-corpus files with images in groups or soft masks, a
-  single-threaded render at 150 dpi takes about a third less time. Output is unchanged. Two costs: the
-  converted images are now held for the whole page, so a single-threaded
-  render of a page with many of them can peak higher than before, and a
-  page with many such images converts them one after another where the
-  bands used to share the work.
+- **A large image drawn small no longer costs its full size in memory, and
+  an image with a soft mask no longer costs it once per band.** Rendering
+  converted every image to RGBA at full size before scaling it down, and
+  an image inside a soft mask or a transparency group — every PDF image
+  with an `/SMask` is one — was converted again by each band that touched
+  it, with bands running in parallel. A 4500×6442 image with a soft mask,
+  rendered 800 pixels wide, peaked at 1,075 MB on 24 threads; it now peaks
+  at about 156 MB on any number, most of which is the decoded image
+  itself. Three changes, none of which alters a pixel:
+  - images inside soft masks and transparency groups are converted once
+    per page, like images outside them;
+  - an image that is scaled down is converted a strip of rows at a time,
+    straight into the scaling filter, and never held at full size;
+  - a page's images are converted in parallel. The same image drawn nine
+    times on a page renders in a third of the time on 24 threads.
+
+  One cost: converted images inside groups and soft masks are now held
+  until the page is finished, so a single-threaded render of a page with
+  many of them that are *not* drawn small can peak higher than before.
 
 ## [0.8.4] — 2026-10-04
 

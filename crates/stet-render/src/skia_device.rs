@@ -1529,22 +1529,118 @@ fn viewport_transform(t: Transform, vp_x: f32, vp_y: f32, scale_x: f32, scale_y:
 /// Two-pass separable (horizontal then vertical) for O(src) total work regardless
 /// of scale ratio. Produces quality equivalent to Lanczos3 for downscaling at a
 /// fraction of the cost.
+///
+/// [`BoxResampler`] runs the same two passes a source row at a time, for a
+/// caller that does not have the whole source in memory.
 fn box_resample(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
     if dw == 0 || dh == 0 {
         return Vec::new();
     }
-    let (sw, sh, dw, dh) = (sw as usize, sh as usize, dw as usize, dh as usize);
+    let mut resampler = BoxResampler::new(sw, sh, dw, dh);
+    for row in src.chunks_exact(sw as usize * 4).take(sh as usize) {
+        resampler.push_row(row);
+    }
+    resampler.finish()
+}
 
-    // Pass 1: horizontal (sw → dw) with fractional edge weights.
-    // Each output pixel covers [left_f, right_f] in source space. Edge source
-    // pixels get proportional weight; interior pixels get weight 1.0.
-    let ratio_x = sw as f32 / dw as f32;
-    let mut tmp = vec![0.0f32; dw * sh * 4];
-    let tmp_stride = dw * 4;
+/// The source rows one output row of the box filter's vertical pass covers.
+struct BoxRowSpan {
+    /// First source row.
+    top: usize,
+    /// One past the last source row.
+    bottom: usize,
+    /// The output row's top edge in source rows.
+    top_f: f32,
+    /// The output row's bottom edge in source rows.
+    bottom_f: f32,
+}
 
-    for y in 0..sh {
-        let row_off = y * sw * 4;
-        let dst_row = y * tmp_stride;
+impl BoxRowSpan {
+    fn of(dy: usize, ratio_y: f32, sh: usize) -> Self {
+        let top_f = dy as f32 * ratio_y;
+        let bottom_f = (dy + 1) as f32 * ratio_y;
+        Self {
+            top: (top_f as usize).min(sh - 1),
+            bottom: (bottom_f.ceil() as usize).min(sh),
+            top_f,
+            bottom_f,
+        }
+    }
+}
+
+/// The area-average box filter of [`box_resample`], fed one RGBA source row
+/// at a time.
+///
+/// The horizontal pass turns each source row into one row of `dw` float
+/// pixels; the vertical pass turns the float rows an output row covers into
+/// that output row. Only the float rows the next output row still needs are
+/// kept, in a ring, so the working memory is a few rows of the *output*
+/// width, where filtering a whole image at once holds a float row for every
+/// source row. The arithmetic and its order are those of the whole-image
+/// filter: the two give the same bytes.
+struct BoxResampler {
+    sw: usize,
+    sh: usize,
+    dw: usize,
+    dh: usize,
+    ratio_x: f32,
+    ratio_y: f32,
+    /// `ring_rows` float rows of `dw * 4`; source row `sy` is in slot
+    /// `sy % ring_rows`.
+    ring: Vec<f32>,
+    ring_rows: usize,
+    /// Source rows pushed so far.
+    pushed: usize,
+    /// Output rows written so far.
+    emitted: usize,
+    /// Scratch: the (source row, weight) pairs of the row being written.
+    weights: Vec<(usize, f32)>,
+    out: Vec<u8>,
+}
+
+impl BoxResampler {
+    /// A resampler from `sw × sh` to `dw × dh`, all non-zero.
+    fn new(sw: u32, sh: u32, dw: u32, dh: u32) -> Self {
+        let (sw, sh, dw, dh) = (sw as usize, sh as usize, dw as usize, dh as usize);
+        let ratio_y = sh as f32 / dh as f32;
+        // The ring holds as many rows as the output row that covers the
+        // most source rows.
+        let ring_rows = (0..dh)
+            .map(|dy| {
+                let span = BoxRowSpan::of(dy, ratio_y, sh);
+                span.bottom.saturating_sub(span.top)
+            })
+            .max()
+            .unwrap_or(0)
+            .max(1);
+        Self {
+            sw,
+            sh,
+            dw,
+            dh,
+            ratio_x: sw as f32 / dw as f32,
+            ratio_y,
+            ring: vec![0.0; ring_rows * dw * 4],
+            ring_rows,
+            pushed: 0,
+            emitted: 0,
+            weights: Vec::new(),
+            out: vec![0u8; dw * dh * 4],
+        }
+    }
+
+    /// Feed the next source row, `sw * 4` bytes of RGBA. Rows past the
+    /// source height are ignored.
+    fn push_row(&mut self, src_row: &[u8]) {
+        if self.pushed >= self.sh {
+            return;
+        }
+        // Horizontal pass (sw → dw) with fractional edge weights. Each
+        // output pixel covers [left_f, right_f] in source space. Edge source
+        // pixels get proportional weight; interior pixels get weight 1.0.
+        let (sw, dw, ratio_x) = (self.sw, self.dw, self.ratio_x);
+        let slot = (self.pushed % self.ring_rows) * dw * 4;
+        let dst = &mut self.ring[slot..slot + dw * 4];
         for dx in 0..dw {
             let left_f = dx as f32 * ratio_x;
             let right_f = (dx + 1) as f32 * ratio_x;
@@ -1557,76 +1653,138 @@ fn box_resample(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
                 let pixel_left = sx as f32;
                 let pixel_right = (sx + 1) as f32;
                 let w = pixel_right.min(right_f) - pixel_left.max(left_f);
-                let i = row_off + sx * 4;
-                r += src[i] as f32 * w;
-                g += src[i + 1] as f32 * w;
-                b += src[i + 2] as f32 * w;
-                a += src[i + 3] as f32 * w;
+                let i = sx * 4;
+                r += src_row[i] as f32 * w;
+                g += src_row[i + 1] as f32 * w;
+                b += src_row[i + 2] as f32 * w;
+                a += src_row[i + 3] as f32 * w;
             }
-            let di = dst_row + dx * 4;
-            tmp[di] = r * inv_area;
-            tmp[di + 1] = g * inv_area;
-            tmp[di + 2] = b * inv_area;
-            tmp[di + 3] = a * inv_area;
+            let di = dx * 4;
+            dst[di] = r * inv_area;
+            dst[di + 1] = g * inv_area;
+            dst[di + 2] = b * inv_area;
+            dst[di + 3] = a * inv_area;
+        }
+        self.pushed += 1;
+
+        // Vertical pass (sh → dh) for every output row whose source rows
+        // are now all in the ring.
+        while self.emitted < self.dh {
+            let span = BoxRowSpan::of(self.emitted, self.ratio_y, self.sh);
+            if span.bottom > self.pushed {
+                break;
+            }
+            self.emit_row(&span);
         }
     }
 
-    // Pass 2: vertical (sh → dh) with fractional edge weights, row-major order.
-    let ratio_y = sh as f32 / dh as f32;
-    let mut out = vec![0u8; dw * dh * 4];
-    let out_stride = dw * 4;
-
-    for dy in 0..dh {
-        let top_f = dy as f32 * ratio_y;
-        let bottom_f = (dy + 1) as f32 * ratio_y;
-        let top = (top_f as usize).min(sh - 1);
-        let bottom = (bottom_f.ceil() as usize).min(sh);
-        let inv_area = 1.0 / (bottom_f - top_f);
-
-        // Pre-compute row weights
-        let n_rows = bottom - top;
-        let mut row_weights_buf: [(usize, f32); 8] = [(0, 0.0); 8];
-        let row_weights_vec: Vec<(usize, f32)>;
-        let row_weights: &[(usize, f32)] = if n_rows <= 8 {
-            for (i, sy) in (top..bottom).enumerate() {
-                let pixel_top = sy as f32;
-                let pixel_bottom = (sy + 1) as f32;
-                let w = pixel_bottom.min(bottom_f) - pixel_top.max(top_f);
-                row_weights_buf[i] = (sy, w);
-            }
-            &row_weights_buf[..n_rows]
-        } else {
-            row_weights_vec = (top..bottom)
-                .map(|sy| {
-                    let pixel_top = sy as f32;
-                    let pixel_bottom = (sy + 1) as f32;
-                    let w = pixel_bottom.min(bottom_f) - pixel_top.max(top_f);
-                    (sy, w)
-                })
-                .collect();
-            &row_weights_vec
-        };
-
-        let dst_row = dy * out_stride;
+    /// Write output row `self.emitted` from the ring.
+    fn emit_row(&mut self, span: &BoxRowSpan) {
+        let dw = self.dw;
+        let inv_area = 1.0 / (span.bottom_f - span.top_f);
+        self.weights.clear();
+        self.weights.extend((span.top..span.bottom).map(|sy| {
+            let pixel_top = sy as f32;
+            let pixel_bottom = (sy + 1) as f32;
+            let w = pixel_bottom.min(span.bottom_f) - pixel_top.max(span.top_f);
+            (sy, w)
+        }));
+        let dst_row = self.emitted * dw * 4;
         for dx in 0..dw {
             let col = dx * 4;
             let (mut r, mut g, mut b, mut a) = (0.0f32, 0.0, 0.0, 0.0);
-            for &(sy, w) in row_weights {
-                let i = sy * tmp_stride + col;
-                r += tmp[i] * w;
-                g += tmp[i + 1] * w;
-                b += tmp[i + 2] * w;
-                a += tmp[i + 3] * w;
+            for &(sy, w) in &self.weights {
+                let i = (sy % self.ring_rows) * dw * 4 + col;
+                r += self.ring[i] * w;
+                g += self.ring[i + 1] * w;
+                b += self.ring[i + 2] * w;
+                a += self.ring[i + 3] * w;
             }
             let di = dst_row + col;
-            out[di] = (r * inv_area + 0.5).clamp(0.0, 255.0) as u8;
-            out[di + 1] = (g * inv_area + 0.5).clamp(0.0, 255.0) as u8;
-            out[di + 2] = (b * inv_area + 0.5).clamp(0.0, 255.0) as u8;
-            out[di + 3] = (a * inv_area + 0.5).clamp(0.0, 255.0) as u8;
+            self.out[di] = (r * inv_area + 0.5).clamp(0.0, 255.0) as u8;
+            self.out[di + 1] = (g * inv_area + 0.5).clamp(0.0, 255.0) as u8;
+            self.out[di + 2] = (b * inv_area + 0.5).clamp(0.0, 255.0) as u8;
+            self.out[di + 3] = (a * inv_area + 0.5).clamp(0.0, 255.0) as u8;
+        }
+        self.emitted += 1;
+    }
+
+    /// The resampled image, `dw * dh * 4` bytes.
+    fn finish(self) -> Vec<u8> {
+        self.out
+    }
+}
+
+/// The integer box filter [`prescale_image`] uses for rotated and sheared
+/// images, fed one RGBA source row at a time: each output pixel is the
+/// rounded mean of a `factor × factor` block.
+struct IntegerBoxResampler {
+    sw: usize,
+    factor: usize,
+    nw: usize,
+    nh: usize,
+    /// Channel sums of the output row being accumulated, `nw * 4`.
+    sums: Vec<u32>,
+    /// Source rows pushed so far.
+    pushed: usize,
+    out: Vec<u8>,
+}
+
+impl IntegerBoxResampler {
+    /// A resampler from a source `sw` wide to `nw × nh`, where
+    /// `nw * factor <= sw`.
+    fn new(sw: u32, factor: u32, nw: u32, nh: u32) -> Self {
+        let (nw, nh) = (nw as usize, nh as usize);
+        Self {
+            sw: sw as usize,
+            factor: factor as usize,
+            nw,
+            nh,
+            sums: vec![0; nw * 4],
+            pushed: 0,
+            out: vec![0u8; nw * nh * 4],
         }
     }
 
-    out
+    /// The number of source rows the output is made from; the rest are not
+    /// needed.
+    fn rows_needed(&self) -> usize {
+        self.nh * self.factor
+    }
+
+    /// Feed the next source row, `sw * 4` bytes of RGBA. Rows past
+    /// [`Self::rows_needed`] are ignored.
+    fn push_row(&mut self, src_row: &[u8]) {
+        if self.pushed >= self.rows_needed() {
+            return;
+        }
+        debug_assert!(src_row.len() >= self.sw * 4);
+        let factor = self.factor;
+        for (dx, sum) in self.sums.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let block = &src_row[dx * factor * 4..(dx + 1) * factor * 4];
+            for px in block.as_chunks::<4>().0 {
+                for (acc, &v) in sum.iter_mut().zip(px) {
+                    *acc += v as u32;
+                }
+            }
+        }
+        self.pushed += 1;
+        if self.pushed.is_multiple_of(factor) {
+            let area = (factor * factor) as u32;
+            let half = area / 2;
+            let dy = self.pushed / factor - 1;
+            let dst = &mut self.out[dy * self.nw * 4..(dy + 1) * self.nw * 4];
+            for (d, sum) in dst.iter_mut().zip(&mut self.sums) {
+                *d = ((*sum + half) / area) as u8;
+                *sum = 0;
+            }
+        }
+    }
+
+    /// The resampled image, `nw * nh * 4` bytes.
+    fn finish(self) -> Vec<u8> {
+        self.out
+    }
 }
 
 /// Bicubic (Catmull-Rom) resample for upscaling — two-pass separable.
@@ -1739,14 +1897,6 @@ fn catmull_rom(t: f32) -> f32 {
     }
 }
 
-/// Pre-downsample an image when the transform indicates significant downscaling.
-///
-/// tiny-skia's bilinear filter only samples a 2×2 neighborhood — it has no mipmap
-/// support, so large downscale ratios cause severe aliasing (e.g., 300 DPI bitmap
-/// fonts rendered at screen resolution).
-///
-/// For axis-aligned transforms: box-filter resample to the exact target dimensions.
-///
 /// Build an `IccCache` from ICC profiles found in a display list.
 ///
 /// Registers all unique ICCBased profiles and optionally the system CMYK
@@ -2466,21 +2616,49 @@ fn image_filter_quality(transform: Transform, interpolate: bool) -> stet_tiny_sk
     }
 }
 
-/// For rotated/sheared transforms: integer box-filter pre-downsample, leaving
-/// the fractional remainder to tiny-skia's bilinear.
-///
-/// Returns `None` if no pre-scaling is needed.
-fn prescale_image(
-    rgba_data: &[u8],
-    w: u32,
-    h: u32,
-    transform: Transform,
-    interpolate: bool,
-) -> Option<(Vec<u8>, u32, u32, Transform)> {
+/// How [`prescale_image`] will resample an image for a transform.
+enum Prescale {
+    /// Bicubic upscale to `dw × dh`.
+    Bicubic {
+        dw: u32,
+        dh: u32,
+        adjusted: Transform,
+    },
+    /// Area-average box filter down to `dw × dh`.
+    Box {
+        dw: u32,
+        dh: u32,
+        adjusted: Transform,
+    },
+    /// Integer box filter by `factor` down to `nw × nh`, for a rotated or
+    /// sheared image; tiny-skia's bilinear takes the fractional remainder.
+    IntegerBox {
+        factor: u32,
+        nw: u32,
+        nh: u32,
+        adjusted: Transform,
+    },
+}
+
+/// Decide how an image of `w × h` drawn through `transform` is prescaled,
+/// if at all, and the transform the prescaled image is drawn through.
+fn plan_prescale(w: u32, h: u32, transform: Transform, interpolate: bool) -> Option<Prescale> {
     // Compute effective scale factors from the 2×2 part of the transform.
     let scale_x = (transform.sx * transform.sx + transform.ky * transform.ky).sqrt();
     let scale_y = (transform.kx * transform.kx + transform.sy * transform.sy).sqrt();
     let min_scale = scale_x.min(scale_y);
+    // The transform with its scale adjusted for a `dw × dh` image (sign
+    // preserved, same translation).
+    let rescaled = |dw: u32, dh: u32| {
+        Transform::from_row(
+            transform.sx * w as f32 / dw as f32,
+            transform.ky,
+            transform.kx,
+            transform.sy * h as f32 / dh as f32,
+            transform.tx,
+            transform.ty,
+        )
+    };
 
     // Upscaling: only apply bicubic resampling when Interpolate is true.
     // Per PLRM/PDF spec, non-interpolated images should use nearest-neighbor
@@ -2492,18 +2670,11 @@ fn prescale_image(
                 let dw = (w as f32 * transform.sx.abs()).round().max(1.0) as u32;
                 let dh = (h as f32 * transform.sy.abs()).round().max(1.0) as u32;
                 if dw > w || dh > h {
-                    let resampled = bicubic_resample(rgba_data, w, h, dw, dh);
-                    let new_sx = transform.sx * w as f32 / dw as f32;
-                    let new_sy = transform.sy * h as f32 / dh as f32;
-                    let adjusted = Transform::from_row(
-                        new_sx,
-                        transform.ky,
-                        transform.kx,
-                        new_sy,
-                        transform.tx,
-                        transform.ty,
-                    );
-                    return Some((resampled, dw, dh, adjusted));
+                    return Some(Prescale::Bicubic {
+                        dw,
+                        dh,
+                        adjusted: rescaled(dw, dh),
+                    });
                 }
             }
         }
@@ -2522,19 +2693,11 @@ fn prescale_image(
         let dw = (w as f32 * transform.sx.abs()).ceil().max(1.0) as u32;
         let dh = (h as f32 * transform.sy.abs()).ceil().max(1.0) as u32;
         if dw < w || dh < h {
-            let resampled = box_resample(rgba_data, w, h, dw, dh);
-            // Adjust transform so scale ≈ ±1 (sign preserved), same translation.
-            let new_sx = transform.sx * w as f32 / dw as f32;
-            let new_sy = transform.sy * h as f32 / dh as f32;
-            let adjusted = Transform::from_row(
-                new_sx,
-                transform.ky,
-                transform.kx,
-                new_sy,
-                transform.tx,
-                transform.ty,
-            );
-            return Some((resampled, dw, dh, adjusted));
+            return Some(Prescale::Box {
+                dw,
+                dh,
+                adjusted: rescaled(dw, dh),
+            });
         }
     }
 
@@ -2548,42 +2711,182 @@ fn prescale_image(
     if nw == 0 || nh == 0 {
         return None;
     }
-    let area = factor * factor;
-    let half = area / 2;
-    let stride = w as usize * 4;
-    let mut out = vec![0u8; (nw * nh * 4) as usize];
-    for dy in 0..nh {
-        for dx in 0..nw {
-            let (mut r, mut g, mut b, mut a) = (0u32, 0u32, 0u32, 0u32);
-            let sy0 = (dy * factor) as usize;
-            let sx0 = (dx * factor) as usize;
-            for iy in 0..factor as usize {
-                let row = (sy0 + iy) * stride + sx0 * 4;
-                for ix in 0..factor as usize {
-                    let i = row + ix * 4;
-                    r += rgba_data[i] as u32;
-                    g += rgba_data[i + 1] as u32;
-                    b += rgba_data[i + 2] as u32;
-                    a += rgba_data[i + 3] as u32;
-                }
+    let f = factor as f32;
+    Some(Prescale::IntegerBox {
+        factor,
+        nw,
+        nh,
+        adjusted: Transform::from_row(
+            transform.sx * f,
+            transform.ky * f,
+            transform.kx * f,
+            transform.sy * f,
+            transform.tx,
+            transform.ty,
+        ),
+    })
+}
+
+/// Pre-downsample an image when the transform indicates significant
+/// downscaling, or upsample one that is to be interpolated.
+///
+/// tiny-skia's bilinear filter only samples a 2×2 neighborhood — it has no
+/// mipmap support, so large downscale ratios cause severe aliasing (e.g.,
+/// 300 DPI bitmap fonts rendered at screen resolution).
+///
+/// For axis-aligned transforms: box-filter resample to the exact target
+/// dimensions. For rotated/sheared transforms: integer box-filter
+/// pre-downsample, leaving the fractional remainder to tiny-skia's bilinear.
+///
+/// Returns `None` if no pre-scaling is needed.
+///
+/// [`convert_prescaled`] gives the same result from an image's samples
+/// without the full-size RGBA this takes.
+fn prescale_image(
+    rgba_data: &[u8],
+    w: u32,
+    h: u32,
+    transform: Transform,
+    interpolate: bool,
+) -> Option<(Vec<u8>, u32, u32, Transform)> {
+    match plan_prescale(w, h, transform, interpolate)? {
+        Prescale::Bicubic { dw, dh, adjusted } => {
+            Some((bicubic_resample(rgba_data, w, h, dw, dh), dw, dh, adjusted))
+        }
+        Prescale::Box { dw, dh, adjusted } => {
+            Some((box_resample(rgba_data, w, h, dw, dh), dw, dh, adjusted))
+        }
+        Prescale::IntegerBox {
+            factor,
+            nw,
+            nh,
+            adjusted,
+        } => {
+            let mut resampler = IntegerBoxResampler::new(w, factor, nw, nh);
+            for row in rgba_data
+                .chunks_exact(w as usize * 4)
+                .take(resampler.rows_needed())
+            {
+                resampler.push_row(row);
             }
-            let di = (dy * nw + dx) as usize * 4;
-            out[di] = ((r + half) / area) as u8;
-            out[di + 1] = ((g + half) / area) as u8;
-            out[di + 2] = ((b + half) / area) as u8;
-            out[di + 3] = ((a + half) / area) as u8;
+            Some((resampler.finish(), nw, nh, adjusted))
         }
     }
-    let f = factor as f32;
-    let adjusted = Transform::from_row(
-        transform.sx * f,
-        transform.ky * f,
-        transform.kx * f,
-        transform.sy * f,
-        transform.tx,
-        transform.ty,
-    );
-    Some((out, nw, nh, adjusted))
+}
+
+/// The number of bytes one row of an image's samples takes, as
+/// [`samples_to_rgba`] reads them, or `None` for a colour space it does not
+/// read row by row.
+fn sample_row_bytes(params: &ImageParams) -> Option<usize> {
+    let w = params.width as usize;
+    let wide = if params.bits_per_component == 16 {
+        2
+    } else {
+        1
+    };
+    Some(match &params.color_space {
+        ImageColorSpace::PreconvertedRGBA => w * 4,
+        ImageColorSpace::DeviceGray => w * wide,
+        ImageColorSpace::DeviceRGB => w * 3 * wide,
+        ImageColorSpace::DeviceCMYK => w * 4,
+        ImageColorSpace::ICCBased { n, .. } => w * *n as usize,
+        ImageColorSpace::Indexed { .. } => w,
+        ImageColorSpace::CIEBasedABC { .. } | ImageColorSpace::Lab { .. } => w * 3,
+        ImageColorSpace::CIEBasedA { .. } | ImageColorSpace::Separation { .. } => w,
+        ImageColorSpace::DeviceN { tint_table, .. } => w * tint_table.num_inputs as usize,
+        // One bit per pixel, each row padded to a byte.
+        ImageColorSpace::Mask { .. } => w.div_ceil(8),
+        _ => return None,
+    })
+}
+
+/// The number of source pixels [`convert_prescaled`] converts at a time.
+const CONVERT_STRIP_PIXELS: usize = 1 << 18;
+
+/// An image's samples converted to premultiplied RGBA and prescaled for
+/// `transform`: what [`image_to_rgba`] then [`prescale_image`] give, byte
+/// for byte, without the image at full size in between.
+///
+/// A large image drawn small is converted a strip of rows at a time, and
+/// each row goes straight into the filter, which keeps a few rows of the
+/// output's width. Converting the whole image first costs four bytes for
+/// every source pixel only to throw them away: 116 MB for a 4500×6442
+/// image that ends up 800 pixels wide.
+///
+/// Returns `None`, and the caller converts the whole image, when there is
+/// nothing to save or the strips could differ from the whole:
+///
+/// - the image is not being scaled down (the result is at least as large as
+///   the source);
+/// - the sample data is short. Each colour conversion is per pixel, but an
+///   ICC conversion refuses short data and the *whole* image then falls back
+///   to its device space, which a strip that happens to be complete would
+///   not do;
+/// - the image is 16-bit with a colour key, which is not applied row by row.
+fn convert_prescaled(
+    sample_data: &[u8],
+    params: &ImageParams,
+    icc: Option<&IccCache>,
+    opm_zero_transparent: bool,
+    transfer: Option<&TransferState>,
+    transform: Transform,
+) -> Option<(Vec<u8>, u32, u32, Transform)> {
+    let (w, h) = (params.width, params.height);
+    let plan = match plan_prescale(w, h, transform, params.interpolate)? {
+        Prescale::Bicubic { .. } => return None,
+        plan => plan,
+    };
+    let row_bytes = sample_row_bytes(params)?;
+    if row_bytes == 0 || sample_data.len() / row_bytes < h as usize {
+        return None;
+    }
+    // The colour key reads a 16-bit image's samples as if they were bytes,
+    // so a pixel's key is looked up in another row's data.
+    if params.mask_color.is_some() && params.bits_per_component == 16 {
+        return None;
+    }
+
+    // Convert `rows` rows from the top, a strip at a time, handing each
+    // RGBA row to `push`.
+    let convert_rows = |rows: usize, push: &mut dyn FnMut(&[u8])| {
+        let strip_rows = (CONVERT_STRIP_PIXELS / w as usize).max(1);
+        let mut strip_params = params.clone();
+        let mut start = 0;
+        while start < rows {
+            let n = strip_rows.min(rows - start);
+            strip_params.height = n as u32;
+            let rgba = image_to_rgba(
+                &sample_data[start * row_bytes..(start + n) * row_bytes],
+                &strip_params,
+                icc,
+                opm_zero_transparent,
+                transfer,
+            );
+            for row in rgba.chunks_exact(w as usize * 4) {
+                push(row);
+            }
+            start += n;
+        }
+    };
+
+    match plan {
+        Prescale::Box { dw, dh, adjusted } => {
+            let mut resampler = BoxResampler::new(w, h, dw, dh);
+            convert_rows(h as usize, &mut |row| resampler.push_row(row));
+            Some((resampler.finish(), dw, dh, adjusted))
+        }
+        Prescale::IntegerBox {
+            factor,
+            nw,
+            nh,
+            adjusted,
+        } => {
+            let mut resampler = IntegerBoxResampler::new(w, factor, nw, nh);
+            convert_rows(resampler.rows_needed(), &mut |row| resampler.push_row(row));
+            Some((resampler.finish(), nw, nh, adjusted))
+        }
+        Prescale::Bicubic { .. } => None,
+    }
 }
 
 /// Translate a device-space ClipRect into band-local coordinates.
@@ -3325,45 +3628,67 @@ fn render_element(
                     );
                 }
             } else {
-                // Use pre-converted RGBA from image cache when available
-                let owned_rgba;
-                let rgba_data: &[u8] =
-                    if let Some(cached) = cached_image(ctx.image_cache, ctx.elem_idx) {
-                        cached
-                    } else {
-                        owned_rgba = image_to_rgba(
-                            sample_data,
-                            params,
-                            ctx.icc,
-                            ctx.opm_zero_transparent,
-                            paint_transfer(
-                                &params.transfer,
-                                params.alpha,
-                                params.blend_mode,
-                                ctx.transfer_suppressed,
-                            ),
-                        );
-                        &owned_rgba
-                    };
-                let expected = (iw * ih * 4) as usize;
-                if rgba_data.len() < expected {
-                    return;
-                }
                 let Some(image_inv) = params.image_matrix.invert() else {
                     return;
                 };
                 let combined = params.ctm.concat(&image_inv);
                 let raw_transform = enforce_min_image_size(ctx.transform(&combined), iw, ih);
 
-                // Pre-scale images that are being downscaled. Even non-interpolated
-                // images need proper area averaging when shrinking — "no interpolation"
-                // means don't smooth when *upscaling*, but downscaling without averaging
-                // produces aliased garbage.
-                let prescaled =
-                    prescale_image(rgba_data, iw, ih, raw_transform, params.interpolate);
-                let (img_data, img_w, img_h, transform) = match &prescaled {
-                    Some((data, w, h, t)) => (data.as_slice(), *w, *h, *t),
-                    None => (rgba_data, iw, ih, raw_transform),
+                // Use pre-converted RGBA from image cache when available.
+                // Without it, an image drawn small is converted and
+                // prescaled in one pass, never held at full size.
+                let cached = cached_image(ctx.image_cache, ctx.elem_idx);
+                let transfer = paint_transfer(
+                    &params.transfer,
+                    params.alpha,
+                    params.blend_mode,
+                    ctx.transfer_suppressed,
+                );
+                let streamed = if cached.is_none() {
+                    convert_prescaled(
+                        sample_data,
+                        params,
+                        ctx.icc,
+                        ctx.opm_zero_transparent,
+                        transfer,
+                        raw_transform,
+                    )
+                } else {
+                    None
+                };
+                let owned_rgba;
+                let prescaled;
+                let (img_data, img_w, img_h, transform) = if let Some((data, w, h, t)) = &streamed {
+                    (data.as_slice(), *w, *h, *t)
+                } else {
+                    let rgba_data: &[u8] = match cached {
+                        Some(cached) => cached,
+                        None => {
+                            owned_rgba = image_to_rgba(
+                                sample_data,
+                                params,
+                                ctx.icc,
+                                ctx.opm_zero_transparent,
+                                transfer,
+                            );
+                            &owned_rgba
+                        }
+                    };
+                    let expected = (iw * ih * 4) as usize;
+                    if rgba_data.len() < expected {
+                        return;
+                    }
+                    // Pre-scale images that are being downscaled. Even
+                    // non-interpolated images need proper area averaging when
+                    // shrinking — "no interpolation" means don't smooth when
+                    // *upscaling*, but downscaling without averaging produces
+                    // aliased garbage.
+                    prescaled =
+                        prescale_image(rgba_data, iw, ih, raw_transform, params.interpolate);
+                    match &prescaled {
+                        Some((data, w, h, t)) => (data.as_slice(), *w, *h, *t),
+                        None => (rgba_data, iw, ih, raw_transform),
+                    }
                 };
 
                 let Some(img_pixmap) =
@@ -10538,13 +10863,87 @@ enum CacheEntry<T> {
     },
 }
 
-/// Which containers [`build_cache_entries`] descends into.
+/// Which containers [`build_cache_entries`] descends into, and how.
 struct CacheDescent<'a> {
     /// Accepts the layers to descend into, by their visibility.
-    layer: &'a dyn Fn(&OcgVisibility) -> bool,
+    layer: &'a (dyn Fn(&OcgVisibility) -> bool + Sync),
     /// Whether to descend into transparency groups and soft-masked
     /// elements as well.
     groups_and_masks: bool,
+    /// Whether to convert the images of a list in parallel (with the
+    /// `parallel` feature; without it every list is converted in order).
+    /// The entries are the same either way.
+    #[cfg_attr(not(feature = "parallel"), expect(dead_code))]
+    parallel: bool,
+}
+
+/// A limit on the memory that conversions running at once may hold beyond
+/// their results.
+///
+/// The images of a page are converted in parallel. One that is converted
+/// and prescaled in a single pass holds a strip of rows while it works; one
+/// that is not (it is drawn at about its own size or larger, or its data is
+/// short) holds the whole image at full size, sometimes more than once.
+/// Those take a share of the budget for as long as they run, so a page of
+/// large images does not have one at full size in flight on every thread.
+struct ConversionBudget {
+    limit: usize,
+    in_use: Mutex<usize>,
+    released: std::sync::Condvar,
+    /// The most ever in use at once.
+    #[cfg(test)]
+    most_in_use: std::sync::atomic::AtomicUsize,
+}
+
+/// A share of a [`ConversionBudget`], returned when dropped.
+struct ConversionShare<'a> {
+    budget: &'a ConversionBudget,
+    bytes: usize,
+}
+
+impl ConversionBudget {
+    /// The budget for a page's conversions: enough for a few images of
+    /// ordinary size at once.
+    const PAGE: usize = 256 << 20;
+
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            in_use: Mutex::new(0),
+            released: std::sync::Condvar::new(),
+            #[cfg(test)]
+            most_in_use: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// Wait until `bytes` fit in the budget and take them. A conversion
+    /// larger than the whole budget runs once it would run alone, as it
+    /// would if the images were converted one after another.
+    fn take(&self, bytes: usize) -> ConversionShare<'_> {
+        let mut in_use = self.in_use.lock().unwrap_or_else(|e| e.into_inner());
+        while *in_use > 0 && *in_use + bytes > self.limit {
+            in_use = self
+                .released
+                .wait(in_use)
+                .unwrap_or_else(|e| e.into_inner());
+        }
+        *in_use += bytes;
+        #[cfg(test)]
+        self.most_in_use
+            .fetch_max(*in_use, std::sync::atomic::Ordering::Relaxed);
+        ConversionShare {
+            budget: self,
+            bytes,
+        }
+    }
+}
+
+impl Drop for ConversionShare<'_> {
+    fn drop(&mut self) {
+        let mut in_use = self.budget.in_use.lock().unwrap_or_else(|e| e.into_inner());
+        *in_use -= self.bytes;
+        self.budget.released.notify_all();
+    }
 }
 
 /// Whether what a transparency group contains is painted with no transfer
@@ -10565,47 +10964,64 @@ fn group_suppresses_transfer(
 /// and descending into the containers `descent` names. `image` is told
 /// whether the image's context suppresses transfer functions, which
 /// `transfer_suppressed` says of `elements` themselves.
-fn build_cache_entries<T>(
+///
+/// With `descent.parallel` the elements of each list are converted in
+/// parallel, a container's lists within its own task; the entries come out
+/// in the elements' order whichever way they were made.
+fn build_cache_entries<T: Send>(
     elements: &[DisplayElement],
     descent: &CacheDescent<'_>,
     transfer_suppressed: bool,
-    image: &impl Fn(&[u8], &ImageParams, bool) -> Option<T>,
+    image: &(impl Fn(&[u8], &ImageParams, bool) -> Option<T> + Sync),
 ) -> Vec<CacheEntry<T>> {
-    elements
-        .iter()
-        .map(|elem| match elem {
-            DisplayElement::Image {
-                sample_data,
-                params,
-            } => image(sample_data, params, transfer_suppressed)
-                .map_or(CacheEntry::Empty, CacheEntry::Image),
-            DisplayElement::OcgGroup {
-                elements,
-                visibility,
-            } if (descent.layer)(visibility) => CacheEntry::Children(build_cache_entries(
+    let entry =
+        |elem: &DisplayElement| build_cache_entry(elem, descent, transfer_suppressed, image);
+    #[cfg(feature = "parallel")]
+    if descent.parallel {
+        return elements.par_iter().map(entry).collect();
+    }
+    elements.iter().map(entry).collect()
+}
+
+/// The cache entry of one element; see [`build_cache_entries`].
+fn build_cache_entry<T: Send>(
+    elem: &DisplayElement,
+    descent: &CacheDescent<'_>,
+    transfer_suppressed: bool,
+    image: &(impl Fn(&[u8], &ImageParams, bool) -> Option<T> + Sync),
+) -> CacheEntry<T> {
+    match elem {
+        DisplayElement::Image {
+            sample_data,
+            params,
+        } => image(sample_data, params, transfer_suppressed)
+            .map_or(CacheEntry::Empty, CacheEntry::Image),
+        DisplayElement::OcgGroup {
+            elements,
+            visibility,
+        } if (descent.layer)(visibility) => CacheEntry::Children(build_cache_entries(
+            elements.elements(),
+            descent,
+            transfer_suppressed,
+            image,
+        )),
+        DisplayElement::Group { elements, params } if descent.groups_and_masks => {
+            CacheEntry::Children(build_cache_entries(
                 elements.elements(),
                 descent,
-                transfer_suppressed,
+                group_suppresses_transfer(transfer_suppressed, params),
                 image,
-            )),
-            DisplayElement::Group { elements, params } if descent.groups_and_masks => {
-                CacheEntry::Children(build_cache_entries(
-                    elements.elements(),
-                    descent,
-                    group_suppresses_transfer(transfer_suppressed, params),
-                    image,
-                ))
+            ))
+        }
+        // Nothing in a soft mask's mask or content is fully opaque.
+        DisplayElement::SoftMasked { mask, content, .. } if descent.groups_and_masks => {
+            CacheEntry::Masked {
+                content: build_cache_entries(content.elements(), descent, true, image),
+                mask: build_cache_entries(mask.elements(), descent, true, image),
             }
-            // Nothing in a soft mask's mask or content is fully opaque.
-            DisplayElement::SoftMasked { mask, content, .. } if descent.groups_and_masks => {
-                CacheEntry::Masked {
-                    content: build_cache_entries(content.elements(), descent, true, image),
-                    mask: build_cache_entries(mask.elements(), descent, true, image),
-                }
-            }
-            _ => CacheEntry::Empty,
-        })
-        .collect()
+        }
+        _ => CacheEntry::Empty,
+    }
 }
 
 /// The image entry at `index` in `entries`.
@@ -10658,6 +11074,9 @@ impl ImageCache {
         let descent = CacheDescent {
             layer: &|_| true,
             groups_and_masks: false,
+            // Every conversion here is a full-size result; in order, the
+            // conversions' own working memory is held one at a time.
+            parallel: false,
         };
         let entries = build_cache_entries(
             list.elements(),
@@ -10702,14 +11121,30 @@ impl ImageCache {
 /// transparency groups and soft masks are included, or every band that
 /// touches one would convert the whole image for itself. Layers that
 /// `layer_set` hides are skipped: their images paint nothing.
+///
+/// The images are converted in parallel.
 fn preprocess_images_for_bands(
     list: &DisplayList,
     icc: Option<&IccCache>,
     layer_set: &LayerSet,
 ) -> Vec<CacheEntry<PreprocessedImage>> {
+    let budget = ConversionBudget::new(ConversionBudget::PAGE);
+    preprocess_images(list, icc, layer_set, true, &budget)
+}
+
+/// [`preprocess_images_for_bands`], in parallel or in order, with full-size
+/// conversions held to `budget`; the entries are the same.
+fn preprocess_images(
+    list: &DisplayList,
+    icc: Option<&IccCache>,
+    layer_set: &LayerSet,
+    parallel: bool,
+    budget: &ConversionBudget,
+) -> Vec<CacheEntry<PreprocessedImage>> {
     let descent = CacheDescent {
         layer: &|visibility| layer_set.evaluate(visibility),
         groups_and_masks: true,
+        parallel,
     };
     build_cache_entries(
         list.elements(),
@@ -10726,36 +11161,33 @@ fn preprocess_images_for_bands(
                 return None;
             }
 
-            // Convert to RGBA, as the image's context will ask for it:
-            // `opm_zero_transparent` is set by pattern tiles only, which
-            // these entries never reach.
-            let rgba = image_to_rgba(
-                sample_data,
-                params,
-                icc,
-                false,
-                paint_transfer(
-                    &params.transfer,
-                    params.alpha,
-                    params.blend_mode,
-                    transfer_suppressed,
-                ),
-            );
-
             // Compute the device-space transform (vp_y=0, scale=1.0)
             let image_inv = params.image_matrix.invert()?;
             let combined = params.ctm.concat(&image_inv);
             let base_transform = enforce_min_image_size(to_transform(&combined), iw, ih);
 
-            // Prescale
+            // Convert to RGBA, as the image's context will ask for it:
+            // `opm_zero_transparent` is set by pattern tiles only, which
+            // these entries never reach.
+            let transfer = paint_transfer(
+                &params.transfer,
+                params.alpha,
+                params.blend_mode,
+                transfer_suppressed,
+            );
+            // An image drawn small is converted and prescaled in one pass;
+            // any other is converted whole and prescaled if it needs it.
             let (data, width, height, adj_t) =
-                match prescale_image(&rgba, iw, ih, base_transform, params.interpolate) {
-                    Some((d, w, h, t)) => {
-                        drop(rgba); // free the full-size RGBA
-                        (d, w, h, t)
-                    }
-                    None => (rgba, iw, ih, base_transform),
-                };
+                convert_prescaled(sample_data, params, icc, false, transfer, base_transform)
+                    .unwrap_or_else(|| {
+                        // The whole image at full size: within the budget.
+                        let _share = budget.take(iw as usize * ih as usize * 4);
+                        let rgba = image_to_rgba(sample_data, params, icc, false, transfer);
+                        match prescale_image(&rgba, iw, ih, base_transform, params.interpolate) {
+                            Some(prescaled) => prescaled,
+                            None => (rgba, iw, ih, base_transform),
+                        }
+                    });
 
             let quality = image_filter_quality(adj_t, params.interpolate);
 
@@ -14922,6 +15354,527 @@ mod tests {
         assert!(compute_obscured_fill_skips(&d).is_empty());
     }
 
+    /// `box_resample` as it was before it was built on [`BoxResampler`]: the
+    /// whole-image filter, with a float row for every source row. Frozen
+    /// here as the reference the streamed filters are held to.
+    fn reference_box_resample(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+        if dw == 0 || dh == 0 {
+            return Vec::new();
+        }
+        let (sw, sh, dw, dh) = (sw as usize, sh as usize, dw as usize, dh as usize);
+
+        // Pass 1: horizontal (sw → dw) with fractional edge weights.
+        // Each output pixel covers [left_f, right_f] in source space. Edge source
+        // pixels get proportional weight; interior pixels get weight 1.0.
+        let ratio_x = sw as f32 / dw as f32;
+        let mut tmp = vec![0.0f32; dw * sh * 4];
+        let tmp_stride = dw * 4;
+
+        for y in 0..sh {
+            let row_off = y * sw * 4;
+            let dst_row = y * tmp_stride;
+            for dx in 0..dw {
+                let left_f = dx as f32 * ratio_x;
+                let right_f = (dx + 1) as f32 * ratio_x;
+                let left = (left_f as usize).min(sw - 1);
+                let right = (right_f.ceil() as usize).min(sw);
+                let inv_area = 1.0 / (right_f - left_f);
+                let (mut r, mut g, mut b, mut a) = (0.0f32, 0.0, 0.0, 0.0);
+                for sx in left..right {
+                    // Weight: fraction of this source pixel covered by the output pixel
+                    let pixel_left = sx as f32;
+                    let pixel_right = (sx + 1) as f32;
+                    let w = pixel_right.min(right_f) - pixel_left.max(left_f);
+                    let i = row_off + sx * 4;
+                    r += src[i] as f32 * w;
+                    g += src[i + 1] as f32 * w;
+                    b += src[i + 2] as f32 * w;
+                    a += src[i + 3] as f32 * w;
+                }
+                let di = dst_row + dx * 4;
+                tmp[di] = r * inv_area;
+                tmp[di + 1] = g * inv_area;
+                tmp[di + 2] = b * inv_area;
+                tmp[di + 3] = a * inv_area;
+            }
+        }
+
+        // Pass 2: vertical (sh → dh) with fractional edge weights, row-major order.
+        let ratio_y = sh as f32 / dh as f32;
+        let mut out = vec![0u8; dw * dh * 4];
+        let out_stride = dw * 4;
+
+        for dy in 0..dh {
+            let top_f = dy as f32 * ratio_y;
+            let bottom_f = (dy + 1) as f32 * ratio_y;
+            let top = (top_f as usize).min(sh - 1);
+            let bottom = (bottom_f.ceil() as usize).min(sh);
+            let inv_area = 1.0 / (bottom_f - top_f);
+
+            // Pre-compute row weights
+            let n_rows = bottom - top;
+            let mut row_weights_buf: [(usize, f32); 8] = [(0, 0.0); 8];
+            let row_weights_vec: Vec<(usize, f32)>;
+            let row_weights: &[(usize, f32)] = if n_rows <= 8 {
+                for (i, sy) in (top..bottom).enumerate() {
+                    let pixel_top = sy as f32;
+                    let pixel_bottom = (sy + 1) as f32;
+                    let w = pixel_bottom.min(bottom_f) - pixel_top.max(top_f);
+                    row_weights_buf[i] = (sy, w);
+                }
+                &row_weights_buf[..n_rows]
+            } else {
+                row_weights_vec = (top..bottom)
+                    .map(|sy| {
+                        let pixel_top = sy as f32;
+                        let pixel_bottom = (sy + 1) as f32;
+                        let w = pixel_bottom.min(bottom_f) - pixel_top.max(top_f);
+                        (sy, w)
+                    })
+                    .collect();
+                &row_weights_vec
+            };
+
+            let dst_row = dy * out_stride;
+            for dx in 0..dw {
+                let col = dx * 4;
+                let (mut r, mut g, mut b, mut a) = (0.0f32, 0.0, 0.0, 0.0);
+                for &(sy, w) in row_weights {
+                    let i = sy * tmp_stride + col;
+                    r += tmp[i] * w;
+                    g += tmp[i + 1] * w;
+                    b += tmp[i + 2] * w;
+                    a += tmp[i + 3] * w;
+                }
+                let di = dst_row + col;
+                out[di] = (r * inv_area + 0.5).clamp(0.0, 255.0) as u8;
+                out[di + 1] = (g * inv_area + 0.5).clamp(0.0, 255.0) as u8;
+                out[di + 2] = (b * inv_area + 0.5).clamp(0.0, 255.0) as u8;
+                out[di + 3] = (a * inv_area + 0.5).clamp(0.0, 255.0) as u8;
+            }
+        }
+
+        out
+    }
+
+    /// `prescale_image` as it was before [`plan_prescale`], on the frozen
+    /// box filter above.
+    fn reference_prescale_image(
+        rgba_data: &[u8],
+        w: u32,
+        h: u32,
+        transform: Transform,
+        interpolate: bool,
+    ) -> Option<(Vec<u8>, u32, u32, Transform)> {
+        // Compute effective scale factors from the 2×2 part of the transform.
+        let scale_x = (transform.sx * transform.sx + transform.ky * transform.ky).sqrt();
+        let scale_y = (transform.kx * transform.kx + transform.sy * transform.sy).sqrt();
+        let min_scale = scale_x.min(scale_y);
+
+        // Upscaling: only apply bicubic resampling when Interpolate is true.
+        // Per PLRM/PDF spec, non-interpolated images should use nearest-neighbor
+        // for upscaling (crisp pixel boundaries, no smoothing).
+        if min_scale > 1.05 {
+            if interpolate {
+                let is_axis_aligned = transform.kx.abs() < 1e-4 && transform.ky.abs() < 1e-4;
+                if is_axis_aligned && w >= 2 && h >= 2 {
+                    let dw = (w as f32 * transform.sx.abs()).round().max(1.0) as u32;
+                    let dh = (h as f32 * transform.sy.abs()).round().max(1.0) as u32;
+                    if dw > w || dh > h {
+                        let resampled = bicubic_resample(rgba_data, w, h, dw, dh);
+                        let new_sx = transform.sx * w as f32 / dw as f32;
+                        let new_sy = transform.sy * h as f32 / dh as f32;
+                        let adjusted = Transform::from_row(
+                            new_sx,
+                            transform.ky,
+                            transform.kx,
+                            new_sy,
+                            transform.tx,
+                            transform.ty,
+                        );
+                        return Some((resampled, dw, dh, adjusted));
+                    }
+                }
+            }
+            return None;
+        }
+
+        // Near 1:1 — no prescaling needed.
+        if min_scale >= 0.95 {
+            return None;
+        }
+
+        // Axis-aligned: use area-average box filter to target dimensions.
+        // Much faster than Lanczos3 and produces equally good results for downscaling.
+        let is_axis_aligned = transform.kx.abs() < 1e-4 && transform.ky.abs() < 1e-4;
+        if is_axis_aligned && w >= 2 && h >= 2 {
+            let dw = (w as f32 * transform.sx.abs()).ceil().max(1.0) as u32;
+            let dh = (h as f32 * transform.sy.abs()).ceil().max(1.0) as u32;
+            if dw < w || dh < h {
+                let resampled = reference_box_resample(rgba_data, w, h, dw, dh);
+                // Adjust transform so scale ≈ ±1 (sign preserved), same translation.
+                let new_sx = transform.sx * w as f32 / dw as f32;
+                let new_sy = transform.sy * h as f32 / dh as f32;
+                let adjusted = Transform::from_row(
+                    new_sx,
+                    transform.ky,
+                    transform.kx,
+                    new_sy,
+                    transform.tx,
+                    transform.ty,
+                );
+                return Some((resampled, dw, dh, adjusted));
+            }
+        }
+
+        // Fallback for rotated/sheared: integer box filter.
+        let factor = (1.0 / min_scale) as u32;
+        if factor < 2 || w < factor || h < factor {
+            return None;
+        }
+        let nw = w / factor;
+        let nh = h / factor;
+        if nw == 0 || nh == 0 {
+            return None;
+        }
+        let area = factor * factor;
+        let half = area / 2;
+        let stride = w as usize * 4;
+        let mut out = vec![0u8; (nw * nh * 4) as usize];
+        for dy in 0..nh {
+            for dx in 0..nw {
+                let (mut r, mut g, mut b, mut a) = (0u32, 0u32, 0u32, 0u32);
+                let sy0 = (dy * factor) as usize;
+                let sx0 = (dx * factor) as usize;
+                for iy in 0..factor as usize {
+                    let row = (sy0 + iy) * stride + sx0 * 4;
+                    for ix in 0..factor as usize {
+                        let i = row + ix * 4;
+                        r += rgba_data[i] as u32;
+                        g += rgba_data[i + 1] as u32;
+                        b += rgba_data[i + 2] as u32;
+                        a += rgba_data[i + 3] as u32;
+                    }
+                }
+                let di = (dy * nw + dx) as usize * 4;
+                out[di] = ((r + half) / area) as u8;
+                out[di + 1] = ((g + half) / area) as u8;
+                out[di + 2] = ((b + half) / area) as u8;
+                out[di + 3] = ((a + half) / area) as u8;
+            }
+        }
+        let f = factor as f32;
+        let adjusted = Transform::from_row(
+            transform.sx * f,
+            transform.ky * f,
+            transform.kx * f,
+            transform.sy * f,
+            transform.tx,
+            transform.ty,
+        );
+        Some((out, nw, nh, adjusted))
+    }
+
+    /// A deterministic stream of bytes for the resampling tests.
+    struct TestBytes(u64);
+
+    impl TestBytes {
+        fn next(&mut self) -> u8 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 56) as u8
+        }
+
+        fn take(&mut self, n: usize) -> Vec<u8> {
+            (0..n).map(|_| self.next()).collect()
+        }
+    }
+
+    /// The row-at-a-time box filter gives the bytes of the whole-image one
+    /// it replaced, across sizes that make the ring one row deep, many rows
+    /// deep, and uneven from one output row to the next.
+    #[test]
+    fn box_resample_equals_the_whole_image_filter() {
+        let mut bytes = TestBytes(1);
+        for (sw, sh, dw, dh) in [
+            (2, 2, 1, 1),
+            (7, 5, 3, 2),
+            (64, 64, 63, 63),
+            (100, 37, 33, 36),
+            (37, 100, 36, 7),
+            (129, 257, 17, 13),
+            (300, 200, 1, 1),
+            (50, 400, 50, 3),
+            (400, 50, 3, 50),
+            // One axis scaled up while the other goes down.
+            (40, 90, 47, 11),
+            (90, 40, 11, 47),
+        ] {
+            let src = bytes.take(sw as usize * sh as usize * 4);
+            assert!(
+                box_resample(&src, sw, sh, dw, dh) == reference_box_resample(&src, sw, sh, dw, dh),
+                "{sw}x{sh} -> {dw}x{dh}"
+            );
+        }
+    }
+
+    /// Transforms that take each of `prescale_image`'s branches: box filter
+    /// down, one axis each way, integer box under rotation and shear,
+    /// bicubic up, and the ones it leaves alone.
+    fn prescale_test_transforms() -> Vec<Transform> {
+        let rotated = |scale: f32, degrees: f32| {
+            let (sin, cos) = degrees.to_radians().sin_cos();
+            Transform::from_row(
+                scale * cos,
+                scale * sin,
+                -scale * sin,
+                scale * cos,
+                9.0,
+                4.0,
+            )
+        };
+        vec![
+            Transform::from_row(0.31, 0.0, 0.0, 0.31, 3.5, 7.25),
+            Transform::from_row(0.07, 0.0, 0.0, -0.11, 0.0, 90.0),
+            Transform::from_row(-0.5, 0.0, 0.0, 0.93, 80.0, 0.0),
+            Transform::from_row(0.4, 0.0, 0.0, 1.3, 0.0, 0.0),
+            Transform::from_row(0.94, 0.0, 0.0, 0.94, 0.0, 0.0),
+            rotated(0.3, 30.0),
+            rotated(0.12, 90.0),
+            rotated(0.45, 200.0),
+            Transform::from_row(0.2, 0.05, 0.1, 0.25, 1.0, 2.0),
+            // Left alone: near 1:1, and a rotation too slight to halve.
+            Transform::from_row(0.97, 0.0, 0.0, 1.0, 0.0, 0.0),
+            rotated(0.6, 45.0),
+            // Up.
+            Transform::from_row(1.7, 0.0, 0.0, 2.2, 0.0, 0.0),
+        ]
+    }
+
+    fn assert_same_prescale(
+        what: &str,
+        got: Option<(Vec<u8>, u32, u32, Transform)>,
+        want: Option<(Vec<u8>, u32, u32, Transform)>,
+    ) {
+        match (got, want) {
+            (None, None) => {}
+            (Some((gd, gw, gh, gt)), Some((wd, ww, wh, wt))) => {
+                assert_eq!((gw, gh), (ww, wh), "{what}: size");
+                assert_eq!(gt, wt, "{what}: transform");
+                assert!(gd == wd, "{what}: pixels differ");
+            }
+            (got, want) => panic!(
+                "{what}: prescaled {} where the reference {}",
+                if got.is_some() {
+                    "something"
+                } else {
+                    "nothing"
+                },
+                if want.is_some() { "did" } else { "did not" },
+            ),
+        }
+    }
+
+    /// `prescale_image`, rebuilt on a plan and the row-at-a-time filters,
+    /// decides and computes what it always did.
+    #[test]
+    fn prescale_image_equals_its_reference() {
+        let mut bytes = TestBytes(2);
+        for (w, h) in [(1, 1), (2, 3), (61, 47), (200, 130)] {
+            let rgba = bytes.take(w as usize * h as usize * 4);
+            for (i, t) in prescale_test_transforms().into_iter().enumerate() {
+                for interpolate in [false, true] {
+                    assert_same_prescale(
+                        &format!("{w}x{h}, transform {i}, interpolate {interpolate}"),
+                        prescale_image(&rgba, w, h, t, interpolate),
+                        reference_prescale_image(&rgba, w, h, t, interpolate),
+                    );
+                }
+            }
+        }
+    }
+
+    /// An image of `width × height` in `color_space` with `samples`.
+    fn streamed_test_params(
+        color_space: ImageColorSpace,
+        bits_per_component: u8,
+        width: u32,
+        height: u32,
+    ) -> ImageParams {
+        ImageParams {
+            width,
+            height,
+            color_space,
+            bits_per_component,
+            ..ImageParams::default()
+        }
+    }
+
+    /// Every colour space the streamed conversion reads row by row, with
+    /// the bytes per pixel its samples take (`None`: one bit, rows padded).
+    fn streamed_test_spaces() -> Vec<(&'static str, ImageColorSpace, u8, Option<usize>)> {
+        let lookup: Vec<u8> = (0..=255u8).flat_map(|i| [i, 255 - i, i / 2]).collect();
+        vec![
+            ("gray", ImageColorSpace::DeviceGray, 8, Some(1)),
+            ("gray16", ImageColorSpace::DeviceGray, 16, Some(2)),
+            ("rgb", ImageColorSpace::DeviceRGB, 8, Some(3)),
+            ("rgb16", ImageColorSpace::DeviceRGB, 16, Some(6)),
+            ("cmyk", ImageColorSpace::DeviceCMYK, 8, Some(4)),
+            ("rgba", ImageColorSpace::PreconvertedRGBA, 8, Some(4)),
+            (
+                "indexed",
+                ImageColorSpace::Indexed {
+                    base: Box::new(ImageColorSpace::DeviceRGB),
+                    hival: 255,
+                    lookup,
+                },
+                8,
+                Some(1),
+            ),
+            (
+                "lab",
+                ImageColorSpace::Lab {
+                    white_point: [0.9505, 1.0, 1.089],
+                    range: [-100.0, 100.0, -100.0, 100.0],
+                },
+                8,
+                Some(3),
+            ),
+            (
+                "mask",
+                ImageColorSpace::Mask {
+                    color: DeviceColor::from_rgb(0.2, 0.4, 0.6),
+                    polarity: true,
+                    spot_color: None,
+                },
+                1,
+                None,
+            ),
+        ]
+    }
+
+    /// The streamed conversion against converting the whole image and then
+    /// prescaling it, for every transform in [`prescale_test_transforms`].
+    /// It must give the same bytes wherever it gives anything, and give
+    /// something exactly where the image is scaled down.
+    fn assert_streamed_equals_whole(
+        what: &str,
+        samples: &[u8],
+        params: &ImageParams,
+        transfer: Option<&TransferState>,
+        expect_streamed: bool,
+    ) {
+        let (w, h) = (params.width, params.height);
+        let whole = image_to_rgba(samples, params, None, false, transfer);
+        let mut streamed_any = false;
+        for (i, t) in prescale_test_transforms().into_iter().enumerate() {
+            let what = format!("{what}, transform {i}");
+            let want = reference_prescale_image(&whole, w, h, t, params.interpolate);
+            let got = convert_prescaled(samples, params, None, false, transfer, t);
+            let Some(got) = got else {
+                let down = matches!(
+                    plan_prescale(w, h, t, params.interpolate),
+                    Some(Prescale::Box { .. } | Prescale::IntegerBox { .. })
+                );
+                assert!(!(down && expect_streamed), "{what}: not streamed");
+                continue;
+            };
+            assert!(expect_streamed, "{what}: streamed");
+            streamed_any = true;
+            assert_same_prescale(&what, Some(got), want);
+        }
+        assert_eq!(streamed_any, expect_streamed, "{what}");
+    }
+
+    /// Converting and prescaling in strips gives the bytes of converting
+    /// the whole image and prescaling that, in every colour space, across
+    /// several strips and with the last strip short.
+    #[test]
+    fn streamed_conversion_equals_whole_image_conversion() {
+        let mut bytes = TestBytes(3);
+        // 700 wide: 374 rows to a strip, so 1000 rows is two strips and a
+        // short third; 3 wide: one strip.
+        for (w, h) in [(700u32, 1000u32), (3, 5), (333, 787)] {
+            for (name, space, bpc, pixel_bytes) in streamed_test_spaces() {
+                let row = match pixel_bytes {
+                    Some(n) => w as usize * n,
+                    None => (w as usize).div_ceil(8),
+                };
+                let samples = bytes.take(row * h as usize);
+                let params = streamed_test_params(space, bpc, w, h);
+                assert_eq!(sample_row_bytes(&params), Some(row), "{name}");
+                assert_streamed_equals_whole(
+                    &format!("{name} {w}x{h}"),
+                    &samples,
+                    &params,
+                    None,
+                    true,
+                );
+            }
+        }
+    }
+
+    /// The transfer function and the colour key are applied strip by strip
+    /// as they are to the whole image, and an interpolated image is streamed
+    /// like any other when it is scaled down.
+    #[test]
+    fn streamed_conversion_applies_transfer_and_colour_key() {
+        let mut bytes = TestBytes(4);
+        let (w, h) = (500u32, 900u32);
+        let invert = TransferState {
+            gray: Some(Arc::new((0..256).map(|i| 1.0 - i as f64 / 255.0).collect())),
+            color: None,
+        };
+        // A coarse palette, so the key matches a good share of the pixels.
+        let samples: Vec<u8> = bytes
+            .take(w as usize * h as usize * 3)
+            .into_iter()
+            .map(|b| b & 0xC0)
+            .collect();
+        let keyed = ImageParams {
+            mask_color: Some(vec![0, 64, 0, 128, 64, 192]),
+            interpolate: true,
+            ..streamed_test_params(ImageColorSpace::DeviceRGB, 8, w, h)
+        };
+        assert_streamed_equals_whole("keyed", &samples, &keyed, Some(&invert), true);
+        // The key cleared some pixels and left others.
+        let whole = image_to_rgba(&samples, &keyed, None, false, Some(&invert));
+        let clear = whole
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| p[3] == 0)
+            .count();
+        assert!(
+            clear > 0 && clear < (w * h) as usize,
+            "{clear} keyed pixels"
+        );
+    }
+
+    /// Where strips could differ from the whole image, the streamed
+    /// conversion declines and the whole image is converted: short data
+    /// (an ICC conversion falls back for the whole image) and a 16-bit
+    /// image with a colour key.
+    #[test]
+    fn streamed_conversion_declines_what_is_not_row_by_row() {
+        let mut bytes = TestBytes(5);
+        let (w, h) = (300u32, 400u32);
+        let params = streamed_test_params(ImageColorSpace::DeviceRGB, 8, w, h);
+        let samples = bytes.take(w as usize * h as usize * 3);
+        // One byte short of complete.
+        assert_streamed_equals_whole("short", &samples[..samples.len() - 1], &params, None, false);
+        assert_streamed_equals_whole("complete", &samples, &params, None, true);
+
+        let keyed16 = ImageParams {
+            mask_color: Some(vec![0, 255]),
+            ..streamed_test_params(ImageColorSpace::DeviceGray, 16, w, h)
+        };
+        let samples = bytes.take(w as usize * h as usize * 2);
+        assert_streamed_equals_whole("16-bit keyed", &samples, &keyed16, None, false);
+    }
+
     /// A one-pixel DeviceGray image, for the cache-shape tests.
     fn cache_test_image() -> DisplayElement {
         DisplayElement::Image {
@@ -15112,6 +16065,7 @@ mod tests {
         let descent = CacheDescent {
             layer: &|_| true,
             groups_and_masks: true,
+            parallel: false,
         };
         let entries = build_cache_entries(page.elements(), &descent, false, &|_, _, suppressed| {
             Some(suppressed)
@@ -15121,6 +16075,119 @@ mod tests {
             cache_shape_with(&entries, &flag),
             "t[t][s][s][[s]][[s]]{s|s}[t][[s]]{[s]|}"
         );
+    }
+
+    /// A gradient image of `size × size`, drawn through `ctm`: each is
+    /// different from the others, so entries in the wrong order show.
+    fn cache_test_gradient(size: u32, seed: u8, ctm: Matrix) -> DisplayElement {
+        let samples = (0..size * size)
+            .flat_map(|i| {
+                let (x, y) = (i % size, i / size);
+                [(x * 255 / size) as u8, (y * 255 / size) as u8, seed]
+            })
+            .collect();
+        DisplayElement::Image {
+            sample_data: Arc::new(samples),
+            params: ImageParams {
+                width: size,
+                height: size,
+                color_space: ImageColorSpace::DeviceRGB,
+                bits_per_component: 8,
+                ctm,
+                image_matrix: Matrix::new(size as f64, 0.0, 0.0, size as f64, 0.0, 0.0),
+                // Interpolated, so one drawn larger is resampled up.
+                interpolate: true,
+                ..ImageParams::default()
+            },
+        }
+    }
+
+    /// Converting a page's images in parallel gives the entries converting
+    /// them in order gives, image for image: scaled down (streamed), drawn
+    /// at their own size and scaled up (whole, within the budget), at top
+    /// level and inside containers.
+    #[test]
+    fn the_parallel_pass_gives_the_entries_of_the_serial_one() {
+        use std::sync::atomic::Ordering;
+        let mut seed = 0u8;
+        let mut images = |n: usize| -> Vec<DisplayElement> {
+            (0..n)
+                .map(|i| {
+                    seed += 1;
+                    let scale = [20.0, 64.0, 150.0, 37.0][i % 4];
+                    cache_test_gradient(
+                        64,
+                        seed,
+                        Matrix::new(scale, 0.0, 0.0, scale, i as f64, 0.0),
+                    )
+                })
+                .collect()
+        };
+        let page = dl(vec![
+            cache_test_group(1.0, 0, images(9)),
+            cache_test_soft_masked(images(5), images(6)),
+            cache_test_layer(1, true, vec![cache_test_group(0.5, 0, images(7))]),
+        ]
+        .into_iter()
+        .chain(images(13))
+        .collect());
+
+        let layers = LayerSet::new();
+        // A 64×64 image at full size is 16 KiB: a budget of 40 KiB lets two
+        // of the whole-image conversions run at once and never three.
+        let budget = ConversionBudget::new(40 << 10);
+        let serial = preprocess_images(&page, None, &layers, false, &budget);
+        assert_eq!(budget.most_in_use.load(Ordering::Relaxed), 16 << 10);
+        let parallel = preprocess_images(&page, None, &layers, true, &budget);
+        let most = budget.most_in_use.load(Ordering::Relaxed);
+        assert!(
+            most == 16 << 10 || most == 32 << 10,
+            "{most} bytes of full-size conversions at once"
+        );
+        let describe = |image: &PreprocessedImage| {
+            let sum: u64 = image.data.iter().map(|&b| u64::from(b)).sum();
+            format!(
+                "<{}x{} {} {} {sum}>",
+                image.width, image.height, image.adj_sx, image.adj_sy
+            )
+        };
+        let shape = cache_shape_with(&serial, &describe);
+        assert_eq!(cache_shape_with(&parallel, &describe), shape);
+        assert_eq!(shape.matches('<').count(), 40);
+        // The streamed, whole and upscaled paths were all taken.
+        for size in ["<20x20 ", "<64x64 ", "<150x150 ", "<37x37 "] {
+            assert!(shape.contains(size), "no {size} entry in {shape}");
+        }
+    }
+
+    /// Conversions that would exceed the budget together run one after
+    /// another; one larger than the whole budget still runs, alone.
+    #[test]
+    fn the_conversion_budget_bounds_what_runs_at_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let budget = ConversionBudget::new(100);
+        let (holding, most) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        std::thread::scope(|scope| {
+            // 60 at a time fits once; 500 fits only alone; 30 fits three
+            // times but never beside a 500.
+            for bytes in [60, 60, 500, 30, 30, 30, 60, 500, 30] {
+                let (budget, holding, most) = (&budget, &holding, &most);
+                scope.spawn(move || {
+                    for _ in 0..50 {
+                        let share = budget.take(bytes);
+                        let now = holding.fetch_add(bytes, Ordering::SeqCst) + bytes;
+                        most.fetch_max(now, Ordering::SeqCst);
+                        assert!(now <= 100 || now == bytes, "{now} held with {bytes} taken");
+                        std::thread::sleep(std::time::Duration::from_micros(200));
+                        holding.fetch_sub(bytes, Ordering::SeqCst);
+                        drop(share);
+                    }
+                });
+            }
+        });
+        assert_eq!(*budget.in_use.lock().unwrap(), 0);
+        // Shares did run side by side when they fitted.
+        assert!(most.load(Ordering::SeqCst) >= 500);
     }
 
     /// The viewer's cache descends into every layer, since the viewer

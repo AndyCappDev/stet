@@ -674,7 +674,12 @@ sized to fit in L2 cache. Each band is rendered independently, enabling:
 
 Before the bands start, each image on the page is converted to RGBA and
 scaled to its size on the page once (`preprocess_images_for_bands`), so a
-band only draws it. The cache has the shape of the page's containers:
+band only draws it. The images are converted in parallel. One that is
+scaled down is converted a strip of rows at a time, straight into the
+scaling filter (`convert_prescaled`), and is never held at full size; one
+drawn at about its own size or larger is converted whole, and those share
+a memory budget so that a page of large images does not have one in flight
+on every thread. The cache has the shape of the page's containers:
 images inside layers, transparency groups and soft masks (content and
 mask) have entries too, found by an image's index within its own list. An
 image the cache does not hold is still drawn correctly, but every band that
