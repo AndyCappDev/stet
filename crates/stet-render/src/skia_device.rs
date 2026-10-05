@@ -24,7 +24,7 @@ use stet_graphics::device::PageSinkFactory;
 use stet_graphics::device::{
     AxialShadingParams, ClipParams, FillParams, ImageColorSpace, ImageParams, MeshShadingParams,
     PatchShadingParams, RadialShadingParams, ShadingColorSpace, ShadingVertex, StrokeParams,
-    TintLookupTable, TransferState,
+    TintLookupTable, TransferState, TransferTable,
 };
 use stet_graphics::icc::{BpcMode, IccCache, IccCacheOptions};
 use stet_graphics::layer_set::LayerSet;
@@ -2638,6 +2638,36 @@ enum Prescale {
         nh: u32,
         adjusted: Transform,
     },
+}
+
+impl Prescale {
+    /// The size of the prescaled image.
+    fn size(&self) -> (u32, u32) {
+        match *self {
+            Prescale::Bicubic { dw, dh, .. } | Prescale::Box { dw, dh, .. } => (dw, dh),
+            Prescale::IntegerBox { nw, nh, .. } => (nw, nh),
+        }
+    }
+
+    /// The transform the prescaled image is drawn through.
+    fn adjusted(&self) -> Transform {
+        match *self {
+            Prescale::Bicubic { adjusted, .. }
+            | Prescale::Box { adjusted, .. }
+            | Prescale::IntegerBox { adjusted, .. } => adjusted,
+        }
+    }
+
+    /// What decides the prescaled pixels, which the transform beyond that
+    /// does not: the filter and the size it resamples to.
+    fn resampling(&self) -> (u8, u32, u32) {
+        match *self {
+            Prescale::Bicubic { dw, dh, .. } => (1, dw, dh),
+            Prescale::Box { dw, dh, .. } => (2, dw, dh),
+            // `nw` and `nh` follow from the factor and the image's size.
+            Prescale::IntegerBox { factor, .. } => (3, factor, factor),
+        }
+    }
 }
 
 /// Decide how an image of `w × h` drawn through `transform` is prescaled,
@@ -10824,8 +10854,9 @@ pub fn prepare_display_list(list: &DisplayList) -> PreparedDisplayList {
 /// Built once per page before the band loop so that expensive RGBA conversion
 /// and box-filter prescaling run once instead of once-per-band.
 struct PreprocessedImage {
-    /// RGBA pixel data (prescaled if applicable).
-    data: Vec<u8>,
+    /// RGBA pixel data (prescaled if applicable). Shared between the
+    /// placements of one image that convert to the same pixels.
+    data: Arc<Vec<u8>>,
     /// Dimensions after prescaling.
     width: u32,
     height: u32,
@@ -11114,6 +11145,199 @@ impl ImageCache {
     }
 }
 
+/// Whether two image colour spaces convert the same samples to the same
+/// colours. Says no when it cannot tell cheaply: two placements of one
+/// image share their tables, so identity is enough for those.
+fn same_image_color_space(a: &ImageColorSpace, b: &ImageColorSpace) -> bool {
+    use ImageColorSpace as Cs;
+    match (a, b) {
+        (Cs::DeviceGray, Cs::DeviceGray)
+        | (Cs::DeviceRGB, Cs::DeviceRGB)
+        | (Cs::DeviceCMYK, Cs::DeviceCMYK)
+        | (Cs::PreconvertedRGBA, Cs::PreconvertedRGBA) => true,
+        (
+            Cs::ICCBased {
+                n: an,
+                profile_hash: ah,
+                ..
+            },
+            Cs::ICCBased {
+                n: bn,
+                profile_hash: bh,
+                ..
+            },
+        ) => an == bn && ah == bh,
+        (
+            Cs::Indexed {
+                base: ab,
+                hival: ah,
+                lookup: al,
+            },
+            Cs::Indexed {
+                base: bb,
+                hival: bh,
+                lookup: bl,
+            },
+        ) => ah == bh && al == bl && same_image_color_space(ab, bb),
+        (Cs::CIEBasedABC { params: a }, Cs::CIEBasedABC { params: b }) => Arc::ptr_eq(a, b),
+        (Cs::CIEBasedA { params: a }, Cs::CIEBasedA { params: b }) => Arc::ptr_eq(a, b),
+        (
+            Cs::Lab {
+                white_point: aw,
+                range: ar,
+            },
+            Cs::Lab {
+                white_point: bw,
+                range: br,
+            },
+        ) => aw == bw && ar == br,
+        (
+            Cs::Separation {
+                alt_space: aa,
+                tint_table: at,
+                ..
+            },
+            Cs::Separation {
+                alt_space: ba,
+                tint_table: bt,
+                ..
+            },
+        )
+        | (
+            Cs::DeviceN {
+                alt_space: aa,
+                tint_table: at,
+                ..
+            },
+            Cs::DeviceN {
+                alt_space: ba,
+                tint_table: bt,
+                ..
+            },
+        ) => Arc::ptr_eq(at, bt) && same_image_color_space(aa, ba),
+        (
+            Cs::Mask {
+                color: ac,
+                polarity: ap,
+                ..
+            },
+            Cs::Mask {
+                color: bc,
+                polarity: bp,
+                ..
+            },
+        ) => ap == bp && (ac.r, ac.g, ac.b) == (bc.r, bc.g, bc.b),
+        _ => false,
+    }
+}
+
+/// Whether two transfer functions, as [`paint_transfer`] gives them, are
+/// the same tables.
+fn same_paint_transfer(a: Option<&TransferState>, b: Option<&TransferState>) -> bool {
+    let same_table = |a: &Option<TransferTable>, b: &Option<TransferTable>| match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+        _ => false,
+    };
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            same_table(&a.gray, &b.gray)
+                && match (&a.color, &b.color) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => a.iter().zip(b).all(|(a, b)| same_table(a, b)),
+                    _ => false,
+                }
+        }
+        _ => false,
+    }
+}
+
+/// The page's conversions so far, so that an image drawn several times is
+/// converted once.
+///
+/// A logo or a texture is one image XObject placed again and again: the
+/// reader hands every placement the same samples, and placements that are
+/// converted the same way and resampled to the same size come out as the
+/// same pixels. They share one buffer. What makes two conversions the same
+/// is everything [`image_to_rgba`] and the prescale read: the samples, how
+/// they are interpreted (size, depth, colour space, colour key, rendering
+/// intent), the transfer function the paint applies, and the resampling.
+/// Where the image is drawn is not part of it.
+struct SharedConversions {
+    /// Conversions by the cheap part of what identifies them; the rest is
+    /// compared against each candidate.
+    by_key: Mutex<HashMap<ConversionKey, Vec<SharedConversion>>>,
+}
+
+/// The hashable part of a conversion's identity: the samples (the address
+/// and length of the buffer the display list holds, which outlives the
+/// pass), the image's size, and the resampling.
+type ConversionKey = (usize, usize, u32, u32, Option<(u8, u32, u32)>);
+
+struct SharedConversion {
+    params: ImageParams,
+    transfer: Option<TransferState>,
+    /// The converted pixels, set by the first placement to get here; the
+    /// others wait for it.
+    data: Arc<std::sync::OnceLock<Arc<Vec<u8>>>>,
+}
+
+impl SharedConversions {
+    fn new() -> Self {
+        Self {
+            by_key: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The pixels of converting `sample_data` as `params` and `transfer`
+    /// say and resampling as `resampling` says: an earlier placement's if
+    /// there is one, `convert`'s otherwise.
+    fn get_or_convert(
+        &self,
+        sample_data: &[u8],
+        params: &ImageParams,
+        transfer: Option<&TransferState>,
+        resampling: Option<(u8, u32, u32)>,
+        convert: impl FnOnce() -> Vec<u8>,
+    ) -> Arc<Vec<u8>> {
+        let key = (
+            sample_data.as_ptr() as usize,
+            sample_data.len(),
+            params.width,
+            params.height,
+            resampling,
+        );
+        let cell = {
+            let mut by_key = self.by_key.lock().unwrap_or_else(|e| e.into_inner());
+            let candidates = by_key.entry(key).or_default();
+            let same = candidates.iter().find(|c| {
+                c.params.bits_per_component == params.bits_per_component
+                    && c.params.interpolate == params.interpolate
+                    && c.params.rendering_intent == params.rendering_intent
+                    && c.params.mask_color == params.mask_color
+                    && same_image_color_space(&c.params.color_space, &params.color_space)
+                    && same_paint_transfer(c.transfer.as_ref(), transfer)
+            });
+            match same {
+                Some(same) => Arc::clone(&same.data),
+                None => {
+                    let data = Arc::new(std::sync::OnceLock::new());
+                    candidates.push(SharedConversion {
+                        params: params.clone(),
+                        transfer: transfer.cloned(),
+                        data: Arc::clone(&data),
+                    });
+                    data
+                }
+            }
+        };
+        // Outside the map's lock: other images convert meanwhile, and a
+        // second placement of this one waits here for the first.
+        Arc::clone(cell.get_or_init(|| Arc::new(convert())))
+    }
+}
+
 /// Build preprocessed image cache for banded rendering.
 ///
 /// For each Image element, converts to RGBA and prescales once.
@@ -11146,6 +11370,7 @@ fn preprocess_images(
         groups_and_masks: true,
         parallel,
     };
+    let shared = SharedConversions::new();
     build_cache_entries(
         list.elements(),
         &descent,
@@ -11175,19 +11400,29 @@ fn preprocess_images(
                 params.blend_mode,
                 transfer_suppressed,
             );
-            // An image drawn small is converted and prescaled in one pass;
-            // any other is converted whole and prescaled if it needs it.
-            let (data, width, height, adj_t) =
+            // The size and the transform follow from the plan; the pixels
+            // are another placement's if it converted the same image the
+            // same way to the same size.
+            let plan = plan_prescale(iw, ih, base_transform, params.interpolate);
+            let (width, height) = plan.as_ref().map_or((iw, ih), Prescale::size);
+            let adj_t = plan.as_ref().map_or(base_transform, Prescale::adjusted);
+            let resampling = plan.as_ref().map(Prescale::resampling);
+            let data = shared.get_or_convert(sample_data, params, transfer, resampling, || {
+                // An image drawn small is converted and prescaled in one
+                // pass; any other is converted whole and prescaled if it
+                // needs it.
                 convert_prescaled(sample_data, params, icc, false, transfer, base_transform)
+                    .map(|(data, ..)| data)
                     .unwrap_or_else(|| {
                         // The whole image at full size: within the budget.
                         let _share = budget.take(iw as usize * ih as usize * 4);
                         let rgba = image_to_rgba(sample_data, params, icc, false, transfer);
                         match prescale_image(&rgba, iw, ih, base_transform, params.interpolate) {
-                            Some(prescaled) => prescaled,
-                            None => (rgba, iw, ih, base_transform),
+                            Some((prescaled, ..)) => prescaled,
+                            None => rgba,
                         }
-                    });
+                    })
+            });
 
             let quality = image_filter_quality(adj_t, params.interpolate);
 
@@ -16158,6 +16393,151 @@ mod tests {
         for size in ["<20x20 ", "<64x64 ", "<150x150 ", "<37x37 "] {
             assert!(shape.contains(size), "no {size} entry in {shape}");
         }
+    }
+
+    /// Each image entry's buffer, in the order of the page.
+    fn cache_test_buffers(entries: &[CacheEntry<PreprocessedImage>]) -> Vec<*const Vec<u8>> {
+        entries
+            .iter()
+            .flat_map(|e| match e {
+                CacheEntry::Empty => vec![],
+                CacheEntry::Image(image) => vec![Arc::as_ptr(&image.data)],
+                CacheEntry::Children(children) => cache_test_buffers(children),
+                CacheEntry::Masked { content, mask } => {
+                    let mut buffers = cache_test_buffers(content);
+                    buffers.extend(cache_test_buffers(mask));
+                    buffers
+                }
+            })
+            .collect()
+    }
+
+    /// For each image of `page`, the index of the first image whose buffer
+    /// it shares: `[0, 0, 2, 0]` is three placements of one conversion and
+    /// one of another. The same in parallel and in order.
+    fn cache_test_sharing(page: &DisplayList) -> Vec<usize> {
+        let layers = LayerSet::new();
+        let budget = ConversionBudget::new(ConversionBudget::PAGE);
+        let sharing = |parallel| {
+            let entries = preprocess_images(page, None, &layers, parallel, &budget);
+            let buffers = cache_test_buffers(&entries);
+            buffers
+                .iter()
+                .map(|b| buffers.iter().position(|first| first == b).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let serial = sharing(false);
+        assert_eq!(
+            sharing(true),
+            serial,
+            "parallel and serial share differently"
+        );
+        serial
+    }
+
+    /// One image drawn several times is converted once: placements that
+    /// differ only in where they are drawn share a buffer, and anything that
+    /// changes the pixels gets its own.
+    #[test]
+    fn placements_of_one_image_share_a_conversion() {
+        let samples = match cache_test_gradient(64, 7, Matrix::new(1.0, 0.0, 0.0, 1.0, 0.0, 0.0)) {
+            DisplayElement::Image { sample_data, .. } => sample_data,
+            _ => unreachable!(),
+        };
+        // A placement of `samples` drawn `size` wide at `x`, then changed
+        // by `change`.
+        let placed_with =
+            |samples: &Arc<Vec<u8>>, size: f64, x: f64, change: &dyn Fn(&mut ImageParams)| {
+                let mut params = ImageParams {
+                    width: 64,
+                    height: 64,
+                    color_space: ImageColorSpace::DeviceRGB,
+                    bits_per_component: 8,
+                    ctm: Matrix::new(size, 0.0, 0.0, size.abs(), x, 0.0),
+                    image_matrix: Matrix::new(64.0, 0.0, 0.0, 64.0, 0.0, 0.0),
+                    ..ImageParams::default()
+                };
+                change(&mut params);
+                DisplayElement::Image {
+                    sample_data: Arc::clone(samples),
+                    params,
+                }
+            };
+        let placed = |size: f64, x: f64| placed_with(&samples, size, x, &|_| {});
+        let invert = TransferState {
+            gray: Some(Arc::new((0..256).map(|i| 1.0 - i as f64 / 255.0).collect())),
+            color: None,
+        };
+        let inverted = |x: f64| {
+            let invert = invert.clone();
+            placed_with(&samples, 20.0, x, &move |p| p.transfer = invert.clone())
+        };
+
+        // Where it is drawn, mirrored or not, and in which container: one
+        // conversion.
+        let page = dl(vec![
+            placed(20.0, 0.0),
+            placed(20.0, 30.0),
+            placed(-20.0, 90.0),
+            cache_test_group(1.0, 0, vec![placed(20.0, 5.0)]),
+            cache_test_soft_masked(vec![placed(20.0, 0.0)], vec![placed(20.0, 9.0)]),
+        ]);
+        assert_eq!(cache_test_sharing(&page), [0; 6]);
+
+        // Anything the pixels depend on: its own conversion.
+        let other_samples = Arc::new(samples.to_vec());
+        let page = dl(vec![
+            placed(20.0, 0.0),
+            // 1: another size.
+            placed(30.0, 0.0),
+            // 2: drawn at its own size, not resampled; 3 shares it.
+            placed(64.0, 0.0),
+            placed(64.0, 70.0),
+            // 4: a colour key.
+            placed_with(&samples, 20.0, 0.0, &|p| p.mask_color = Some(vec![0, 0, 7])),
+            // 5: another rendering intent.
+            placed_with(&samples, 20.0, 0.0, &|p| p.rendering_intent ^= 1),
+            // 6: the samples read as another colour space.
+            placed_with(&samples, 20.0, 0.0, &|p| {
+                p.color_space = ImageColorSpace::Lab {
+                    white_point: [0.95, 1.0, 1.09],
+                    range: [-100.0, 100.0, -100.0, 100.0],
+                }
+            }),
+            // 7: other samples, though equal byte for byte.
+            placed_with(&other_samples, 20.0, 0.0, &|_| {}),
+            // 8: a transfer function; 9 shares it.
+            inverted(0.0),
+            inverted(40.0),
+            // 10: the same function where it does not apply is no function,
+            // so the image is the plain one again.
+            cache_test_group(0.5, 0, vec![inverted(0.0)]),
+            // 11: rotated, through the other filter.
+            placed_with(&samples, 20.0, 0.0, &|p| {
+                p.ctm = Matrix::new(0.0, 20.0, -20.0, 0.0, 30.0, 0.0)
+            }),
+            // 12: the samples read at another depth.
+            placed_with(&samples, 20.0, 0.0, &|p| p.bits_per_component = 16),
+            // 13: to be interpolated.
+            placed_with(&samples, 20.0, 0.0, &|p| p.interpolate = true),
+            // 14 and 15: the first rows of the samples read as a narrower
+            // image and as a shorter one, drawn at their own size: not
+            // resampled, like 2, but not the same image.
+            placed_with(&samples, 20.0, 0.0, &|p| {
+                p.width = 32;
+                p.ctm = Matrix::new(32.0, 0.0, 0.0, 64.0, 0.0, 0.0);
+                p.image_matrix = Matrix::new(32.0, 0.0, 0.0, 64.0, 0.0, 0.0);
+            }),
+            placed_with(&samples, 20.0, 0.0, &|p| {
+                p.height = 32;
+                p.ctm = Matrix::new(64.0, 0.0, 0.0, 32.0, 0.0, 0.0);
+                p.image_matrix = Matrix::new(64.0, 0.0, 0.0, 32.0, 0.0, 0.0);
+            }),
+        ]);
+        assert_eq!(
+            cache_test_sharing(&page),
+            [0, 1, 2, 2, 4, 5, 6, 7, 8, 8, 0, 11, 12, 13, 14, 15]
+        );
     }
 
     /// Conversions that would exceed the budget together run one after

@@ -414,3 +414,80 @@ fn a_prescaled_image_in_a_soft_mask_spans_bands() {
         assert_ne!(data[i..i + 3], PAPER, "nothing drawn at row {y}");
     }
 }
+
+/// One image placed many times shares a conversion between the placements
+/// that come out as the same pixels. Each placement still draws its own way
+/// round and at its own size: mirrored, flipped, larger, inside a soft mask.
+#[test]
+fn placements_sharing_a_conversion_each_draw_their_own_way() {
+    const PAGE_W: u32 = 400;
+    const PAGE_H: u32 = 120;
+    const IMG: u32 = 200;
+    let samples: Arc<Vec<u8>> = Arc::new(
+        (0..IMG * IMG)
+            .flat_map(|i| {
+                let (x, y) = (i % IMG, i / IMG);
+                [(x * 255 / IMG) as u8, (y * 255 / IMG) as u8, 90]
+            })
+            .collect(),
+    );
+    let placed = |sx: f64, sy: f64, x: f64, y: f64| DisplayElement::Image {
+        sample_data: Arc::clone(&samples),
+        params: ImageParams {
+            width: IMG,
+            height: IMG,
+            color_space: ImageColorSpace::DeviceRGB,
+            bits_per_component: 8,
+            ctm: Matrix::new(sx, 0.0, 0.0, sy, x, y),
+            image_matrix: Matrix::new(IMG as f64, 0.0, 0.0, IMG as f64, 0.0, 0.0),
+            ..ImageParams::default()
+        },
+    };
+    let mask = DisplayElement::Image {
+        sample_data: Arc::new(vec![200]),
+        params: ImageParams {
+            width: 1,
+            height: 1,
+            color_space: ImageColorSpace::DeviceGray,
+            bits_per_component: 8,
+            ctm: Matrix::new(PAGE_W as f64, 0.0, 0.0, PAGE_H as f64, 0.0, 0.0),
+            image_matrix: Matrix::new(1.0, 0.0, 0.0, 1.0, 0.0, 0.0),
+            ..ImageParams::default()
+        },
+    };
+    let page = list(vec![
+        placed(50.0, 50.0, 5.0, 5.0),
+        placed(50.0, 50.0, 60.0, 5.0),
+        // Mirrored, flipped, and both: the same pixels, drawn turned.
+        placed(-50.0, 50.0, 165.0, 5.0),
+        placed(50.0, -50.0, 170.0, 55.0),
+        placed(-50.0, -50.0, 275.0, 55.0),
+        // Another size, twice.
+        placed(80.0, 40.0, 280.0, 5.0),
+        placed(80.0, 40.0, 5.0, 65.0),
+        // The first size again, inside containers.
+        group(vec![placed(50.0, 50.0, 90.0, 65.0)]),
+        DisplayElement::SoftMasked {
+            mask: list(vec![mask]),
+            content: list(vec![placed(50.0, 50.0, 145.0, 65.0)]),
+            params: SoftMaskParams {
+                subtype: SoftMaskSubtype::Luminosity,
+                bbox: [0.0, 0.0, PAGE_W as f64, PAGE_H as f64],
+                backdrop_color: None,
+                transfer_invert: false,
+                has_nested_mask_scope: false,
+                parent_clip_bbox: None,
+            },
+            mask_cache: Arc::new(Mutex::new(None)),
+        },
+    ]);
+    let data = render(&page, PAGE_W, PAGE_H);
+    let at = |x: u32, y: u32| {
+        let i = ((y * PAGE_W + x) * 4) as usize;
+        [data[i], data[i + 1], data[i + 2]]
+    };
+    // The gradient runs left to right in the first placement and right to
+    // left in the mirrored one.
+    assert!(at(10, 30)[0] < at(50, 30)[0], "the plain placement");
+    assert!(at(120, 30)[0] > at(160, 30)[0], "the mirrored placement");
+}

@@ -17,13 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it, with bands running in parallel. A 4500×6442 image with a soft mask,
   rendered 800 pixels wide, peaked at 1,075 MB on 24 threads; it now peaks
   at about 156 MB on any number, most of which is the decoded image
-  itself. Three changes, none of which alters a pixel:
+  itself. Four changes, none of which alters a pixel:
   - images inside soft masks and transparency groups are converted once
     per page, like images outside them;
   - an image that is scaled down is converted a strip of rows at a time,
     straight into the scaling filter, and never held at full size;
-  - a page's images are converted in parallel. The same image drawn nine
-    times on a page renders in a third of the time on 24 threads.
+  - a page's images are converted in parallel;
+  - an image drawn several times on a page — a logo, a texture — is
+    converted once for all the placements that come out as the same
+    pixels. That image drawn nine times renders in a quarter of the time
+    on 24 threads and a tenth of it on one.
 
   One cost: converted images inside groups and soft masks are now held
   until the page is finished, so a single-threaded render of a page with
