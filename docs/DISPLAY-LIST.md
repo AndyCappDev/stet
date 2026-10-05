@@ -74,11 +74,11 @@ share the sample buffer without copying.
 | `width` | `u32` | Image width in samples |
 | `height` | `u32` | Image height in samples |
 | `color_space` | `ImageColorSpace` | Native color space (see below) |
-| `bits_per_component` | `u8` | 1, 2, 4, 8, or 16 |
+| `bits_per_component` | `u8` | 8, or 16 for `DeviceGray` and `DeviceRGB` (see "Sample depth") |
 | `ctm` | `Matrix` | Image-to-device transform |
 | `image_matrix` | `Matrix` | Sample-to-image transform |
 | `interpolate` | `bool` | Bilinear interpolation hint |
-| `mask_color` | `Option<Vec<u8>>` | Chroma key mask range |
+| `mask_color` | `Option<Vec<u8>>` | Colour key: pixels whose samples match are not painted (see "Sample depth") |
 | `alpha` | `f64` | Image opacity |
 | `blend_mode` | `u8` | PDF blend mode |
 | `overprint` | `bool` | Overprint flag |
@@ -88,6 +88,25 @@ share the sample buffer without copying.
 | `alpha_is_shape` | `bool` | Alpha-is-shape (PDF `AIS`) |
 | `rendering_intent` | `u8` | Intent for converting the image's colours (see "Rendering intent") |
 | `transfer` | `TransferState` | Transfer function in force, applied after conversion to RGB (see "Print Production State") |
+
+#### Sample depth
+
+`sample_data` holds one byte per sample, whatever depth the source image
+had: stet's PostScript and PDF front ends expand 1-, 2- and 4-bit samples
+and reduce 12- and 16-bit ones before the image reaches the display list,
+and set `bits_per_component` to 8. The one other layout a renderer is
+asked to read is `bits_per_component: 16` with `DeviceGray` or
+`DeviceRGB`: two bytes per sample, high byte first. stet's renderer paints
+such a sample with its high byte. Every other colour space is one byte per
+sample at any `bits_per_component`; `Mask` is one bit per pixel, each row
+padded to a byte.
+
+`mask_color` holds 8-bit values: one per component (the pixel is keyed out
+when every component equals its value) or a low/high pair per component
+(when every component is in its range). A 16-bit sample is tested by its
+high byte, the value it is painted with. The front ends pass a key here
+only when testing the 8-bit samples is exact; otherwise they clear the
+keyed pixels themselves and emit the image as `PreconvertedRGBA`.
 
 #### Image Color Spaces
 

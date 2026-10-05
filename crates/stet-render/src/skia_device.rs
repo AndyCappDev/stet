@@ -2559,6 +2559,10 @@ fn alt_comps_to_rgb(comps: &[f32], alt_space: &ImageColorSpace) -> (u8, u8, u8) 
 }
 
 /// Apply ImageType 4 mask color transparency to RGBA data.
+///
+/// The key is in 8-bit values. A 16-bit sample is tested by its high byte,
+/// the value [`samples_to_rgba`] paints it with, so a pixel is cleared
+/// exactly when the colour it would have had is in the key.
 fn apply_mask_color_rgba(rgba: &mut [u8], sample_data: &[u8], params: &ImageParams) {
     let mask_color = match &params.mask_color {
         Some(mc) => mc,
@@ -2567,19 +2571,26 @@ fn apply_mask_color_rgba(rgba: &mut [u8], sample_data: &[u8], params: &ImagePara
     let ncomp = params.color_space.num_components() as usize;
     let npixels = params.width as usize * params.height as usize;
     let is_range = mask_color.len() == 2 * ncomp;
+    let sample_bytes = sample_bytes(params);
+    // Component `c` of pixel `i`: the first byte of its sample.
+    let sample = |i: usize, c: usize| {
+        sample_data
+            .get((i * ncomp + c) * sample_bytes)
+            .copied()
+            .unwrap_or(0)
+    };
 
     for i in 0..npixels {
-        let si = i * ncomp;
         let matched = if is_range {
             (0..ncomp).all(|c| {
-                let sample = sample_data.get(si + c).copied().unwrap_or(0);
+                let sample = sample(i, c);
                 let min_val = mask_color.get(c * 2).copied().unwrap_or(0);
                 let max_val = mask_color.get(c * 2 + 1).copied().unwrap_or(0);
                 sample >= min_val && sample <= max_val
             })
         } else {
             (0..ncomp).all(|c| {
-                let sample = sample_data.get(si + c).copied().unwrap_or(0);
+                let sample = sample(i, c);
                 let target = mask_color.get(c).copied().unwrap_or(0);
                 sample == target
             })
@@ -2804,16 +2815,27 @@ fn prescale_image(
     }
 }
 
+/// The number of bytes one sample of an image takes, as [`samples_to_rgba`]
+/// reads them: two, high byte first, for DeviceGray and DeviceRGB at 16 bits
+/// per component, and one for everything else.
+fn sample_bytes(params: &ImageParams) -> usize {
+    let two_byte_space = matches!(
+        params.color_space,
+        ImageColorSpace::DeviceGray | ImageColorSpace::DeviceRGB
+    );
+    if params.bits_per_component == 16 && two_byte_space {
+        2
+    } else {
+        1
+    }
+}
+
 /// The number of bytes one row of an image's samples takes, as
 /// [`samples_to_rgba`] reads them, or `None` for a colour space it does not
 /// read row by row.
 fn sample_row_bytes(params: &ImageParams) -> Option<usize> {
     let w = params.width as usize;
-    let wide = if params.bits_per_component == 16 {
-        2
-    } else {
-        1
-    };
+    let wide = sample_bytes(params);
     Some(match &params.color_space {
         ImageColorSpace::PreconvertedRGBA => w * 4,
         ImageColorSpace::DeviceGray => w * wide,
@@ -2851,8 +2873,7 @@ const CONVERT_STRIP_PIXELS: usize = 1 << 18;
 /// - the sample data is short. Each colour conversion is per pixel, but an
 ///   ICC conversion refuses short data and the *whole* image then falls back
 ///   to its device space, which a strip that happens to be complete would
-///   not do;
-/// - the image is 16-bit with a colour key, which is not applied row by row.
+///   not do.
 fn convert_prescaled(
     sample_data: &[u8],
     params: &ImageParams,
@@ -2868,11 +2889,6 @@ fn convert_prescaled(
     };
     let row_bytes = sample_row_bytes(params)?;
     if row_bytes == 0 || sample_data.len() / row_bytes < h as usize {
-        return None;
-    }
-    // The colour key reads a 16-bit image's samples as if they were bytes,
-    // so a pixel's key is looked up in another row's data.
-    if params.mask_color.is_some() && params.bits_per_component == 16 {
         return None;
     }
 
@@ -16090,10 +16106,9 @@ mod tests {
 
     /// Where strips could differ from the whole image, the streamed
     /// conversion declines and the whole image is converted: short data
-    /// (an ICC conversion falls back for the whole image) and a 16-bit
-    /// image with a colour key.
+    /// (an ICC conversion falls back for the whole image).
     #[test]
-    fn streamed_conversion_declines_what_is_not_row_by_row() {
+    fn streamed_conversion_declines_short_data() {
         let mut bytes = TestBytes(5);
         let (w, h) = (300u32, 400u32);
         let params = streamed_test_params(ImageColorSpace::DeviceRGB, 8, w, h);
@@ -16101,13 +16116,76 @@ mod tests {
         // One byte short of complete.
         assert_streamed_equals_whole("short", &samples[..samples.len() - 1], &params, None, false);
         assert_streamed_equals_whole("complete", &samples, &params, None, true);
+    }
 
-        let keyed16 = ImageParams {
-            mask_color: Some(vec![0, 255]),
+    /// A colour key on a 16-bit image tests each sample's high byte, the
+    /// value the pixel is painted with, at that pixel's own place in the
+    /// data: the low bytes and the neighbours' samples do not come into it.
+    #[test]
+    fn a_colour_key_reads_16_bit_samples_at_their_own_place() {
+        let cleared = |params: &ImageParams, samples: &[u8]| -> Vec<bool> {
+            image_to_rgba(samples, params, None, false, None)
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|p| p[3] == 0)
+                .collect()
+        };
+
+        // Gray: 0x10, 0x80, 0x30, 0x40 as high bytes, with low bytes that
+        // would match the key if they were read as samples.
+        let gray = ImageParams {
+            mask_color: Some(vec![0x80, 0x80]),
+            ..streamed_test_params(ImageColorSpace::DeviceGray, 16, 4, 1)
+        };
+        let samples = [0x10, 0x80, 0x80, 0x00, 0x30, 0x80, 0x40, 0x80];
+        assert_eq!(cleared(&gray, &samples), [false, true, false, false]);
+        // The same image at 8 bits keys the same pixel.
+        let gray8 = ImageParams {
+            bits_per_component: 8,
+            ..gray.clone()
+        };
+        assert_eq!(
+            cleared(&gray8, &[0x10, 0x80, 0x30, 0x40]),
+            [false, true, false, false]
+        );
+
+        // RGB, a range per component: only the second pixel has all three
+        // high bytes in range.
+        let rgb = ImageParams {
+            mask_color: Some(vec![0x20, 0x2F, 0x40, 0x4F, 0x60, 0x6F]),
+            ..streamed_test_params(ImageColorSpace::DeviceRGB, 16, 3, 1)
+        };
+        #[rustfmt::skip]
+        let samples = [
+            0x20, 0x25, 0x40, 0x45, 0x70, 0x65,
+            0x2F, 0x00, 0x40, 0xFF, 0x60, 0x00,
+            0x00, 0x25, 0x00, 0x45, 0x00, 0x65,
+        ];
+        assert_eq!(cleared(&rgb, &samples), [false, true, false]);
+
+        // Only DeviceGray and DeviceRGB have two-byte samples: any other
+        // space is a byte per sample whatever depth it claims.
+        let cmyk = ImageParams {
+            mask_color: Some(vec![1, 2, 3, 4]),
+            ..streamed_test_params(ImageColorSpace::DeviceCMYK, 16, 2, 1)
+        };
+        assert_eq!(cleared(&cmyk, &[9, 2, 9, 4, 1, 2, 3, 4]), [false, true]);
+
+        // And 16-bit keyed images are streamed like any other.
+        let mut bytes = TestBytes(6);
+        let (w, h) = (300u32, 900u32);
+        let keyed = ImageParams {
+            mask_color: Some(vec![0, 127]),
             ..streamed_test_params(ImageColorSpace::DeviceGray, 16, w, h)
         };
         let samples = bytes.take(w as usize * h as usize * 2);
-        assert_streamed_equals_whole("16-bit keyed", &samples, &keyed16, None, false);
+        assert_streamed_equals_whole("16-bit keyed", &samples, &keyed, None, true);
+        let clear = cleared(&keyed, &samples).iter().filter(|&&c| c).count();
+        assert!(
+            clear > 0 && clear < (w * h) as usize,
+            "{clear} keyed pixels"
+        );
     }
 
     /// A one-pixel DeviceGray image, for the cache-shape tests.

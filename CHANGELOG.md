@@ -32,6 +32,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   until the page is finished, so a single-threaded render of a page with
   many of them that are *not* drawn small can peak higher than before.
 
+- **A colour key on a 16-bit image cleared the wrong pixels.** The
+  renderer looked up each pixel's key one byte per sample, so with
+  `bits_per_component: 16` it tested low bytes and neighbouring pixels'
+  samples. It now tests each sample's high byte, the value the pixel is
+  painted with. stet's own PostScript and PDF front ends never produce
+  such an image (they reduce samples to 8 bits first), so only a display
+  list built elsewhere was affected. `docs/DISPLAY-LIST.md` now says what
+  sample layouts and keys a renderer is given ("Sample depth"); it listed
+  depths of 1, 2 and 4 bits that no display list carries.
+
 ## [0.8.4] — 2026-10-04
 
 ### Added
