@@ -672,6 +672,16 @@ sized to fit in L2 cache. Each band is rendered independently, enabling:
   `parallel` feature is enabled)
 - **Streaming output**: Bands can be written to a `PageSink` incrementally
 
+Before the bands start, each image on the page is converted to RGBA and
+scaled to its size on the page once (`preprocess_images_for_bands`), so a
+band only draws it. The cache has the shape of the page's containers:
+images inside layers, transparency groups and soft masks (content and
+mask) have entries too, found by an image's index within its own list. An
+image the cache does not hold is still drawn correctly, but every band that
+touches it converts the whole image for itself, and bands run in parallel.
+The viewer's `ImageCache` holds full-size conversions for as long as a page
+is shown and covers top-level images and layers only.
+
 ## Resource System
 
 The PostScript interpreter requires several resource files to function:

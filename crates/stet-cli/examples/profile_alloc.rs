@@ -138,11 +138,16 @@ fn maybe_snapshot(live: usize) {
         }
         return;
     }
-    PEAK.store(live, Ordering::Relaxed);
     IN_HOOK.with(|g| {
+        // Capturing a large allocation's backtrace allocates too, and those
+        // allocations arrive here before the large one is in `TRACKED`. Leave
+        // the peak alone for them, or they claim the jump without being able
+        // to snapshot and the large allocation's own call finds nothing left
+        // to report.
         if g.get() {
             return;
         }
+        PEAK.store(live, Ordering::Relaxed);
         g.set(true);
         if let Ok(guard) = TRACKED.lock()
             && let Some(map) = guard.as_ref()

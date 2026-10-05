@@ -3257,6 +3257,10 @@ fn render_element(
             } else if let Some(pp) = cached_image(ctx.preprocessed, ctx.elem_idx) {
                 // Fast path: use pre-converted and prescaled image data.
                 // Only the per-band translation differs; scale factors are cached.
+                // The entries are prescaled for a context of scale 1, which
+                // the banded renderer's are, group and soft-mask offscreens
+                // included: they move the viewport and keep the scale.
+                debug_assert!(ctx.scale_x == 1.0 && ctx.scale_y == 1.0);
                 let Some(image_inv) = params.image_matrix.invert() else {
                     return;
                 };
@@ -3552,8 +3556,8 @@ fn render_element(
             // "hidden layer" means.
             let visible = ctx.layer_set.evaluate(visibility);
             // The children find their images in the layer's own entries.
-            let image_cache = cached_layer(ctx.image_cache, ctx.elem_idx);
-            let preprocessed = cached_layer(ctx.preprocessed, ctx.elem_idx);
+            let image_cache = cached_children(ctx.image_cache, ctx.elem_idx);
+            let preprocessed = cached_children(ctx.preprocessed, ctx.elem_idx);
             for (idx, elem) in elements.elements().iter().enumerate() {
                 if !visible
                     && !matches!(elem, DisplayElement::Clip { .. } | DisplayElement::InitClip)
@@ -4207,8 +4211,9 @@ fn render_group(
         out_h: eff_h,
         effective_dpi: ctx.effective_dpi,
         icc: ctx.icc,
-        image_cache: None, // Group elements don't use parent image cache
-        preprocessed: None,
+        // The children find their images in the group's own entries.
+        image_cache: cached_children(ctx.image_cache, ctx.elem_idx),
+        preprocessed: cached_children(ctx.preprocessed, ctx.elem_idx),
         elem_idx: 0,
         no_aa: ctx.no_aa,
         opm_zero_transparent: ctx.opm_zero_transparent,
@@ -4217,9 +4222,7 @@ fn render_group(
         parent_group_isolated: params.isolated,
         alpha_extraction_pass: ctx.alpha_extraction_pass,
         layer_set: ctx.layer_set,
-        transfer_suppressed: ctx.transfer_suppressed
-            || params.alpha < 1.0
-            || params.blend_mode != 0,
+        transfer_suppressed: group_suppresses_transfer(ctx.transfer_suppressed, params),
     };
 
     let skip_indices = compute_obscured_fill_skips(elements);
@@ -4764,8 +4767,9 @@ fn render_knockout_group(
         out_h: eff_h,
         effective_dpi: ctx.effective_dpi,
         icc: ctx.icc,
-        image_cache: None,
-        preprocessed: None,
+        // The children find their images in the group's own entries.
+        image_cache: cached_children(ctx.image_cache, ctx.elem_idx),
+        preprocessed: cached_children(ctx.preprocessed, ctx.elem_idx),
         elem_idx: 0,
         no_aa: true,
         opm_zero_transparent: ctx.opm_zero_transparent,
@@ -4776,9 +4780,7 @@ fn render_knockout_group(
         parent_group_isolated: true,
         alpha_extraction_pass: false,
         layer_set: ctx.layer_set,
-        transfer_suppressed: ctx.transfer_suppressed
-            || params.alpha < 1.0
-            || params.blend_mode != 0,
+        transfer_suppressed: group_suppresses_transfer(ctx.transfer_suppressed, params),
     };
 
     // Persistent band state for clip tracking — clips must accumulate across
@@ -4800,7 +4802,12 @@ fn render_knockout_group(
     // groups. Reused (zeroed) across painters; allocated lazily on first need.
     let mut coverage_offscreen: Option<Pixmap> = None;
 
-    for elem in elements.elements() {
+    for (idx, elem) in elements.elements().iter().enumerate() {
+        // Each element looks its image entry up by its index in the group.
+        let group_ctx = RenderContext {
+            elem_idx: idx,
+            ..group_ctx
+        };
         match elem {
             // State-only elements: update persistent clip, no knockout compositing
             DisplayElement::Clip { .. } | DisplayElement::InitClip => {
@@ -5131,6 +5138,10 @@ fn render_soft_masked(
     let eff_vp_x = ctx.vp_x + crop_x as f32 / ctx.scale_x;
     let eff_vp_y = ctx.vp_y + crop_y as f32 / ctx.scale_y;
 
+    // The content and the mask each find their images in their own entries.
+    let (content_images, mask_images) = cached_masked(ctx.image_cache, ctx.elem_idx);
+    let (content_preprocessed, mask_preprocessed) = cached_masked(ctx.preprocessed, ctx.elem_idx);
+
     let sub_ctx = RenderContext {
         vp_x: eff_vp_x,
         vp_y: eff_vp_y,
@@ -5140,8 +5151,8 @@ fn render_soft_masked(
         out_h: eff_h,
         effective_dpi: ctx.effective_dpi,
         icc: ctx.icc,
-        image_cache: None,
-        preprocessed: None,
+        image_cache: content_images,
+        preprocessed: content_preprocessed,
         elem_idx: 0,
         no_aa: ctx.no_aa,
         opm_zero_transparent: ctx.opm_zero_transparent,
@@ -5176,6 +5187,8 @@ fn render_soft_masked(
         };
         for (idx, elem) in mask_list.elements().iter().enumerate() {
             let elem_ctx = RenderContext {
+                image_cache: mask_images,
+                preprocessed: mask_preprocessed,
                 elem_idx: idx,
                 ..sub_ctx
             };
@@ -5226,6 +5239,8 @@ fn render_soft_masked(
                 ctx.scale_x,
                 ctx.scale_y,
                 ctx.layer_set,
+                mask_images,
+                mask_preprocessed,
             );
             *guard = Some(built);
         }
@@ -5636,6 +5651,8 @@ fn rasterize_mask(
     scale_x: f32,
     scale_y: f32,
     layer_set: &LayerSet,
+    image_cache: Option<&[CacheEntry<Vec<u8>>]>,
+    preprocessed: Option<&[CacheEntry<PreprocessedImage>]>,
 ) -> Option<stet_graphics::display_list::MaskRaster> {
     // 1. Find the actual paint bounds in device space, then cap them to
     // the parent gstate's clip path bbox if known. The cap is critical
@@ -5687,8 +5704,8 @@ fn rasterize_mask(
         out_h: raster_h,
         effective_dpi,
         icc,
-        image_cache: None,
-        preprocessed: None,
+        image_cache,
+        preprocessed,
         elem_idx: 0,
         no_aa,
         opm_zero_transparent: false,
@@ -10500,25 +10517,59 @@ struct PreprocessedImage {
 
 /// One element's slot in a per-page image cache.
 ///
-/// The caches have the shape of the page's layers: a layer
-/// (`DisplayElement::OcgGroup`) holds its children's entries, so an image
-/// inside a layer finds its own entry by its index within the layer. Every
-/// other container clears the caches for its children.
+/// The caches have the shape of the page's containers: a layer
+/// (`DisplayElement::OcgGroup`) or a transparency group holds its children's
+/// entries, and a soft-masked element holds those of its content and of its
+/// mask, so an image inside one finds its own entry by its index within the
+/// list it is in. Pattern tiles clear the caches for their elements.
 enum CacheEntry<T> {
     /// Not an image, or an image the cache does not hold.
     Empty,
     /// An image's converted data.
     Image(T),
-    /// A layer's children.
-    Layer(Vec<CacheEntry<T>>),
+    /// The children of a layer or of a transparency group.
+    Children(Vec<CacheEntry<T>>),
+    /// The two lists of a soft-masked element.
+    Masked {
+        /// The entries of the content list.
+        content: Vec<CacheEntry<T>>,
+        /// The entries of the mask list.
+        mask: Vec<CacheEntry<T>>,
+    },
+}
+
+/// Which containers [`build_cache_entries`] descends into.
+struct CacheDescent<'a> {
+    /// Accepts the layers to descend into, by their visibility.
+    layer: &'a dyn Fn(&OcgVisibility) -> bool,
+    /// Whether to descend into transparency groups and soft-masked
+    /// elements as well.
+    groups_and_masks: bool,
+}
+
+/// Whether what a transparency group contains is painted with no transfer
+/// function: `inherited` is the same question for the group itself. Nothing
+/// in a group drawn with alpha below 1 or a blend mode other than Normal is
+/// fully opaque (see [`RenderContext::transfer_suppressed`]).
+///
+/// The renderer's group contexts and the image caches both ask this, so a
+/// cached image is converted as the group's context would convert it.
+fn group_suppresses_transfer(
+    inherited: bool,
+    params: &stet_graphics::display_list::GroupParams,
+) -> bool {
+    inherited || params.alpha < 1.0 || params.blend_mode != 0
 }
 
 /// Build cache entries for `elements`, converting each image with `image`
-/// and descending into each layer whose visibility `descend` accepts.
+/// and descending into the containers `descent` names. `image` is told
+/// whether the image's context suppresses transfer functions, which
+/// `transfer_suppressed` says of `elements` themselves.
 fn build_cache_entries<T>(
     elements: &[DisplayElement],
-    descend: &impl Fn(&OcgVisibility) -> bool,
-    image: &impl Fn(&[u8], &ImageParams) -> Option<T>,
+    descent: &CacheDescent<'_>,
+    transfer_suppressed: bool,
+    image: &impl Fn(&[u8], &ImageParams, bool) -> Option<T>,
 ) -> Vec<CacheEntry<T>> {
     elements
         .iter()
@@ -10526,12 +10577,31 @@ fn build_cache_entries<T>(
             DisplayElement::Image {
                 sample_data,
                 params,
-            } => image(sample_data, params).map_or(CacheEntry::Empty, CacheEntry::Image),
+            } => image(sample_data, params, transfer_suppressed)
+                .map_or(CacheEntry::Empty, CacheEntry::Image),
             DisplayElement::OcgGroup {
                 elements,
                 visibility,
-            } if descend(visibility) => {
-                CacheEntry::Layer(build_cache_entries(elements.elements(), descend, image))
+            } if (descent.layer)(visibility) => CacheEntry::Children(build_cache_entries(
+                elements.elements(),
+                descent,
+                transfer_suppressed,
+                image,
+            )),
+            DisplayElement::Group { elements, params } if descent.groups_and_masks => {
+                CacheEntry::Children(build_cache_entries(
+                    elements.elements(),
+                    descent,
+                    group_suppresses_transfer(transfer_suppressed, params),
+                    image,
+                ))
+            }
+            // Nothing in a soft mask's mask or content is fully opaque.
+            DisplayElement::SoftMasked { mask, content, .. } if descent.groups_and_masks => {
+                CacheEntry::Masked {
+                    content: build_cache_entries(content.elements(), descent, true, image),
+                    mask: build_cache_entries(mask.elements(), descent, true, image),
+                }
             }
             _ => CacheEntry::Empty,
         })
@@ -10546,11 +10616,25 @@ fn cached_image<T>(entries: Option<&[CacheEntry<T>]>, index: usize) -> Option<&T
     }
 }
 
-/// The children's entries of the layer at `index` in `entries`.
-fn cached_layer<T>(entries: Option<&[CacheEntry<T>]>, index: usize) -> Option<&[CacheEntry<T>]> {
+/// The children's entries of the layer or transparency group at `index` in
+/// `entries`.
+fn cached_children<T>(entries: Option<&[CacheEntry<T>]>, index: usize) -> Option<&[CacheEntry<T>]> {
     match entries?.get(index)? {
-        CacheEntry::Layer(children) => Some(children),
+        CacheEntry::Children(children) => Some(children),
         _ => None,
+    }
+}
+
+/// The entries of the content list and of the mask list of the soft-masked
+/// element at `index` in `entries`.
+#[expect(clippy::type_complexity)]
+fn cached_masked<T>(
+    entries: Option<&[CacheEntry<T>]>,
+    index: usize,
+) -> (Option<&[CacheEntry<T>]>, Option<&[CacheEntry<T>]>) {
+    match entries.and_then(|entries| entries.get(index)) {
+        Some(CacheEntry::Masked { content, mask }) => (Some(content), Some(mask)),
+        _ => (None, None),
     }
 }
 
@@ -10568,21 +10652,35 @@ pub struct ImageCache {
 impl ImageCache {
     /// Build cache by pre-converting all images in the display list.
     pub fn build(list: &DisplayList, icc: Option<&IccCache>) -> Self {
-        let entries = build_cache_entries(list.elements(), &|_| true, &|sample_data, params| {
-            if params.width == 0 || params.height == 0 {
-                return None;
-            }
-            // The cache holds images that no group or soft mask encloses
-            // (layers draw nothing of their own): the paint's own opacity
-            // decides.
-            Some(image_to_rgba(
-                sample_data,
-                params,
-                icc,
-                false,
-                paint_transfer(&params.transfer, params.alpha, params.blend_mode, false),
-            ))
-        });
+        // Images inside transparency groups and soft masks stay out: the
+        // cache holds full-size conversions for as long as the page is
+        // shown, and those are converted as they are drawn.
+        let descent = CacheDescent {
+            layer: &|_| true,
+            groups_and_masks: false,
+        };
+        let entries = build_cache_entries(
+            list.elements(),
+            &descent,
+            false,
+            &|sample_data, params, transfer_suppressed| {
+                if params.width == 0 || params.height == 0 {
+                    return None;
+                }
+                Some(image_to_rgba(
+                    sample_data,
+                    params,
+                    icc,
+                    false,
+                    paint_transfer(
+                        &params.transfer,
+                        params.alpha,
+                        params.blend_mode,
+                        transfer_suppressed,
+                    ),
+                ))
+            },
+        );
         Self { entries }
     }
 
@@ -10600,17 +10698,24 @@ impl ImageCache {
 /// Build preprocessed image cache for banded rendering.
 ///
 /// For each Image element, converts to RGBA and prescales once.
-/// Banded rendering then only needs `draw_pixmap` per band. Layers that
+/// Banded rendering then only needs `draw_pixmap` per band. Images inside
+/// transparency groups and soft masks are included, or every band that
+/// touches one would convert the whole image for itself. Layers that
 /// `layer_set` hides are skipped: their images paint nothing.
 fn preprocess_images_for_bands(
     list: &DisplayList,
     icc: Option<&IccCache>,
     layer_set: &LayerSet,
 ) -> Vec<CacheEntry<PreprocessedImage>> {
+    let descent = CacheDescent {
+        layer: &|visibility| layer_set.evaluate(visibility),
+        groups_and_masks: true,
+    };
     build_cache_entries(
         list.elements(),
-        &|visibility| layer_set.evaluate(visibility),
-        &|sample_data, params| {
+        &descent,
+        false,
+        &|sample_data, params, transfer_suppressed| {
             let iw = params.width;
             let ih = params.height;
             if iw == 0 || ih == 0 {
@@ -10621,15 +10726,20 @@ fn preprocess_images_for_bands(
                 return None;
             }
 
-            // Convert to RGBA. No group or soft mask encloses these images
-            // (layers draw nothing of their own): the paint's own opacity
-            // decides the transfer function.
+            // Convert to RGBA, as the image's context will ask for it:
+            // `opm_zero_transparent` is set by pattern tiles only, which
+            // these entries never reach.
             let rgba = image_to_rgba(
                 sample_data,
                 params,
                 icc,
                 false,
-                paint_transfer(&params.transfer, params.alpha, params.blend_mode, false),
+                paint_transfer(
+                    &params.transfer,
+                    params.alpha,
+                    params.blend_mode,
+                    transfer_suppressed,
+                ),
             );
 
             // Compute the device-space transform (vp_y=0, scale=1.0)
@@ -14395,6 +14505,8 @@ mod tests {
             1.0,
             1.0,
             &LayerSet::new(),
+            None,
+            None,
         )
         .expect("expected raster");
 
@@ -14833,17 +14945,66 @@ mod tests {
         }
     }
 
-    /// Each entry's shape: `I` an image, `.` empty, a layer its children in
-    /// brackets.
-    fn cache_shape<T>(entries: &[CacheEntry<T>]) -> String {
+    fn cache_test_soft_masked(
+        mask: Vec<DisplayElement>,
+        content: Vec<DisplayElement>,
+    ) -> DisplayElement {
+        DisplayElement::SoftMasked {
+            mask: dl(mask),
+            content: dl(content),
+            params: stet_graphics::display_list::SoftMaskParams {
+                subtype: stet_graphics::display_list::SoftMaskSubtype::Luminosity,
+                bbox: [0.0, 0.0, 10.0, 10.0],
+                backdrop_color: None,
+                transfer_invert: false,
+                has_nested_mask_scope: false,
+                parent_clip_bbox: None,
+            },
+            mask_cache: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn cache_test_group(alpha: f64, blend: u8, elements: Vec<DisplayElement>) -> DisplayElement {
+        group_elem(elements, [0.0, 0.0, 10.0, 10.0], true, alpha, blend)
+    }
+
+    fn cache_test_knockout_group(elements: Vec<DisplayElement>) -> DisplayElement {
+        match cache_test_group(1.0, 0, elements) {
+            DisplayElement::Group { elements, params } => DisplayElement::Group {
+                elements,
+                params: stet_graphics::display_list::GroupParams {
+                    knockout: true,
+                    ..params
+                },
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    /// Each entry's shape: `.` empty, an image whatever `image` writes for
+    /// it, a layer's or a group's children in brackets, a soft-masked
+    /// element's content and mask in braces either side of a bar.
+    fn cache_shape_with<T>(entries: &[CacheEntry<T>], image: &impl Fn(&T) -> String) -> String {
         entries
             .iter()
             .map(|e| match e {
                 CacheEntry::Empty => ".".to_string(),
-                CacheEntry::Image(_) => "I".to_string(),
-                CacheEntry::Layer(children) => format!("[{}]", cache_shape(children)),
+                CacheEntry::Image(data) => image(data),
+                CacheEntry::Children(children) => {
+                    format!("[{}]", cache_shape_with(children, image))
+                }
+                CacheEntry::Masked { content, mask } => format!(
+                    "{{{}|{}}}",
+                    cache_shape_with(content, image),
+                    cache_shape_with(mask, image)
+                ),
             })
             .collect()
+    }
+
+    /// [`cache_shape_with`], every image an `I`.
+    fn cache_shape<T>(entries: &[CacheEntry<T>]) -> String {
+        cache_shape_with(entries, &|_| "I".to_string())
     }
 
     /// A page with an image, a visible layer holding an image and a nested
@@ -14877,6 +15038,89 @@ mod tests {
         layers.set(3, true);
         let entries = preprocess_images_for_bands(&page, None, &layers);
         assert_eq!(cache_shape(&entries), "I[I.][I]I");
+    }
+
+    /// A page with an image in each kind of container: a group, a knockout
+    /// group, a soft mask's content and its mask, a group inside a soft
+    /// mask's content, and a soft-masked image inside a group inside a layer.
+    fn cache_test_container_page() -> DisplayList {
+        let image = cache_test_image;
+        dl(vec![
+            cache_test_group(1.0, 0, vec![image()]),
+            cache_test_knockout_group(vec![image(), image()]),
+            cache_test_soft_masked(vec![image()], vec![image(), image()]),
+            cache_test_soft_masked(vec![], vec![cache_test_group(1.0, 0, vec![image()])]),
+            cache_test_layer(
+                1,
+                true,
+                vec![cache_test_group(
+                    1.0,
+                    0,
+                    vec![cache_test_soft_masked(vec![image()], vec![image()])],
+                )],
+            ),
+        ])
+    }
+
+    /// The banded renderer's cache descends into transparency groups and
+    /// soft masks: an image the cache misses still draws correctly, but
+    /// every band converts the whole image to do it.
+    #[test]
+    fn band_cache_has_the_shape_of_the_groups_and_soft_masks() {
+        let entries =
+            preprocess_images_for_bands(&cache_test_container_page(), None, &LayerSet::new());
+        assert_eq!(cache_shape(&entries), "[I][II]{II|I}{[I]|}[[{I|I}]]");
+
+        // A hidden layer is skipped wherever it is.
+        let page = dl(vec![cache_test_group(
+            1.0,
+            0,
+            vec![cache_test_layer(1, false, vec![cache_test_image()])],
+        )]);
+        let entries = preprocess_images_for_bands(&page, None, &LayerSet::new());
+        assert_eq!(cache_shape(&entries), "[.]");
+    }
+
+    /// The viewer's cache holds full-size conversions for as long as the
+    /// page is shown, and stays out of groups and soft masks.
+    #[test]
+    fn image_cache_stays_out_of_groups_and_soft_masks() {
+        let cache = ImageCache::build(&cache_test_container_page(), None);
+        assert_eq!(cache_shape(cache.entries()), "....[.]");
+    }
+
+    /// Each image is converted as its context will ask for it: with no
+    /// transfer function inside a soft mask's content or mask, or anywhere
+    /// inside a group drawn with alpha below 1 or a blend mode.
+    #[test]
+    fn cache_entries_know_where_transfer_functions_are_suppressed() {
+        let image = cache_test_image;
+        let page = dl(vec![
+            image(),
+            cache_test_group(1.0, 0, vec![image()]),
+            cache_test_group(0.5, 0, vec![image()]),
+            cache_test_group(1.0, 1, vec![image()]),
+            // Decided by the outer group for everything inside it.
+            cache_test_group(0.5, 0, vec![cache_test_group(1.0, 0, vec![image()])]),
+            cache_test_group(1.0, 0, vec![cache_test_group(1.0, 1, vec![image()])]),
+            cache_test_soft_masked(vec![image()], vec![image()]),
+            // A layer changes nothing; a group inside a soft mask inherits.
+            cache_test_layer(1, true, vec![image()]),
+            cache_test_group(0.5, 0, vec![cache_test_layer(2, true, vec![image()])]),
+            cache_test_soft_masked(vec![], vec![cache_test_group(1.0, 0, vec![image()])]),
+        ]);
+        let descent = CacheDescent {
+            layer: &|_| true,
+            groups_and_masks: true,
+        };
+        let entries = build_cache_entries(page.elements(), &descent, false, &|_, _, suppressed| {
+            Some(suppressed)
+        });
+        let flag = |suppressed: &bool| if *suppressed { "s" } else { "t" }.to_string();
+        assert_eq!(
+            cache_shape_with(&entries, &flag),
+            "t[t][s][s][[s]][[s]]{s|s}[t][[s]]{[s]|}"
+        );
     }
 
     /// The viewer's cache descends into every layer, since the viewer

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Images inside soft masks and transparency groups are converted once
+  per page, not once per band.** Every PDF image with an `/SMask` is drawn
+  through a soft mask, so this is the ordinary path for an image with
+  alpha. Each band that touched such an image converted the whole of it,
+  and bands run in parallel, so memory grew with the thread count: a
+  4500×6442 image with a soft mask, rendered 800 pixels wide, peaked at
+  1,075 MB on 24 threads and now peaks at 327 MB on any number. On the
+  hundred test-corpus files with images in groups or soft masks, a
+  single-threaded render at 150 dpi takes about a third less time. Output is unchanged. Two costs: the
+  converted images are now held for the whole page, so a single-threaded
+  render of a page with many of them can peak higher than before, and a
+  page with many such images converts them one after another where the
+  bands used to share the work.
+
 ## [0.8.4] — 2026-10-04
 
 ### Added
