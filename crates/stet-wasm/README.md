@@ -52,10 +52,15 @@ import init, {
     render,
     render_viewport,
     page_dimensions,
+    set_max_vm,
 } from './pkg/stet_wasm.js';
 
 await init({ module_or_path: './pkg/stet_wasm_bg.wasm' });
 const interp = create_interpreter();
+
+// Optional: cap PostScript VM (strings, arrays, dicts) at 256 MB, so a
+// runaway program gets a VMerror instead of exhausting the module's memory
+set_max_vm(interp, 256 * 1024 * 1024);
 
 // Interpret PostScript (captures display lists for viewport rendering)
 const numPages = render(interp, psData, 150, 'test.ps');

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`stet-wasm`: `set_max_vm(interp, bytes)`** caps PostScript VM in the
+  browser, as `--max-vm` does on the command line. The default there is
+  1 GiB, a quarter of the address space, which is more than most pages
+  embedding the viewer want to grant one document.
 ### Fixed
 
 - **A PostScript program could raise `--max-vm`.** `MaxLocalVM` is a user

@@ -212,6 +212,26 @@ pub fn create_interpreter() -> Interpreter {
     }
 }
 
+/// Set the ceiling on PostScript VM — strings, arrays, dictionaries — in bytes.
+///
+/// The browser counterpart of the CLI's `--max-vm`: a program that would
+/// exceed it gets a `VMerror` it can catch, where an allocation the module
+/// cannot satisfy aborts it. The default is a quarter of the address space,
+/// which is 1 GiB here; a page embedding the viewer will usually want less.
+///
+/// A program can lower its own limit with `setuserparams` but cannot raise it
+/// past this.
+///
+/// The interpreter's own start-up state counts against the ceiling, so a
+/// value below what `create_interpreter` has already allocated refuses every
+/// further allocation. The ceiling bounds PostScript VM only, not the
+/// renderer's image and band buffers, and holds for the life of the
+/// interpreter.
+#[wasm_bindgen]
+pub fn set_max_vm(interp: &mut Interpreter, max_bytes: u32) {
+    interp.ctx.max_local_vm = max_bytes as usize;
+}
+
 /// Render PostScript or EPS data at the specified DPI.
 ///
 /// Interprets the PostScript, renders an overview of each page, and retains
