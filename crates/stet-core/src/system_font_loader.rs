@@ -30,8 +30,16 @@ pub fn load_otf_cff(ctx: &mut Context, path: &Path) -> bool {
         Err(_) => return false,
     };
 
+    load_otf_cff_from_data(ctx, &data)
+}
+
+/// Load an OTF with CFF outlines from raw data.
+///
+/// Extracts the CFF table, parses it, and registers fonts via the CFF pipeline.
+/// Returns true on success.
+pub fn load_otf_cff_from_data(ctx: &mut Context, data: &[u8]) -> bool {
     // Find CFF table
-    let (cff_offset, cff_length) = match find_table(&data, b"CFF ") {
+    let (cff_offset, cff_length) = match find_table(data, b"CFF ") {
         Some(t) => t,
         None => return false,
     };
@@ -554,16 +562,25 @@ pub fn load_binary_font(ctx: &mut Context, path: &Path) -> bool {
         Err(_) => return false,
     };
 
+    load_binary_font_from_data(ctx, &data)
+}
+
+/// Load a binary font (TTF or OTF) from raw data, auto-detecting the format.
+///
+/// The entry point for a font that is not a file on disk — one held in
+/// [`FileStore`](crate::file_store::FileStore)'s embedded files, as every
+/// resource is in a WebAssembly build.
+pub fn load_binary_font_from_data(ctx: &mut Context, data: &[u8]) -> bool {
     if data.len() < 4 {
         return false;
     }
 
-    if is_cff_font(&data) {
+    if is_cff_font(data) {
         // OTF with CFF outlines
-        load_otf_cff(ctx, path)
+        load_otf_cff_from_data(ctx, data)
     } else {
         // TrueType outlines (TTF or OTF with glyf table)
-        load_ttf_from_data(ctx, &data)
+        load_ttf_from_data(ctx, data)
     }
 }
 

@@ -453,7 +453,8 @@ pub fn op_loadbinarysystemfont(ctx: &mut Context) -> Result<(), PsError> {
 /// `.loadbinaryfontfile`: name path → true | false
 ///
 /// Load a binary font from an explicit file path. Used by fontcategory.ps
-/// when .ttf/.otf files are found in resources/Font/.
+/// when .ttf/.otf files are found in resources/Font/. An embedded file of
+/// that path is taken before the disk is tried, as `run` and `file` do.
 pub fn op_loadbinaryfontfile(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.len() < 2 {
         return Err(PsError::StackUnderflow);
@@ -468,8 +469,13 @@ pub fn op_loadbinaryfontfile(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?; // font name (unused — the font file declares its own name)
 
     let path_str = String::from_utf8_lossy(&path_bytes);
-    let path = std::path::Path::new(path_str.as_ref());
-    let ok = stet_core::system_font_loader::load_binary_font(ctx, path);
+    // Check embedded files first (for WASM builds where no real filesystem exists).
+    let ok = if let Some(data) = ctx.files.get_embedded_file(path_str.as_ref()) {
+        stet_core::system_font_loader::load_binary_font_from_data(ctx, data)
+    } else {
+        let path = std::path::Path::new(path_str.as_ref());
+        stet_core::system_font_loader::load_binary_font(ctx, path)
+    };
     ctx.o_stack.push(PsObject::bool(ok))?;
     Ok(())
 }
@@ -1710,6 +1716,99 @@ mod tests {
         ctx.o_stack.push(PsObject::name_lit(key_name)).unwrap();
         op_systemundef(&mut ctx).unwrap();
         assert!(!ctx.dicts.known(dict, &DictKey::Name(key_name)));
+    }
+
+    /// A TrueType font holding only what `.loadbinaryfontfile` reads: a
+    /// PostScript name of `Probe`, 1000 units per em, and a `cmap` sending
+    /// U+0041 to glyph 1.
+    fn probe_sfnt() -> Vec<u8> {
+        let mut head = vec![0u8; 54];
+        head[12..16].copy_from_slice(&0x5F0F_3CF5u32.to_be_bytes()); // magic
+        head[18..20].copy_from_slice(&1000u16.to_be_bytes()); // unitsPerEm
+
+        let mut name = Vec::new();
+        name.extend(0u16.to_be_bytes()); // format
+        name.extend(1u16.to_be_bytes()); // one record
+        name.extend(18u16.to_be_bytes()); // string storage offset
+        // Macintosh Roman, English, nameID 6 (PostScript name), 5 bytes at 0.
+        for v in [1u16, 0, 0, 6, 5, 0] {
+            name.extend(v.to_be_bytes());
+        }
+        name.extend(b"Probe");
+
+        let mut cmap = Vec::new();
+        cmap.extend(0u16.to_be_bytes()); // version
+        cmap.extend(1u16.to_be_bytes()); // one subtable
+        cmap.extend(3u16.to_be_bytes()); // platform: Windows
+        cmap.extend(10u16.to_be_bytes()); // encoding: UCS-4
+        cmap.extend(12u32.to_be_bytes()); // offset
+        cmap.extend(12u16.to_be_bytes()); // format 12
+        cmap.extend(0u16.to_be_bytes()); // reserved
+        cmap.extend(28u32.to_be_bytes()); // length
+        cmap.extend(0u32.to_be_bytes()); // language
+        cmap.extend(1u32.to_be_bytes()); // one group
+        for v in [0x41u32, 0x41, 1] {
+            cmap.extend(v.to_be_bytes()); // start, end, start glyph
+        }
+
+        // Sorted by tag, as the table directory must be.
+        let tables: [(&[u8; 4], &[u8]); 3] = [(b"cmap", &cmap), (b"head", &head), (b"name", &name)];
+        let mut font = Vec::new();
+        font.extend(0x0001_0000u32.to_be_bytes());
+        font.extend((tables.len() as u16).to_be_bytes());
+        font.extend([0u8; 6]);
+        let mut offset = 12 + 16 * tables.len();
+        let mut bodies = Vec::new();
+        for (tag, body) in tables {
+            font.extend(tag);
+            font.extend(0u32.to_be_bytes());
+            font.extend((offset as u32).to_be_bytes());
+            font.extend((body.len() as u32).to_be_bytes());
+            let mut padded = body.to_vec();
+            padded.resize(body.len().div_ceil(4) * 4, 0);
+            offset += padded.len();
+            bodies.extend(padded);
+        }
+        font.extend(bodies);
+        font
+    }
+
+    fn push_loadbinaryfontfile_operands(ctx: &mut Context, path: &[u8]) {
+        let name = ctx.names.intern(b"Probe");
+        let entity = crate::vm_ops::alloc_string(ctx, path);
+        ctx.o_stack.push(PsObject::name_lit(name)).unwrap();
+        ctx.o_stack
+            .push(PsObject::string(entity, path.len() as u32))
+            .unwrap();
+    }
+
+    /// A WebAssembly build has no disk: its resources are embedded files, and
+    /// a `.ttf` among them has to load from there. The path is the one
+    /// fontcategory.ps builds, doubled slash included.
+    #[test]
+    fn test_loadbinaryfontfile_reads_an_embedded_font() {
+        let mut ctx = test_ctx();
+        let font: &'static [u8] = Box::leak(probe_sfnt().into_boxed_slice());
+        ctx.files.add_embedded_file("Font/Probe.ttf", font);
+
+        push_loadbinaryfontfile_operands(&mut ctx, b"/Font//Probe.ttf");
+        op_loadbinaryfontfile(&mut ctx).unwrap();
+
+        let loaded = ctx.o_stack.pop().unwrap();
+        assert!(matches!(loaded.value, PsValue::Bool(true)));
+        assert_eq!(ctx.o_stack.len(), 0);
+        let key = DictKey::Name(ctx.names.intern(b"Probe"));
+        assert!(ctx.dicts.get(ctx.font_directory, &key).is_some());
+    }
+
+    /// A path that is neither embedded nor on disk reports `false`.
+    #[test]
+    fn test_loadbinaryfontfile_reports_a_missing_font() {
+        let mut ctx = test_ctx();
+        push_loadbinaryfontfile_operands(&mut ctx, b"/Font//Absent.ttf");
+        op_loadbinaryfontfile(&mut ctx).unwrap();
+        let loaded = ctx.o_stack.pop().unwrap();
+        assert!(matches!(loaded.value, PsValue::Bool(false)));
     }
 
     #[test]

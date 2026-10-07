@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A TrueType or OpenType font among the embedded resources never
+  loaded.** `resources/Font/` may hold `.ttf` and `.otf` files beside the
+  Type 1 ones, but they were read from disk even where the resources are
+  embedded in the binary and there is no disk — a WebAssembly build. None
+  of the 35 bundled fonts is affected, being Type 1; this matters to a
+  build that embeds fonts of its own.
 - **A large image drawn small no longer costs its full size in memory, and
   an image with a soft mask no longer costs it once per band.** Rendering
   converted every image to RGBA at full size before scaling it down, and
