@@ -72,6 +72,8 @@ fi
 
 section "URW++ base 35 fonts -- embedded by stet and stet-pdf-reader" \
     crates/stet/LICENSE-URW-FONTS
+section "Default CMYK ICC profile -- embedded by stet" \
+    crates/stet/LICENSE-CMYK-PROFILE
 section "Adobe CMap resources (CID <-> Unicode tables) -- embedded by stet-fonts" \
     crates/stet-fonts/LICENSE-ADOBE-CMAP
 section "Adobe Glyph List and ITC Zapf Dingbats Glyph List -- embedded by stet-fonts" \

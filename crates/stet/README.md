@@ -252,4 +252,6 @@ stet::ps_exec(ctx, b"/greeting (Hello, PostScript!) def greeting print")?;
 
 Apache-2.0 OR MIT, except the 35 embedded URW++ base 35 font programs,
 which are under the SIL Open Font License 1.1 — see
-[`LICENSE-URW-FONTS`](LICENSE-URW-FONTS).
+[`LICENSE-URW-FONTS`](LICENSE-URW-FONTS) — and the embedded CMYK ICC
+profile, which is public domain (CC0) — see
+[`LICENSE-CMYK-PROFILE`](LICENSE-CMYK-PROFILE).

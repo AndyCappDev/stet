@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   browser, as `--max-vm` does on the command line. The default there is
   1 GiB, a quarter of the address space, which is more than most pages
   embedding the viewer want to grant one document.
+- **Licence note for the embedded CMYK profile.** `default_cmyk.icc` has
+  been the public-domain (CC0) `CGATS001Compat-v2-micro` profile since
+  before 0.1.0, but only its filename — Ghostscript's — said anything about
+  where it came from, and a reader could take it for Ghostscript's
+  AGPL-licensed profile. `LICENSE-CMYK-PROFILE` in the `stet` and
+  `stet-wasm` crates now records its source and terms, and the prebuilt
+  archives' `THIRD-PARTY-NOTICES.txt` carries it.
+
 ### Fixed
 
 - **A PostScript program could raise `--max-vm`.** `MaxLocalVM` is a user

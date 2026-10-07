@@ -27,7 +27,9 @@ use stet_render::{ImageCache, PreparedDisplayList, SkiaDevice};
 
 use memory_sink::{PageData, PageSizeRecorder, new_page_collection};
 
-/// Embedded GhostScript default CMYK ICC profile for CMYK→sRGB conversion.
+/// Embedded CC0-licensed CMYK ICC profile for CMYK→sRGB conversion — the
+/// file the `stet` facade embeds, not Ghostscript's profile of the same name.
+/// See `LICENSE-CMYK-PROFILE`.
 const DEFAULT_CMYK_ICC: &[u8] = include_bytes!("default_cmyk.icc");
 
 /// Page metadata stored alongside display lists for viewport rendering.

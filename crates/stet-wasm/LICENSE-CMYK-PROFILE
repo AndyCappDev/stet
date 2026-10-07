@@ -1,0 +1,24 @@
+The CMYK ICC profile this crate embeds (src/default_cmyk.icc) is
+CGATS001Compat-v2-micro.icc from Clinton Ingram's Compact ICC Profiles
+collection, byte-identical to
+https://github.com/saucecontrol/Compact-ICC-Profiles/blob/1fabe4a41b/profiles/CGATS001Compat-v2-micro.icc
+(8464 bytes, SHA-256
+73e1ba37d2bad5bab2a964f40a9eed96209666efc067c3322626214bbef234a0).
+Its own copyright tag reads "CC0".
+
+It is not covered by this crate's Apache-2.0 OR MIT licence. That
+collection's README releases it to the public domain:
+
+    All profiles in this collection are released to the public domain
+    under the Creative Commons CC0 license. They are free from
+    restrictions on distribution and use to the extent allowed by law.
+
+The CC0 1.0 Universal legal code is at
+https://creativecommons.org/publicdomain/zero/1.0/legalcode
+
+The file keeps the name default_cmyk.icc because it stands where
+Ghostscript's profile of that name once stood. It is not that profile and
+contains nothing from it: Ghostscript's default_cmyk.icc is 187484 bytes,
+describes itself as "Artifex CMYK SWOP Profile", and carries an Artifex
+copyright. The profile here is built from the CGATS TR 001-1995 (SWOP)
+characterisation data.

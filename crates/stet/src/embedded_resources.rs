@@ -10,7 +10,8 @@
 
 use stet_core::file_store::FileStore;
 
-/// Embedded CC0-licensed CMYK ICC profile for CMYK→sRGB conversion.
+/// Embedded CC0-licensed CMYK ICC profile for CMYK→sRGB conversion. Not
+/// Ghostscript's profile of the same name; see `LICENSE-CMYK-PROFILE`.
 pub const DEFAULT_CMYK_ICC: &[u8] = include_bytes!("../resources/default_cmyk.icc");
 
 /// All embedded resource entries: (relative_path, data).
