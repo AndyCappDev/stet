@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A PostScript program could raise `--max-vm`.** `MaxLocalVM` is a user
+  parameter, and `<< /MaxLocalVM 2000000000 >> setuserparams` replaced
+  whatever ceiling the command line had set — so `--max-vm 16` bounded only
+  a program that left it alone. The host's ceiling now holds: a program may
+  lower its limit and raise it again, but not past what the host allows,
+  and `currentuserparams` reports the limit in force rather than the
+  request. The built-in 8 GiB default is a ceiling in the same sense; pass
+  `--max-vm` to allow more. Library users get the same guarantee from
+  `Context::max_local_vm`, and `Context::vm_limit()` returns the limit in
+  force.
 - **A TrueType or OpenType font among the embedded resources never
   loaded.** `resources/Font/` may hold `.ttf` and `.otf` files beside the
   Type 1 ones, but they were read from disk even where the resources are

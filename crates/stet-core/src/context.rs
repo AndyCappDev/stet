@@ -438,8 +438,12 @@ pub struct Context {
     /// Ceiling on local VM, in bytes.
     ///
     /// PLRM 3.7.1 gives this as the device-dependent `MaxLocalVM` user
-    /// parameter; stet stores it here and exposes it through
-    /// `setuserparams` and the CLI's `--max-vm`.
+    /// parameter. This field is the host's side of it — the CLI's `--max-vm`
+    /// sets it — and is a ceiling in the strict sense: a program may ask for
+    /// less through `setuserparams`, and for more again, but never for more
+    /// than this. [`Self::vm_limit`] is the limit in force. Were the program
+    /// able to raise it, `--max-vm 16` would bound only the programs that did
+    /// not mind being bounded.
     ///
     /// The default is generous rather than absent. A large allocation that
     /// fails is not a catchable error — Rust's allocator aborts the process —
@@ -450,6 +454,12 @@ pub struct Context {
     /// pool from the band and image buffers the renderer works in, and those
     /// are where a large prepress job actually spends memory.
     pub max_local_vm: usize,
+
+    /// The program's own `MaxLocalVM`, from `setuserparams`; `None` until it
+    /// sets one. Kept apart from [`Self::max_local_vm`] rather than written
+    /// over it, so the host's ceiling survives whatever the program asks for
+    /// and a host that changes its ceiling mid-session is obeyed at once.
+    program_max_vm: Option<usize>,
 
     /// Wall-clock deadline for interpretation, if one was set.
     ///
@@ -738,7 +748,24 @@ impl Context {
         strings.saturating_add(arrays)
     }
 
-    /// Refuse an allocation of `bytes` that would exceed [`Self::max_local_vm`].
+    /// The VM limit in force, in bytes: the program's `MaxLocalVM` request
+    /// where it has made one, held to the host's [`Self::max_local_vm`].
+    pub fn vm_limit(&self) -> usize {
+        match self.program_max_vm {
+            Some(requested) => requested.min(self.max_local_vm),
+            None => self.max_local_vm,
+        }
+    }
+
+    /// Record the program's `MaxLocalVM` request, as `setuserparams` does.
+    ///
+    /// A request above [`Self::max_local_vm`] is kept but has no effect
+    /// beyond it — see [`Self::vm_limit`]. `None` withdraws the request.
+    pub fn set_program_vm_limit(&mut self, requested: Option<usize>) {
+        self.program_max_vm = requested;
+    }
+
+    /// Refuse an allocation of `bytes` that would exceed [`Self::vm_limit`].
     ///
     /// Call this *before* allocating, from any operator whose allocation size
     /// comes from the operand stack. Checking beforehand is the whole point:
@@ -762,7 +789,7 @@ impl Context {
         // consequence is that steady growth stops at about half the nominal
         // value; a single large request is bounded by the full one.
         let worst_case = held.saturating_add(bytes).max(held.saturating_mul(2));
-        if worst_case > self.max_local_vm {
+        if worst_case > self.vm_limit() {
             return Err(PsError::VMError);
         }
         Ok(())
@@ -1298,6 +1325,7 @@ impl Context {
             interrupt_flag: None,
             exec_sync_depth: 0,
             max_local_vm: DEFAULT_MAX_LOCAL_VM,
+            program_max_vm: None,
             deadline: None,
             steps_to_deadline_check: DEADLINE_CHECK_INTERVAL,
             gstate_backups: Vec::new(),

@@ -66,12 +66,14 @@ fn apply_user_params(ctx: &mut Context) {
     // than local alone, since a local-only ceiling is sidestepped with
     // `true setglobal`. A value of 0 means "no explicit request" — that is
     // what the dict is seeded with — and leaves the context default in place.
+    // The request is the program's and cannot lift the host's ceiling: see
+    // `Context::vm_limit`.
     let max_vm_name = ctx.names.intern(b"MaxLocalVM");
     if let Some(obj) = ctx.dicts.get(ctx.user_params, &DictKey::Name(max_vm_name))
         && let Some(v) = obj.as_i64()
         && v > 0
     {
-        ctx.max_local_vm = v as usize;
+        ctx.set_program_vm_limit(Some(usize::try_from(v).unwrap_or(usize::MAX)));
     }
 
     let max_op_name = ctx.names.intern(b"MaxOpStack");
@@ -115,7 +117,7 @@ pub fn op_currentuserparams(ctx: &mut Context) -> Result<(), PsError> {
     // so a query operator does not mutate interpreter state and no
     // `dict_put_cow` backup is owed.
     let max_vm_name = ctx.names.intern(b"MaxLocalVM");
-    let live_max_vm = i64::try_from(ctx.max_local_vm).unwrap_or(i64::MAX);
+    let live_max_vm = i64::try_from(ctx.vm_limit()).unwrap_or(i64::MAX);
     ctx.dicts
         .put(copy, DictKey::Name(max_vm_name), PsObject::int(live_max_vm));
 

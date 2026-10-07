@@ -106,7 +106,7 @@ fn the_default_ceiling_is_reported_not_zero() {
     );
 }
 
-/// `setuserparams` must still win, and must still be reported.
+/// `setuserparams` must still lower the limit, and must still be reported.
 #[test]
 fn setuserparams_still_sets_and_reports_the_ceiling() {
     assert!(
@@ -115,6 +115,50 @@ fn setuserparams_still_sets_and_reports_the_ceiling() {
              currentuserparams /MaxLocalVM get 33554432 eq",
             64 * 1024 * 1024,
         ),
-        "setuserparams must override the ceiling and be reported back"
+        "setuserparams must lower the limit and be reported back"
+    );
+}
+
+/// The host's ceiling is not the program's to raise. `--max-vm 16` followed
+/// by `<< /MaxLocalVM 2000000000 >> setuserparams` used to allocate 100 MB:
+/// the limit bound only a program that left it alone.
+#[test]
+fn setuserparams_cannot_raise_the_hosts_ceiling() {
+    assert!(
+        probe_with_cap(
+            "<< /MaxLocalVM 2000000000 >> setuserparams \
+             { 100000000 string pop } stopped \
+             { $error /errorname get /VMerror eq } { false } ifelse",
+            16 * 1024 * 1024,
+        ),
+        "a request above the host's ceiling must not lift it"
+    );
+}
+
+/// Nor does asking for more make the interpreter claim to have granted it.
+#[test]
+fn a_request_above_the_ceiling_reports_the_ceiling() {
+    assert!(
+        probe_with_cap(
+            "<< /MaxLocalVM 2000000000 >> setuserparams \
+             currentuserparams /MaxLocalVM get 16777216 eq",
+            16 * 1024 * 1024,
+        ),
+        "currentuserparams must report the limit in force, not the request"
+    );
+}
+
+/// A program that lowered its limit may raise it again, as far as the host's
+/// ceiling: the ceiling restricts the program, lowering does not ratchet.
+#[test]
+fn a_lowered_limit_can_be_raised_back_to_the_ceiling() {
+    assert!(
+        probe_with_cap(
+            "<< /MaxLocalVM 8388608 >> setuserparams \
+             << /MaxLocalVM 2000000000 >> setuserparams \
+             currentuserparams /MaxLocalVM get 67108864 eq",
+            64 * 1024 * 1024,
+        ),
+        "raising after lowering must stop at the host's ceiling"
     );
 }
