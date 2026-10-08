@@ -10,6 +10,9 @@
 //! Ghostscript 10.05.1's `png16m` at 72 dpi, except where the spec and
 //! Ghostscript part (noted there).
 
+// Renders to pixels, which is the `render` feature.
+#![cfg(feature = "render")]
+
 use stet_graphics::display_list::DisplayElement;
 use stet_graphics::icc::IccCache;
 use stet_pdf_reader::PdfDocument;

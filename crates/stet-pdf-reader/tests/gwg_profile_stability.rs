@@ -35,6 +35,9 @@
 //!
 //! Skips gracefully when the sample PDF is absent.
 
+// Renders to pixels, which is the `render` feature.
+#![cfg(feature = "render")]
+
 use stet_pdf_reader::PdfDocument;
 
 /// A rectangular region inside a rendered page that should be uniform under

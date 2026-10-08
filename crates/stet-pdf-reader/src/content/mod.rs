@@ -5910,6 +5910,9 @@ impl<'a> ContentInterpreter<'a> {
                 return color_channels == 3 && has_alpha;
             }
         }
+        // Without the `jpx` feature no image is JPEG 2000 to this build.
+        #[cfg(not(feature = "jpx"))]
+        let _ = obj;
         false
     }
 

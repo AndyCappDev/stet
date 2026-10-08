@@ -3343,6 +3343,7 @@ mod tests {
     /// Layer 6 references `MissingLayer` (no resource entry) so the
     /// content gets emitted unwrapped — provides a baseline rectangle
     /// that's always visible.
+    #[cfg(feature = "render")]
     fn build_pdf_with_layered_content() -> Vec<u8> {
         let mut pdf = Vec::new();
         pdf.extend(b"%PDF-1.6\n");
@@ -3397,6 +3398,7 @@ mod tests {
 
     /// Sample the centre of the layered region (pixel 75,25 in a 100x100
     /// page) so we can detect whether the layer's content rendered.
+    #[cfg(feature = "render")]
     fn sample_pixel(rgba: &[u8], w: u32, x: u32, y: u32) -> [u8; 4] {
         let i = (y as usize * w as usize + x as usize) * 4;
         [rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]]

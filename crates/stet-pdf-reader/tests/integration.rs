@@ -60,6 +60,7 @@ fn render_hospital_pdf() {
     assert!(!display_list.is_empty(), "display list should not be empty");
 }
 
+#[cfg(feature = "render")]
 #[test]
 fn render_hospital_pdf_to_rgba() {
     let Some(data) = try_load_pdf("hospital.pdf") else {
@@ -72,6 +73,7 @@ fn render_hospital_pdf_to_rgba() {
     assert_eq!(rgba.len(), (w * h * 4) as usize, "RGBA data size mismatch");
 }
 
+#[cfg(feature = "render")]
 #[test]
 fn render_hospital_pdf_to_png() {
     let Some(data) = try_load_pdf("hospital.pdf") else {
