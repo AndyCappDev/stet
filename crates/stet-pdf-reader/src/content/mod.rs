@@ -5424,15 +5424,17 @@ impl<'a> ContentInterpreter<'a> {
                 let n_comps = image_params.color_space.num_components() as usize;
                 if mc.len() >= n_comps && n_comps >= 3 {
                     let mut out = sample_data;
-                    let pixels = (width * height) as usize;
-                    for i in 0..pixels {
-                        let a = smask_data[i] as f64 / 255.0;
+                    // Pixel by pixel for as far as both the image and its
+                    // mask have samples: a truncated stream leaves either
+                    // short of `width * height`, and a pixel with no mask
+                    // sample has no alpha to divide by.
+                    for (pixel, &alpha) in out.chunks_exact_mut(n_comps).zip(smask_data.iter()) {
+                        let a = alpha as f64 / 255.0;
                         if a > 0.0 && a < 1.0 {
-                            for c in 0..n_comps.min(3) {
-                                let m = (mc[c] * 255.0).clamp(0.0, 255.0);
-                                let premul = out[i * n_comps + c] as f64;
-                                let orig = m + (premul - m) / a;
-                                out[i * n_comps + c] = orig.round().clamp(0.0, 255.0) as u8;
+                            for (sample, matte) in pixel.iter_mut().zip(mc.iter()).take(3) {
+                                let m = (matte * 255.0).clamp(0.0, 255.0);
+                                let orig = m + (*sample as f64 - m) / a;
+                                *sample = orig.round().clamp(0.0, 255.0) as u8;
                             }
                         }
                     }

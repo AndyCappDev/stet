@@ -153,6 +153,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1.2 GB, which is the display list of what they did draw.
   Reuse is unaffected: a form or glyph used any number of times in a row is
   drawn each time.
+- **A `/Matte` image whose soft mask was cut short panicked.** An image
+  premultiplied against a matte colour is divided back out by its soft
+  mask; when the mask's stream ended early the loop read past its last
+  sample. Pixels with no mask sample are now left as they are. Found in a
+  public PDF corpus.
 
 ## [0.8.4] — 2026-10-04
 

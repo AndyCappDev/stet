@@ -1130,3 +1130,32 @@ fn heavy_ordinary_reuse_is_drawn_in_full() {
     );
     assert_eq!(count_fills(&pdf), 4000);
 }
+
+/// An image premultiplied against a `/Matte` colour is divided back out by
+/// its soft mask, pixel by pixel. A soft mask whose stream ends early has
+/// fewer samples than the image has pixels, and the loop indexed past them
+/// — a panic on a real file, `0001957.pdf` of a public PDF corpus.
+#[test]
+fn a_matte_image_with_a_truncated_soft_mask_does_not_panic() {
+    let rgb = [200u8; 4 * 4 * 3];
+    let mut image = format!(
+        "<</Type/XObject/Subtype/Image/Width 4/Height 4/BitsPerComponent 8\
+         /ColorSpace/DeviceRGB/SMask 6 0 R/Length {}>>\nstream\n",
+        rgb.len()
+    )
+    .into_bytes();
+    image.extend_from_slice(&rgb);
+    image.extend_from_slice(b"\nendstream");
+    // Sixteen mask samples declared, three present, all partly transparent
+    // so the division is reached.
+    let mask = b"<</Type/XObject/Subtype/Image/Width 4/Height 4/BitsPerComponent 8\
+                 /ColorSpace/DeviceGray/Matte[0 0 0]/Length 3>>\nstream\n\x80\x80\x80\nendstream"
+        .to_vec();
+    let pdf = one_page_doc(
+        b"/Resources<</XObject<</Im 5 0 R>>>>",
+        b"100 0 0 100 0 0 cm /Im Do",
+        &[(5, image), (6, mask)],
+    );
+    let doc = PdfDocument::from_bytes(&pdf).unwrap();
+    assert!(!doc.render_page(0, 72.0).unwrap().is_empty());
+}
