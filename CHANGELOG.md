@@ -168,6 +168,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1.2 GB, which is the display list of what they did draw.
   Reuse is unaffected: a form or glyph used any number of times in a row is
   drawn each time.
+- **An AES-256 PDF did not open when its password needed Unicode
+  preparation.** PDF 2.0 has the writer run a password through SASLprep
+  (RFC 4013) before hashing it: compatibility forms are folded, characters
+  such as the soft hyphen are dropped. stet hashed the bytes as typed, so
+  a password entered with a full-width letter, a decomposed accent or a
+  non-breaking space was refused although it was the right one. The reader
+  now prepares the password and tries that first, then the bytes as given
+  for files whose writer skipped the step; both are cut to the 127 bytes
+  the algorithm reads. The preparation is the new `saslprep` feature of
+  `stet-pdf-reader`, on by default; it brings in the `stringprep` crate and
+  its Unicode tables (about 170 KB in the `stet` binary), and a build
+  without it behaves as before. RC4 and AES-128 files are unaffected.
+
 - **A `/Matte` image whose soft mask was cut short panicked.** An image
   premultiplied against a matte colour is divided back out by its soft
   mask; when the mask's stream ended early the loop read past its last

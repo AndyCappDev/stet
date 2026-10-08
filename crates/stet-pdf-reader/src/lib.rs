@@ -59,6 +59,13 @@
 //!
 //! RC4 (40/128-bit), AES-128, and AES-256 (R=5/6) are all supported.
 //!
+//! A password is bytes. For RC4 and AES-128 files they are compared as
+//! given. For AES-256 they are taken as UTF-8 and prepared with SASLprep
+//! (RFC 4013) first, as ISO 32000-2 requires — so a password typed with a
+//! full-width letter or a decomposed accent matches the one the file was
+//! made with — and the bytes as given are tried after that. SASLprep is the
+//! default-on `saslprep` feature; a build without it skips the preparation.
+//!
 //! # Structural API
 //!
 //! In addition to rendering, [`PdfDocument`] exposes typed, read-only

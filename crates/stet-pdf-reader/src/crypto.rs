@@ -172,6 +172,28 @@ impl EncryptionState {
             return Err(PdfError::Other("AES-256: /U too short".into()));
         }
 
+        for candidate in aes256_password_candidates(password) {
+            if let Some(file_key) = Self::user_key_v5(encrypt_dict, u_value, r, &candidate)? {
+                return Ok(Self {
+                    key: file_key,
+                    version: 5,
+                    stm_method: CryptMethod::AesV3,
+                    str_method: CryptMethod::AesV3,
+                });
+            }
+        }
+        Err(PdfError::PasswordRequired)
+    }
+
+    /// The file encryption key, if `password` is the user password of an
+    /// AES-256 file (ISO 32000-2 Algorithms 2.A and 11). `Ok(None)` means
+    /// the password does not match.
+    fn user_key_v5(
+        encrypt_dict: &PdfDict,
+        u_value: &[u8],
+        r: i32,
+        password: &[u8],
+    ) -> Result<Option<Vec<u8>>, PdfError> {
         let validation_salt = &u_value[32..40];
         let key_salt = &u_value[40..48];
 
@@ -182,7 +204,7 @@ impl EncryptionState {
             sha256(&[password, validation_salt])
         };
         if hash[..] != u_value[..32] {
-            return Err(PdfError::PasswordRequired);
+            return Ok(None);
         }
 
         // Derive file encryption key (u_key is empty for user password).
@@ -203,14 +225,11 @@ impl EncryptionState {
         }
 
         // Decrypt UE without padding removal — the raw 32-byte output IS the file key
-        let file_key = aes_cbc_decrypt_no_pad(&key_hash, &[0u8; 16], &ue[..32]);
-
-        Ok(Self {
-            key: file_key,
-            version: 5,
-            stm_method: CryptMethod::AesV3,
-            str_method: CryptMethod::AesV3,
-        })
+        Ok(Some(aes_cbc_decrypt_no_pad(
+            &key_hash,
+            &[0u8; 16],
+            &ue[..32],
+        )))
     }
 
     /// Decrypt a string.
@@ -253,6 +272,50 @@ impl EncryptionState {
             }
         }
     }
+}
+
+/// The longest password an AES-256 handler reads, in bytes of UTF-8
+/// (ISO 32000-2, Algorithm 2.A step a).
+const AES256_PASSWORD_MAX: usize = 127;
+
+/// The forms of a password to try against an AES-256 (R5 / R6) file, most
+/// likely first.
+///
+/// ISO 32000-2 has the writer run the password through SASLprep (RFC 4013)
+/// before hashing it, so a reader has to do the same or a password typed
+/// with a full-width letter, a soft hyphen or a decomposed accent never
+/// matches. Not every writer does, so the bytes as given are tried second.
+/// Both are cut to 127 bytes, as the algorithm says.
+fn aes256_password_candidates(password: &[u8]) -> Vec<Vec<u8>> {
+    let truncated = |bytes: &[u8]| bytes[..bytes.len().min(AES256_PASSWORD_MAX)].to_vec();
+    let as_given = truncated(password);
+    match saslprep(password) {
+        Some(prepared) => {
+            let prepared = truncated(&prepared);
+            if prepared == as_given {
+                vec![as_given]
+            } else {
+                vec![prepared, as_given]
+            }
+        }
+        None => vec![as_given],
+    }
+}
+
+/// `password` after SASLprep, or `None` when it is not UTF-8 or holds a
+/// character the profile prohibits. In both cases the caller falls back to
+/// the bytes as given.
+#[cfg(feature = "saslprep")]
+fn saslprep(password: &[u8]) -> Option<Vec<u8>> {
+    let text = std::str::from_utf8(password).ok()?;
+    let prepared = stringprep::saslprep(text).ok()?;
+    Some(prepared.into_owned().into_bytes())
+}
+
+/// Without the `saslprep` feature a password is used as the bytes given.
+#[cfg(not(feature = "saslprep"))]
+fn saslprep(_password: &[u8]) -> Option<Vec<u8>> {
+    None
 }
 
 fn parse_crypt_method(cf: Option<&PdfDict>, name: &[u8]) -> CryptMethod {
@@ -991,5 +1054,39 @@ mod tests {
         let ciphertext = [0u8; 16];
         let result = aes_cbc_decrypt(&key, &iv, &ciphertext);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn aes256_password_is_cut_to_127_bytes() {
+        let long = vec![b'a'; 200];
+        assert_eq!(aes256_password_candidates(&long), vec![vec![b'a'; 127]]);
+    }
+
+    #[test]
+    fn aes256_password_that_is_not_utf8_is_used_as_given() {
+        assert_eq!(
+            aes256_password_candidates(&[0xE6, 0xF8, 0xE5]),
+            vec![vec![0xE6, 0xF8, 0xE5]]
+        );
+    }
+
+    #[cfg(feature = "saslprep")]
+    #[test]
+    fn aes256_password_is_prepared_before_the_bytes_as_given() {
+        // U+00AA maps to "a" under NFKC and U+00AD maps to nothing: the
+        // RFC 4013 example behind pdf.js's `saslprep-r6.pdf`.
+        let typed = "S\u{aa}SL\u{ad}prep";
+        assert_eq!(
+            aes256_password_candidates(typed.as_bytes()),
+            vec![b"SaSLprep".to_vec(), typed.as_bytes().to_vec()]
+        );
+        // A prohibited character (here a control) leaves only the bytes
+        // as given.
+        assert_eq!(
+            aes256_password_candidates(b"a\x07b"),
+            vec![b"a\x07b".to_vec()]
+        );
+        // Plain ASCII is one candidate, not two.
+        assert_eq!(aes256_password_candidates(b"user"), vec![b"user".to_vec()]);
     }
 }

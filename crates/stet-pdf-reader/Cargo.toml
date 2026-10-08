@@ -32,11 +32,16 @@ fax = "0.2.6"
 hayro-jbig2 = "0.3.1"
 skrifa = "0.40"
 sha2 = "0.10"
+stringprep = { version = "0.1.5", optional = true }
 
 [features]
-default = ["jpx", "render"]
+default = ["jpx", "render", "saslprep"]
 render = ["dep:stet-render"]
 jpx = ["dep:hayro-jpeg2000"]
+# SASLprep (RFC 4013) for AES-256 passwords, as ISO 32000-2 requires. It
+# brings in Unicode normalisation tables; without it a password is used as
+# the bytes given, which is right for any password that is plain ASCII.
+saslprep = ["dep:stringprep"]
 
 [dev-dependencies]
 png.workspace = true
