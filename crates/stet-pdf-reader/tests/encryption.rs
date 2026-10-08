@@ -119,3 +119,32 @@ fn an_aes256_password_already_in_prepared_form_opens() {
     opens("R6, owner, prepared form", R6_SASLPREP, b"SaSLprepOwner");
     is_refused("R6, wrong case", R6_SASLPREP, b"saslprep");
 }
+
+/// The R3 fixture with its `/Length 128` replaced by another three digits.
+fn r3_with_key_length(bits: &str) -> Vec<u8> {
+    let needle = b"/Length 128";
+    let at = R3
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .expect("the R3 fixture declares /Length 128");
+    let mut data = R3.to_vec();
+    data[at + 8..at + 11].copy_from_slice(bits.as_bytes());
+    data
+}
+
+/// The key length is the file's to state, and it used to be trusted: zero
+/// keyed RC4 with nothing (a division by zero), and anything over 128 bits
+/// sliced past the end of an MD5 digest. Neither may panic, and a length
+/// the handler cannot have is no reason to refuse a file whose key still
+/// works at the nearest length it can.
+#[test]
+fn a_key_length_out_of_range_does_not_panic() {
+    for bits in ["000", "004", "-16"] {
+        is_refused(bits, &r3_with_key_length(bits), b"user");
+    }
+    for bits in ["136", "256", "999"] {
+        let data = r3_with_key_length(bits);
+        opens(bits, &data, b"user");
+        opens(bits, &data, b"owner");
+    }
+}

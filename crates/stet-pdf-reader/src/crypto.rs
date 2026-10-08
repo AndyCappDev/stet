@@ -20,6 +20,11 @@ pub struct EncryptionState {
     str_method: CryptMethod,
 }
 
+/// The shortest and longest file key an RC4 or AES-128 handler uses, in
+/// bytes (40 and 128 bits).
+const MIN_KEY_BYTES: i64 = 5;
+const MAX_KEY_BYTES: i64 = 16;
+
 #[derive(Clone, Copy, PartialEq)]
 enum CryptMethod {
     None,
@@ -57,19 +62,24 @@ impl EncryptionState {
         // Key length: prefer top-level /Length (in bits), then fall back to the
         // crypt filter's /Length (in bytes) for V≥4 where the top-level key may
         // be absent. Default to 40 bits (5 bytes) for older encryption.
-        let key_length = if let Some(len) = encrypt_dict.get_int(b"Length") {
-            len as usize / 8
+        //
+        // The value is the file's, so it is held to the range these
+        // handlers define — 40 to 128 bits — before anything slices a
+        // 16-byte digest with it or keys RC4 with it. (An AES-256 file
+        // does not use it: its key is the 32 bytes wrapped in /UE.)
+        let key_bytes = if let Some(bits) = encrypt_dict.get_int(b"Length") {
+            bits / 8
         } else if v >= 4 {
             // Try CF/<filter>/Length (value is in bytes for crypt filter dicts)
             let cf_len = encrypt_dict.get_dict(b"CF").and_then(|cf| {
                 let filter_name = encrypt_dict.get_name(b"StmF").unwrap_or(b"StdCF");
-                cf.get_dict(filter_name)
-                    .and_then(|f| f.get_int(b"Length").map(|n| n as usize))
+                cf.get_dict(filter_name).and_then(|f| f.get_int(b"Length"))
             });
             cf_len.unwrap_or(16) // AES-128 default
         } else {
             5 // 40-bit RC4 default
         };
+        let key_length = key_bytes.clamp(MIN_KEY_BYTES, MAX_KEY_BYTES) as usize;
 
         let o_value = encrypt_dict
             .get(b"O")
@@ -485,11 +495,7 @@ fn user_password_from_owner(
         }
     }
     // Revision 2 keys are always 40 bits, whatever /Length says.
-    let key_length = if revision <= 2 {
-        5
-    } else {
-        key_length.clamp(1, hash.len())
-    };
+    let key_length = if revision <= 2 { 5 } else { key_length };
     let key = &hash[..key_length];
 
     if revision <= 2 {

@@ -190,6 +190,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to recover the user password, for AES-256 files against the owner hash
   and the key wrapped in `/OE`.
 
+- **An encrypted PDF stating an impossible key length panicked.** The
+  `/Length` in an `/Encrypt` dictionary was used as the key size without a
+  check: zero divided by zero in RC4, and anything over 128 bits read past
+  the end of a digest. The value is now held to the 40 to 128 bits the RC4
+  and AES-128 handlers define, so such a file is refused as needing a
+  password, or opens if its key works at the nearest valid length.
+
 - **A `/Matte` image whose soft mask was cut short panicked.** An image
   premultiplied against a matte colour is divided back out by its soft
   mask; when the mask's stream ended early the loop read past its last
