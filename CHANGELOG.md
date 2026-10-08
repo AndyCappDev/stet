@@ -255,8 +255,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `stroke` and `show` mark (PLRM 3, 4.9). A shading pattern
   (`PatternType 2`) was accepted by `makepattern` and `setpattern` and
   then drew nothing at all, for any shading type; a tiling pattern was
-  honoured by `fill`, `eofill` and `rectfill`, while a stroke or text set
-  in it came out in a solid colour. Now, for both kinds:
+  honoured by `fill`, `eofill` and `rectfill`, while a stroke, text or a
+  stencil mask set in it came out in a solid colour. Now, for both kinds:
   - **Fills, strokes (`stroke`, `rectstroke`) and text are painted with
     the pattern.** A patterned stroke is painted as the area the stroke
     covers and patterned text as its outlines, so every output device sees
@@ -266,6 +266,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the current matrix when it is used, paints its shading's `Background`
     across what it fills, and reads a mesh's `DataSource` from the start
     of a positionable file each time one is made.
+  - **`imagemask` is painted with the pattern** too, where it had used a
+    solid colour: the pattern shows through the mask's painted samples.
   - **`makepattern` no longer disturbs the graphics state.** `PaintProc`
     ran in the program's own state, so the colour, line width and path it
     set stayed set afterwards and the current path was lost; and a cell

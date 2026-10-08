@@ -11,10 +11,10 @@ use stet_core::dict::DictKey;
 use stet_core::error::PsError;
 use stet_core::graphics_state::ColorSpace;
 use stet_core::object::{PsObject, PsValue};
-use stet_fonts::geometry::Matrix;
-use stet_graphics::color::DeviceColor;
+use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
+use stet_graphics::color::{DeviceColor, FillRule};
 use stet_graphics::device::{ImageColorSpace, ImageParams};
-use stet_graphics::display_list::DisplayElement;
+use stet_graphics::display_list::{DisplayElement, DisplayList, SoftMaskParams, SoftMaskSubtype};
 use stet_graphics::icc::intent_from_byte;
 use stet_graphics::image_limits::{validate_image_dimension, validate_image_size};
 use stet_graphics::image_samples::{ColorKey, to_8bit};
@@ -832,19 +832,14 @@ pub fn op_imagemask(ctx: &mut Context) -> Result<(), PsError> {
         ctx.o_stack.pop()?; // width
 
         let data = collect_proc_data(ctx, procedure, total_bytes)?;
-        let cs = ImageColorSpace::Mask {
-            color,
-            polarity,
-            spot_color: None,
-        };
-        draw_image_to_device(
+        draw_image_mask(
             ctx,
             data,
             width as u32,
             height as u32,
-            cs,
+            color,
+            polarity,
             &image_matrix,
-            None,
         );
         return Ok(());
     }
@@ -858,19 +853,14 @@ pub fn op_imagemask(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?; // width
 
     let color = ctx.gstate.color.clone();
-    let cs = ImageColorSpace::Mask {
-        color,
-        polarity,
-        spot_color: None,
-    };
-    draw_image_to_device(
+    draw_image_mask(
         ctx,
         data,
         width as u32,
         height as u32,
-        cs,
+        color,
+        polarity,
         &image_matrix,
-        None,
     );
     Ok(())
 }
@@ -906,13 +896,129 @@ fn imagemask_dict_form(ctx: &mut Context) -> Result<(), PsError> {
     let data = read_image_data(ctx, data_source, total_bytes)?;
 
     let color = ctx.gstate.color.clone();
-    let cs = ImageColorSpace::Mask {
-        color,
-        polarity,
-        spot_color: None,
-    };
-    draw_image_to_device(ctx, data, width, height, cs, &image_matrix, None);
+    draw_image_mask(ctx, data, width, height, color, polarity, &image_matrix);
     Ok(())
+}
+
+/// Paint a stencil mask: the current colour through the mask's painted
+/// samples, or the current pattern when one is set.
+///
+/// A pattern is painted across the image's parallelogram and shown through
+/// the mask, the mask's painted samples white and the rest black in a
+/// luminosity soft mask.
+fn draw_image_mask(
+    ctx: &mut Context,
+    data: Vec<u8>,
+    width: u32,
+    height: u32,
+    color: DeviceColor,
+    polarity: bool,
+    image_matrix: &Matrix,
+) {
+    let quad = match ctx.gstate.current_pattern {
+        Some(_) => image_device_quad(ctx, width, height, image_matrix),
+        None => None,
+    };
+    let Some(quad) = quad else {
+        let cs = ImageColorSpace::Mask {
+            color,
+            polarity,
+            spot_color: None,
+        };
+        draw_image_to_device(ctx, data, width, height, cs, image_matrix, None);
+        return;
+    };
+
+    let row_bytes = (width as usize).div_ceil(8);
+    let mut gray = vec![0u8; width as usize * height as usize];
+    for (y, row) in gray.chunks_exact_mut(width as usize).enumerate() {
+        let Some(bits) = data.get(y * row_bytes..) else {
+            break;
+        };
+        for (x, sample) in row.iter_mut().enumerate() {
+            let bit = bits.get(x / 8).is_some_and(|b| b >> (7 - x % 8) & 1 == 1);
+            if bit == polarity {
+                *sample = 255;
+            }
+        }
+    }
+    let mut mask = DisplayList::new();
+    mask.push(DisplayElement::Image {
+        sample_data: std::sync::Arc::new(gray),
+        params: ImageParams {
+            width,
+            height,
+            color_space: ImageColorSpace::DeviceGray,
+            bits_per_component: 8,
+            ctm: ctx.gstate.ctm,
+            image_matrix: *image_matrix,
+            interpolate: false,
+            mask_color: None,
+            alpha: 1.0,
+            blend_mode: 0,
+            overprint: false,
+            overprint_mode: 0,
+            opm_paired: false,
+            painted_channels: 0,
+            alpha_is_shape: false,
+            rendering_intent: ctx.gstate.rendering_intent,
+            transfer: Default::default(),
+        },
+    });
+
+    let mut path = PsPath::new();
+    path.segments
+        .push(PathSegment::MoveTo(quad[0].0, quad[0].1));
+    for &(x, y) in &quad[1..] {
+        path.segments.push(PathSegment::LineTo(x, y));
+    }
+    path.segments.push(PathSegment::ClosePath);
+    let bbox = [
+        quad.iter().map(|p| p.0).fold(f64::INFINITY, f64::min),
+        quad.iter().map(|p| p.1).fold(f64::INFINITY, f64::min),
+        quad.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max),
+        quad.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max),
+    ];
+
+    let start = ctx.current_display_list_mut().len();
+    crate::paint_ops::push_fill_element(ctx, path, FillRule::NonZeroWinding);
+    let content = ctx.current_display_list_mut().split_off(start);
+
+    let parent_clip_bbox = ctx
+        .gstate
+        .clip_path
+        .as_ref()
+        .and_then(crate::transparency_ops::path_device_bbox);
+    ctx.current_display_list_mut()
+        .push(DisplayElement::SoftMasked {
+            mask,
+            content,
+            params: SoftMaskParams {
+                subtype: SoftMaskSubtype::Luminosity,
+                bbox,
+                backdrop_color: None,
+                transfer_invert: false,
+                has_nested_mask_scope: false,
+                parent_clip_bbox,
+            },
+            mask_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        });
+}
+
+/// The corners of an image in device space, in order round its edge, or
+/// `None` when its matrix cannot be inverted.
+fn image_device_quad(
+    ctx: &Context,
+    width: u32,
+    height: u32,
+    image_matrix: &Matrix,
+) -> Option<[(f64, f64); 4]> {
+    let to_user = image_matrix.invert()?;
+    let (w, h) = (width as f64, height as f64);
+    Some([(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)].map(|(x, y)| {
+        let (ux, uy) = to_user.transform_point(x, y);
+        ctx.gstate.ctm.transform_point(ux, uy)
+    }))
 }
 
 // ---------- colorimage operator ----------

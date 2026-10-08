@@ -243,3 +243,48 @@ fn a_shading_pattern_needs_a_shading_dictionary() {
         assert_eq!(at(&rgba, 100, 100), [0, 255, 0], "{dict}");
     }
 }
+
+/// An 8 × 8 stencil over (20,20)–(180,180): the left half of its top four
+/// rows and the right half of its bottom four are painted.
+const STENCIL: &str = "20 20 translate 160 160 scale \
+                       8 8 true [8 0 0 -8 0 8] {<f0 f0 f0 f0 0f 0f 0f 0f>} imagemask";
+
+#[test]
+fn a_stencil_mask_is_painted_with_the_pattern() {
+    for (what, pattern) in [
+        (
+            "shading",
+            format!(
+                "<< /PatternType 2 /Shading {AXIAL} /Extend [true true] >> >> matrix makepattern"
+            ),
+        ),
+        ("tiling", TILING.to_string()),
+    ] {
+        let rgba = render(&format!("{pattern} setpattern {STENCIL}"));
+        assert_marked_with_pattern(&rgba, &format!("{what} imagemask"));
+        // Painted where the stencil says, and only there.
+        assert_ne!(at(&rgba, 60, 140), WHITE, "{what}");
+        assert_ne!(at(&rgba, 140, 60), WHITE, "{what}");
+        assert_eq!(at(&rgba, 140, 140), WHITE, "{what}");
+        assert_eq!(at(&rgba, 60, 60), WHITE, "{what}");
+    }
+}
+
+#[test]
+fn a_stencil_mask_in_dictionary_form_is_painted_with_the_pattern() {
+    let rgba = render(&format!(
+        "{TILING} setpattern 20 20 translate 160 160 scale\n\
+         << /ImageType 1 /Width 8 /Height 8 /ImageMatrix [8 0 0 -8 0 8] /BitsPerComponent 1 \
+         /Decode [1 0] /DataSource <f0 f0 f0 f0 0f 0f 0f 0f> >> imagemask"
+    ));
+    assert_marked_with_pattern(&rgba, "dictionary imagemask");
+    assert_ne!(at(&rgba, 60, 140), WHITE);
+    assert_eq!(at(&rgba, 140, 140), WHITE);
+}
+
+#[test]
+fn a_stencil_mask_without_a_pattern_is_painted_with_the_colour() {
+    let rgba = render(&format!("0 1 0 setrgbcolor {STENCIL}"));
+    assert_eq!(at(&rgba, 60, 140), [0, 255, 0]);
+    assert_eq!(at(&rgba, 140, 140), WHITE);
+}
