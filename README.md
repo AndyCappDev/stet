@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Version-0.8.4-blue" alt="Version 0.8.4">
   <img src="https://img.shields.io/badge/License-Apache--2.0_OR_MIT-green" alt="License Apache-2.0 OR MIT">
-  <img src="https://img.shields.io/badge/Rust-1.88+-orange" alt="Rust 1.88+">
+  <img src="https://img.shields.io/badge/Rust-1.92+-orange" alt="Rust 1.92+">
 </p>
 
 ## About
@@ -148,7 +148,7 @@ cargo install stet-cli
 ```
 
 Builds the `stet` binary with the interactive viewer included. Needs a Rust
-toolchain (1.88+), and compiles the workspace including the GUI stack, so it
+toolchain (1.92+), and compiles the workspace including the GUI stack, so it
 takes appreciably longer than downloading a binary.
 
 For a headless build with no viewer and no GUI dependencies:
@@ -463,7 +463,7 @@ output devices, feature flags, and the pre-1.0 upgrade notes are in
 
 ## Minimum Supported Rust Version
 
-stet requires **Rust 1.88** or newer. This is verified on every push by a CI
+stet requires **Rust 1.92** or newer. This is verified on every push by a CI
 job that compiles the workspace on exactly that toolchain, so the number above
 is a tested fact rather than an estimate.
 

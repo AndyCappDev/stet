@@ -1616,21 +1616,12 @@ impl FileStore {
                         FilterKind::JBIG2Decode { globals, .. } => globals.clone(),
                         _ => None,
                     };
-                    let image = hayro_jbig2::decode_embedded(&raw, globals.as_deref())
+                    // PDF DeviceGray bytes: 1 bit per pixel, MSB-first,
+                    // 0=black, 1=white, each row padded to a byte boundary
+                    // so the consumer can treat it as a standard 1-bpc
+                    // raster.
+                    let packed = decode_jbig2_packed(&raw, globals.as_deref())
                         .map_err(|e| io::Error::other(format!("JBIG2 decode error: {e}")))?;
-                    // Pack the bool grid into PDF DeviceGray bytes (1 bit per
-                    // pixel, MSB-first; 0=black, 1=white). Pad each row to a
-                    // byte boundary so the consumer can treat it as a
-                    // standard 1-bpc raster.
-                    let row_bytes = (image.width as usize).div_ceil(8);
-                    let mut packed = vec![0xFFu8; row_bytes * image.height as usize];
-                    for y in 0..image.height as usize {
-                        for x in 0..image.width as usize {
-                            if image.data[y * image.width as usize + x] {
-                                packed[y * row_bytes + x / 8] &= !(0x80 >> (x % 8));
-                            }
-                        }
-                    }
                     state.output_buf = packed;
                     state.output_pos = 0;
                     if let FilterKind::JBIG2Decode { decoded, .. } = &mut state.kind {
@@ -1649,9 +1640,11 @@ impl FileStore {
                         &hayro_jpeg2000::DecodeSettings::default(),
                     )
                     .map_err(|e| io::Error::other(format!("JPXDecode error: {e}")))?;
+                    let mut jpx = hayro_jpeg2000::DecoderContext::default();
                     let pixels = image
-                        .decode()
-                        .map_err(|e| io::Error::other(format!("JPXDecode error: {e}")))?;
+                        .decode(&mut jpx)
+                        .map_err(|e| io::Error::other(format!("JPXDecode error: {e}")))?
+                        .data_u8();
                     state.output_buf = pixels;
                     state.output_pos = 0;
                     *decoded = true;
@@ -2374,6 +2367,63 @@ impl FileStore {
 
         Ok(())
     }
+}
+
+/// Receives a decoded JBIG2 page and packs it as a 1-bit-per-pixel raster in
+/// PDF DeviceGray polarity: MSB first, 0 = black, 1 = white, each row padded
+/// to a byte boundary with white.
+#[derive(Default)]
+struct Jbig2Rows {
+    out: Vec<u8>,
+    current: u8,
+    bits: u8,
+}
+
+impl hayro_jbig2::Decoder for Jbig2Rows {
+    fn push_pixel(&mut self, black: bool) {
+        self.current = (self.current << 1) | (!black as u8);
+        self.bits += 1;
+        if self.bits == 8 {
+            self.out.push(self.current);
+            self.current = 0;
+            self.bits = 0;
+        }
+    }
+
+    fn push_pixel_chunk(&mut self, black: bool, chunk_count: u32) {
+        // The decoder promises byte alignment here; hold it to that only
+        // where it is cheap to.
+        if self.bits != 0 {
+            for _ in 0..chunk_count.saturating_mul(8) {
+                self.push_pixel(black);
+            }
+            return;
+        }
+        let byte = if black { 0x00 } else { 0xFF };
+        self.out.resize(self.out.len() + chunk_count as usize, byte);
+    }
+
+    fn next_line(&mut self) {
+        if self.bits > 0 {
+            let pad = 8 - self.bits;
+            self.out.push((self.current << pad) | ((1u8 << pad) - 1));
+            self.current = 0;
+            self.bits = 0;
+        }
+    }
+}
+
+/// Decode an embedded JBIG2 stream to a packed 1-bit raster of exactly
+/// `ceil(width / 8) * height` bytes.
+fn decode_jbig2_packed(data: &[u8], globals: Option<&[u8]>) -> hayro_jbig2::Result<Vec<u8>> {
+    let image = hayro_jbig2::Image::new_embedded(data, globals)?;
+    let mut rows = Jbig2Rows::default();
+    image.decode(&mut rows)?;
+    // Whatever the decoder emitted, the caller is promised the size the
+    // page information declares.
+    let size = (image.width() as usize).div_ceil(8) * image.height() as usize;
+    rows.out.resize(size, 0xFF);
+    Ok(rows.out)
 }
 
 /// Read the next hex digit from a file, skipping whitespace.

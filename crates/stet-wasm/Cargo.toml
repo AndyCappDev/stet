@@ -7,7 +7,7 @@ edition = "2024"
 # against. It depends on the stet crates by path, so its floor is theirs.
 # check-release-versions.sh asserts this literal matches [workspace.package]
 # rust-version, so the two cannot drift.
-rust-version = "1.88"
+rust-version = "1.92"
 license = "Apache-2.0 OR MIT"
 authors = ["Scott Bowman <scott@bowmans.org>"]
 description = "WebAssembly bindings for stet PostScript interpreter"

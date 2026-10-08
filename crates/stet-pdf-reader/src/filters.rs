@@ -1409,37 +1409,41 @@ impl CcittByteDecoder {
     }
 }
 
+impl CcittByteDecoder {
+    /// Append `count` bits of the same value, MSB first.
+    fn push_bits(&mut self, bit: bool, mut count: u32) {
+        // Finish the byte in progress.
+        while self.bit_pos != 0 && count > 0 {
+            self.current_byte = (self.current_byte << 1) | (bit as u8);
+            self.bit_pos += 1;
+            if self.bit_pos == 8 {
+                self.output.push(self.current_byte);
+                self.current_byte = 0;
+                self.bit_pos = 0;
+            }
+            count -= 1;
+        }
+        // Whole bytes.
+        let whole = (count / 8) as usize;
+        if whole > 0 {
+            let byte = if bit { 0xFF } else { 0x00 };
+            self.output.resize(self.output.len() + whole, byte);
+        }
+        // Start the next byte with what is left.
+        let rest = (count % 8) as u8;
+        if rest > 0 {
+            self.current_byte = if bit { (1u8 << rest) - 1 } else { 0 };
+            self.bit_pos = rest;
+        }
+    }
+}
+
 impl hayro_ccitt::Decoder for CcittByteDecoder {
-    fn push_pixel(&mut self, white: bool) {
+    fn push_pixels(&mut self, white: bool, count: u32) {
         // black_is1=true: black=1, white=0
         // black_is1=false: black=0, white=1
         let bit = if self.black_is1 { !white } else { white };
-        self.current_byte = (self.current_byte << 1) | (bit as u8);
-        self.bit_pos += 1;
-        if self.bit_pos == 8 {
-            self.output.push(self.current_byte);
-            self.current_byte = 0;
-            self.bit_pos = 0;
-        }
-    }
-
-    fn push_pixel_chunk(&mut self, white: bool, chunk_count: u32) {
-        // If there are partial bits pending, we can't directly push bytes —
-        // the bit boundary wouldn't align. Fall back to pixel-by-pixel.
-        if self.bit_pos != 0 {
-            for _ in 0..chunk_count * 8 {
-                self.push_pixel(white);
-            }
-            return;
-        }
-        let byte = if (self.black_is1 && !white) || (!self.black_is1 && white) {
-            0xFF
-        } else {
-            0x00
-        };
-        for _ in 0..chunk_count {
-            self.output.push(byte);
-        }
+        self.push_bits(bit, count);
     }
 
     fn next_line(&mut self) {
@@ -1459,7 +1463,8 @@ fn decode_ccitt_hayro(
     black_is1: bool,
 ) -> Result<Vec<u8>, PdfError> {
     let mut decoder = CcittByteDecoder::new(black_is1);
-    let hayro_err = hayro_ccitt::decode(data, &mut decoder, settings).err();
+    let mut ctx = hayro_ccitt::DecoderContext::new(*settings);
+    let hayro_err = hayro_ccitt::decode(data, &mut decoder, &mut ctx).err();
 
     // If hayro failed with anything other than a soft EOF, try `fax` as a
     // fallback. Keep whichever decoder produced more byte output.
@@ -1571,6 +1576,63 @@ fn fill_bits(row: &mut [u8], start: usize, end: usize, black_is_one: bool) {
     }
 }
 
+/// Receives a decoded JBIG2 page and packs it as a 1-bit-per-pixel raster in
+/// PDF DeviceGray polarity: MSB first, 0 = black, 1 = white, each row padded
+/// to a byte boundary with white.
+#[derive(Default)]
+struct Jbig2Rows {
+    out: Vec<u8>,
+    current: u8,
+    bits: u8,
+}
+
+impl hayro_jbig2::Decoder for Jbig2Rows {
+    fn push_pixel(&mut self, black: bool) {
+        self.current = (self.current << 1) | (!black as u8);
+        self.bits += 1;
+        if self.bits == 8 {
+            self.out.push(self.current);
+            self.current = 0;
+            self.bits = 0;
+        }
+    }
+
+    fn push_pixel_chunk(&mut self, black: bool, chunk_count: u32) {
+        // The decoder promises byte alignment here; hold it to that only
+        // where it is cheap to.
+        if self.bits != 0 {
+            for _ in 0..chunk_count.saturating_mul(8) {
+                self.push_pixel(black);
+            }
+            return;
+        }
+        let byte = if black { 0x00 } else { 0xFF };
+        self.out.resize(self.out.len() + chunk_count as usize, byte);
+    }
+
+    fn next_line(&mut self) {
+        if self.bits > 0 {
+            let pad = 8 - self.bits;
+            self.out.push((self.current << pad) | ((1u8 << pad) - 1));
+            self.current = 0;
+            self.bits = 0;
+        }
+    }
+}
+
+/// Decode an embedded JBIG2 stream to a packed 1-bit raster of exactly
+/// `ceil(width / 8) * height` bytes.
+fn decode_jbig2_packed(data: &[u8], globals: Option<&[u8]>) -> hayro_jbig2::Result<Vec<u8>> {
+    let image = hayro_jbig2::Image::new_embedded(data, globals)?;
+    let mut rows = Jbig2Rows::default();
+    image.decode(&mut rows)?;
+    // Whatever the decoder emitted, the caller is promised the size the
+    // page information declares.
+    let size = (image.width() as usize).div_ceil(8) * image.height() as usize;
+    rows.out.resize(size, 0xFF);
+    Ok(rows.out)
+}
+
 /// JBIG2Decode.
 fn decode_jbig2(data: &[u8], globals: Option<&[u8]>) -> Result<Vec<u8>, PdfError> {
     // Native builds run the decode on a sidecar thread with a 2-second
@@ -1581,12 +1643,12 @@ fn decode_jbig2(data: &[u8], globals: Option<&[u8]>) -> Result<Vec<u8>, PdfError
     // in pdf_samples/1321.pdf) will now decode instead of panicking at
     // `std::thread::spawn`.
     #[cfg(not(target_arch = "wasm32"))]
-    let image = {
+    let packed = {
         let data_owned = data.to_vec();
         let globals_owned = globals.map(|g| g.to_vec());
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let result = hayro_jbig2::decode_embedded(&data_owned, globals_owned.as_deref());
+            let result = decode_jbig2_packed(&data_owned, globals_owned.as_deref());
             let _ = tx.send(result);
         });
         // Scale timeout with data size: 5s base + 5s per MB of compressed data.
@@ -1600,22 +1662,9 @@ fn decode_jbig2(data: &[u8], globals: Option<&[u8]>) -> Result<Vec<u8>, PdfError
     };
 
     #[cfg(target_arch = "wasm32")]
-    let image = hayro_jbig2::decode_embedded(data, globals)
+    let packed = decode_jbig2_packed(data, globals)
         .map_err(|e| PdfError::DecompressionError(format!("JBIG2: {e}")))?;
 
-    // Convert Vec<bool> to packed bytes (8 pixels/byte, MSB first)
-    // JBIG2: true = black, false = white
-    // PDF DeviceGray: 0 = black, 1 = white
-    // So: start all-white (0xFF), clear bits for black pixels
-    let row_bytes = (image.width as usize).div_ceil(8);
-    let mut packed = vec![0xFFu8; row_bytes * image.height as usize];
-    for y in 0..image.height as usize {
-        for x in 0..image.width as usize {
-            if image.data[y * image.width as usize + x] {
-                packed[y * row_bytes + x / 8] &= !(0x80 >> (x % 8));
-            }
-        }
-    }
     Ok(packed)
 }
 
@@ -1631,9 +1680,11 @@ fn decode_jpx(data: &[u8]) -> Result<Vec<u8>, PdfError> {
     let image = hayro_jpeg2000::Image::new(data, &hayro_jpeg2000::DecodeSettings::default())
         .map_err(|e| PdfError::DecompressionError(format!("JPXDecode: {e}")))?;
 
-    image
-        .decode()
-        .map_err(|e| PdfError::DecompressionError(format!("JPXDecode: {e}")))
+    let mut ctx = hayro_jpeg2000::DecoderContext::default();
+    let decoded = image
+        .decode(&mut ctx)
+        .map_err(|e| PdfError::DecompressionError(format!("JPXDecode: {e}")))?;
+    Ok(decoded.data_u8())
 }
 
 /// JPXDecode without resolving the JP2-internal palette.
@@ -1661,9 +1712,11 @@ pub fn decode_jpx_no_palette(data: &[u8]) -> Result<(Vec<u8>, u8), PdfError> {
         .map_err(|e| PdfError::DecompressionError(format!("JPXDecode: {e}")))?;
     let bit_depth = image.original_bit_depth();
 
+    let mut ctx = hayro_jpeg2000::DecoderContext::default();
     let pixels = image
-        .decode()
-        .map_err(|e| PdfError::DecompressionError(format!("JPXDecode: {e}")))?;
+        .decode(&mut ctx)
+        .map_err(|e| PdfError::DecompressionError(format!("JPXDecode: {e}")))?
+        .data_u8();
     Ok((pixels, bit_depth))
 }
 

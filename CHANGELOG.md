@@ -33,6 +33,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `stet-wasm` crates now records its source and terms, and the prebuilt
   archives' `THIRD-PARTY-NOTICES.txt` carries it.
 
+### Changed
+
+- **The minimum supported Rust version is now 1.92** (was 1.88). The JBIG2,
+  CCITT and JPEG 2000 decoders stet uses — `hayro-jbig2`, `hayro-ccitt` and
+  `hayro-jpeg2000` — were two to three releases behind, held there by the
+  old floor: their current versions need 1.92. They are now 0.3.1, 0.4.0
+  and 0.4.1. A JBIG2 image is also packed to one bit per pixel as it is
+  decoded, where it used to pass through a one-byte-per-pixel copy first.
+  The 212-megapixel JPEG 2000 page of pdf.js's `issue19517.pdf` peaks at
+  8.6 GB where it took 11 GB; that is still far too much, and is not
+  finished work.
+
 ### Fixed
 
 - **A PostScript program could raise `--max-vm`.** `MaxLocalVM` is a user

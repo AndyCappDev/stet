@@ -74,8 +74,8 @@ jobs:
       # rather than assuming it.
       - name: MSRV still resolves and compiles
         run: |
-          rustup toolchain install 1.88 --profile minimal
-          cargo +1.88 check --workspace
+          rustup toolchain install 1.92 --profile minimal
+          cargo +1.92 check --workspace
 
       # Leaves the updated lock downloadable from the run, so a human can
       # inspect or adopt it without re-resolving locally.
