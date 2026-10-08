@@ -83,6 +83,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A page that draws one gradient thousands of times renders in a tenth
+  of the time and a third of the memory.** Some producers build a gradient
+  out of thin clipped strips, each a separate `sh` of the same shading:
+  pdf.js `bug1721218_reduced.pdf` draws 41 shadings 3,531 times on one
+  letter page, and took 12.6 s and 2.6 GB at 72 dpi. It now takes 1.2 s
+  and 1.0 GB, and the output is byte for byte the same, as it is for the
+  first two pages of all 692 PDFs in the test set. Three things were
+  wrong. The renderer visited every pixel of a shading's bounding box —
+  the whole page, when it has no `/BBox` — before asking the clip whether
+  to paint it; it now finds the stretch of each row the clip lets through
+  first. Its cache of rasterised clip masks had no limit and held one for
+  each of the page's thousands of clips; it is now bounded at 32 MB. And
+  the reader parsed and sampled a shading's function afresh for every use;
+  the colour stops are now kept for the page.
+
 - **A very large JPEG 2000 image drawn small is decoded small.** Where a
   page is rasterised at once — `render_page_to_rgba` and its variants, and
   `stet --device png` for PDF input — a JPEG 2000 image the page draws at

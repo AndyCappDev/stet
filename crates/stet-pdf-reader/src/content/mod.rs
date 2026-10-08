@@ -551,6 +551,9 @@ pub struct ContentInterpreter<'a> {
     /// Which annotations [`Self::render_annotation`] draws; see
     /// [`Self::set_annotation_filter`].
     annotation_filter: crate::annotations::AnnotationFilter,
+    /// The stops of the axial and radial shadings drawn so far on this
+    /// page, so that one drawn again is not sampled again.
+    shading_stops: crate::resources::shading::ShadingStops,
     /// Whether images are kept at full resolution; see
     /// [`Self::set_image_resolution`].
     image_resolution: crate::ImageResolution,
@@ -649,6 +652,7 @@ impl<'a> ContentInterpreter<'a> {
             overprint_enabled,
             text_extraction: TextExtraction::Off,
             annotation_filter: crate::annotations::AnnotationFilter::default(),
+            shading_stops: Default::default(),
             image_resolution: crate::ImageResolution::Full,
             unscaled_nesting: 0,
             font_text: std::collections::HashMap::new(),
@@ -7723,13 +7727,14 @@ impl<'a> ContentInterpreter<'a> {
             .as_dict()
             .ok_or(PdfError::Other("Shading is not a dict".into()))?;
 
-        crate::resources::shading::handle_shading(
+        crate::resources::shading::handle_shading_cached(
             &sh_ref_clone,
             sh_dict,
             &self.gstate,
             self.resolver,
             &mut self.display_list,
             &mut self.icc_cache,
+            &mut self.shading_stops,
         )
     }
 
@@ -8126,13 +8131,14 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.overprint_stroke = false;
 
         let mut shading_dl = DisplayList::new();
-        let result = crate::resources::shading::handle_shading(
+        let result = crate::resources::shading::handle_shading_cached(
             &sh_ref_clone,
             sh_dict,
             &self.gstate,
             self.resolver,
             &mut shading_dl,
             &mut self.icc_cache,
+            &mut self.shading_stops,
         );
         self.gstate.ctm = saved_ctm;
         self.gstate.overprint = saved_overprint;

@@ -762,9 +762,31 @@ struct BandState {
 /// without accumulating unbounded memory across bands.
 const MAX_POOL_MASKS: usize = 8;
 
+/// The most memory one clip-mask cache may hold. A mask is a byte per pixel
+/// of the band (or page) being rendered, so at 300 dpi a letter-width band
+/// of 256 rows is about 0.7 MB and this is some 48 masks.
+///
+/// The cache keeps the rasterised mask of any clip path used twice, so
+/// that a clip re-established after each `Q` is not rasterised again. It
+/// had no limit, and a page that builds its gradients out of thousands of
+/// differently-clipped strips (pdf.js `bug1721218_reduced.pdf`: 24,710
+/// clips on a letter page) held a mask for each: 1.7 GB at 72 dpi. Such
+/// clips are used a few times close together and never again, so emptying
+/// the cache when it fills loses nothing that would have been used.
+///
+/// Every band being rendered in parallel, and every transparency group
+/// nested inside one, has a cache of its own, so the worst case is this
+/// times their number; before, there was no worst case.
+const CLIP_MASK_CACHE_BYTES: usize = 32 * 1024 * 1024;
+
+/// How many masks of `mask_bytes` each a clip-mask cache may hold.
+fn clip_mask_cache_capacity(mask_bytes: usize) -> usize {
+    (CLIP_MASK_CACHE_BYTES / mask_bytes.max(1)).max(4)
+}
+
 impl BandState {
-    /// Recycle all cached masks into the pool, clearing the cache for the next band.
-    #[allow(dead_code)]
+    /// Empty the clip-mask cache, keeping a few of its masks in the pool for
+    /// reuse and freeing the rest.
     fn recycle_cache(&mut self) {
         for (_, mask) in self.clip_mask_cache.drain() {
             if self.mask_pool.len() < MAX_POOL_MASKS {
@@ -7118,6 +7140,9 @@ fn clip_path_unified(
             mask.fill_path(&skia_path, fill_rule, false, transform);
         }
         if !band_state.clip_mask_seen.insert(path_hash) {
+            if band_state.clip_mask_cache.len() >= clip_mask_cache_capacity(mask.data().len()) {
+                band_state.recycle_cache();
+            }
             band_state.clip_mask_cache.insert(path_hash, mask.clone());
         }
         mask
@@ -7267,6 +7292,9 @@ impl OutputDevice for SkiaDevice {
             // Cache on second sight: first time just record, second time store
             if !self.clip_mask_seen.insert(path_hash) {
                 // Seen before — cache it (this clone only happens once per unique path)
+                if self.clip_mask_cache.len() >= clip_mask_cache_capacity(mask.data().len()) {
+                    self.clip_mask_cache.clear();
+                }
                 self.clip_mask_cache.insert(path_hash, mask.clone());
             }
             mask
@@ -13051,6 +13079,58 @@ fn clip_polygon_halfplane(
     out
 }
 
+/// The part of row `py` between columns `x0` and `x1` that a clip mask
+/// lets anything through: the first and one past the last column whose
+/// mask sample is not zero, or `None` if the whole run is masked out.
+///
+/// A shading paints its whole bounding box, which with no `/BBox` is the
+/// page, and a page that builds a gradient out of thin clipped strips
+/// draws thousands of them. Visiting every pixel to find the mask zero
+/// there costs the page area per strip; this finds the strip first, eight
+/// mask samples at a time. Pixels inside the span are still tested one by
+/// one, so what is painted is unchanged.
+fn mask_row_span(mask: &[u8], width: usize, py: u32, x0: u32, x1: u32) -> Option<(u32, u32)> {
+    let start = py as usize * width + x0 as usize;
+    let row = mask.get(start..py as usize * width + x1 as usize)?;
+    let (chunks, tail) = row.as_chunks::<8>();
+    let first = match chunks.iter().position(|c| u64::from_ne_bytes(*c) != 0) {
+        Some(c) => c * 8 + chunks[c].iter().position(|&b| b != 0)?,
+        None => chunks.len() * 8 + tail.iter().position(|&b| b != 0)?,
+    };
+    let last = match tail.iter().rposition(|&b| b != 0) {
+        Some(t) => chunks.len() * 8 + t,
+        None => {
+            let c = chunks.iter().rposition(|c| u64::from_ne_bytes(*c) != 0)?;
+            c * 8 + chunks[c].iter().rposition(|&b| b != 0)?
+        }
+    };
+    Some((x0 + first as u32, x0 + last as u32 + 1))
+}
+
+/// A colour component in 0..=1 scaled to a byte, exactly as
+/// `(v * 255.0).round().clamp(0.0, 255.0) as u8` gives it, without the call
+/// into libm that `round` is on a baseline x86-64 target. A gradient table
+/// has up to 16,384 entries of three components, built once per shading.
+#[inline]
+fn unit_to_byte(v: f64) -> u8 {
+    let scaled = v * 255.0;
+    // NaN, zero and everything below it: `round` gives at most -0, and the
+    // clamp and the cast make that 0.
+    if scaled.is_nan() || scaled <= 0.0 {
+        return 0;
+    }
+    if scaled >= 255.0 {
+        return 255;
+    }
+    // Round half away from zero, for a value known to be in (0, 255).
+    let whole = scaled as u32;
+    if scaled - f64::from(whole) >= 0.5 {
+        (whole + 1) as u8
+    } else {
+        whole as u8
+    }
+}
+
 /// Render an axial (linear) gradient shading.
 #[expect(clippy::too_many_arguments)]
 fn render_axial_shading(
@@ -13329,7 +13409,16 @@ fn render_axial_shading(
                     (0.0, 0.0)
                 };
 
-            for px in ix_min..ix_max {
+            // Only the stretch of the row the clip lets through.
+            let (row_min, row_max) = match mask_data {
+                Some(md) => match mask_row_span(md, pw as usize, py, ix_min, ix_max) {
+                    Some(span) => span,
+                    None => continue,
+                },
+                None => (ix_min, ix_max),
+            };
+
+            for px in row_min..row_max {
                 // Check clip mask
                 if let Some(md) = mask_data
                     && md[py as usize * pw as usize + px as usize] == 0
@@ -13391,7 +13480,15 @@ fn render_axial_shading(
 
         for py in iy_min..iy_max {
             let dev_y = py as f64 * inv_sy + vp_y as f64;
-            for px in ix_min..ix_max {
+            // Only the stretch of the row the clip lets through.
+            let (row_min, row_max) = match clip_mask {
+                Some(mask) => match mask_row_span(mask.data(), pw as usize, py, ix_min, ix_max) {
+                    Some(span) => span,
+                    None => continue,
+                },
+                None => (ix_min, ix_max),
+            };
+            for px in row_min..row_max {
                 let dev_x = px as f64 * inv_sx + vp_x as f64;
                 let (ux, uy) = inv_ctm.transform_point(dev_x, dev_y);
                 let t = if axis_len_sq > 1e-10 {
@@ -14692,12 +14789,7 @@ fn build_gradient_lut(
             )
         };
         let (r, g, b) = transfer_rgb(transfer, (r, g, b));
-        *entry = [
-            (r * 255.0).round().clamp(0.0, 255.0) as u8,
-            (g * 255.0).round().clamp(0.0, 255.0) as u8,
-            (b * 255.0).round().clamp(0.0, 255.0) as u8,
-            255,
-        ];
+        *entry = [unit_to_byte(r), unit_to_byte(g), unit_to_byte(b), 255];
     }
     lut
 }
@@ -17065,5 +17157,109 @@ mod tests {
         assert!(cache.get(1).is_none());
         assert!(cache.get(3).is_some());
         assert!(cache.get(4).is_none());
+    }
+}
+
+#[cfg(test)]
+mod clip_span_tests {
+    use super::{CLIP_MASK_CACHE_BYTES, clip_mask_cache_capacity, mask_row_span, unit_to_byte};
+
+    /// The span by the obvious route: look at every sample.
+    fn span_slowly(mask: &[u8], width: usize, py: u32, x0: u32, x1: u32) -> Option<(u32, u32)> {
+        let row = &mask[py as usize * width..(py as usize + 1) * width];
+        let lit: Vec<u32> = (x0..x1).filter(|&x| row[x as usize] != 0).collect();
+        Some((*lit.first()?, *lit.last()? + 1))
+    }
+
+    #[test]
+    fn a_row_span_is_the_first_and_last_unmasked_sample() {
+        // Every run of every length at every offset, in a row long enough
+        // to have whole eight-sample chunks and a tail, searched over every
+        // sub-range.
+        let width = 21;
+        for start in 0..width {
+            for end in start..=width {
+                let mut mask = vec![0u8; width * 2];
+                mask[width + start..width + end].fill(200);
+                for x0 in 0..width as u32 {
+                    for x1 in x0..=width as u32 {
+                        assert_eq!(
+                            mask_row_span(&mask, width, 1, x0, x1),
+                            span_slowly(&mask, width, 1, x0, x1),
+                            "run {start}..{end}, searched {x0}..{x1}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_row_span_runs_from_the_first_sample_to_the_last_across_gaps() {
+        // The span is not the mask: holes inside it are still tested by
+        // the caller, sample by sample.
+        let mut mask = vec![0u8; 40];
+        for x in [3, 4, 17, 30, 31] {
+            mask[x] = 1;
+        }
+        assert_eq!(mask_row_span(&mask, 40, 0, 0, 40), Some((3, 32)));
+        assert_eq!(mask_row_span(&mask, 40, 0, 5, 30), Some((17, 18)));
+        assert_eq!(mask_row_span(&mask, 40, 0, 5, 17), None);
+        assert_eq!(mask_row_span(&mask, 40, 0, 12, 12), None);
+    }
+
+    #[test]
+    fn a_row_outside_the_mask_has_no_span() {
+        let mask = vec![255u8; 16];
+        assert_eq!(mask_row_span(&mask, 8, 1, 0, 8), Some((0, 8)));
+        assert_eq!(mask_row_span(&mask, 8, 2, 0, 8), None);
+    }
+
+    #[test]
+    fn a_component_becomes_the_byte_round_would_give() {
+        let by_round = |v: f64| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+        // A fine sweep across and beyond the unit range ...
+        for i in -2_000..=1_002_000 {
+            let v = f64::from(i) / 1_000_000.0;
+            assert_eq!(unit_to_byte(v), by_round(v), "{v}");
+        }
+        // ... every half-way point, where the rounding direction shows, and
+        // the nearest values either side of each ...
+        for byte in 0..=255u32 {
+            let half = (f64::from(byte) + 0.5) / 255.0;
+            for v in [
+                half,
+                half.next_down(),
+                half.next_up(),
+                f64::from(byte) / 255.0,
+            ] {
+                assert_eq!(unit_to_byte(v), by_round(v), "{v}");
+            }
+        }
+        // ... and what is not a colour at all.
+        for v in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            -0.0,
+            -1e-300,
+            1e300,
+            f64::MIN_POSITIVE,
+        ] {
+            assert_eq!(unit_to_byte(v), by_round(v), "{v}");
+        }
+    }
+
+    #[test]
+    fn the_clip_mask_cache_is_bounded_in_bytes() {
+        // A letter-width band at 300 dpi: 2,550 x 268.
+        let band = 2550 * 268;
+        assert_eq!(clip_mask_cache_capacity(band), 49);
+        assert!(clip_mask_cache_capacity(band) * band <= CLIP_MASK_CACHE_BYTES);
+        // A mask too large for the budget is still worth keeping a few of:
+        // a clip re-established after every `Q` is the common case.
+        assert_eq!(clip_mask_cache_capacity(CLIP_MASK_CACHE_BYTES), 4);
+        assert_eq!(clip_mask_cache_capacity(usize::MAX), 4);
+        assert_eq!(clip_mask_cache_capacity(0), CLIP_MASK_CACHE_BYTES);
     }
 }

@@ -34,6 +34,72 @@ pub fn handle_shading(
     display_list: &mut DisplayList,
     icc_cache: &mut IccCache,
 ) -> Result<(), PdfError> {
+    handle_shading_cached(
+        shading_obj,
+        dict,
+        gstate,
+        resolver,
+        display_list,
+        icc_cache,
+        &mut ShadingStops::default(),
+    )
+}
+
+/// The colour stops of the axial and radial shadings a page has drawn so
+/// far, by shading object and rendering intent.
+///
+/// Sampling a shading's function into stops means parsing the function,
+/// evaluating it up to 1,024 times and converting each result through the
+/// colour pipeline, and none of that depends on where the shading is
+/// drawn. A page that builds a gradient out of clipped strips draws the
+/// same few shadings thousands of times (pdf.js `bug1721218_reduced.pdf`:
+/// 41 shadings, 3,531 uses), so the stops are kept for the page.
+#[derive(Default)]
+pub(crate) struct ShadingStops {
+    stops: std::collections::HashMap<(u32, u16, u8), Vec<ColorStop>>,
+}
+
+/// Shadings past this many on one page are sampled each time, as before:
+/// the cache is for the few drawn often, and each entry is up to 1,024
+/// stops.
+const MAX_CACHED_SHADINGS: usize = 256;
+
+impl ShadingStops {
+    /// The stops of `shading_obj` under `intent`, sampled by `sample` the
+    /// first time. A shading written directly in a resource dictionary has
+    /// no object number to know it by and is sampled every time.
+    fn get_or_sample(
+        &mut self,
+        shading_obj: &PdfObj,
+        intent: u8,
+        sample: impl FnOnce() -> Result<Vec<ColorStop>, PdfError>,
+    ) -> Result<Vec<ColorStop>, PdfError> {
+        let PdfObj::Ref(num, generation) = shading_obj else {
+            return sample();
+        };
+        let key = (*num, *generation, intent);
+        if let Some(stops) = self.stops.get(&key) {
+            return Ok(stops.clone());
+        }
+        let stops = sample()?;
+        if self.stops.len() < MAX_CACHED_SHADINGS {
+            self.stops.insert(key, stops.clone());
+        }
+        Ok(stops)
+    }
+}
+
+/// [`handle_shading`], reusing the stops of shadings already drawn on the
+/// page.
+pub(crate) fn handle_shading_cached(
+    shading_obj: &PdfObj,
+    dict: &PdfDict,
+    gstate: &PdfGraphicsState,
+    resolver: &Resolver,
+    display_list: &mut DisplayList,
+    icc_cache: &mut IccCache,
+    stops: &mut ShadingStops,
+) -> Result<(), PdfError> {
     let shading_type =
         dict.get_int(b"ShadingType")
             .ok_or(PdfError::Other("shading missing ShadingType".into()))? as i32;
@@ -81,6 +147,7 @@ pub fn handle_shading(
             icc_cache,
         ),
         2 => handle_axial(
+            shading_obj,
             dict,
             gstate,
             resolver,
@@ -89,8 +156,10 @@ pub fn handle_shading(
             extend,
             &resolved_cs,
             icc_cache,
+            stops,
         ),
         3 => handle_radial(
+            shading_obj,
             dict,
             gstate,
             resolver,
@@ -99,6 +168,7 @@ pub fn handle_shading(
             extend,
             &resolved_cs,
             icc_cache,
+            stops,
         ),
         4 | 5 => handle_mesh(
             shading_obj,
@@ -220,6 +290,7 @@ fn handle_function_based(
 
 #[expect(clippy::too_many_arguments)]
 fn handle_axial(
+    shading_obj: &PdfObj,
     dict: &PdfDict,
     gstate: &PdfGraphicsState,
     resolver: &Resolver,
@@ -228,6 +299,7 @@ fn handle_axial(
     extend: (bool, bool),
     resolved_cs: &ResolvedColorSpace,
     icc_cache: &mut IccCache,
+    stops: &mut ShadingStops,
 ) -> Result<(), PdfError> {
     let coords = dict
         .get_array(b"Coords")
@@ -237,15 +309,17 @@ fn handle_axial(
         return Err(PdfError::Other("axial Coords needs 4 values".into()));
     }
 
-    let function = parse_shading_function(dict, resolver)?;
-    let n_stops = function.min_samples().clamp(64, 1024);
-    let color_stops = sample_function_to_stops_icc(
-        &function,
-        n_stops,
-        resolved_cs,
-        icc_cache,
-        gstate.rendering_intent,
-    );
+    let color_stops = stops.get_or_sample(shading_obj, gstate.rendering_intent, || {
+        let function = parse_shading_function(dict, resolver)?;
+        let n_stops = function.min_samples().clamp(64, 1024);
+        Ok(sample_function_to_stops_icc(
+            &function,
+            n_stops,
+            resolved_cs,
+            icc_cache,
+            gstate.rendering_intent,
+        ))
+    })?;
 
     // Keep coordinates in shading/user space, pass the CTM to the renderer.
     // The renderer inverse-transforms device pixels to evaluate the gradient,
@@ -280,6 +354,7 @@ fn handle_axial(
 
 #[expect(clippy::too_many_arguments)]
 fn handle_radial(
+    shading_obj: &PdfObj,
     dict: &PdfDict,
     gstate: &PdfGraphicsState,
     resolver: &Resolver,
@@ -288,6 +363,7 @@ fn handle_radial(
     extend: (bool, bool),
     resolved_cs: &ResolvedColorSpace,
     icc_cache: &mut IccCache,
+    stops: &mut ShadingStops,
 ) -> Result<(), PdfError> {
     let coords = dict
         .get_array(b"Coords")
@@ -297,15 +373,17 @@ fn handle_radial(
         return Err(PdfError::Other("radial Coords needs 6 values".into()));
     }
 
-    let function = parse_shading_function(dict, resolver)?;
-    let n_stops = function.min_samples().clamp(64, 1024);
-    let color_stops = sample_function_to_stops_icc(
-        &function,
-        n_stops,
-        resolved_cs,
-        icc_cache,
-        gstate.rendering_intent,
-    );
+    let color_stops = stops.get_or_sample(shading_obj, gstate.rendering_intent, || {
+        let function = parse_shading_function(dict, resolver)?;
+        let n_stops = function.min_samples().clamp(64, 1024);
+        Ok(sample_function_to_stops_icc(
+            &function,
+            n_stops,
+            resolved_cs,
+            icc_cache,
+            gstate.rendering_intent,
+        ))
+    })?;
 
     // Keep coordinates in user space; pass the CTM to the renderer so it can
     // inverse-transform device pixels back to user space where circles are circular.
@@ -1073,4 +1151,81 @@ fn sample_tint_function_nd(
         samples_per_dim,
         cmyk_samples: Arc::new(cmyk_samples),
     })
+}
+
+#[cfg(test)]
+mod shading_stops_tests {
+    use super::*;
+    use stet_graphics::color::DeviceColor;
+
+    fn stops(n: usize) -> Vec<ColorStop> {
+        (0..n)
+            .map(|i| ColorStop {
+                position: i as f64,
+                color: DeviceColor::from_rgb(0.0, 0.0, 0.0),
+                raw_components: Vec::new(),
+                source_components: Vec::new(),
+            })
+            .collect()
+    }
+
+    /// How many stops the cache hands back, and whether it had to sample.
+    fn ask(cache: &mut ShadingStops, obj: &PdfObj, intent: u8, n: usize) -> (usize, bool) {
+        let mut sampled = false;
+        let got = cache
+            .get_or_sample(obj, intent, || {
+                sampled = true;
+                Ok(stops(n))
+            })
+            .unwrap();
+        (got.len(), sampled)
+    }
+
+    #[test]
+    fn a_shading_object_is_sampled_once_for_each_intent() {
+        let mut cache = ShadingStops::default();
+        let shading = PdfObj::Ref(7, 0);
+        assert_eq!(ask(&mut cache, &shading, 1, 3), (3, true));
+        // The second use gets the first sampling, not a new one.
+        assert_eq!(ask(&mut cache, &shading, 1, 99), (3, false));
+        // Another intent converts colours differently.
+        assert_eq!(ask(&mut cache, &shading, 0, 5), (5, true));
+        assert_eq!(ask(&mut cache, &shading, 0, 99), (5, false));
+        // Another object, and another generation of the same number.
+        assert_eq!(ask(&mut cache, &PdfObj::Ref(8, 0), 1, 4), (4, true));
+        assert_eq!(ask(&mut cache, &PdfObj::Ref(7, 1), 1, 6), (6, true));
+        assert_eq!(ask(&mut cache, &shading, 1, 99), (3, false));
+    }
+
+    #[test]
+    fn a_shading_with_no_object_number_is_sampled_every_time() {
+        let mut cache = ShadingStops::default();
+        let inline = PdfObj::Dict(PdfDict::new());
+        assert_eq!(ask(&mut cache, &inline, 1, 3), (3, true));
+        assert_eq!(ask(&mut cache, &inline, 1, 4), (4, true));
+    }
+
+    #[test]
+    fn a_failed_sampling_is_not_remembered() {
+        let mut cache = ShadingStops::default();
+        let shading = PdfObj::Ref(7, 0);
+        let failed =
+            cache.get_or_sample(&shading, 1, || Err(PdfError::Other("no function".into())));
+        assert!(failed.is_err());
+        assert_eq!(ask(&mut cache, &shading, 1, 3), (3, true));
+    }
+
+    #[test]
+    fn the_cache_stops_growing_and_keeps_working() {
+        let mut cache = ShadingStops::default();
+        for n in 0..MAX_CACHED_SHADINGS as u32 + 10 {
+            assert_eq!(ask(&mut cache, &PdfObj::Ref(n, 0), 1, 2), (2, true));
+        }
+        assert_eq!(cache.stops.len(), MAX_CACHED_SHADINGS);
+        // The early ones are still served from it; the overflow is sampled
+        // again each time, as every shading was before there was a cache.
+        assert_eq!(ask(&mut cache, &PdfObj::Ref(0, 0), 1, 9), (2, false));
+        let overflow = PdfObj::Ref(MAX_CACHED_SHADINGS as u32 + 5, 0);
+        assert_eq!(ask(&mut cache, &overflow, 1, 9), (9, true));
+    }
 }
