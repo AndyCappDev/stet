@@ -1046,18 +1046,14 @@ fn precompute_bboxes(list: &DisplayList, dpi: f64) -> Vec<Option<YBBox>> {
                 y_min: params.bbox[1],
                 y_max: params.bbox[3],
             }),
-            DisplayElement::OcgGroup {
-                elements,
-                visibility,
-            } => {
-                // Hidden groups without clip ops contribute nothing — cull.
-                // (Hidden + has clip ops is handled below: we return paint
-                // bounds so the epoch has correct extent, and the band loop
-                // skips per-element culling for OcgGroups so the clip ops
-                // always execute.)
-                if !visibility.default_visible() && !contains_clip_op(elements) {
-                    return None;
-                }
+            DisplayElement::OcgGroup { elements, .. } => {
+                // The bounds of what the layer draws when it is shown,
+                // whatever its default visibility: these are computed once
+                // for the page and serve every `LayerSet` it is rendered
+                // with, so a layer hidden by default must still be found
+                // when an override shows it. A hidden layer costs a visit
+                // per band it covers and paints nothing —
+                // `render_element` evaluates its visibility.
                 let child_bboxes = precompute_bboxes(elements, dpi);
                 let mut y_min = f64::INFINITY;
                 let mut y_max = f64::NEG_INFINITY;
@@ -10226,17 +10222,10 @@ fn precompute_full_bboxes(list: &DisplayList, dpi: f64) -> Vec<Option<BBox2D>> {
                 x_max: params.bbox[2],
                 y_max: params.bbox[3],
             }),
-            DisplayElement::OcgGroup {
-                elements,
-                visibility,
-            } => {
-                // Hidden groups without clip ops contribute nothing. Hidden
-                // + has clip ops is force-processed at the render-loop layer
-                // (see the viewport render_region_prepared loop) so we still
-                // return the paint bounds here for correct epoch bbox.
-                if !visibility.default_visible() && !contains_clip_op(elements) {
-                    return None;
-                }
+            DisplayElement::OcgGroup { elements, .. } => {
+                // The layer's bounds whatever its default visibility, as
+                // in `precompute_bboxes`: a `PreparedDisplayList` outlives
+                // any one `LayerSet`.
                 let child_bboxes = precompute_full_bboxes(elements, dpi);
                 let mut x_min = f64::INFINITY;
                 let mut y_min = f64::INFINITY;
@@ -11456,13 +11445,9 @@ fn preprocess_images(
     )
 }
 
-/// Render a rectangular viewport region using precomputed metadata.
-///
-/// Like [`render_region()`] but skips the three precomputation passes,
-/// using the [`PreparedDisplayList`] instead. Significantly faster for
-/// repeated renders of the same display list (e.g., panning at a fixed zoom).
+/// [`render_region_prepared`], with the layers a [`LayerSet`] shows or hides.
 #[expect(clippy::too_many_arguments)]
-pub fn render_region_prepared(
+fn render_region_prepared_inner(
     list: &DisplayList,
     prepared: &PreparedDisplayList,
     vp_x: f64,
@@ -11475,12 +11460,12 @@ pub fn render_region_prepared(
     icc: Option<&IccCache>,
     image_cache: Option<&ImageCache>,
     no_aa: bool,
+    layer_set: &LayerSet,
 ) -> Vec<u8> {
     if pixel_w == 0 || pixel_h == 0 || vp_w <= 0.0 || vp_h <= 0.0 {
         return vec![0xFF; pixel_w as usize * pixel_h as usize * 4];
     }
 
-    let layer_set = LayerSet::new();
     let scale_x = pixel_w as f64 / vp_w;
     let scale_y = pixel_h as f64 / vp_h;
     let effective_dpi = dpi * scale_x;
@@ -11578,7 +11563,7 @@ pub fn render_region_prepared(
                 knockout_painter_pass: KnockoutPainterPass::None,
                 parent_group_isolated: false,
                 alpha_extraction_pass: false,
-                layer_set: &layer_set,
+                layer_set,
                 transfer_suppressed: false,
             };
             render_element(&mut pixmap, &mut state, &elements[i], &ctx);
@@ -11607,16 +11592,9 @@ pub fn viewport_band_count(pixel_w: u32, pixel_h: u32) -> (u32, u32) {
     (num_bands, band_h)
 }
 
-/// Render a single horizontal band of a viewport region.
-///
-/// This is the per-band counterpart to [`render_region_prepared()`]. The caller
-/// loops over `band_idx` in `0..num_bands`, collecting RGBA strips that tile
-/// vertically to form the full viewport image.
-///
-/// Returns RGBA pixel data for `actual_h` rows (may be less than `band_h` for
-/// the last band).
+/// [`render_region_single_band`], with the layers a [`LayerSet`] shows or hides.
 #[expect(clippy::too_many_arguments)]
-pub fn render_region_single_band(
+fn render_region_single_band_inner(
     list: &DisplayList,
     prepared: &PreparedDisplayList,
     vp_x: f64,
@@ -11632,6 +11610,7 @@ pub fn render_region_single_band(
     icc: Option<&IccCache>,
     image_cache: Option<&ImageCache>,
     no_aa: bool,
+    layer_set: &LayerSet,
 ) -> Vec<u8> {
     if pixel_w == 0 || pixel_h == 0 || vp_w <= 0.0 || vp_h <= 0.0 {
         let actual_h = if band_idx < num_bands - 1 {
@@ -11642,7 +11621,6 @@ pub fn render_region_single_band(
         return vec![0xFF; pixel_w as usize * actual_h as usize * 4];
     }
 
-    let layer_set = LayerSet::new();
     let scale_x = pixel_w as f64 / vp_w;
     let scale_y = pixel_h as f64 / vp_h;
     let effective_dpi = dpi * scale_x;
@@ -11758,7 +11736,7 @@ pub fn render_region_single_band(
                 knockout_painter_pass: KnockoutPainterPass::None,
                 parent_group_isolated: false,
                 alpha_extraction_pass: false,
-                layer_set: &layer_set,
+                layer_set,
                 transfer_suppressed: false,
             };
             render_element(&mut pixmap, &mut state, &elements[i], &ctx);
@@ -11775,16 +11753,9 @@ pub fn render_region_single_band(
     pixmap.data()[start..end].to_vec()
 }
 
-/// Render a viewport region using parallel banded rendering via rayon.
-///
-/// This is the WASM counterpart to the parallel path in `render_banded_to_sink`.
-/// All bands are rendered in parallel using `par_iter`, then assembled into the
-/// final RGBA buffer in order.
-///
-/// Requires the `parallel` feature (rayon). Falls back to sequential rendering
-/// if `parallel` is not enabled.
+/// [`render_region_prepared_parallel`], with the layers a [`LayerSet`] shows or hides.
 #[expect(clippy::too_many_arguments)]
-pub fn render_region_prepared_parallel(
+fn render_region_prepared_parallel_inner(
     list: &DisplayList,
     prepared: &PreparedDisplayList,
     vp_x: f64,
@@ -11797,12 +11768,13 @@ pub fn render_region_prepared_parallel(
     icc: Option<&IccCache>,
     image_cache: Option<&ImageCache>,
     no_aa: bool,
+    layer_set: &LayerSet,
 ) -> Vec<u8> {
     let (num_bands, band_h) = viewport_band_count(pixel_w, pixel_h);
 
     if num_bands <= 1 {
         // Single band — no parallelism needed
-        return render_region_prepared(
+        return render_region_prepared_inner(
             list,
             prepared,
             vp_x,
@@ -11815,11 +11787,12 @@ pub fn render_region_prepared_parallel(
             icc,
             image_cache,
             no_aa,
+            layer_set,
         );
     }
 
     let render_band = |band_idx: u32| -> Vec<u8> {
-        render_region_single_band(
+        render_region_single_band_inner(
             list,
             prepared,
             vp_x,
@@ -11835,6 +11808,7 @@ pub fn render_region_prepared_parallel(
             icc,
             image_cache,
             no_aa,
+            layer_set,
         )
     };
 
@@ -11876,12 +11850,9 @@ pub fn render_region_prepared_parallel(
     result
 }
 
-/// Like [`render_region_prepared_parallel()`] but with an atomic progress counter.
-///
-/// The counter is incremented after each chunk of bands completes. The total
-/// number of bands is returned alongside the counter via [`viewport_band_count()`].
+/// [`render_region_prepared_parallel_with_progress`], with the layers a [`LayerSet`] shows or hides.
 #[expect(clippy::too_many_arguments)]
-pub fn render_region_prepared_parallel_with_progress(
+fn render_region_prepared_parallel_with_progress_inner(
     list: &DisplayList,
     prepared: &PreparedDisplayList,
     vp_x: f64,
@@ -11894,12 +11865,13 @@ pub fn render_region_prepared_parallel_with_progress(
     icc: Option<&IccCache>,
     image_cache: Option<&ImageCache>,
     no_aa: bool,
+    layer_set: &LayerSet,
     progress: &std::sync::atomic::AtomicU32,
 ) -> Vec<u8> {
     let (num_bands, band_h) = viewport_band_count(pixel_w, pixel_h);
 
     if num_bands <= 1 {
-        let result = render_region_prepared(
+        let result = render_region_prepared_inner(
             list,
             prepared,
             vp_x,
@@ -11912,13 +11884,14 @@ pub fn render_region_prepared_parallel_with_progress(
             icc,
             image_cache,
             no_aa,
+            layer_set,
         );
         progress.store(1, std::sync::atomic::Ordering::Relaxed);
         return result;
     }
 
     let render_band = |band_idx: u32| -> Vec<u8> {
-        render_region_single_band(
+        render_region_single_band_inner(
             list,
             prepared,
             vp_x,
@@ -11934,6 +11907,7 @@ pub fn render_region_prepared_parallel_with_progress(
             icc,
             image_cache,
             no_aa,
+            layer_set,
         )
     };
 
@@ -11977,10 +11951,9 @@ pub fn render_region_prepared_parallel_with_progress(
     result
 }
 
-/// Like [`render_region_prepared_parallel()`] but checks a cancellation flag
-/// between band chunks. Returns `None` if cancelled.
+/// [`render_region_prepared_parallel_cancellable`], with the layers a [`LayerSet`] shows or hides.
 #[expect(clippy::too_many_arguments)]
-pub fn render_region_prepared_parallel_cancellable(
+fn render_region_prepared_parallel_cancellable_inner(
     list: &DisplayList,
     prepared: &PreparedDisplayList,
     vp_x: f64,
@@ -11993,6 +11966,7 @@ pub fn render_region_prepared_parallel_cancellable(
     icc: Option<&IccCache>,
     image_cache: Option<&ImageCache>,
     no_aa: bool,
+    layer_set: &LayerSet,
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> Option<Vec<u8>> {
     if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
@@ -12002,7 +11976,7 @@ pub fn render_region_prepared_parallel_cancellable(
     let (num_bands, band_h) = viewport_band_count(pixel_w, pixel_h);
 
     if num_bands <= 1 {
-        return Some(render_region_prepared(
+        return Some(render_region_prepared_inner(
             list,
             prepared,
             vp_x,
@@ -12015,11 +11989,12 @@ pub fn render_region_prepared_parallel_cancellable(
             icc,
             image_cache,
             no_aa,
+            layer_set,
         ));
     }
 
     let render_band = |band_idx: u32| -> Vec<u8> {
-        render_region_single_band(
+        render_region_single_band_inner(
             list,
             prepared,
             vp_x,
@@ -12035,6 +12010,7 @@ pub fn render_region_prepared_parallel_cancellable(
             icc,
             image_cache,
             no_aa,
+            layer_set,
         )
     };
 
@@ -12080,6 +12056,436 @@ pub fn render_region_prepared_parallel_cancellable(
     }
 
     Some(result)
+}
+
+/// Render a rectangular viewport region using precomputed metadata.
+///
+/// Like [`render_region()`] but skips the three precomputation passes,
+/// using the [`PreparedDisplayList`] instead. Significantly faster for
+/// repeated renders of the same display list (e.g., panning at a fixed zoom).
+#[expect(clippy::too_many_arguments)]
+pub fn render_region_prepared(
+    list: &DisplayList,
+    prepared: &PreparedDisplayList,
+    vp_x: f64,
+    vp_y: f64,
+    vp_w: f64,
+    vp_h: f64,
+    pixel_w: u32,
+    pixel_h: u32,
+    dpi: f64,
+    icc: Option<&IccCache>,
+    image_cache: Option<&ImageCache>,
+    no_aa: bool,
+) -> Vec<u8> {
+    render_region_prepared_inner(
+        list,
+        prepared,
+        vp_x,
+        vp_y,
+        vp_w,
+        vp_h,
+        pixel_w,
+        pixel_h,
+        dpi,
+        icc,
+        image_cache,
+        no_aa,
+        &LayerSet::new(),
+    )
+}
+
+/// Render a single horizontal band of a viewport region.
+///
+/// This is the per-band counterpart to [`render_region_prepared()`]. The caller
+/// loops over `band_idx` in `0..num_bands`, collecting RGBA strips that tile
+/// vertically to form the full viewport image.
+///
+/// Returns RGBA pixel data for `actual_h` rows (may be less than `band_h` for
+/// the last band).
+#[expect(clippy::too_many_arguments)]
+pub fn render_region_single_band(
+    list: &DisplayList,
+    prepared: &PreparedDisplayList,
+    vp_x: f64,
+    vp_y: f64,
+    vp_w: f64,
+    vp_h: f64,
+    pixel_w: u32,
+    pixel_h: u32,
+    band_idx: u32,
+    band_h: u32,
+    num_bands: u32,
+    dpi: f64,
+    icc: Option<&IccCache>,
+    image_cache: Option<&ImageCache>,
+    no_aa: bool,
+) -> Vec<u8> {
+    render_region_single_band_inner(
+        list,
+        prepared,
+        vp_x,
+        vp_y,
+        vp_w,
+        vp_h,
+        pixel_w,
+        pixel_h,
+        band_idx,
+        band_h,
+        num_bands,
+        dpi,
+        icc,
+        image_cache,
+        no_aa,
+        &LayerSet::new(),
+    )
+}
+
+/// Render a viewport region using parallel banded rendering via rayon.
+///
+/// This is the WASM counterpart to the parallel path in `render_banded_to_sink`.
+/// All bands are rendered in parallel using `par_iter`, then assembled into the
+/// final RGBA buffer in order.
+///
+/// Requires the `parallel` feature (rayon). Falls back to sequential rendering
+/// if `parallel` is not enabled.
+#[expect(clippy::too_many_arguments)]
+pub fn render_region_prepared_parallel(
+    list: &DisplayList,
+    prepared: &PreparedDisplayList,
+    vp_x: f64,
+    vp_y: f64,
+    vp_w: f64,
+    vp_h: f64,
+    pixel_w: u32,
+    pixel_h: u32,
+    dpi: f64,
+    icc: Option<&IccCache>,
+    image_cache: Option<&ImageCache>,
+    no_aa: bool,
+) -> Vec<u8> {
+    render_region_prepared_parallel_inner(
+        list,
+        prepared,
+        vp_x,
+        vp_y,
+        vp_w,
+        vp_h,
+        pixel_w,
+        pixel_h,
+        dpi,
+        icc,
+        image_cache,
+        no_aa,
+        &LayerSet::new(),
+    )
+}
+
+/// Like [`render_region_prepared_parallel()`] but with an atomic progress counter.
+///
+/// The counter is incremented after each chunk of bands completes. The total
+/// number of bands is returned alongside the counter via [`viewport_band_count()`].
+#[expect(clippy::too_many_arguments)]
+pub fn render_region_prepared_parallel_with_progress(
+    list: &DisplayList,
+    prepared: &PreparedDisplayList,
+    vp_x: f64,
+    vp_y: f64,
+    vp_w: f64,
+    vp_h: f64,
+    pixel_w: u32,
+    pixel_h: u32,
+    dpi: f64,
+    icc: Option<&IccCache>,
+    image_cache: Option<&ImageCache>,
+    no_aa: bool,
+    progress: &std::sync::atomic::AtomicU32,
+) -> Vec<u8> {
+    render_region_prepared_parallel_with_progress_inner(
+        list,
+        prepared,
+        vp_x,
+        vp_y,
+        vp_w,
+        vp_h,
+        pixel_w,
+        pixel_h,
+        dpi,
+        icc,
+        image_cache,
+        no_aa,
+        &LayerSet::new(),
+        progress,
+    )
+}
+
+/// Like [`render_region_prepared_parallel()`] but checks a cancellation flag
+/// between band chunks. Returns `None` if cancelled.
+#[expect(clippy::too_many_arguments)]
+pub fn render_region_prepared_parallel_cancellable(
+    list: &DisplayList,
+    prepared: &PreparedDisplayList,
+    vp_x: f64,
+    vp_y: f64,
+    vp_w: f64,
+    vp_h: f64,
+    pixel_w: u32,
+    pixel_h: u32,
+    dpi: f64,
+    icc: Option<&IccCache>,
+    image_cache: Option<&ImageCache>,
+    no_aa: bool,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Option<Vec<u8>> {
+    render_region_prepared_parallel_cancellable_inner(
+        list,
+        prepared,
+        vp_x,
+        vp_y,
+        vp_w,
+        vp_h,
+        pixel_w,
+        pixel_h,
+        dpi,
+        icc,
+        image_cache,
+        no_aa,
+        &LayerSet::new(),
+        cancelled,
+    )
+}
+
+/// One region of a prepared display list, ready to render: the rectangle,
+/// the size to render it at, and the options that apply.
+///
+/// This is the form of [`render_region_prepared()`] and its parallel
+/// variants that takes a [`LayerSet`], so a viewer that renders a page in
+/// tiles can show and hide layers without rebuilding the display list or
+/// the [`ImageCache`]. Options are set by chained calls and default to
+/// what those functions do: no ICC cache, no image cache, antialiasing on,
+/// every layer at its default visibility.
+///
+/// ```no_run
+/// # use stet_graphics::display_list::DisplayList;
+/// # use stet_graphics::layer_set::LayerSet;
+/// # use stet_render::{RegionRender, prepare_display_list};
+/// # let list = DisplayList::new();
+/// # let layers = LayerSet::new();
+/// let prepared = prepare_display_list(&list);
+/// // A 256 x 256 tile whose top-left corner is at (512, 0) in the list's
+/// // device space, at the resolution the list was built for.
+/// let rgba = RegionRender::new(&list, &prepared, [512.0, 0.0, 256.0, 256.0], 256, 256, 150.0)
+///     .layer_set(&layers)
+///     .render();
+/// assert_eq!(rgba.len(), 256 * 256 * 4);
+/// ```
+#[derive(Clone, Copy)]
+pub struct RegionRender<'a> {
+    list: &'a DisplayList,
+    prepared: &'a PreparedDisplayList,
+    viewport: [f64; 4],
+    pixel_w: u32,
+    pixel_h: u32,
+    dpi: f64,
+    icc: Option<&'a IccCache>,
+    image_cache: Option<&'a ImageCache>,
+    no_aa: bool,
+    layer_set: Option<&'a LayerSet>,
+}
+
+impl<'a> RegionRender<'a> {
+    /// A region of `list`, which `prepared` was computed from.
+    ///
+    /// - `viewport`: `[x, y, width, height]` in the display list's device
+    ///   space, the pixels of the resolution it was built at.
+    /// - `pixel_w`, `pixel_h`: the size of the output, which need not match
+    ///   the viewport's: the ratio is the zoom.
+    /// - `dpi`: the resolution the display list was built at (it decides
+    ///   how hairlines are drawn).
+    pub fn new(
+        list: &'a DisplayList,
+        prepared: &'a PreparedDisplayList,
+        viewport: [f64; 4],
+        pixel_w: u32,
+        pixel_h: u32,
+        dpi: f64,
+    ) -> Self {
+        Self {
+            list,
+            prepared,
+            viewport,
+            pixel_w,
+            pixel_h,
+            dpi,
+            icc: None,
+            image_cache: None,
+            no_aa: false,
+            layer_set: None,
+        }
+    }
+
+    /// Convert colours through `icc`.
+    pub fn icc(mut self, icc: &'a IccCache) -> Self {
+        self.icc = Some(icc);
+        self
+    }
+
+    /// Take converted images from `cache`, built once for the page with
+    /// [`ImageCache::build`]. The cache does not depend on which layers are
+    /// shown.
+    pub fn image_cache(mut self, cache: &'a ImageCache) -> Self {
+        self.image_cache = Some(cache);
+        self
+    }
+
+    /// Turn antialiasing off (`true`) or leave it on.
+    pub fn no_aa(mut self, no_aa: bool) -> Self {
+        self.no_aa = no_aa;
+        self
+    }
+
+    /// Show and hide layers as `layers` says. Without this, or with an
+    /// empty set, each layer has the visibility the document gives it.
+    pub fn layer_set(mut self, layers: &'a LayerSet) -> Self {
+        self.layer_set = Some(layers);
+        self
+    }
+
+    /// The region as RGBA, `pixel_w × pixel_h × 4` bytes, rendered on the
+    /// calling thread. See [`render_region_prepared()`].
+    pub fn render(&self) -> Vec<u8> {
+        let [x, y, w, h] = self.viewport;
+        self.with_layers(|layers| {
+            render_region_prepared_inner(
+                self.list,
+                self.prepared,
+                x,
+                y,
+                w,
+                h,
+                self.pixel_w,
+                self.pixel_h,
+                self.dpi,
+                self.icc,
+                self.image_cache,
+                self.no_aa,
+                layers,
+            )
+        })
+    }
+
+    /// One horizontal band of the region; see
+    /// [`render_region_single_band()`] and [`viewport_band_count()`].
+    pub fn render_band(&self, band_idx: u32, band_h: u32, num_bands: u32) -> Vec<u8> {
+        let [x, y, w, h] = self.viewport;
+        self.with_layers(|layers| {
+            render_region_single_band_inner(
+                self.list,
+                self.prepared,
+                x,
+                y,
+                w,
+                h,
+                self.pixel_w,
+                self.pixel_h,
+                band_idx,
+                band_h,
+                num_bands,
+                self.dpi,
+                self.icc,
+                self.image_cache,
+                self.no_aa,
+                layers,
+            )
+        })
+    }
+
+    /// The region rendered in bands across the thread pool; see
+    /// [`render_region_prepared_parallel()`].
+    pub fn render_parallel(&self) -> Vec<u8> {
+        let [x, y, w, h] = self.viewport;
+        self.with_layers(|layers| {
+            render_region_prepared_parallel_inner(
+                self.list,
+                self.prepared,
+                x,
+                y,
+                w,
+                h,
+                self.pixel_w,
+                self.pixel_h,
+                self.dpi,
+                self.icc,
+                self.image_cache,
+                self.no_aa,
+                layers,
+            )
+        })
+    }
+
+    /// [`render_parallel`](Self::render_parallel), storing the number of
+    /// bands finished in `progress` as it goes; see
+    /// [`render_region_prepared_parallel_with_progress()`].
+    pub fn render_parallel_with_progress(
+        &self,
+        progress: &std::sync::atomic::AtomicU32,
+    ) -> Vec<u8> {
+        let [x, y, w, h] = self.viewport;
+        self.with_layers(|layers| {
+            render_region_prepared_parallel_with_progress_inner(
+                self.list,
+                self.prepared,
+                x,
+                y,
+                w,
+                h,
+                self.pixel_w,
+                self.pixel_h,
+                self.dpi,
+                self.icc,
+                self.image_cache,
+                self.no_aa,
+                layers,
+                progress,
+            )
+        })
+    }
+
+    /// [`render_parallel`](Self::render_parallel), giving up with `None`
+    /// once `cancelled` is set; see
+    /// [`render_region_prepared_parallel_cancellable()`].
+    pub fn render_parallel_cancellable(
+        &self,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Option<Vec<u8>> {
+        let [x, y, w, h] = self.viewport;
+        self.with_layers(|layers| {
+            render_region_prepared_parallel_cancellable_inner(
+                self.list,
+                self.prepared,
+                x,
+                y,
+                w,
+                h,
+                self.pixel_w,
+                self.pixel_h,
+                self.dpi,
+                self.icc,
+                self.image_cache,
+                self.no_aa,
+                layers,
+                cancelled,
+            )
+        })
+    }
+
+    /// Run `f` with the layer set in force: the caller's, or an empty one.
+    fn with_layers<T>(&self, f: impl FnOnce(&LayerSet) -> T) -> T {
+        match self.layer_set {
+            Some(layers) => f(layers),
+            None => f(&LayerSet::new()),
+        }
+    }
 }
 
 /// Render a full-page display list to RGBA pixels using the banded parallel renderer.

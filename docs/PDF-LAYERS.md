@@ -170,6 +170,41 @@ its `default_visible`. `layer_set_from_configuration(doc, idx)` does
 the same for an alternate configuration: it applies `BaseState`,
 then the config's `/ON` and `/OFF` overrides.
 
+### Rendering in tiles
+
+A viewer that draws a page in tiles keeps one display list per page and
+renders regions of it. `stet_render::RegionRender` takes the same
+`LayerSet`, so toggling a layer re-renders the visible tiles without
+interpreting the page again:
+
+```rust,no_run
+# use stet_pdf_reader::PdfDocument;
+# use stet_graphics::layer_set::LayerSet;
+use stet_render::{ImageCache, RegionRender, prepare_display_list};
+# let bytes = std::fs::read("layered.pdf")?;
+# let doc = PdfDocument::from_bytes(&bytes)?;
+# let set = LayerSet::new();
+
+// Once per page: interpret, then compute bounds and convert images.
+let list = doc.render_page(0, 150.0)?;
+let prepared = prepare_display_list(&list);
+let images = ImageCache::build(&list, Some(doc.icc_cache()));
+
+// Per tile, per layer setting: a 512 x 512 tile at (1024, 0).
+let rgba = RegionRender::new(&list, &prepared, [1024.0, 0.0, 512.0, 512.0], 512, 512, 150.0)
+    .icc(doc.icc_cache())
+    .image_cache(&images)
+    .layer_set(&set)
+    .render();
+# let _ = rgba;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Neither the prepared list nor the image cache depends on which layers are
+shown. `render()` runs on the calling thread; `render_parallel()` and
+`render_parallel_cancellable()` split the region into bands across
+threads.
+
 [`OcgVisibility`]: https://docs.rs/stet-graphics/latest/stet_graphics/display_list/enum.OcgVisibility.html
 [`LayerSet`]: https://docs.rs/stet-graphics/latest/stet_graphics/layer_set/struct.LayerSet.html
 

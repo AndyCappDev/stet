@@ -21,6 +21,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only, and not with `--width`/`--height`. Contributed by @jungseohaan
   (#5).
 
+- **`stet_render::RegionRender`: a region of a page rendered with a layer
+  set.** `render_region_prepared` and its parallel variants take twelve to
+  fifteen positional arguments and no `LayerSet`, so a viewer that draws a
+  page in tiles could not show or hide layers without interpreting the
+  page again. `RegionRender::new(list, prepared, viewport, w, h, dpi)`
+  takes the options by name — `.icc()`, `.image_cache()`, `.no_aa()`,
+  `.layer_set()` — and renders with `.render()`, `.render_parallel()`,
+  `.render_parallel_with_progress()`, `.render_parallel_cancellable()` or
+  `.render_band()`. With no layer set it gives the pixels the existing
+  functions give, and those are unchanged. One `PreparedDisplayList` and
+  one `ImageCache` serve a page under every layer set: the precomputed
+  bounds used to leave out a layer hidden by default, which an override
+  could then not bring back in a tile that the layer alone touched. Also
+  re-exported from the `stet` facade.
+
 - **`stet-wasm`: `set_max_vm(interp, bytes)`** caps PostScript VM in the
   browser, as `--max-vm` does on the command line. The default there is
   1 GiB, a quarter of the address space, which is more than most pages

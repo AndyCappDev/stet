@@ -19,7 +19,8 @@ use stet_graphics::device::{ImageColorSpace, ImageParams};
 use stet_graphics::display_list::{DisplayElement, DisplayList, OcgVisibility};
 use stet_graphics::layer_set::LayerSet;
 use stet_render::{
-    ImageCache, prepare_display_list, render_region_prepared, render_to_rgba_with_layers,
+    ImageCache, RegionRender, prepare_display_list, render_region_prepared,
+    render_to_rgba_with_layers, viewport_band_count,
 };
 
 const W: u32 = 80;
@@ -82,27 +83,14 @@ fn stripes(list: &DisplayList, layers: &LayerSet) -> Vec<[u8; 3]> {
     };
     let banded = render_to_rgba_with_layers(list, W, H, 72.0, None, false, layers);
     let cache = ImageCache::build(list, None);
-    let viewer = render_region_prepared(
-        list,
-        &prepare_display_list(list),
-        0.0,
-        0.0,
-        W as f64,
-        H as f64,
-        W,
-        H,
-        72.0,
-        None,
-        Some(&cache),
-        false,
-    );
+    let prepared = prepare_display_list(list);
+    let viewer = RegionRender::new(list, &prepared, [0.0, 0.0, W as f64, H as f64], W, H, 72.0)
+        .image_cache(&cache)
+        .layer_set(layers)
+        .render();
     let banded: Vec<_> = (0..W / STRIPE).map(|s| at(&banded, s)).collect();
-    // The viewport renderer takes no layer overrides; compare it only where
-    // the page is drawn with the default visibility.
-    if layers.is_empty() {
-        let viewer: Vec<_> = (0..W / STRIPE).map(|s| at(&viewer, s)).collect();
-        assert_eq!(banded, viewer, "banded and viewer renders disagree");
-    }
+    let viewer: Vec<_> = (0..W / STRIPE).map(|s| at(&viewer, s)).collect();
+    assert_eq!(banded, viewer, "banded and viewer renders disagree");
     banded
 }
 
@@ -155,4 +143,99 @@ fn an_image_after_a_layer_keeps_its_own_entry() {
         image(YELLOW, 3),
     ]);
     assert_eq!(stripes(&page, &LayerSet::new()), [RED, GREEN, BLUE, YELLOW]);
+}
+
+/// A page of two layers, one hidden by default, with a plain image between.
+fn layered_page() -> DisplayList {
+    list(vec![
+        layer(1, true, vec![image(RED, 0)]),
+        image(GREEN, 1),
+        layer(2, false, vec![image(BLUE, 2)]),
+    ])
+}
+
+/// The tile a viewer asks for — one stripe of the page — follows the layer
+/// set it is given, with the page's one image cache serving every setting.
+#[test]
+fn a_tile_follows_the_layer_set() {
+    let page = layered_page();
+    let prepared = prepare_display_list(&page);
+    let cache = ImageCache::build(&page, None);
+    let tile = |stripe: u32, layers: Option<&LayerSet>| {
+        let viewport = [(stripe * STRIPE) as f64, 0.0, STRIPE as f64, H as f64];
+        let mut region =
+            RegionRender::new(&page, &prepared, viewport, STRIPE, H, 72.0).image_cache(&cache);
+        if let Some(layers) = layers {
+            region = region.layer_set(layers);
+        }
+        let data = region.render();
+        assert_eq!(data.len(), (STRIPE * H * 4) as usize);
+        let i = (((H / 2) * STRIPE + STRIPE / 2) * 4) as usize;
+        [data[i], data[i + 1], data[i + 2]]
+    };
+    // No layer set, and an empty one: the document's own visibility.
+    let empty = LayerSet::new();
+    for layers in [None, Some(&empty)] {
+        assert_eq!(tile(0, layers), RED);
+        assert_eq!(tile(1, layers), GREEN);
+        assert_eq!(tile(2, layers), PAPER);
+    }
+    // Both layers flipped; the image outside any layer is untouched.
+    let mut flipped = LayerSet::new();
+    flipped.set(1, false);
+    flipped.set(2, true);
+    assert_eq!(tile(0, Some(&flipped)), PAPER);
+    assert_eq!(tile(1, Some(&flipped)), GREEN);
+    assert_eq!(tile(2, Some(&flipped)), BLUE);
+}
+
+/// Every way of rendering a region gives the same pixels for the same
+/// layer set, and with no layer set they are the pixels the plain
+/// function has always given.
+#[test]
+fn every_region_path_agrees() {
+    let page = layered_page();
+    let prepared = prepare_display_list(&page);
+    let viewport = [0.0, 0.0, W as f64, H as f64];
+    // Large enough for the parallel paths to split into bands.
+    let (w, h) = (W * 20, H * 40);
+    let (num_bands, band_h) = viewport_band_count(w, h);
+    assert!(num_bands > 1, "{num_bands} band(s)");
+
+    let mut flipped = LayerSet::new();
+    flipped.set(1, false);
+    flipped.set(2, true);
+    for layers in [None, Some(&flipped)] {
+        let mut region = RegionRender::new(&page, &prepared, viewport, w, h, 72.0);
+        if let Some(layers) = layers {
+            region = region.layer_set(layers);
+        }
+        let whole = region.render();
+        assert_eq!(whole, region.render_parallel(), "parallel");
+        let progress = std::sync::atomic::AtomicU32::new(0);
+        assert_eq!(
+            whole,
+            region.render_parallel_with_progress(&progress),
+            "with progress"
+        );
+        assert_eq!(progress.into_inner(), num_bands);
+        let go = std::sync::atomic::AtomicBool::new(false);
+        assert_eq!(
+            Some(&whole),
+            region.render_parallel_cancellable(&go).as_ref(),
+            "cancellable"
+        );
+        let stop = std::sync::atomic::AtomicBool::new(true);
+        assert!(region.render_parallel_cancellable(&stop).is_none());
+        let bands: Vec<u8> = (0..num_bands)
+            .flat_map(|b| region.render_band(b, band_h, num_bands))
+            .collect();
+        assert_eq!(whole, bands, "band by band");
+        if layers.is_none() {
+            let plain = render_region_prepared(
+                &page, &prepared, 0.0, 0.0, W as f64, H as f64, w, h, 72.0, None, None, false,
+            );
+            assert_eq!(whole, plain, "the plain function");
+        }
+    }
 }

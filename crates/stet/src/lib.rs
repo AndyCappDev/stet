@@ -105,7 +105,7 @@ pub use stet_graphics::text::{TextLine, TextWord, text_lines, text_runs};
 
 #[cfg(feature = "render")]
 pub use stet_render::{
-    ImageCache, PageBackground, PreparedDisplayList, build_icc_cache_for_list,
+    ImageCache, PageBackground, PreparedDisplayList, RegionRender, build_icc_cache_for_list,
     build_icc_cache_for_list_with_bpc, prepare_display_list, render_region_prepared,
     render_to_rgba, render_to_rgba_with_background, viewport_band_count,
 };

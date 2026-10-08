@@ -20,6 +20,9 @@
 //!   rendering: pre-compute bounding boxes once, then render any
 //!   rectangular region at any zoom without reinterpreting or
 //!   reallocating. Used by the interactive viewer and the WASM frontend.
+//!   [`RegionRender`] is the same with options set by name, among them
+//!   the [`LayerSet`](stet_graphics::layer_set::LayerSet) that shows and
+//!   hides layers per render.
 //!
 //! # Sinks
 //!
@@ -38,6 +41,7 @@ pub use png_sink::PngSinkFactory;
 pub use skia_device::ImageCache;
 pub use skia_device::PageBackground;
 pub use skia_device::PreparedDisplayList;
+pub use skia_device::RegionRender;
 #[cfg(feature = "ps-device")]
 pub use skia_device::SkiaDevice;
 pub use skia_device::debug_bbox_comparison;

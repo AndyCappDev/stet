@@ -489,9 +489,12 @@ fallback baked from the document's default configuration. The
 `LayerSet` evaluator (also in `stet-graphics`) lets a consumer
 override visibility per OCG without re-parsing the PDF; `stet-render`
 holds an `Arc<LayerSet>` on `SkiaDevice` and consults it during
-banded / viewport replay. `render_to_rgba_with_layers` and
-`PdfDocument::render_page_to_rgba_with_layers` are the
-LayerSet-aware entry points.
+banded / viewport replay. `render_to_rgba_with_layers`,
+`PdfDocument::render_page_to_rgba_with_layers` and, for one region of a
+page at a time, `stet_render::RegionRender` are the LayerSet-aware entry
+points. The bounds and epochs in a `PreparedDisplayList`, and the
+conversions in an `ImageCache`, do not depend on which layers are shown:
+one of each serves a page under every `LayerSet`.
 
 [`OcgVisibility`]: https://docs.rs/stet-graphics/latest/stet_graphics/display_list/enum.OcgVisibility.html
 
