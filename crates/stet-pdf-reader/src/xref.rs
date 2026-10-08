@@ -1055,13 +1055,8 @@ fn find_startxref(data: &[u8]) -> Result<usize, PdfError> {
                 found = Some(search_start + i);
             }
         }
-        if let Some(pos) = found {
-            let mut p = pos + needle.len();
-            while p < data.len() && is_whitespace(data[p]) {
-                p += 1;
-            }
-            let (offset, _) = parse_int_at(data, p)?;
-            return Ok(offset as usize);
+        if let Some(offset) = found.and_then(|pos| startxref_value(data, pos + needle.len())) {
+            return Ok(offset);
         }
     }
 
@@ -1076,17 +1071,13 @@ fn find_startxref(data: &[u8]) -> Result<usize, PdfError> {
         }
     }
 
-    if let Some(pos) = found {
-        let mut p = pos + needle.len();
-        while p < data.len() && is_whitespace(data[p]) {
-            p += 1;
-        }
-        let (offset, _) = parse_int_at(data, p)?;
-        return Ok(offset as usize);
+    if let Some(offset) = found.and_then(|pos| startxref_value(data, pos + needle.len())) {
+        return Ok(offset);
     }
 
-    // Strategy 3: No startxref at all (truncated file). Scan for the last
-    // "xref" keyword and return its offset directly.
+    // Strategy 3: No usable startxref (the keyword is missing, or the file
+    // was cut off after it and before its value). Scan for the last "xref"
+    // keyword and return its offset directly.
     let xref_kw = b"xref";
     let mut last_xref = None;
     for i in (0..data.len().saturating_sub(xref_kw.len())).rev() {
@@ -1098,6 +1089,17 @@ fn find_startxref(data: &[u8]) -> Result<usize, PdfError> {
         }
     }
     last_xref.ok_or(PdfError::NoStartXref)
+}
+
+/// The offset that follows a `startxref` keyword ending at `pos`, or `None`
+/// when no non-negative integer follows it.
+///
+/// A file truncated between the keyword and its value is common enough
+/// (pdf.js `issue6069.pdf`) that it must not be fatal: the caller goes on to
+/// look for the cross-reference table itself.
+fn startxref_value(data: &[u8], pos: usize) -> Option<usize> {
+    let (offset, _) = parse_int_at(data, pos).ok()?;
+    usize::try_from(offset).ok()
 }
 
 /// Parse an integer starting at `pos`, return (value, new_pos).
@@ -1138,6 +1140,18 @@ mod tests {
         let data = b"%PDF-1.4\nstartxref\n1234\n%%EOF\n";
         let offset = find_startxref(data).unwrap();
         assert_eq!(offset, 1234);
+    }
+
+    #[test]
+    fn find_startxref_without_a_value_uses_the_xref_keyword() {
+        let data = b"%PDF-1.4\nxref\n0 1\ntrailer\n<<>>\nstartxref\n";
+        assert_eq!(find_startxref(data).unwrap(), 9);
+        // A negative value is no offset either.
+        let data = b"%PDF-1.4\nxref\n0 1\ntrailer\n<<>>\nstartxref\n-5\n%%EOF\n";
+        assert_eq!(find_startxref(data).unwrap(), 9);
+        // Nothing to fall back on: the caller rebuilds by scanning.
+        let data = b"%PDF-1.4\n1 0 obj\nnull\nendobj\nstartxref\n";
+        assert!(matches!(find_startxref(data), Err(PdfError::NoStartXref)));
     }
 
     #[test]

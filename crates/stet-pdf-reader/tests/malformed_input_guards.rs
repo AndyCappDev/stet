@@ -743,3 +743,42 @@ fn broken_group_forms_do_not_use_up_the_nesting_limit() {
     );
     assert_eq!(last_fill_bbox(&pdf), Some((20.0, 70.0, 30.0, 80.0)));
 }
+
+/// A file cut off after the `startxref` keyword and before its value — the
+/// shape of pdf.js's `issue6069.pdf`. The cross-reference table is intact
+/// just above, so the document must open as if the offset had been there.
+#[test]
+fn a_file_cut_off_after_the_startxref_keyword_still_opens() {
+    let whole = one_page_doc(b"", b"20 20 10 10 re f", &[]);
+    let keyword = b"startxref";
+    let at = whole
+        .windows(keyword.len())
+        .rposition(|w| w == keyword)
+        .expect("build_pdf writes startxref");
+
+    // With and without the newline after the keyword, and with a value
+    // that is not a number at all.
+    for tail in [&b""[..], b"\n", b"\nabc\n%%EOF\n"] {
+        let mut cut = whole[..at + keyword.len()].to_vec();
+        cut.extend_from_slice(tail);
+        let doc = PdfDocument::from_bytes(&cut)
+            .unwrap_or_else(|e| panic!("tail {:?}: {e}", String::from_utf8_lossy(tail)));
+        assert_eq!(doc.page_count(), 1);
+        assert!(!doc.render_page(0, 72.0).unwrap().is_empty());
+    }
+}
+
+/// The same truncation with no cross-reference table to fall back on: the
+/// objects are found by scanning the file.
+#[test]
+fn a_valueless_startxref_with_no_xref_table_is_rebuilt_by_scanning() {
+    let whole = one_page_doc(b"", b"20 20 10 10 re f", &[]);
+    let table = whole
+        .windows(6)
+        .position(|w| w == b"\nxref\n")
+        .expect("build_pdf writes an xref table");
+    let mut cut = whole[..table + 1].to_vec();
+    cut.extend_from_slice(b"trailer\n<</Size 5/Root 1 0 R>>\nstartxref\n");
+    let doc = PdfDocument::from_bytes(&cut).expect("opens by scanning");
+    assert_eq!(doc.page_count(), 1);
+}

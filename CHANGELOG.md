@@ -92,6 +92,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value, as the other depths are, and a colour key or `/Decode` on it
   applies as it does to them. Ghostscript draws nothing for these files
   and poppler keeps the low 8 bits of each sample.
+- **A PDF cut off just after its `startxref` keyword did not open.** The
+  reader took the keyword as a promise of an offset and failed with
+  "expected integer" when none followed, though a missing keyword was
+  already handled. Such a file now opens the same way: from the
+  cross-reference table when one is there, otherwise by scanning for its
+  objects. Found with `issue6069.pdf` from the pdf.js test set.
 
 ## [0.8.4] — 2026-10-04
 
