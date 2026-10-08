@@ -136,6 +136,41 @@ for callers of `render_page` that rasterise the list themselves. The
 `stet` command line sets it for PNG output and not for the viewer or for
 PDF output.
 
+### A ceiling on image size
+
+Every image is held to limits sized for prepress — 100,000 samples a
+side, four billion in all — and to nothing lower, because the right
+figure depends on the machine. An application that knows its own can set
+one:
+
+```rust
+# let mut doc: stet_pdf_reader::PdfDocument = unimplemented!();
+doc.set_max_image_pixels(Some(250_000_000)); // width x height, in samples
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+An image over it is left out of the page, with a `ParsePhase::Content`
+warning naming its size. `None`, the default, lifts it.
+
+The reason to set one is JPEG 2000. Its decoder needs about 39 bytes of
+memory for each sample the image's header declares, however small the
+stream is: a legitimate 212-megapixel scan costs 8.5 GB to decode in
+full, and a hostile 25 KB stream declaring 60,000 x 60,000 asks for more
+than 100 GB. Nothing in such a file marks it out from a real one — real
+images reach thousands of pixels per compressed byte — so the bound has
+to come from outside. A service that renders files it did not write
+should set one.
+
+What is counted is the size decoded:
+
+- For a JPEG 2000 image, the size in its own header, which is what the
+  decoder allocates for; and under `ImageResolution::Rendered` (so always
+  in `render_page_to_rgba`) the reduced size it is decoded at. A very
+  large image drawn small is still drawn.
+- For every other image, mask and soft mask, the `/Width` times `/Height`
+  in its dictionary. A soft mask over the ceiling takes its image with
+  it: the image without its mask would be the wrong picture.
+
 ---
 
 ## Document metadata

@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`PdfDocument::set_max_image_pixels`: an application's own ceiling on
+  image size.** stet holds every image to limits sized for prepress
+  (100,000 samples a side, four billion in all) and to nothing lower,
+  because the right figure depends on the machine. That leaves JPEG 2000
+  exposed: its decoder needs about 39 bytes of memory per sample the
+  image's header declares, whatever the size of the stream, so a
+  legitimate 212-megapixel scan costs 8.5 GB and a hostile 25 KB stream
+  declaring 60,000 × 60,000 asks for over 100 GB — and nothing in the
+  file tells the two apart. With a ceiling set, an image over it is left
+  out of the page with a warning naming its size. The size counted is the
+  one decoded: for JPEG 2000 the size in the stream's own header, or the
+  reduced size under `ImageResolution::Rendered`, so a very large image
+  drawn small is still drawn; for every other image, mask and soft mask,
+  the size in its dictionary. Off by default. Also new:
+  `DecodeBudget::with_image_pixels`. See `docs/PDF-READER-API.md`, "A
+  ceiling on image size".
+
 - **`--box-snap`, and `PdfDocument::page_area_rect_on_pixel_grid`** in
   `stet-pdf-reader`: a `--box` area whose edges fall between device pixels
   is rasterised at its own sub-pixel phase, so it antialiases differently

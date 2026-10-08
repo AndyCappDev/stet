@@ -319,3 +319,140 @@ fn an_image_in_a_tiling_pattern_is_left_at_full_resolution() {
     assert!(!sizes.is_empty(), "the pattern's image is in the list");
     assert!(sizes.iter().all(|&s| s == STORED), "{sizes:?}");
 }
+
+// --- The application's ceiling on image size --------------------------------
+
+/// Render `pdf` with a ceiling of `limit` samples; the sizes of the images
+/// drawn, and the content warnings.
+fn with_limit(
+    pdf: &[u8],
+    dpi: f64,
+    resolution: ImageResolution,
+    limit: Option<u64>,
+) -> (Vec<(u32, u32)>, Vec<String>) {
+    fn walk(elements: &[DisplayElement], out: &mut Vec<(u32, u32)>) {
+        for element in elements {
+            match element {
+                DisplayElement::Image { params, .. } => out.push((params.width, params.height)),
+                DisplayElement::Group { elements, .. } => walk(elements.elements(), out),
+                DisplayElement::SoftMasked { mask, content, .. } => {
+                    walk(mask.elements(), out);
+                    walk(content.elements(), out);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut doc = PdfDocument::from_bytes(pdf).unwrap();
+    doc.set_image_resolution(resolution);
+    doc.set_max_image_pixels(limit);
+    assert_eq!(doc.max_image_pixels(), limit);
+    let list = doc.render_page(0, dpi).unwrap();
+    let mut sizes = Vec::new();
+    walk(list.elements(), &mut sizes);
+    let warnings = doc
+        .parse_warnings()
+        .iter()
+        .map(|w| w.message.clone())
+        .collect();
+    (sizes, warnings)
+}
+
+/// The photo is 196,608 samples. Under a ceiling below that it is left
+/// out, and the page says why; with none, or one above, it is drawn.
+#[test]
+fn an_image_over_the_ceiling_is_left_out_with_a_warning() {
+    let pdf = page(FULL_PAGE, "", "", None);
+
+    let (sizes, warnings) = with_limit(&pdf, 72.0, ImageResolution::Full, Some(100_000));
+    assert!(sizes.is_empty(), "{sizes:?}");
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].contains("512 x 384") && warnings[0].contains("limit of 100000"),
+        "{warnings:?}"
+    );
+
+    for limit in [None, Some(196_608), Some(1_000_000)] {
+        let (sizes, warnings) = with_limit(&pdf, 72.0, ImageResolution::Full, limit);
+        assert_eq!(sizes, [STORED], "{limit:?}");
+        assert!(warnings.is_empty(), "{limit:?}: {warnings:?}");
+    }
+}
+
+/// What counts is the size decoded. Drawn at a quarter of its size and
+/// decoded for that, the photo is 128 x 96 and passes a ceiling its stored
+/// size does not.
+#[test]
+fn a_reduced_decode_is_measured_at_its_reduced_size() {
+    let pdf = page("q 128 0 0 96 0 0 cm /Im Do Q", "", "", None);
+
+    let (sizes, warnings) = with_limit(&pdf, 72.0, ImageResolution::Rendered, Some(100_000));
+    assert_eq!(sizes, [(128, 96)]);
+    assert!(warnings.is_empty(), "{warnings:?}");
+
+    // The same page at the stored resolution is over it.
+    let (sizes, warnings) = with_limit(&pdf, 72.0, ImageResolution::Full, Some(100_000));
+    assert!(sizes.is_empty(), "{sizes:?}");
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+}
+
+/// A ceiling above the built-in limit is the built-in limit, which is to
+/// say none.
+#[test]
+fn a_ceiling_above_the_built_in_limit_is_no_ceiling() {
+    let pdf = page(FULL_PAGE, "", "", None);
+    let mut doc = PdfDocument::from_bytes(&pdf).unwrap();
+    assert_eq!(doc.max_image_pixels(), None);
+    doc.set_max_image_pixels(Some(u64::MAX));
+    assert_eq!(doc.max_image_pixels(), None);
+    doc.set_max_image_pixels(Some(1_000));
+    assert_eq!(doc.max_image_pixels(), Some(1_000));
+    doc.set_max_image_pixels(None);
+    assert_eq!(doc.max_image_pixels(), None);
+}
+
+/// An image that is not JPEG 2000 is as large as its dictionary says, and
+/// so is a soft mask: one over the ceiling takes its image with it, since
+/// the image without its mask would be the wrong picture.
+#[test]
+fn the_ceiling_covers_other_images_and_soft_masks() {
+    // Object 6: a 400 x 400 grey image, run-length coded (0x81 0x00 is "two
+    // zeros"; 80,000 of them make 160,000 samples).
+    let grey = stream(
+        "/Type /XObject /Subtype /Image /Width 400 /Height 400 \
+         /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /RunLengthDecode",
+        &[0x81, 0x00].repeat(80_000),
+    );
+    let plain = page(
+        "q 100 0 0 100 0 0 cm /G Do Q",
+        "",
+        "/XObject << /G 6 0 R >>",
+        Some(grey.clone()),
+    );
+    let (sizes, warnings) = with_limit(&plain, 72.0, ImageResolution::Full, Some(100_000));
+    assert!(sizes.is_empty(), "{sizes:?}");
+    assert!(
+        warnings.iter().any(|w| w.contains("400 x 400")),
+        "{warnings:?}"
+    );
+    let (sizes, _) = with_limit(&plain, 72.0, ImageResolution::Full, None);
+    assert_eq!(sizes, [(400, 400)]);
+
+    // The photo, drawn small enough to be decoded at 128 x 96, with that
+    // 400 x 400 image as its soft mask.
+    let masked = page(
+        "q 128 0 0 96 0 0 cm /Im Do Q",
+        "/SMask 6 0 R",
+        "",
+        Some(grey),
+    );
+    let (sizes, warnings) = with_limit(&masked, 72.0, ImageResolution::Rendered, Some(100_000));
+    assert!(sizes.is_empty(), "{sizes:?}");
+    assert!(
+        warnings.iter().any(|w| w.contains("400 x 400")),
+        "{warnings:?}"
+    );
+    let (sizes, _) = with_limit(&masked, 72.0, ImageResolution::Rendered, Some(200_000));
+    // The image and its mask, both at the reduced size.
+    assert_eq!(sizes, [(128, 96), (128, 96)]);
+}

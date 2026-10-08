@@ -54,6 +54,9 @@ pub struct Resolver<'a> {
     /// their messages. It is what makes a repeated warning cheap, and what
     /// [`MAX_CONTENT_WARNINGS_PER_PAGE`] counts.
     content_seen: RefCell<(Option<usize>, HashSet<String>)>,
+    /// Most samples an image may have and still be decoded: the
+    /// application's ceiling, or the built-in one.
+    max_image_pixels: std::cell::Cell<u64>,
 }
 
 /// Most distinct content warnings kept for one page.
@@ -202,6 +205,18 @@ impl<'a> Resolver<'a> {
         );
     }
 
+    /// Most samples an image may have and still be decoded.
+    pub(crate) fn max_image_pixels(&self) -> u64 {
+        self.max_image_pixels.get()
+    }
+
+    /// Set [`max_image_pixels`](Self::max_image_pixels), no higher than
+    /// the built-in limit.
+    pub(crate) fn set_max_image_pixels(&self, pixels: u64) {
+        self.max_image_pixels
+            .set(pixels.min(stet_graphics::image_limits::MAX_IMAGE_PIXELS));
+    }
+
     /// Decode a stream's filters, recording what the decoders recovered
     /// from as content warnings.
     pub(crate) fn decode_filters(
@@ -218,7 +233,7 @@ impl<'a> Resolver<'a> {
             filter_list,
             parms,
             jbig2_globals,
-            budget,
+            budget.with_image_pixels(self.max_image_pixels.get()),
             &mut notes,
         );
         for note in notes {
@@ -248,6 +263,7 @@ impl<'a> Resolver<'a> {
             warnings: crate::diagnostics::WarningSink::new(),
             content_page: std::cell::Cell::new(None),
             content_seen: RefCell::new((None, HashSet::new())),
+            max_image_pixels: std::cell::Cell::new(stet_graphics::image_limits::MAX_IMAGE_PIXELS),
         }
     }
 
@@ -279,6 +295,7 @@ impl<'a> Resolver<'a> {
             warnings: crate::diagnostics::WarningSink::new(),
             content_page: std::cell::Cell::new(None),
             content_seen: RefCell::new((None, HashSet::new())),
+            max_image_pixels: std::cell::Cell::new(stet_graphics::image_limits::MAX_IMAGE_PIXELS),
         }
     }
 

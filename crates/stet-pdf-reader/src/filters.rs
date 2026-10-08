@@ -50,20 +50,33 @@ pub const MAX_DECODED_STREAM_BYTES: usize = 512 * 1024 * 1024;
 #[derive(Debug, Clone, Copy)]
 pub struct DecodeBudget {
     limit: usize,
+    /// Most samples a filter that sizes its work from its own header may
+    /// declare; see [`with_image_pixels`](Self::with_image_pixels).
+    image_pixels: u64,
 }
 
 impl Default for DecodeBudget {
     fn default() -> Self {
-        Self {
-            limit: MAX_DECODED_STREAM_BYTES,
-        }
+        Self::new(MAX_DECODED_STREAM_BYTES)
     }
 }
 
 impl DecodeBudget {
     /// A budget with an explicit ceiling.
     pub const fn new(limit: usize) -> Self {
-        Self { limit }
+        Self {
+            limit,
+            image_pixels: stet_graphics::image_limits::MAX_IMAGE_PIXELS,
+        }
+    }
+
+    /// The same budget with a ceiling on the size of a JPEG 2000 image,
+    /// in samples (width times height). That decoder allocates from the
+    /// size in its own header before it produces a byte, so the byte
+    /// ceiling cannot hold it.
+    pub const fn with_image_pixels(mut self, pixels: u64) -> Self {
+        self.image_pixels = pixels;
+        self
     }
 
     /// The ceiling, in bytes.
@@ -95,9 +108,7 @@ impl DecodeBudget {
         let declared = declared_image_bytes(dict)
             .or_else(|| declared_embedded_file_bytes(dict))
             .unwrap_or(0);
-        Self {
-            limit: declared.max(MAX_DECODED_STREAM_BYTES),
-        }
+        Self::new(declared.max(MAX_DECODED_STREAM_BYTES))
     }
 
     /// Fail if `produced` bytes exceeds the ceiling.
@@ -123,6 +134,17 @@ impl DecodeBudget {
     fn reserve_hint(&self, want: usize) -> usize {
         want.min(self.limit)
     }
+}
+
+/// Refuse an image of more than `max_pixels` samples: the application's
+/// ceiling, [`PdfDocument::set_max_image_pixels`](crate::PdfDocument::set_max_image_pixels).
+pub(crate) fn check_image_pixels(width: u32, height: u32, max_pixels: u64) -> Result<(), PdfError> {
+    if u64::from(width) * u64::from(height) > max_pixels {
+        return Err(PdfError::Other(format!(
+            "image of {width} x {height} samples is over the limit of {max_pixels} set for this document"
+        )));
+    }
+    Ok(())
 }
 
 /// Raster size in bytes for a dictionary that describes an image, if it does.
@@ -388,7 +410,7 @@ pub(crate) fn decode_stream_noted(
             Filter::DCTDecode => decode_dct(&data)?,
             Filter::CCITTFaxDecode => decode_ccittfax(&data, parms, notes)?,
             #[cfg(feature = "jpx")]
-            Filter::JPXDecode => decode_jpx(&data)?,
+            Filter::JPXDecode => decode_jpx(&data, budget.image_pixels)?,
             #[cfg(not(feature = "jpx"))]
             Filter::JPXDecode => {
                 return Err(PdfError::UnsupportedFilter("JPXDecode (disabled)".into()));
@@ -1702,12 +1724,12 @@ fn decode_jbig2(data: &[u8], globals: Option<&[u8]>) -> Result<Vec<u8>, PdfError
 ///
 /// Uses hayro-jpeg2000 to decode JP2 or raw J2K codestreams into interleaved pixel data.
 #[cfg(feature = "jpx")]
-fn decode_jpx(data: &[u8]) -> Result<Vec<u8>, PdfError> {
+fn decode_jpx(data: &[u8], max_pixels: u64) -> Result<Vec<u8>, PdfError> {
     if data.is_empty() {
         return Ok(Vec::new());
     }
 
-    let image = open_jpx(data, &hayro_jpeg2000::DecodeSettings::default())?;
+    let image = open_jpx(data, &hayro_jpeg2000::DecodeSettings::default(), max_pixels)?;
 
     let mut ctx = hayro_jpeg2000::DecoderContext::default();
     let decoded = image
@@ -1725,11 +1747,20 @@ fn decode_jpx(data: &[u8]) -> Result<Vec<u8>, PdfError> {
 /// process. With a [`target_resolution`] the size checked is the reduced
 /// one, which is the one decoded.
 ///
+///
+/// `max_pixels` is the application's own ceiling
+/// ([`PdfDocument::set_max_image_pixels`](crate::PdfDocument::set_max_image_pixels)),
+/// or [`MAX_IMAGE_PIXELS`](stet_graphics::image_limits::MAX_IMAGE_PIXELS)
+/// when it has set none. It matters more here than for any other filter:
+/// this decoder needs about 39 bytes for every sample the header declares,
+/// however few bytes the stream has, so the header alone decides the cost.
+///
 /// [`target_resolution`]: hayro_jpeg2000::DecodeSettings::target_resolution
 #[cfg(feature = "jpx")]
 fn open_jpx<'a>(
     data: &'a [u8],
     settings: &hayro_jpeg2000::DecodeSettings,
+    max_pixels: u64,
 ) -> Result<hayro_jpeg2000::Image<'a>, PdfError> {
     use stet_graphics::image_limits::{validate_image_dimension, validate_image_size};
 
@@ -1744,6 +1775,7 @@ fn open_jpx<'a>(
                 "JPXDecode: image of {width} x {height} samples is too large"
             ))
         })?;
+    check_image_pixels(width, height, max_pixels)?;
     Ok(image)
 }
 
@@ -1760,6 +1792,16 @@ fn open_jpx<'a>(
 /// (hayro rescales sub-8-bit data to 0-255).
 #[cfg(feature = "jpx")]
 pub fn decode_jpx_no_palette(data: &[u8]) -> Result<(Vec<u8>, u8), PdfError> {
+    decode_jpx_no_palette_bounded(data, stet_graphics::image_limits::MAX_IMAGE_PIXELS)
+}
+
+/// [`decode_jpx_no_palette`], refusing an image of more than `max_pixels`
+/// samples.
+#[cfg(feature = "jpx")]
+pub(crate) fn decode_jpx_no_palette_bounded(
+    data: &[u8],
+    max_pixels: u64,
+) -> Result<(Vec<u8>, u8), PdfError> {
     if data.is_empty() {
         return Ok((Vec::new(), 8));
     }
@@ -1768,7 +1810,7 @@ pub fn decode_jpx_no_palette(data: &[u8]) -> Result<(Vec<u8>, u8), PdfError> {
         resolve_palette_indices: false,
         ..Default::default()
     };
-    let image = open_jpx(data, &settings)?;
+    let image = open_jpx(data, &settings, max_pixels)?;
     let bit_depth = image.original_bit_depth();
 
     let mut ctx = hayro_jpeg2000::DecoderContext::default();
@@ -1791,12 +1833,13 @@ pub fn decode_jpx_no_palette(data: &[u8]) -> Result<(Vec<u8>, u8), PdfError> {
 pub(crate) fn decode_jpx_reduced(
     data: &[u8],
     target: (u32, u32),
+    max_pixels: u64,
 ) -> Result<(Vec<u8>, u32, u32), PdfError> {
     let settings = hayro_jpeg2000::DecodeSettings {
         target_resolution: Some(target),
         ..Default::default()
     };
-    let image = open_jpx(data, &settings)?;
+    let image = open_jpx(data, &settings, max_pixels)?;
     let mut ctx = hayro_jpeg2000::DecoderContext::default();
     let decoded = image
         .decode(&mut ctx)

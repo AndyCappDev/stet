@@ -1416,3 +1416,55 @@ fn jpeg2000_codestream_claiming_an_absurd_size_is_refused() {
         }
     }
 }
+
+/// Inside the built-in limits a JPEG 2000 header can still ask for far
+/// more than a machine has: 60,000 x 60,000 samples is under four billion,
+/// and this decoder wants about 39 bytes for each, from a 25 KB stream.
+/// Nothing in the file tells it from a real one, so the bound is the
+/// application's: with a ceiling set, the image is refused before anything
+/// is allocated. (Without one this test would need 140 GB.)
+#[cfg(feature = "jpx")]
+#[test]
+fn jpeg2000_within_the_built_in_limits_is_held_to_the_applications_ceiling() {
+    use stet_pdf_reader::ParsePhase;
+
+    let fixture: &[u8] = include_bytes!("data/jpx/photo-512x384.jp2");
+    let siz = fixture
+        .windows(4)
+        .position(|w| w == [0xff, 0x4f, 0xff, 0x51])
+        .expect("codestream")
+        + 2;
+    let ihdr = fixture.windows(4).position(|w| w == b"ihdr").expect("ihdr");
+    let mut jp2 = fixture.to_vec();
+    let side = 60_000u32.to_be_bytes();
+    for at in [siz + 6, siz + 10, siz + 22, siz + 26, ihdr + 4, ihdr + 8] {
+        jp2[at..at + 4].copy_from_slice(&side);
+    }
+
+    let mut image = format!(
+        "<</Type/XObject/Subtype/Image/Width 512/Height 384/ColorSpace/DeviceRGB\
+         /BitsPerComponent 8/Filter/JPXDecode/Length {}>>\nstream\n",
+        jp2.len()
+    )
+    .into_bytes();
+    image.extend_from_slice(&jp2);
+    image.extend_from_slice(b"\nendstream");
+    let data = one_page_doc(
+        b"/Resources<</XObject<</I 5 0 R>>>>",
+        b"100 0 0 100 0 0 cm /I Do\n",
+        &[(5, image)],
+    );
+
+    let mut doc = PdfDocument::from_bytes(&data).unwrap();
+    doc.set_max_image_pixels(Some(250_000_000));
+    let _ = doc.render_page(0, 72.0);
+    assert!(
+        doc.parse_warnings()
+            .iter()
+            .any(|w| w.phase == ParsePhase::Content
+                && w.message.contains("60000 x 60000")
+                && w.message.contains("limit of 250000000")),
+        "{:?}",
+        doc.parse_warnings()
+    );
+}

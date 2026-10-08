@@ -577,6 +577,44 @@ impl<'a> PdfDocument<'a> {
         self.image_resolution
     }
 
+    /// Refuse to decode any image of more than `limit` samples (width
+    /// times height), or lift that with `None`.
+    ///
+    /// Nothing is refused by default beyond the limits every image is held
+    /// to (100,000 samples a side, four billion in all), which are sized
+    /// for prepress and for a machine that can hold such an image. An
+    /// application that knows its own memory can set something lower.
+    ///
+    /// It matters most for JPEG 2000. That decoder needs about 39 bytes
+    /// of memory for each sample an image's header declares, however small
+    /// the stream: a legitimate 212-megapixel image costs 8.5 GB to decode
+    /// in full, and a hostile 25 KB one declaring 60,000 x 60,000 asks for
+    /// more than 100 GB. Nothing in such a file marks it out from a real
+    /// one, so the only bound is one set from outside.
+    ///
+    /// The size counted is the one decoded. For a JPEG 2000 image that is
+    /// the size in its own header, and with
+    /// [`ImageResolution::Rendered`] — which
+    /// [`render_page_to_rgba`](Self::render_page_to_rgba) always uses —
+    /// the reduced size it is decoded at: a very large image drawn small
+    /// is still drawn. For every other image, mask and soft mask it is the
+    /// `/Width` times `/Height` in its dictionary.
+    ///
+    /// An image over the limit is left out of the page, with a
+    /// [`ParsePhase::Content`] warning in
+    /// [`parse_warnings`](Self::parse_warnings) that names its size.
+    pub fn set_max_image_pixels(&mut self, limit: Option<u64>) {
+        self.resolver
+            .set_max_image_pixels(limit.unwrap_or(stet_graphics::image_limits::MAX_IMAGE_PIXELS));
+    }
+
+    /// The limit set by
+    /// [`set_max_image_pixels`](Self::set_max_image_pixels), if one is.
+    pub fn max_image_pixels(&self) -> Option<u64> {
+        let limit = self.resolver.max_image_pixels();
+        (limit < stet_graphics::image_limits::MAX_IMAGE_PIXELS).then_some(limit)
+    }
+
     /// Choose which annotations rendered pages draw, by purpose and by
     /// class.
     ///

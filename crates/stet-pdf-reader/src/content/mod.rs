@@ -4955,6 +4955,13 @@ impl<'a> ContentInterpreter<'a> {
         // (streaming encoder placeholder like 60000), patch the JPEG header
         // to the PDF dict height before decoding to avoid wasting time on
         // excess zero-filled rows.
+        // The application's ceiling. A JPEG 2000 image is held to it by
+        // its decoder, for the size it is actually decoded at, which may
+        // be a reduced one; everything else is as large as it says here.
+        if !filter_is_jpx {
+            crate::filters::check_image_pixels(width, height, self.resolver.max_image_pixels())?;
+        }
+
         let cs_is_indexed = matches!(resolved_cs, Some(ResolvedColorSpace::Indexed { .. }));
         let reduced_jpx = if filter_is_jpx && !cs_is_indexed && !is_image_mask {
             self.decode_jpx_for_drawn_size(obj, dict)
@@ -4990,7 +4997,10 @@ impl<'a> ContentInterpreter<'a> {
             {
                 if let Some(raw) = self.resolver.raw_stream_bytes(obj) {
                     let jp2_data = crate::filters::decode_pre_jpx(raw, dict);
-                    let (mut data, bpc) = crate::filters::decode_jpx_no_palette(&jp2_data)?;
+                    let (mut data, bpc) = crate::filters::decode_jpx_no_palette_bounded(
+                        &jp2_data,
+                        self.resolver.max_image_pixels(),
+                    )?;
                     // hayro normalizes sub-8-bit data to 0-255 grayscale.
                     // Un-normalize back to raw palette indices using the
                     // codestream's original bit depth.
@@ -5904,6 +5914,7 @@ impl<'a> ContentInterpreter<'a> {
         if validate_image_size(sw, sh).is_none() {
             return Ok(None);
         }
+        crate::filters::check_image_pixels(sw, sh, self.resolver.max_image_pixels())?;
         let Some(bpc) = validate_bits_per_component(smask_dict.get_int(b"BitsPerComponent")) else {
             return Ok(None);
         };
@@ -5986,6 +5997,7 @@ impl<'a> ContentInterpreter<'a> {
         if validate_image_size(mw, mh).is_none() {
             return Ok(None);
         }
+        crate::filters::check_image_pixels(mw, mh, self.resolver.max_image_pixels())?;
         let mask_data = self.resolver.stream_data_from_obj(&mask_ref)?;
 
         // Determine mask polarity from /Decode (default [0 1]: 0=painted=opaque)
@@ -6120,7 +6132,9 @@ impl<'a> ContentInterpreter<'a> {
             return None;
         }
         let target = ((stored.0 / shrink).max(1), (stored.1 / shrink).max(1));
-        let (samples, width, height) = crate::filters::decode_jpx_reduced(&jp2, target).ok()?;
+        let (samples, width, height) =
+            crate::filters::decode_jpx_reduced(&jp2, target, self.resolver.max_image_pixels())
+                .ok()?;
         // Trust the decoder's account of what it produced only if it adds
         // up, and only if it is what was asked for: everything after this
         // sizes its work from these two numbers.
@@ -6623,8 +6637,8 @@ impl<'a> ContentInterpreter<'a> {
         // A rejected dimension lands as 0 here, which the existing
         // zero-dimension paths below already treat as "no image".
         let (width, height) = match validate_image_size(width, height) {
-            Some(_) => (width, height),
-            None => (0, 0),
+            Some(pixels) if pixels as u64 <= self.resolver.max_image_pixels() => (width, height),
+            _ => (0, 0),
         };
         let is_image_mask = matches!(dict.get(b"ImageMask"), Some(PdfObj::Bool(true)));
         // As for image XObjects (ISO 32000 §11.3.4), the image's own
