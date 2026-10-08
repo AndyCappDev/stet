@@ -382,7 +382,7 @@ renders at different resolutions. See the
 - All 5 PDF page boxes (MediaBox, CropBox, BleedBox, TrimBox, ArtBox) plus rotation, user unit, presentation hints
 - Embedded files (file attachments) with on-demand byte access and AfRelationship hints
 - Full **Optional Content (layer)** model: per-layer metadata + `/Usage` hints, hierarchy + alternate configurations + `/RBGroups`, runtime `LayerSet` overrides, OCMD `/P` policies (`AllOn` / `AnyOn` / `AllOff` / `AnyOff`), `/VE` boolean expressions (`/And` / `/Or` / `/Not`), and intent-driven rendering (`RenderIntent::View` / `Print` / `Export`) that honours `/AS` automatic-state rules
-- Parse warnings (`ParseWarning`, `ParsePhase`, `Severity`) for cycles, dropped entries, and structural truncations
+- Parse warnings (`ParseWarning`, `ParsePhase`, `Severity`) for cycles, dropped entries, and structural truncations, and for what goes wrong in page content while rendering — the library prints nothing to stderr
 
 **PostScript Interpreter**
 - Full PostScript Level 3 — 390 operators in `systemdict`

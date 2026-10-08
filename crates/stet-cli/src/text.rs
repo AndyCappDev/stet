@@ -149,7 +149,9 @@ fn pdf_pages(
             continue;
         }
         // 72 dpi: device space is points, from the top-left corner.
-        let list = match doc.render_page(index, 72.0) {
+        let rendered = doc.render_page(index, 72.0);
+        crate::print_content_warnings(&doc);
+        let list = match rendered {
             Ok(list) => list,
             Err(e) => {
                 eprintln!("Warning: page {number} of '{path}': {e}");

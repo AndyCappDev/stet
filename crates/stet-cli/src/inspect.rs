@@ -393,6 +393,7 @@ fn format_phase(phase: &ParsePhase) -> String {
         ParsePhase::PageBoxes { page } => format!("page-boxes(page {})", page + 1),
         ParsePhase::EmbeddedFiles => "embedded-files".to_string(),
         ParsePhase::Layers => "layers".to_string(),
+        ParsePhase::Content => "content".to_string(),
         _ => "other".to_string(),
     }
 }

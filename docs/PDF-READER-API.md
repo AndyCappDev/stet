@@ -548,10 +548,49 @@ Recoverable malformations — outline cycles, annotations missing
 accessors are called for the first time; cached subsequent calls
 don't re-emit.
 
+### Warnings from rendering
+
+The reader prints nothing to stderr. What goes wrong in a page's content
+is reported here too, as `ParsePhase::Content`, when the page is first
+rendered:
+
+| Severity | Examples |
+|---|---|
+| `Error` | a content stream that stops making sense part-way; what came before it is drawn |
+| `Warning` | a font, a soft mask or a predefined CMap that could not be loaded; a page with more nested content than the reader will interpret; an image decoded only in part |
+| `Info` | an image stream that needed the more lenient of two decoders |
+
+The page is in `location`, as `LocationHint::Page`:
+
+```rust
+use stet_pdf_reader::{LocationHint, ParsePhase};
+
+# let doc: stet_pdf_reader::PdfDocument = unimplemented!();
+let _list = doc.render_page(0, 150.0)?;
+for w in doc.parse_warnings().iter() {
+    if let (ParsePhase::Content, Some(LocationHint::Page(page))) = (&w.phase, &w.location) {
+        // show it beside page `page + 1`, log it, or ignore it
+    }
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Each is recorded once. Rendering a page again — which a viewer does at
+every zoom — adds nothing, so the list is bounded by what is wrong with
+the document and not by how long it stays open. The same fault on two
+pages is reported for each.
+
+The `stet` command line prints these as `warning:` lines, each distinct
+message once per run. That is its choice as an application; a GUI would
+do something else with them.
+
+### Holding the borrow
+
 The returned `Ref` wraps a `RefCell` borrow of the underlying
-storage. Drop it before invoking other accessors that might push more
-warnings (iterating through it is fine; calling `doc.outline()`
-mid-iteration is not).
+storage. Drop it before calling an accessor or rendering a page
+(iterating through it is fine; calling `doc.outline()` or
+`doc.render_page()` mid-iteration is not). A warning raised while the
+borrow is held is not recorded.
 
 ---
 

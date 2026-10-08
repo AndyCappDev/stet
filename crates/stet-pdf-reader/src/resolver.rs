@@ -43,9 +43,91 @@ pub struct Resolver<'a> {
     /// Cached scan map: obj_num → file offset of last `N 0 obj` marker.
     /// Built once on first xref miss, then reused for all subsequent lookups.
     scan_map: RefCell<Option<HashMap<u32, usize>>>,
+    /// Non-fatal problems found in this document. It lives here because
+    /// the resolver is the one thing every parser, the content interpreter
+    /// and the font loader are all handed.
+    warnings: crate::diagnostics::WarningSink,
+    /// The page being rendered, if one is: where content warnings are
+    /// said to be.
+    content_page: std::cell::Cell<Option<usize>>,
+}
+
+/// Marks a page as the one being rendered until dropped; see
+/// [`Resolver::rendering_page`].
+pub(crate) struct ContentPage<'r, 'a> {
+    resolver: &'r Resolver<'a>,
+    previous: Option<usize>,
+}
+
+impl Drop for ContentPage<'_, '_> {
+    fn drop(&mut self) {
+        self.resolver.content_page.set(self.previous);
+    }
 }
 
 impl<'a> Resolver<'a> {
+    /// The non-fatal problems found in this document so far: the list
+    /// behind [`PdfDocument::parse_warnings`](crate::PdfDocument::parse_warnings).
+    pub fn warnings(&self) -> &crate::diagnostics::WarningSink {
+        &self.warnings
+    }
+
+    /// Say which page is being rendered, so content warnings can name it,
+    /// for as long as the returned guard lives.
+    pub(crate) fn rendering_page(&self, page: usize) -> ContentPage<'_, 'a> {
+        ContentPage {
+            resolver: self,
+            previous: self.content_page.replace(Some(page)),
+        }
+    }
+
+    /// Record a problem with page content, once. See
+    /// [`ParsePhase::Content`](crate::diagnostics::ParsePhase::Content).
+    pub(crate) fn warn_content(
+        &self,
+        severity: crate::diagnostics::Severity,
+        message: impl Into<String>,
+    ) {
+        self.warnings.record_once(
+            crate::diagnostics::ParsePhase::Content,
+            self.content_page
+                .get()
+                .map(crate::diagnostics::LocationHint::Page),
+            severity,
+            message,
+        );
+    }
+
+    /// Decode a stream's filters, recording what the decoders recovered
+    /// from as content warnings.
+    pub(crate) fn decode_filters(
+        &self,
+        raw: &[u8],
+        filter_list: &[filters::Filter],
+        parms: &[Option<crate::objects::PdfDict>],
+        jbig2_globals: Option<&[u8]>,
+        budget: filters::DecodeBudget,
+    ) -> Result<Vec<u8>, PdfError> {
+        let mut notes = Vec::new();
+        let result = filters::decode_stream_noted(
+            raw,
+            filter_list,
+            parms,
+            jbig2_globals,
+            budget,
+            &mut notes,
+        );
+        for note in notes {
+            let severity = if note.lost_data {
+                crate::diagnostics::Severity::Warning
+            } else {
+                crate::diagnostics::Severity::Info
+            };
+            self.warn_content(severity, note.message);
+        }
+        result
+    }
+
     /// Create a temporary resolver without encryption (for resolving the
     /// Encrypt dict before encryption state is known).
     pub(crate) fn new(data: &'a [u8], xref: &XrefTable) -> Self {
@@ -59,6 +141,8 @@ impl<'a> Resolver<'a> {
             stream_seen: RefCell::new(HashSet::new()),
             objstm_cache: RefCell::new(HashMap::new()),
             scan_map: RefCell::new(None),
+            warnings: crate::diagnostics::WarningSink::new(),
+            content_page: std::cell::Cell::new(None),
         }
     }
 
@@ -78,6 +162,8 @@ impl<'a> Resolver<'a> {
             stream_seen: RefCell::new(HashSet::new()),
             objstm_cache: RefCell::new(HashMap::new()),
             scan_map: RefCell::new(None),
+            warnings: crate::diagnostics::WarningSink::new(),
+            content_page: std::cell::Cell::new(None),
         }
     }
 
@@ -203,7 +289,7 @@ impl<'a> Resolver<'a> {
                     Ok(raw)
                 } else {
                     let jbig2_globals = self.resolve_jbig2_globals(&filter_list, &parms)?;
-                    filters::decode_stream_bounded(
+                    self.decode_filters(
                         &raw,
                         &filter_list,
                         &parms,
@@ -281,7 +367,7 @@ impl<'a> Resolver<'a> {
                     Ok(raw.to_vec())
                 } else {
                     let jbig2_globals = self.resolve_jbig2_globals(&filter_list, &parms)?;
-                    filters::decode_stream_bounded(
+                    self.decode_filters(
                         raw,
                         &filter_list,
                         &parms,
@@ -700,7 +786,7 @@ impl<'a> Resolver<'a> {
         let stream_data = if filter_list.is_empty() {
             raw
         } else {
-            filters::decode_stream_bounded(
+            self.decode_filters(
                 &raw,
                 &filter_list,
                 &parms,

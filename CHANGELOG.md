@@ -63,6 +63,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`stet-pdf-reader` no longer prints to stderr.** A content stream
+  error, a font or soft mask that would not load, a missing predefined
+  CMap, a page cut short by the nesting budget and a CCITT image that
+  needed a fallback were each written straight to the terminal of
+  whatever application linked the library. They are now recorded in
+  `PdfDocument::parse_warnings()` under the new `ParsePhase::Content`,
+  with the page as the warning's location, when the page is first
+  rendered; rendering it again adds nothing. Two of them were silenced
+  after their first occurrence in the whole process, so a second document
+  with the same fault said nothing; each document now has its own record.
+  The `stet` command line prints them itself, so its output is unchanged
+  apart from the wording of the two CCITT messages. Also new:
+  `Resolver::warnings()` and `WarningSink::record_once`. A lint keeps
+  the library from printing again.
+
 - **An annotation flagged `NoView` is no longer drawn.** The flag means
   "do not display on screen"; it marks print-only content such as a
   watermark that should appear on paper alone. stet honoured `Hidden` and

@@ -347,6 +347,34 @@ pub fn decode_stream_bounded(
     jbig2_globals: Option<&[u8]>,
     budget: DecodeBudget,
 ) -> Result<Vec<u8>, PdfError> {
+    decode_stream_noted(
+        raw_data,
+        filters,
+        decode_parms,
+        jbig2_globals,
+        budget,
+        &mut Vec::new(),
+    )
+}
+
+/// Something a decoder got past without failing, for the caller to report.
+pub(crate) struct DecodeNote {
+    /// Whether data was lost, or only a second decoder was needed.
+    pub(crate) lost_data: bool,
+    pub(crate) message: String,
+}
+
+/// [`decode_stream_bounded`], also collecting what the decoders recovered
+/// from. The resolver uses this one, so the notes reach the document's
+/// warnings.
+pub(crate) fn decode_stream_noted(
+    raw_data: &[u8],
+    filters: &[Filter],
+    decode_parms: &[Option<PdfDict>],
+    jbig2_globals: Option<&[u8]>,
+    budget: DecodeBudget,
+    notes: &mut Vec<DecodeNote>,
+) -> Result<Vec<u8>, PdfError> {
     let mut data = raw_data.to_vec();
 
     for (i, filter) in filters.iter().enumerate() {
@@ -358,7 +386,7 @@ pub fn decode_stream_bounded(
             Filter::ASCII85Decode => decode_ascii85(&data)?,
             Filter::RunLengthDecode => decode_run_length(&data, budget)?,
             Filter::DCTDecode => decode_dct(&data)?,
-            Filter::CCITTFaxDecode => decode_ccittfax(&data, parms)?,
+            Filter::CCITTFaxDecode => decode_ccittfax(&data, parms, notes)?,
             #[cfg(feature = "jpx")]
             Filter::JPXDecode => decode_jpx(&data)?,
             #[cfg(not(feature = "jpx"))]
@@ -1327,7 +1355,11 @@ fn needs_ycck_override(data: &[u8]) -> bool {
 }
 
 /// CCITTFaxDecode (Group 3 / Group 4 fax compression).
-fn decode_ccittfax(data: &[u8], parms: Option<&PdfDict>) -> Result<Vec<u8>, PdfError> {
+fn decode_ccittfax(
+    data: &[u8],
+    parms: Option<&PdfDict>,
+    notes: &mut Vec<DecodeNote>,
+) -> Result<Vec<u8>, PdfError> {
     use crate::objects::PdfObj;
 
     let k = parms.and_then(|p| p.get_int(b"K")).unwrap_or(0) as i32;
@@ -1371,7 +1403,7 @@ fn decode_ccittfax(data: &[u8], parms: Option<&PdfDict>) -> Result<Vec<u8>, PdfE
         invert_black: false,
     };
 
-    decode_ccitt_hayro(data, &settings, black_is1)
+    decode_ccitt_hayro(data, &settings, black_is1, notes)
 }
 
 /// A byte-oriented CCITT pixel decoder used by hayro-ccitt.
@@ -1461,6 +1493,7 @@ fn decode_ccitt_hayro(
     data: &[u8],
     settings: &hayro_ccitt::DecodeSettings,
     black_is1: bool,
+    notes: &mut Vec<DecodeNote>,
 ) -> Result<Vec<u8>, PdfError> {
     let mut decoder = CcittByteDecoder::new(black_is1);
     let mut ctx = hayro_ccitt::DecoderContext::new(*settings);
@@ -1472,20 +1505,17 @@ fn decode_ccitt_hayro(
         && e != hayro_ccitt::DecodeError::UnexpectedEof
     {
         let fallback = decode_ccitt_fax(data, settings, black_is1);
-        use std::sync::atomic::{AtomicBool, Ordering};
-        static WARNED: AtomicBool = AtomicBool::new(false);
         if fallback.len() > decoder.output.len() {
-            if !WARNED.swap(true, Ordering::Relaxed) {
-                eprintln!(
-                    "[CCITT] hayro-ccitt error: {} — fell back to `fax` crate",
-                    e
-                );
-            }
+            notes.push(DecodeNote {
+                lost_data: false,
+                message: format!("CCITT image: {e}; decoded by the more lenient decoder instead"),
+            });
             return Ok(fallback);
         }
-        if !WARNED.swap(true, Ordering::Relaxed) {
-            eprintln!("[CCITT] decode warning: {} (using partial data)", e);
-        }
+        notes.push(DecodeNote {
+            lost_data: true,
+            message: format!("CCITT image: {e}; only the part before the error is drawn"),
+        });
     }
     Ok(decoder.output)
 }

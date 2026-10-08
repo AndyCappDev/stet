@@ -469,7 +469,7 @@ parse them.
 | `layers()` / `layer(ocg_id)` | `&[Layer]` / `Option<&Layer>` | catalog `/OCProperties /OCGs` |
 | `configurations()` / `default_configuration()` / `configuration(idx)` / `layer_tree()` | `&[Configuration]` / `Option<&Configuration>` / `LayerTree` | `/OCProperties /D` + `/Configs`, including `/Order` parsing |
 | `layer_set_for(intent)` | `LayerSet` | default config + `/AS` automatic-state rules for the intent |
-| `parse_warnings()` | `Ref<'_, [ParseWarning]>` | warnings emitted by the structural parsers |
+| `parse_warnings()` | `Ref<'_, [ParseWarning]>` | warnings from the structural parsers and, as pages are rendered, from their content; the reader prints nothing itself |
 
 The implementation lives in sibling modules under
 `crates/stet-pdf-reader/src/`: `metadata.rs`, `viewer_prefs.rs`,

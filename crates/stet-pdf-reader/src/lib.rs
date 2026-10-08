@@ -179,6 +179,10 @@
 //! out as reusable crates — `stet-pdf-reader` would not cover the full
 //! PDF stream-filter surface without them.
 
+// A library does not write to the terminal of the application that links
+// it: diagnostics go to `parse_warnings()`. Tests may print.
+#![cfg_attr(not(test), deny(clippy::print_stderr, clippy::print_stdout))]
+
 pub mod annotations;
 pub mod content;
 pub mod crypto;
@@ -308,11 +312,6 @@ pub struct PdfDocument<'a> {
     /// Layer configurations (default `/D` plus alternates from
     /// `/Configs`), parsed lazily on first access.
     configurations_cache: OnceCell<Vec<Configuration>>,
-    /// Parse-time warnings accumulated by structural parsers
-    /// (outline, annotations, form fields, ...). The sink uses
-    /// interior mutability so accessors can record warnings while
-    /// holding only `&self`.
-    warnings: WarningSink,
 }
 
 impl<'a> PdfDocument<'a> {
@@ -390,9 +389,8 @@ impl<'a> PdfDocument<'a> {
 
         let resolver = Resolver::with_encryption(data, xref, encryption);
         let (pages, box_notes) = page_tree::collect_pages_noted(&resolver)?;
-        let warnings = WarningSink::new();
         for (page, message) in box_notes {
-            warnings.record(
+            resolver.warnings().record(
                 ParsePhase::PageBoxes { page },
                 Some(LocationHint::Page(page)),
                 Severity::Warning,
@@ -425,7 +423,6 @@ impl<'a> PdfDocument<'a> {
             embedded_files_cache: OnceCell::new(),
             layers_cache: OnceCell::new(),
             configurations_cache: OnceCell::new(),
-            warnings,
         })
     }
 
@@ -686,6 +683,8 @@ impl<'a> PdfDocument<'a> {
             .pages
             .get(page)
             .ok_or(PdfError::PageOutOfRange(page, self.pages.len()))?;
+        // Content warnings raised from here on belong to this page.
+        let _rendering = self.resolver.rendering_page(page);
 
         let [llx, lly, urx, ury] =
             page_boxes::resolve_page_area(&self.resolver, info, page, self.page_area)?;
@@ -774,7 +773,8 @@ impl<'a> PdfDocument<'a> {
 
         // Render page content
         if let Err(e) = interpreter.interpret_stream_public(&content_data) {
-            eprintln!("warning: content stream error: {}", e);
+            self.resolver
+                .warn_content(Severity::Error, format!("content stream error: {e}"));
         }
         // Unwind any unbalanced q's left by the content stream.
         interpreter.unwind_gstate_stack();
@@ -972,7 +972,7 @@ impl<'a> PdfDocument<'a> {
     /// [`parse_warnings`](Self::parse_warnings).
     pub fn outline(&self) -> &[OutlineItem] {
         self.outline_cache.get_or_init(|| {
-            outline::parse_outline_tree(&self.resolver, &self.pages, &self.warnings)
+            outline::parse_outline_tree(&self.resolver, &self.pages, self.resolver.warnings())
         })
     }
 
@@ -1014,7 +1014,12 @@ impl<'a> PdfDocument<'a> {
         }
         let cell = &self.page_annotations_cache[page];
         let annots = cell.get_or_init(|| {
-            annotations::parse_page_annotations(&self.resolver, &self.pages, page, &self.warnings)
+            annotations::parse_page_annotations(
+                &self.resolver,
+                &self.pages,
+                page,
+                self.resolver.warnings(),
+            )
         });
         Ok(annots.as_slice())
     }
@@ -1032,23 +1037,27 @@ impl<'a> PdfDocument<'a> {
     /// renderable widget data.
     pub fn form(&self) -> Option<&FormCatalog> {
         self.form_cache
-            .get_or_init(|| form_fields::parse_acroform(&self.resolver, &self.warnings))
+            .get_or_init(|| form_fields::parse_acroform(&self.resolver, self.resolver.warnings()))
             .as_ref()
     }
 
-    /// Parse-time warnings accumulated by the structural accessors.
+    /// The non-fatal problems found in the document so far.
     ///
-    /// Outline cycles, dropped annotations (missing `/Rect`),
-    /// form-field tree truncations, and similar recoverable issues
-    /// are surfaced here. The list grows as accessors are called for
-    /// the first time; cached subsequent calls don't re-emit.
+    /// Two kinds arrive here. The structural accessors report outline
+    /// cycles, dropped annotations (missing `/Rect`), form-field tree
+    /// truncations and the like, when each is first called. Rendering
+    /// reports what went wrong in a page's content — a content stream
+    /// error, a font that would not load, an image decoded only in part —
+    /// as [`ParsePhase::Content`] with the page as its location, when the
+    /// page is first rendered. Neither repeats: a cached accessor and a
+    /// page rendered again add nothing. The reader prints nothing to
+    /// stderr; this list is where its diagnostics go.
     ///
     /// Returns a borrow of the underlying slice — drop the returned
-    /// `Ref` before calling any other accessor that could push more
-    /// warnings (e.g. iterating with `for w in doc.parse_warnings().iter()`
-    /// is fine; calling `doc.outline()` mid-iteration is not).
+    /// `Ref` before calling an accessor or rendering a page. A warning
+    /// raised while the borrow is held is not recorded.
     pub fn parse_warnings(&self) -> std::cell::Ref<'_, [ParseWarning]> {
-        self.warnings.borrow_slice()
+        self.resolver.warnings().borrow_slice()
     }
 
     /// Page geometry for a page (0-based) — all five PDF page boxes
@@ -1100,7 +1109,9 @@ impl<'a> PdfDocument<'a> {
     /// Parsed lazily on first call and cached.
     pub fn layers(&self) -> &[Layer] {
         self.layers_cache
-            .get_or_init(|| layers::metadata::parse_layers(&self.resolver, &self.warnings))
+            .get_or_init(|| {
+                layers::metadata::parse_layers(&self.resolver, self.resolver.warnings())
+            })
             .as_slice()
     }
 
@@ -1123,7 +1134,10 @@ impl<'a> PdfDocument<'a> {
     pub fn configurations(&self) -> &[Configuration] {
         self.configurations_cache
             .get_or_init(|| {
-                layers::configuration::parse_configurations(&self.resolver, &self.warnings)
+                layers::configuration::parse_configurations(
+                    &self.resolver,
+                    self.resolver.warnings(),
+                )
             })
             .as_slice()
     }

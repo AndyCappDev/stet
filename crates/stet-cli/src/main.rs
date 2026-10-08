@@ -2434,7 +2434,9 @@ fn render_dropped_pdf(
         if interrupt_flag.load(std::sync::atomic::Ordering::Relaxed) {
             return;
         }
-        match doc.render_page(page, dpi) {
+        let rendered = doc.render_page(page, dpi);
+        print_content_warnings(&doc);
+        match rendered {
             Ok(display_list) => {
                 let (w, h) = doc.page_size(page).unwrap_or((612.0, 792.0));
                 let scale = dpi / 72.0;
@@ -2507,6 +2509,31 @@ fn compute_fit_dims(
     (out_w, out_h, dpi)
 }
 
+/// Print the problems the reader found in a page's content, as `warning:`
+/// lines on stderr.
+///
+/// The reader itself prints nothing: it records them for
+/// `PdfDocument::parse_warnings`, and what to do with them is the
+/// application's call. This is the command line's: say each one once per
+/// run, however many pages repeat it — a font that will not load fails the
+/// same way on every page that uses it.
+pub(crate) fn print_content_warnings(doc: &PdfDocument) {
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+    use stet_pdf_reader::ParsePhase;
+
+    static PRINTED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+    let Ok(mut printed) = PRINTED.lock() else {
+        return;
+    };
+    let printed = printed.get_or_insert_with(HashSet::new);
+    for warning in doc.parse_warnings().iter() {
+        if warning.phase == ParsePhase::Content && printed.insert(warning.message.clone()) {
+            eprintln!("warning: {}", warning.message);
+        }
+    }
+}
+
 #[expect(clippy::too_many_arguments)]
 fn render_pdf_page_to_rgba(
     doc: &PdfDocument,
@@ -2529,7 +2556,9 @@ fn render_pdf_page_to_rgba(
             dpi,
         )
     };
-    let display_list = doc.render_page(page, effective_dpi)?;
+    let display_list = doc.render_page(page, effective_dpi);
+    print_content_warnings(doc);
+    let display_list = display_list?;
     let rgba = if use_viewport {
         stet_render::render_to_rgba_viewport(
             &display_list,
@@ -2835,7 +2864,9 @@ fn run_pdf_input_pdf(
                 }
             };
 
-            let display_list = match doc.render_page(page, 72.0) {
+            let rendered = doc.render_page(page, 72.0);
+            print_content_warnings(&doc);
+            let display_list = match rendered {
                 Ok(dl) => dl,
                 Err(e) => {
                     eprintln!("  Page {}: render error: {}", page_1based, e);

@@ -2754,10 +2754,13 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 );
                 (cmap.code_lengths, cmap.code_to_cid, cmap.wmode)
             } else {
-                eprintln!(
-                    "warning: predefined CMap '{}' not found; \
-                     set STET_CMAP_DIR or install poppler-data for CJK support",
-                    String::from_utf8_lossy(encoding_name)
+                resolver.warn_content(
+                    crate::diagnostics::Severity::Warning,
+                    format!(
+                        "predefined CMap '{}' not found; \
+                         set STET_CMAP_DIR or install poppler-data for CJK support",
+                        String::from_utf8_lossy(encoding_name)
+                    ),
                 );
                 ([2u8; 256], HashMap::new(), 0)
             }
@@ -4086,16 +4089,22 @@ impl CidTrueTypePdfFont {
 
     fn glyph_path_cid(&self, cid: u16) -> Option<PsPath> {
         if std::env::var("STET_DEBUG_TEXT").is_ok() {
-            eprintln!(
-                "[cid_tt] cid={} sub={} ordering={} identity={} to_unicode={} cmap={} cid_to_gid_map={}",
-                cid,
-                self.substituted,
-                String::from_utf8_lossy(&self.ordering),
-                self.identity_cid_to_gid,
-                !self.to_unicode.is_empty(),
-                !self.cmap.is_empty(),
-                self.cid_to_gid_map.is_some()
-            );
+            #[allow(
+                clippy::print_stderr,
+                reason = "a developer trace, printed only when STET_DEBUG_TEXT is set"
+            )]
+            {
+                eprintln!(
+                    "[cid_tt] cid={} sub={} ordering={} identity={} to_unicode={} cmap={} cid_to_gid_map={}",
+                    cid,
+                    self.substituted,
+                    String::from_utf8_lossy(&self.ordering),
+                    self.identity_cid_to_gid,
+                    !self.to_unicode.is_empty(),
+                    !self.cmap.is_empty(),
+                    self.cid_to_gid_map.is_some()
+                );
+            }
         }
         let gid = if self.ucs2_encoding && !self.cmap.is_empty() && self.code_to_cid.is_empty() {
             // UCS2 encoding with no CMap: cid is a raw Unicode code point, map via cmap.

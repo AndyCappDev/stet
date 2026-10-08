@@ -55,6 +55,15 @@ pub enum ParsePhase {
     EmbeddedFiles,
     /// Optional Content (layers): metadata, hierarchy, configurations.
     Layers,
+    /// Page content, found while a page was being rendered: a content
+    /// stream that stops making sense part-way, a font or a soft mask that
+    /// could not be loaded, an image stream decoded only in part. The page
+    /// is in the warning's [`location`](ParseWarning::location), as
+    /// [`LocationHint::Page`], when the render was of a page.
+    ///
+    /// These are recorded as pages are rendered, not when the document is
+    /// opened, and once each: rendering a page again adds nothing.
+    Content,
 }
 
 /// Where in the document a problem occurred.
@@ -107,8 +116,15 @@ impl WarningSink {
     }
 
     /// Push a warning into the sink.
+    ///
+    /// A warning raised while a caller still holds the slice from
+    /// [`borrow_slice`](Self::borrow_slice) is dropped: the list cannot
+    /// grow under a reader, and losing a diagnostic is better than a
+    /// panic in the middle of a render.
     pub fn push(&self, w: ParseWarning) {
-        self.inner.borrow_mut().push(w);
+        if let Ok(mut warnings) = self.inner.try_borrow_mut() {
+            warnings.push(w);
+        }
     }
 
     /// Convenience: build and push a warning with the given pieces.
@@ -125,6 +141,32 @@ impl WarningSink {
             severity,
             message: message.into(),
         });
+    }
+
+    /// Like [`record`](Self::record), unless the same warning — phase,
+    /// location and message — is already in the sink. For warnings raised
+    /// by work that is repeated, such as rendering a page.
+    pub fn record_once(
+        &self,
+        phase: ParsePhase,
+        location: Option<LocationHint>,
+        severity: Severity,
+        message: impl Into<String>,
+    ) {
+        let message = message.into();
+        let known = self
+            .inner
+            .borrow()
+            .iter()
+            .any(|w| w.phase == phase && w.location == location && w.message == message);
+        if !known {
+            self.push(ParseWarning {
+                phase,
+                location,
+                message,
+                severity,
+            });
+        }
     }
 
     /// Borrow the underlying slice for read-only access. Held borrow

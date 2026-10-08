@@ -16,6 +16,7 @@ pub mod graphics_state;
 mod standard_fonts;
 mod text_extract;
 
+use crate::diagnostics::Severity;
 use crate::error::PdfError;
 use crate::lexer::{Lexer, MAX_OBJECT_DEPTH, Token};
 use crate::objects::{PdfDict, PdfObj};
@@ -631,7 +632,8 @@ impl<'a> ContentInterpreter<'a> {
     /// Interpret a content stream and return the display list.
     pub fn interpret(mut self, data: &[u8]) -> Result<DisplayList, PdfError> {
         if let Err(e) = self.interpret_stream(data) {
-            eprintln!("warning: content stream error: {}", e);
+            self.resolver
+                .warn_content(Severity::Error, format!("content stream error: {e}"));
         }
         // Flush any active soft mask scope
         self.flush_soft_mask();
@@ -666,12 +668,12 @@ impl<'a> ContentInterpreter<'a> {
         let cost = u64::from(self.depth) + 1;
         if self.nested_work.saturating_add(cost) > MAX_NESTED_WORK {
             if self.nested_work < MAX_NESTED_WORK {
-                eprintln!(
-                    "warning: page has more nested content than the reader will \
-                     interpret; the rest of it is not drawn"
+                self.resolver.warn_content(
+                    Severity::Warning,
+                    "page has more nested content than the reader will interpret; \
+                     the rest of it is not drawn",
                 );
             }
-            // Spend what is left, so the page stays over budget from here.
             self.nested_work = MAX_NESTED_WORK;
             return Err(PdfError::Other(
                 "page has more nested content than the reader will interpret".into(),
@@ -3150,16 +3152,10 @@ impl<'a> ContentInterpreter<'a> {
                 self.current_font = Some(arc);
             }
             Err(e) => {
-                // Deduplicate warnings across pages (same font fails on every page)
-                use std::sync::Mutex;
-                static WARNED: Mutex<Vec<String>> = Mutex::new(Vec::new());
-                let msg = format!("font /{}: {}", String::from_utf8_lossy(name), e);
-                if let Ok(mut set) = WARNED.lock()
-                    && !set.contains(&msg)
-                {
-                    eprintln!("warning: {msg}");
-                    set.push(msg);
-                }
+                self.resolver.warn_content(
+                    Severity::Warning,
+                    format!("font /{}: {}", String::from_utf8_lossy(name), e),
+                );
                 // Try fallback font on resolution failure too
                 if let Some(fallback) = font::fallback_font(self.font_provider.as_ref()) {
                     let arc = Arc::new(fallback);
@@ -6564,10 +6560,16 @@ impl<'a> ContentInterpreter<'a> {
         // Apply filters if present
         let sample_data = if has_filter {
             match crate::filters::parse_filters(&dict, Some(self.resolver)) {
-                Ok((filters, parms)) if !filters.is_empty() => {
-                    crate::filters::decode_stream(&sample_data, &filters, &parms, None)
-                        .unwrap_or(sample_data)
-                }
+                Ok((filters, parms)) if !filters.is_empty() => self
+                    .resolver
+                    .decode_filters(
+                        &sample_data,
+                        &filters,
+                        &parms,
+                        None,
+                        crate::filters::DecodeBudget::default(),
+                    )
+                    .unwrap_or(sample_data),
                 _ => sample_data,
             }
         } else {
@@ -6893,7 +6895,8 @@ impl<'a> ContentInterpreter<'a> {
                         self.current_font = Some(arc);
                     }
                     Err(e) => {
-                        eprintln!("warning: ExtGState Font: {e}");
+                        self.resolver
+                            .warn_content(Severity::Warning, format!("ExtGState Font: {e}"));
                     }
                 }
             }
@@ -6925,7 +6928,10 @@ impl<'a> ContentInterpreter<'a> {
                             });
                         }
                         Err(e) => {
-                            eprintln!("warning: SMask resolve error: {}", e);
+                            self.resolver.warn_content(
+                                Severity::Warning,
+                                format!("SMask resolve error: {e}"),
+                            );
                         }
                     }
                 }
