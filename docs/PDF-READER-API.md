@@ -95,6 +95,47 @@ let doc = match PdfDocument::from_owned(Arc::clone(&bytes)) {
 the three `from_bytes` constructors. They take `impl Into<PdfBytes>`,
 which a `Vec<u8>`, a `Box<[u8]>` and an `Arc<[u8]>` all are.
 
+### Display lists and resolution
+
+`render_page(page, dpi)` returns a display list in device space at `dpi`,
+but every image in it is at the resolution the file stores. The list can
+be zoomed into, rendered again at ten times the size or written out as
+another PDF, and no image is any the worse. That is the default,
+`ImageResolution::Full`, and it does not change with `dpi`.
+
+A list that will be rasterised once, at the `dpi` it was built for, does
+not need that, and can cost far less:
+
+```rust
+use stet_pdf_reader::ImageResolution;
+
+# let mut doc: stet_pdf_reader::PdfDocument = unimplemented!();
+doc.set_image_resolution(ImageResolution::Rendered);
+let list = doc.render_page(0, 150.0)?; // for rasterising at 150 dpi or below
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Under `Rendered`, an image may be decoded below its stored resolution
+when the page draws it smaller than that. It applies where decoding less
+is less work rather than a resize afterwards — today, JPEG 2000, whose
+codestream holds the image at successive halvings. The level is chosen so
+that the result is at least the size drawn, and so that the picture stays
+within a quarter of a device pixel of where the full image would put it
+(a reduced level is offset slightly, by more the further it is reduced).
+A 212-megapixel scan drawn 3,152 pixels wide goes from 8.6 GB and 8 s to
+0.6 GB and 1.1 s.
+
+Left at full resolution regardless: an image with a `/Mask` (a colour key
+or a stencil picks out exact samples), a palette image, an image inside a
+tiling pattern or a Type 3 glyph, and an image in an encrypted file. An
+image with a soft mask is reduced, and its mask averaged down with it.
+
+`render_page_to_rgba` and its variants rasterise at once and never hand
+the list out, so they always decode for the rendered size; the setting is
+for callers of `render_page` that rasterise the list themselves. The
+`stet` command line sets it for PNG output and not for the viewer or for
+PDF output.
+
 ---
 
 ## Document metadata

@@ -256,6 +256,33 @@ use stet_graphics::icc::IccCache;
 /// Used for environments without filesystem access (WASM) where fonts are embedded.
 pub type FontProvider = Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>;
 
+/// How much of an image's resolution a rendered page carries: the setting
+/// for [`PdfDocument::set_image_resolution`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum ImageResolution {
+    /// Every image at the resolution it is stored at. The display list is
+    /// then independent of the resolution it was built for: it can be
+    /// zoomed into, rendered again larger, or written to another format,
+    /// and no image is any worse for it. The default.
+    #[default]
+    Full,
+    /// An image may be decoded at less than its stored resolution when the
+    /// page draws it smaller than that, never at less than the size it is
+    /// drawn at the `dpi` given to
+    /// [`render_page`](PdfDocument::render_page). The display list is then
+    /// good for rasterising at that resolution or below, and not for
+    /// enlarging.
+    ///
+    /// It applies where decoding less is less work, not a resize after the
+    /// fact: today, JPEG 2000 images, whose codestream holds the image at
+    /// successive halvings. A 212-megapixel one drawn on a page 3,000
+    /// pixels wide decodes in an eighth of the time and a fourteenth of
+    /// the memory. The picture stays within a quarter of a device pixel of
+    /// where the full image would put it.
+    Rendered,
+}
+
 /// A parsed PDF document.
 pub struct PdfDocument<'a> {
     resolver: Resolver<'a>,
@@ -277,6 +304,9 @@ pub struct PdfDocument<'a> {
     /// Whether rendered pages include annotation appearances. On by
     /// default. See [`PdfDocument::set_render_annotations`].
     render_annotations: bool,
+    /// Whether rendered pages carry images at full resolution. See
+    /// [`PdfDocument::set_image_resolution`].
+    image_resolution: ImageResolution,
     /// Which annotations are drawn when any are. See
     /// [`PdfDocument::set_annotation_filter`].
     annotation_filter: AnnotationFilter,
@@ -474,6 +504,7 @@ impl<'a> PdfDocument<'a> {
             overprint: true,
             render_annotations: true,
             annotation_filter: AnnotationFilter::default(),
+            image_resolution: ImageResolution::Full,
             text_extraction: TextExtraction::Off,
             page_area: PageArea::CropBox,
             default_rendering_intent: RenderingIntent::RelativeColorimetric,
@@ -522,6 +553,28 @@ impl<'a> PdfDocument<'a> {
     /// [`set_render_annotations`](Self::set_render_annotations).
     pub fn render_annotations(&self) -> bool {
         self.render_annotations
+    }
+
+    /// Choose whether [`render_page`](Self::render_page) keeps every image
+    /// at full resolution.
+    ///
+    /// [`ImageResolution::Full`], the default, does, and its display lists
+    /// are independent of resolution. Choose
+    /// [`ImageResolution::Rendered`] when a list will be rasterised at the
+    /// `dpi` it was built for and then dropped: a very large image drawn
+    /// small then costs what it is drawn at, not what it is stored at.
+    ///
+    /// [`render_page_to_rgba`](Self::render_page_to_rgba) and its variants
+    /// rasterise at once and never hand the list out, so they decode for
+    /// the rendered size whatever is set here.
+    pub fn set_image_resolution(&mut self, resolution: ImageResolution) {
+        self.image_resolution = resolution;
+    }
+
+    /// The setting made by
+    /// [`set_image_resolution`](Self::set_image_resolution).
+    pub fn image_resolution(&self) -> ImageResolution {
+        self.image_resolution
     }
 
     /// Choose which annotations rendered pages draw, by purpose and by
@@ -744,6 +797,18 @@ impl<'a> PdfDocument<'a> {
     /// `/Rotate`, and the offset of the [`PageArea`] set with
     /// [`set_page_area`](Self::set_page_area) — the crop box by default.
     pub fn render_page(&self, page: usize, dpi: f64) -> Result<DisplayList, PdfError> {
+        self.build_display_list(page, dpi, self.image_resolution)
+    }
+
+    /// [`render_page`](Self::render_page), with the image resolution said
+    /// by the caller: the paths that rasterise at once pass
+    /// [`ImageResolution::Rendered`].
+    fn build_display_list(
+        &self,
+        page: usize,
+        dpi: f64,
+        image_resolution: ImageResolution,
+    ) -> Result<DisplayList, PdfError> {
         let info = self
             .pages
             .get(page)
@@ -834,6 +899,7 @@ impl<'a> PdfDocument<'a> {
         }
         interpreter.set_text_extraction(self.text_extraction);
         interpreter.set_annotation_filter(self.annotation_filter);
+        interpreter.set_image_resolution(image_resolution);
         interpreter.set_initial_rendering_intent(self.default_rendering_intent);
 
         // Render page content
@@ -913,7 +979,9 @@ impl<'a> PdfDocument<'a> {
         let pixel_w = (page_w * scale).round() as u32;
         let pixel_h = (page_h * scale).round() as u32;
 
-        let display_list = self.render_page(page, dpi)?;
+        // The list is rasterised here, at this resolution, and dropped: no
+        // image need be decoded beyond the size it is drawn at.
+        let display_list = self.build_display_list(page, dpi, ImageResolution::Rendered)?;
 
         let rgba = stet_render::render_to_rgba_with_background(
             &display_list,

@@ -2626,6 +2626,10 @@ fn run_pdf_input_png(
         if let Some(area) = page_area {
             doc.set_page_area(area);
         }
+        // Each page's display list is rasterised at the resolution it was
+        // built for and dropped, so an image need not be decoded beyond the
+        // size it is drawn at.
+        doc.set_image_resolution(stet_pdf_reader::ImageResolution::Rendered);
         doc.set_default_rendering_intent(icc_cfg.default_intent);
         // Opt-in: when `--use-output-intent` is set and the user didn't pin a
         // source CMYK profile via `--cmyk-profile`/`--output-profile`, prefer

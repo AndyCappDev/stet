@@ -1750,6 +1750,44 @@ pub fn decode_jpx_no_palette(data: &[u8]) -> Result<(Vec<u8>, u8), PdfError> {
     Ok((pixels, bit_depth))
 }
 
+/// Decode a JPEG 2000 image at the smallest of its resolution levels that
+/// is at least `target` pixels in each direction, returning the samples
+/// and the size they came out at.
+///
+/// A JPEG 2000 codestream stores the image as a pyramid — each wavelet
+/// level halves it — so a smaller version is not a full decode followed by
+/// a resize but less decoding: the levels above the one wanted are never
+/// reconstructed. Time and memory both fall with the pixel count.
+#[cfg(feature = "jpx")]
+pub(crate) fn decode_jpx_reduced(
+    data: &[u8],
+    target: (u32, u32),
+) -> Result<(Vec<u8>, u32, u32), PdfError> {
+    let settings = hayro_jpeg2000::DecodeSettings {
+        target_resolution: Some(target),
+        ..Default::default()
+    };
+    let image = hayro_jpeg2000::Image::new(data, &settings)
+        .map_err(|e| PdfError::DecompressionError(format!("JPXDecode: {e}")))?;
+    let mut ctx = hayro_jpeg2000::DecoderContext::default();
+    let decoded = image
+        .decode(&mut ctx)
+        .map_err(|e| PdfError::DecompressionError(format!("JPXDecode: {e}")))?;
+    Ok((decoded.data_u8(), image.width(), image.height()))
+}
+
+/// Whether a JP2 file carries a palette (`pclr`) box, so that its samples
+/// are indices rather than colours. Looked for by name in the header, ahead
+/// of the codestream: a false positive only costs an optimisation.
+#[cfg(feature = "jpx")]
+pub(crate) fn jpx_has_palette(data: &[u8]) -> bool {
+    let header_end = data
+        .windows(4)
+        .position(|w| w == b"jp2c")
+        .unwrap_or(data.len().min(64 * 1024));
+    data[..header_end].windows(4).any(|w| w == b"pclr")
+}
+
 /// Query the number of color channels (excluding alpha) and whether alpha is
 /// present in a JPEG 2000 image, without fully decoding the pixel data.
 /// Returns `(color_channels, has_alpha)`.
@@ -2116,6 +2154,16 @@ fn hex_digit(b: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "jpx")]
+    #[test]
+    fn a_palette_box_is_found_only_ahead_of_the_codestream() {
+        assert!(jpx_has_palette(b"....jp2h....ihdr....pclr....jp2c...."));
+        assert!(!jpx_has_palette(b"....jp2h....ihdr....colr....jp2c...."));
+        // The same four bytes inside the compressed data mean nothing.
+        assert!(!jpx_has_palette(b"....jp2h....ihdr....jp2c..pclr.."));
+        assert!(!jpx_has_palette(b""));
+    }
 
     #[test]
     fn flate_round_trip() {

@@ -21,6 +21,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only, and not with `--width`/`--height`. Contributed by @jungseohaan
   (#5).
 
+- **`PdfDocument::set_image_resolution`, and `ImageResolution`.** A
+  display list keeps every image at its stored resolution, so it can be
+  zoomed into or written to another format; that is
+  `ImageResolution::Full`, the default, and it is unchanged. A caller that
+  builds a list with `render_page` only to rasterise it at that resolution
+  can now say so with `ImageResolution::Rendered`, and get what
+  `render_page_to_rgba` does on its own (see "Changed"). See
+  `docs/PDF-READER-API.md`, "Display lists and resolution".
+
 - **`PdfDocument::from_owned`: a document that owns its bytes.**
   `from_bytes` borrows the file, so a `PdfDocument<'a>` cannot outlive the
   buffer, and an application that keeps documents open — a viewer, a
@@ -73,6 +82,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   archives' `THIRD-PARTY-NOTICES.txt` carries it.
 
 ### Changed
+
+- **A very large JPEG 2000 image drawn small is decoded small.** Where a
+  page is rasterised at once — `render_page_to_rgba` and its variants, and
+  `stet --device png` for PDF input — a JPEG 2000 image the page draws at
+  half its stored size or less is decoded at a lower resolution level of
+  its codestream rather than in full and then scaled down. A 212-megapixel
+  scan (pdf.js `issue19517.pdf`) rendered 3,152 pixels wide went from
+  8.6 GB and 8 s to 0.6 GB and 1.1 s. The level is chosen to be at least
+  the size drawn and to keep the picture within a quarter of a device
+  pixel of where the full image would put it; a soft mask is averaged down
+  to match. Pixels of such pages differ slightly from before: the
+  wavelet's own smaller image is not the same filter as averaging blocks
+  of the large one. Images with a `/Mask`, palette images, images inside
+  tiling patterns or Type 3 glyphs and images in encrypted files are
+  decoded in full as before, and so is everything in a display list from
+  `render_page`, the viewer and PDF output, which stay independent of
+  resolution.
 
 - **`Resolver::data()` returns `&[u8]` borrowed from the resolver**, where
   it returned `&'a [u8]` borrowed from the file. A resolver may now own

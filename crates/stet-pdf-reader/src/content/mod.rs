@@ -358,6 +358,94 @@ struct CachedImage {
     /// Cached so re-emits keep the same intent — the image-level intent is a
     /// property of the image, not of the gstate at re-use time.
     rendering_intent: u8,
+    /// The image's stored size, when `sample_data` was decoded at less
+    /// than that for the size it was first drawn at. A later, larger
+    /// placement then has to decode again rather than reuse this.
+    reduced_from: Option<(u32, u32)>,
+}
+
+/// An 8-bit mask of `sw` x `sh` averaged down to `dw` x `dh`, each output
+/// sample the mean of the block of input samples it covers. For alpha that
+/// is the right answer, where picking one sample of the block is not: a
+/// thin opaque line would come and go with the phase.
+///
+/// Input samples the mask is short of count as transparent, as elsewhere.
+fn average_mask_down(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+    let (sw, sh, dw, dh) = (sw as usize, sh as usize, dw as usize, dh as usize);
+    let mut out = vec![0u8; dw * dh];
+    if sw == 0 || sh == 0 {
+        return out;
+    }
+    // Block edges, shared by every row and every column.
+    let edges = |s: usize, d: usize| -> Vec<(usize, usize)> {
+        (0..d)
+            .map(|i| {
+                let start = i * s / d;
+                let end = ((i + 1) * s / d).max(start + 1).min(s);
+                (start, end)
+            })
+            .collect()
+    };
+    let (cols, rows) = (edges(sw, dw), edges(sh, dh));
+    for (dy, &(y0, y1)) in rows.iter().enumerate() {
+        for (dx, &(x0, x1)) in cols.iter().enumerate() {
+            let mut sum = 0u64;
+            for y in y0..y1 {
+                let row = y * sw;
+                if let Some(run) = src.get(row + x0..row + x1) {
+                    sum += run.iter().map(|&v| u64::from(v)).sum::<u64>();
+                } else if let Some(run) = src.get(row + x0..) {
+                    sum += run.iter().map(|&v| u64::from(v)).sum::<u64>();
+                }
+            }
+            let count = ((y1 - y0) * (x1 - x0)) as u64;
+            out[dy * dw + dx] = ((sum + count / 2) / count) as u8;
+        }
+    }
+    out
+}
+
+/// How far a JPEG 2000 image stored at `stored` may be shrunk — by 2, 4,
+/// 8, … in each direction — when it is drawn at `drawn` device pixels, or
+/// `None` if not at all.
+///
+/// Two things limit it. The result must still be at least the drawn size.
+/// And it must still be in the right place: a sample of the level shrunk
+/// by `g` stands for the `g` stored samples around stored sample `k * g`,
+/// where a sample of an image `1/g` the size ought to stand for those
+/// around `k * g + g / 2`. Drawn in the usual way, the picture therefore
+/// sits `g / 2 - 1` stored samples from where the full image would put it:
+/// nothing at 2, one sample at 4, three at 8. That is held to a quarter of
+/// a device pixel, which keeps an image in register with whatever is drawn
+/// over it; it costs a level or two of the saving on the deepest
+/// reductions and nothing on the first two.
+#[cfg(feature = "jpx")]
+fn jpx_shrink_factor(stored: (u32, u32), drawn: (u32, u32)) -> Option<u32> {
+    let allowed = |shrink: u64| {
+        let fits = |stored: u32, drawn: u32| {
+            let (stored, drawn) = (u64::from(stored), u64::from(drawn));
+            // Still at least the drawn size, and the offset, in device
+            // pixels `(shrink / 2 - 1) * drawn / stored`, at most 1/4.
+            drawn * shrink <= stored && (shrink / 2 - 1) * drawn * 4 <= stored
+        };
+        fits(stored.0, drawn.0) && fits(stored.1, drawn.1)
+    };
+    let mut shrink = None;
+    let mut candidate = 2u32;
+    while candidate <= 1 << 16 && allowed(u64::from(candidate)) {
+        shrink = Some(candidate);
+        candidate *= 2;
+    }
+    shrink
+}
+
+/// A JPEG 2000 image decoded below its stored resolution.
+struct ReducedImage {
+    samples: Vec<u8>,
+    width: u32,
+    height: u32,
+    /// The size the image is stored at.
+    stored: (u32, u32),
 }
 
 /// Tracks the scope of an active soft mask in the display list.
@@ -463,6 +551,13 @@ pub struct ContentInterpreter<'a> {
     /// Which annotations [`Self::render_annotation`] draws; see
     /// [`Self::set_annotation_filter`].
     annotation_filter: crate::annotations::AnnotationFilter,
+    /// Whether images are kept at full resolution; see
+    /// [`Self::set_image_resolution`].
+    image_resolution: crate::ImageResolution,
+    /// How many enclosing content streams are drawn at a scale the CTM
+    /// here does not show — a tiling pattern's cell, a Type 3 glyph — so
+    /// that the size an image is drawn at cannot be read from it.
+    unscaled_nesting: u32,
     /// Text-extraction data for each font resolved while `text_extraction`
     /// is on, keyed by the font's `Arc` address. The `Arc` is held so the
     /// address cannot be reused by another font.
@@ -554,6 +649,8 @@ impl<'a> ContentInterpreter<'a> {
             overprint_enabled,
             text_extraction: TextExtraction::Off,
             annotation_filter: crate::annotations::AnnotationFilter::default(),
+            image_resolution: crate::ImageResolution::Full,
+            unscaled_nesting: 0,
             font_text: std::collections::HashMap::new(),
             text_show: None,
             last_text_run: None,
@@ -575,6 +672,13 @@ impl<'a> ContentInterpreter<'a> {
     /// to match compositing in CMYK space (produces more muted, accurate colors).
     pub fn set_page_group_cmyk(&mut self) {
         self.page_group_is_cmyk = true;
+    }
+
+    /// Choose whether images are kept at full resolution, or may be
+    /// decoded for the size the page draws them at. Full by default; see
+    /// [`ImageResolution`](crate::ImageResolution).
+    pub fn set_image_resolution(&mut self, resolution: crate::ImageResolution) {
+        self.image_resolution = resolution;
     }
 
     /// Choose which annotations [`Self::render_annotation`] draws. The
@@ -3913,7 +4017,9 @@ impl<'a> ContentInterpreter<'a> {
         let saved_d1 = self.d1_color_suppressed;
         self.d1_color_suppressed = false;
         let suspended = self.suspend_text_extraction();
+        self.unscaled_nesting += 1;
         let _ = self.interpret_nested(proc_id, &proc_data);
+        self.unscaled_nesting -= 1;
         self.resume_text_extraction(suspended);
         self.d1_color_suppressed = saved_d1;
         // Collect glyph display elements and append to main display list
@@ -4703,10 +4809,22 @@ impl<'a> ContentInterpreter<'a> {
     fn handle_image_xobject(&mut self, obj: &PdfObj, dict: &PdfDict) -> Result<(), PdfError> {
         // Check image cache: if we've already processed this XObject, reuse the
         // decoded data with fresh graphics-state params (CTM, alpha, blend, etc.).
+        //
+        // One exception: an image decoded at reduced resolution for a small
+        // placement is no good for a larger one, and is decoded again.
         if let PdfObj::Ref(obj_num, _) = obj
-            && let Some(cached) = self.image_cache.get(obj_num).cloned()
+            && let Some(cached) = self.image_cache.get(obj_num)
         {
-            return self.emit_cached_image(cached);
+            let big_enough = match (cached.reduced_from, self.drawn_image_size()) {
+                (None, _) => true,
+                (Some(_), Some((w, h))) => cached.width >= w && cached.height >= h,
+                // Reduced, and now drawn where its size cannot be known.
+                (Some(_), None) => false,
+            };
+            if big_enough {
+                let cached = cached.clone();
+                return self.emit_cached_image(cached);
+            }
         }
 
         // Width/Height may be indirect references in some PDFs.
@@ -4807,7 +4925,16 @@ impl<'a> ContentInterpreter<'a> {
         // to the PDF dict height before decoding to avoid wasting time on
         // excess zero-filled rows.
         let cs_is_indexed = matches!(resolved_cs, Some(ResolvedColorSpace::Indexed { .. }));
-        let sample_data = if filter_is_dct {
+        let reduced_jpx = if filter_is_jpx && !cs_is_indexed && !is_image_mask {
+            self.decode_jpx_for_drawn_size(obj, dict)
+        } else {
+            None
+        };
+        let reduced_from = reduced_jpx.as_ref().map(|r| r.stored);
+        let reduced_size = reduced_jpx.as_ref().map(|r| (r.width, r.height));
+        let sample_data = if let Some(reduced) = reduced_jpx {
+            reduced.samples
+        } else if filter_is_dct {
             if let Some(raw) = self.resolver.raw_stream_bytes(obj)
                 && let Some((_jw, jh)) = crate::filters::jpeg_dimensions(raw)
                 && jh > height * 2
@@ -4869,6 +4996,9 @@ impl<'a> ContentInterpreter<'a> {
             } else {
                 (width, height)
             }
+        } else if let Some(size) = reduced_size {
+            // Decoded below its stored resolution: the samples are this size.
+            size
         } else if filter_is_jpx {
             #[cfg(feature = "jpx")]
             {
@@ -5388,9 +5518,22 @@ impl<'a> ContentInterpreter<'a> {
             // mask on a 2×2 image in issue16263.pdf). The limit is generous
             // enough for high-DPI and zoomed rendering but prevents pathological
             // cases from consuming gigabytes of memory.
+            //
+            // An image decoded below its stored resolution, for the size
+            // it is drawn at, is the exception: enlarging it to its mask
+            // would undo that. The mask comes down to it instead.
             const MAX_PIXELS: u64 = 16_000_000; // ~4096×4096
-            let mut target_w = mw.max(width);
-            let mut target_h = mh.max(height);
+            let image_is_reduced = reduced_from.is_some();
+            let mut target_w = if image_is_reduced {
+                width
+            } else {
+                mw.max(width)
+            };
+            let mut target_h = if image_is_reduced {
+                height
+            } else {
+                mh.max(height)
+            };
             if (target_w as u64) * (target_h as u64) > MAX_PIXELS {
                 let scale = (MAX_PIXELS as f64 / (target_w as f64 * target_h as f64)).sqrt();
                 target_w = (target_w as f64 * scale).ceil() as u32;
@@ -5411,7 +5554,9 @@ impl<'a> ContentInterpreter<'a> {
             };
 
             // Resample SMask to image dimensions if they differ
-            let smask_data = if mw != width || mh != height {
+            let smask_data = if image_is_reduced && mw >= width && mh >= height {
+                average_mask_down(&smask_data, mw, mh, width, height)
+            } else if mw != width || mh != height {
                 let mut resampled = vec![0u8; (width * height) as usize];
                 for y in 0..height {
                     let sy = (y as u64 * mh as u64 / height as u64) as u32;
@@ -5479,6 +5624,7 @@ impl<'a> ContentInterpreter<'a> {
                             matte: matte.clone(),
                         }),
                         rendering_intent: image_params.rendering_intent,
+                        reduced_from,
                     },
                 );
             }
@@ -5569,6 +5715,7 @@ impl<'a> ContentInterpreter<'a> {
                         painted_channels: image_params.painted_channels,
                         smask: None,
                         rendering_intent: image_params.rendering_intent,
+                        reduced_from,
                     },
                 );
             }
@@ -5890,6 +6037,83 @@ impl<'a> ContentInterpreter<'a> {
             }
             Ok(Some((resampled, image_w, image_h)))
         }
+    }
+
+    /// The size in device pixels the image about to be drawn covers, when
+    /// images may be decoded for it: `None` under
+    /// [`ImageResolution::Full`](crate::ImageResolution::Full), and inside
+    /// a tiling pattern or a Type 3 glyph, whose content is drawn at scales
+    /// the CTM here does not show.
+    ///
+    /// An image fills the unit square, so the CTM's two axes are its width
+    /// and height on the page, whatever the rotation or skew.
+    fn drawn_image_size(&self) -> Option<(u32, u32)> {
+        if self.image_resolution != crate::ImageResolution::Rendered || self.unscaled_nesting > 0 {
+            return None;
+        }
+        let ctm = &self.gstate.ctm;
+        let (w, h) = (ctm.a.hypot(ctm.b), ctm.c.hypot(ctm.d));
+        if !(w.is_finite() && h.is_finite()) {
+            return None;
+        }
+        // Whole pixels, rounded down. A resolution level is chosen by
+        // integer division of the stored size by this, so rounding 4201.5
+        // up would ask for a level a pixel larger than the one that fits
+        // and get the next one, twice the size each way, for nothing.
+        let pixels = |v: f64| v.floor().clamp(1.0, f64::from(u32::MAX)) as u32;
+        Some((pixels(w), pixels(h)))
+    }
+
+    /// Decode a JPEG 2000 image at a lower resolution level, if the size
+    /// it is drawn at allows one — otherwise `None`, and the caller decodes
+    /// it in full as usual.
+    ///
+    /// Left to the full decode as well: an image with a `/Mask`, which
+    /// picks pixels out exactly (a colour key would no longer find its
+    /// colour once neighbours are averaged in); a palette image, whose
+    /// samples are indices and cannot be averaged at all; and a stream the
+    /// decoder cannot open as it stands, which includes an encrypted one.
+    /// A soft mask is fine: it is averaged down to match, which is what
+    /// alpha means.
+    #[cfg(feature = "jpx")]
+    fn decode_jpx_for_drawn_size(&self, obj: &PdfObj, dict: &PdfDict) -> Option<ReducedImage> {
+        let drawn = self.drawn_image_size()?;
+        if dict.get(b"Mask").is_some() {
+            return None;
+        }
+        let raw = self.resolver.raw_stream_bytes(obj)?;
+        let jp2 = crate::filters::decode_pre_jpx(raw, dict);
+        let stored = crate::filters::jpx_dimensions(&jp2)?;
+        let shrink = jpx_shrink_factor(stored, drawn)?;
+        if crate::filters::jpx_has_palette(&jp2) {
+            return None;
+        }
+        let target = ((stored.0 / shrink).max(1), (stored.1 / shrink).max(1));
+        let (samples, width, height) = crate::filters::decode_jpx_reduced(&jp2, target).ok()?;
+        // Trust the decoder's account of what it produced only if it adds
+        // up, and only if it is what was asked for: everything after this
+        // sizes its work from these two numbers.
+        let pixels = (width as usize).checked_mul(height as usize)?;
+        if pixels == 0
+            || samples.len() % pixels != 0
+            || width > stored.0
+            || height > stored.1
+            || width < drawn.0
+            || height < drawn.1
+        {
+            return None;
+        }
+        Some(ReducedImage {
+            samples,
+            width,
+            height,
+            stored,
+        })
+    }
+
+    #[cfg(not(feature = "jpx"))]
+    fn decode_jpx_for_drawn_size(&self, _obj: &PdfObj, _dict: &PdfDict) -> Option<ReducedImage> {
+        None
     }
 
     /// Check if a JPXDecode image stream contains RGB+alpha (not CMYK).
@@ -7814,7 +8038,9 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.text_rendering_mode = 0;
 
         let suspended = self.suspend_text_extraction();
+        self.unscaled_nesting += 1;
         let _ = self.interpret_nested(StreamId::of(pat_obj, &pattern_data), &pattern_data);
+        self.unscaled_nesting -= 1;
         self.resume_text_extraction(suspended);
 
         // Flush any pending soft mask scope from the pattern stream
@@ -8385,4 +8611,82 @@ fn sample_transfer_function(func: &crate::resources::function::PdfFunction) -> V
             result.first().copied().unwrap_or(t).clamp(0.0, 1.0)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod image_resolution_tests {
+    use super::average_mask_down;
+    #[cfg(feature = "jpx")]
+    use super::jpx_shrink_factor;
+
+    #[cfg(feature = "jpx")]
+    #[test]
+    fn an_image_is_shrunk_only_as_far_as_it_stays_in_place() {
+        let stored = (4096, 4096);
+        let drawn = |n| (n, n);
+        // More than half size: no level fits.
+        assert_eq!(jpx_shrink_factor(stored, drawn(4096)), None);
+        assert_eq!(jpx_shrink_factor(stored, drawn(2049)), None);
+        // By 2 the picture does not move at all, by 4 one stored sample:
+        // both are taken as soon as they fit.
+        assert_eq!(jpx_shrink_factor(stored, drawn(2048)), Some(2));
+        assert_eq!(jpx_shrink_factor(stored, drawn(1025)), Some(2));
+        assert_eq!(jpx_shrink_factor(stored, drawn(1024)), Some(4));
+        // By 8 it moves 3 samples, which at an eighth size is 3/8 of a
+        // pixel: too far. Not until 3 samples are a quarter of one.
+        assert_eq!(jpx_shrink_factor(stored, drawn(512)), Some(4));
+        assert_eq!(jpx_shrink_factor(stored, drawn(342)), Some(4));
+        assert_eq!(jpx_shrink_factor(stored, drawn(341)), Some(8));
+        // By 16, 7 samples: a quarter of a pixel at 1/28 size.
+        assert_eq!(jpx_shrink_factor(stored, drawn(147)), Some(8));
+        assert_eq!(jpx_shrink_factor(stored, drawn(146)), Some(16));
+        // Down to a single pixel: 1,023 samples is still a quarter of it.
+        assert_eq!(jpx_shrink_factor(stored, drawn(1)), Some(2048));
+    }
+
+    #[cfg(feature = "jpx")]
+    #[test]
+    fn the_tighter_direction_decides() {
+        // Squeezed one way only: the other direction still needs it all.
+        assert_eq!(jpx_shrink_factor((4096, 4096), (64, 4096)), None);
+        assert_eq!(jpx_shrink_factor((4096, 4096), (64, 2048)), Some(2));
+        // The 212-megapixel page of pdf.js's issue19517.pdf at 18 dpi.
+        assert_eq!(jpx_shrink_factor((12608, 16806), (3152, 4201)), Some(4));
+    }
+
+    #[cfg(feature = "jpx")]
+    #[test]
+    fn a_degenerate_size_is_not_shrunk_into_nothing() {
+        assert_eq!(jpx_shrink_factor((1, 1), (1, 1)), None);
+        assert_eq!(jpx_shrink_factor((0, 0), (1, 1)), None);
+        // Capped, however small it is drawn.
+        assert_eq!(
+            jpx_shrink_factor((u32::MAX, u32::MAX), (1, 1)),
+            Some(1 << 16)
+        );
+    }
+
+    #[test]
+    fn a_mask_is_averaged_down() {
+        // 4 x 4, opaque on the left half.
+        let mask = [255, 255, 0, 0].repeat(4);
+        assert_eq!(average_mask_down(&mask, 4, 4, 2, 2), [255, 0, 255, 0]);
+        // Down to one sample: the mean of them all.
+        assert_eq!(average_mask_down(&mask, 4, 4, 1, 1), [128]);
+        // A one-sample line survives as its share of the block, where
+        // picking one sample of the block would keep it or lose it whole.
+        let line = [0, 255, 0, 0, 0, 0, 0, 0];
+        assert_eq!(average_mask_down(&line, 8, 1, 2, 1), [64, 0]);
+        // Sizes that do not divide: every input sample lands in a block.
+        assert_eq!(average_mask_down(&[10, 20, 30], 3, 1, 2, 1), [10, 25]);
+    }
+
+    #[test]
+    fn a_mask_that_is_short_of_samples_does_not_panic() {
+        // Declared 4 x 4, three rows present: the missing row is clear.
+        let mask = [255u8; 12];
+        assert_eq!(average_mask_down(&mask, 4, 4, 2, 2), [255, 255, 128, 128]);
+        assert_eq!(average_mask_down(&[], 4, 4, 2, 2), [0, 0, 0, 0]);
+        assert_eq!(average_mask_down(&[], 0, 0, 2, 2), [0, 0, 0, 0]);
+    }
 }
