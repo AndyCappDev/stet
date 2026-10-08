@@ -157,6 +157,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A PDF function could abort the process, panic, or take all the memory
+  there is.** Functions colour every shading and convert every spot colour,
+  and `stet-pdf-reader` took their dictionaries at their word. Found by the
+  fuzzer, then by reading the rest of the file; each of these is a PDF
+  under 1 KB:
+  - A sampled (Type 0) function whose `/Size` is `[65535 65535 65535]`
+    asked for its whole table in one reservation, 2.2 × 10¹⁵ bytes, and the
+    allocator **aborted the process** — which no caller can catch. One
+    entry of two billion, or `-1`, filled memory instead. The table now
+    holds the samples the stream contains; one the stream does not reach
+    reads as zero, as it did before.
+  - `/Size []` panicked on an index; an entry of `0`, or of `1` with two or
+    more inputs, and a `/BitsPerSample` of 64, overflowed (a panic in a
+    debug build). `/Size` entries must now be positive, one per input, and
+    `/BitsPerSample` one of the eight values the format allows; a function
+    that fails either is refused, and what it would have coloured is not
+    drawn.
+  - A sampled function with more than 16 inputs is refused, as poppler
+    refuses it: evaluating one point reads 2^m samples. One of the pdf.js
+    test files, `axial_shading_many_inputs.pdf`, has 18; it drew a black
+    page and now draws nothing, as poppler and Ghostscript do.
+  - A calculator (Type 4) function has no loops, but `2 copy 4 copy 8 copy
+    …` doubles its operand stack with each pair of tokens: forty of them
+    took 4 GB. The stack now stops at 100 operands, the figure in the
+    standard, which poppler and pdf.js also use.
+  - `idiv` and `mod` by a number between −1 and 1 divided by zero and
+    **panicked in a release build**, since both work on truncated
+    integers; they give 0, as division by zero already did. `bitshift` by
+    64 or more, and a function leaving fewer results than it has outputs,
+    no longer overflow.
+
+  Every valid file renders as before: two pages of each of 1,681 PDFs are
+  byte-identical, bar the one above.
+
 - **A PostScript program could raise `--max-vm`.** `MaxLocalVM` is a user
   parameter, and `<< /MaxLocalVM 2000000000 >> setuserparams` replaced
   whatever ceiling the command line had set — so `--max-vm 16` bounded only

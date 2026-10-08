@@ -164,6 +164,124 @@ fn deeply_nested_calculator_function_does_not_overflow_the_stack() {
     ));
 }
 
+/// A page whose one shading takes its colours from function object 6.
+fn shading_with_function(function: Vec<u8>) -> Vec<u8> {
+    one_page_doc(
+        b"/Resources<</Shading<</S1 5 0 R>>>>",
+        b"/S1 sh\n",
+        &[
+            (
+                5,
+                b"<</ShadingType 2/ColorSpace/DeviceGray/Coords[0 0 100 100]/Function 6 0 R>>"
+                    .to_vec(),
+            ),
+            (6, function),
+        ],
+    )
+}
+
+/// A Type 0 (sampled) function with the given dictionary entries and 16
+/// bytes of sample data.
+fn sampled_fn(entries: &str) -> Vec<u8> {
+    let mut v = format!("<</FunctionType 0 {entries}/Length 16>>\nstream\n").into_bytes();
+    v.extend_from_slice(&[0x00, 0xff, 0x80, 0x40].repeat(4));
+    v.extend_from_slice(b"\nendstream");
+    v
+}
+
+/// A sampled function's table size is the product of its `/Size` entries
+/// times its outputs, all file-supplied. Three entries of 65,535 asked for
+/// 2.2e15 bytes in one reservation and aborted the process; one entry of
+/// two billion, or `-1` read as unsigned, filled memory instead.
+#[test]
+fn sampled_function_table_is_bounded_by_its_data() {
+    for entries in [
+        "/Domain[0 1 0 1 0 1]/Range[0 1]/Size[65535 65535 65535]/BitsPerSample 8",
+        "/Domain[0 1]/Range[0 1]/Size[2000000000]/BitsPerSample 8",
+        "/Domain[0 1]/Range[0 1]/Size[-1]/BitsPerSample 8",
+        "/Domain[0 1]/Range[0 1]/Size[4294967295]/BitsPerSample 1",
+    ] {
+        load_and_render(&shading_with_function(sampled_fn(entries)));
+    }
+}
+
+/// `/Size` with no entry for an input, a zero entry, or an axis of a single
+/// sample: each indexed out of bounds or subtracted below zero.
+#[test]
+fn sampled_function_with_degenerate_size_does_not_panic() {
+    for entries in [
+        "/Domain[0 1]/Range[0 1]/Size[]/BitsPerSample 8",
+        "/Domain[0 1]/Range[0 1]/Size[0]/BitsPerSample 8",
+        "/Domain[0 1]/Range[0 1]/Size[1]/BitsPerSample 8",
+        "/Domain[0 1 0 1]/Range[0 1]/Size[4]/BitsPerSample 8",
+        "/Domain[0 1 0 1]/Range[0 1]/Size[1 1]/BitsPerSample 8",
+        "/Domain[0 1 0 1]/Range[0 1]/Size[2 2]/Encode[0 1]/BitsPerSample 8",
+        "/Domain[]/Range[0 1]/Size[4]/BitsPerSample 8",
+    ] {
+        load_and_render(&shading_with_function(sampled_fn(entries)));
+    }
+}
+
+/// `BitsPerSample` is a shift count: 64 overflows it, and zero or a negative
+/// value divides every sample by zero.
+#[test]
+fn sampled_function_with_bad_bits_per_sample_does_not_panic() {
+    for bps in ["64", "0", "-8", "3", "4294967304"] {
+        load_and_render(&shading_with_function(sampled_fn(&format!(
+            "/Domain[0 1]/Range[0 1]/Size[4]/BitsPerSample {bps}"
+        ))));
+    }
+}
+
+/// Evaluating a sampled function reads 2^m samples for m inputs, and its
+/// table has at least 2^m entries: 28 inputs took 2 GB, 70 overflowed the
+/// shift that counts the corners.
+#[test]
+fn sampled_function_with_too_many_inputs_is_refused() {
+    for inputs in [28, 70] {
+        load_and_render(&shading_with_function(sampled_fn(&format!(
+            "/Domain[{}]/Range[0 1]/Size[{}]/BitsPerSample 8",
+            "0 1 ".repeat(inputs),
+            "2 ".repeat(inputs)
+        ))));
+    }
+}
+
+/// A calculator function has no loops, but `n copy` doubles the operand
+/// stack, so 40 of them asked for 2^40 operands.
+#[test]
+fn calculator_function_cannot_grow_its_stack_without_limit() {
+    let mut code = String::from("{ dup ");
+    for k in 1..40 {
+        code.push_str(&format!("{} copy ", 1u64 << k));
+    }
+    code.push('}');
+    let mut v = format!(
+        "<</FunctionType 4/Domain[0 1]/Range[0 1]/Length {}>>\nstream\n",
+        code.len()
+    )
+    .into_bytes();
+    v.extend_from_slice(code.as_bytes());
+    v.extend_from_slice(b"\nendstream");
+    load_and_render(&shading_with_function(v));
+}
+
+/// `idiv` and `mod` truncate their operands to integers first, so a divisor
+/// of one half is a division by zero.
+#[test]
+fn calculator_function_dividing_by_a_fraction_does_not_panic() {
+    for code in ["{ 0.5 idiv }", "{ 0.5 mod }", "{ 200 bitshift }", "{ pop }"] {
+        let mut v = format!(
+            "<</FunctionType 4/Domain[0 1]/Range[0 1 0 1]/Length {}>>\nstream\n",
+            code.len()
+        )
+        .into_bytes();
+        v.extend_from_slice(code.as_bytes());
+        v.extend_from_slice(b"\nendstream");
+        load_and_render(&shading_with_function(v));
+    }
+}
+
 fn stitching_fn(functions: &[u8]) -> Vec<u8> {
     let mut v = b"<</FunctionType 3/Domain[0 1]/Range[0 1]/Functions".to_vec();
     v.extend_from_slice(functions);

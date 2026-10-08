@@ -15,6 +15,21 @@ use crate::resolver::Resolver;
 /// because they have no object number to track.
 const MAX_FUNCTION_DEPTH: u32 = 32;
 
+/// Most inputs a Type 0 (sampled) function may take.
+///
+/// Evaluating one point reads the 2^m samples around it, so the cost of a
+/// single evaluation doubles with every input. Sixteen is the limit poppler
+/// applies; the widest tables in practice are tint transforms of a few
+/// colourants.
+const MAX_SAMPLED_INPUTS: usize = 16;
+
+/// Operand stack depth for a Type 4 (calculator) function.
+///
+/// ISO 32000-1 7.10.5.1 has a conforming reader allow at least 100 operands,
+/// and poppler and pdf.js both stop there. Without a ceiling `2 copy 4 copy
+/// 8 copy …` doubles the stack with each pair of tokens.
+const MAX_CALC_STACK: usize = 100;
+
 /// A parsed PDF function.
 #[derive(Clone, Debug)]
 pub enum PdfFunction {
@@ -349,24 +364,53 @@ impl PdfFunction {
         range: Vec<[f64; 2]>,
         resolver: &Resolver,
     ) -> Result<Self, PdfError> {
-        let size: Vec<u32> = dict
+        let n_inputs = domain.len();
+        if n_inputs == 0 || n_inputs > MAX_SAMPLED_INPUTS {
+            return Err(PdfError::Other(format!(
+                "sampled function has {n_inputs} inputs (1 to {MAX_SAMPLED_INPUTS} supported)"
+            )));
+        }
+
+        // One positive entry per input. A zero or negative entry describes
+        // no table at all, and a missing one leaves an input with no axis.
+        // Entries beyond the inputs are dropped, which reads the first
+        // slice of the table they describe.
+        let mut size: Vec<u32> = dict
             .get_array(b"Size")
             .ok_or(PdfError::Other("sampled function missing Size".into()))?
             .iter()
-            .filter_map(|o| o.as_int().map(|n| n as u32))
-            .collect();
+            .filter_map(|o| o.as_int())
+            .map(|n| u32::try_from(n).ok().filter(|n| *n > 0))
+            .collect::<Option<_>>()
+            .ok_or(PdfError::Other(
+                "sampled function Size entry is not a positive integer".into(),
+            ))?;
+        if size.len() < n_inputs {
+            return Err(PdfError::Other(format!(
+                "sampled function Size has {} entries for {n_inputs} inputs",
+                size.len()
+            )));
+        }
+        size.truncate(n_inputs);
 
-        let bps = dict
-            .get_int(b"BitsPerSample")
-            .ok_or(PdfError::Other("missing BitsPerSample".into()))? as u32;
+        let bps = match dict.get_int(b"BitsPerSample") {
+            Some(n @ (1 | 2 | 4 | 8 | 12 | 16 | 24 | 32)) => n as u32,
+            Some(n) => {
+                return Err(PdfError::Other(format!(
+                    "sampled function BitsPerSample is {n}"
+                )));
+            }
+            None => return Err(PdfError::Other("missing BitsPerSample".into())),
+        };
 
         let n_outputs = range.len();
 
-        let encode = if let Ok(enc) = parse_domain_range(dict, b"Encode") {
-            enc
-        } else {
-            size.iter().map(|s| [0.0, (*s as f64) - 1.0]).collect()
-        };
+        // A short /Encode leaves the remaining inputs on their default.
+        let mut encode = parse_domain_range(dict, b"Encode").unwrap_or_default();
+        encode.truncate(n_inputs);
+        for s in &size[encode.len()..] {
+            encode.push([0.0, (*s as f64) - 1.0]);
+        }
 
         let decode = if let Ok(dec) = parse_domain_range(dict, b"Decode") {
             dec
@@ -374,10 +418,19 @@ impl PdfFunction {
             range.clone()
         };
 
-        // Read sample data
+        // Read sample data. The table the dictionary declares can be any
+        // size at all (/Size [65535 65535 65535] is 2.8e14 samples in a few
+        // bytes of file), so only the samples the stream actually holds are
+        // kept; evaluation reads a sample past the end as zero, which is
+        // what an all-zero tail would have given.
         let data = resolver.stream_data_from_obj(obj)?;
         let max_val = ((1u64 << bps) - 1) as f64;
-        let total_samples: usize = size.iter().map(|s| *s as usize).product::<usize>() * n_outputs;
+        let declared = size
+            .iter()
+            .try_fold(n_outputs, |acc, s| acc.checked_mul(*s as usize))
+            .unwrap_or(usize::MAX);
+        let held = data.len().saturating_mul(8).div_ceil(bps as usize);
+        let total_samples = declared.min(held);
         let mut samples = Vec::with_capacity(total_samples);
 
         let mut bit_offset = 0usize;
@@ -589,28 +642,46 @@ fn evaluate_sampled(
     samples: &[f64],
     n_outputs: usize,
 ) -> Vec<f64> {
-    let n_inputs = domain.len();
+    // The fields are public, so nothing guarantees the arrays agree in
+    // length the way `parse_sampled` leaves them: work on the inputs every
+    // one of them covers.
+    let n_inputs = domain
+        .len()
+        .min(inputs.len())
+        .min(size.len())
+        .min(encode.len())
+        .min(MAX_SAMPLED_INPUTS);
+    if n_inputs == 0 {
+        return vec![0.0; n_outputs];
+    }
 
     // Clamp and encode inputs
     let mut encoded = Vec::with_capacity(n_inputs);
-    for i in 0..n_inputs.min(inputs.len()) {
+    for i in 0..n_inputs {
         let x = clamp(inputs[i], domain[i][0], domain[i][1]);
         let e = interpolate(x, domain[i][0], domain[i][1], encode[i][0], encode[i][1]);
-        let e = clamp(e, 0.0, (size[i] as f64) - 1.0);
+        let e = clamp(e, 0.0, (size[i] as f64 - 1.0).max(0.0));
         encoded.push(e);
     }
 
     // For 1D input, simple linear interpolation
-    if n_inputs == 1 && !encoded.is_empty() {
+    if n_inputs == 1 {
         let e = encoded[0];
         let i0 = e.floor() as usize;
-        let i1 = (i0 + 1).min(size[0] as usize - 1);
+        let i1 = (i0 + 1).min((size[0] as usize).saturating_sub(1));
         let frac = e - e.floor();
+        let sample = |i: usize, j: usize| {
+            i.checked_mul(n_outputs)
+                .and_then(|base| base.checked_add(j))
+                .and_then(|at| samples.get(at))
+                .copied()
+                .unwrap_or(0.0)
+        };
 
         let mut result = Vec::with_capacity(n_outputs);
         for j in 0..n_outputs {
-            let s0 = samples.get(i0 * n_outputs + j).copied().unwrap_or(0.0);
-            let s1 = samples.get(i1 * n_outputs + j).copied().unwrap_or(0.0);
+            let s0 = sample(i0, j);
+            let s1 = sample(i1, j);
             let val = s0 + frac * (s1 - s0);
             let decoded = if j < decode.len() {
                 interpolate(val, 0.0, 1.0, decode[j][0], decode[j][1])
@@ -629,7 +700,7 @@ fn evaluate_sampled(
 
     // Multi-dimensional: multilinear interpolation
     // For N inputs, interpolate across 2^N corners of the hypercube
-    let n = n_inputs.min(encoded.len());
+    let n = n_inputs;
 
     // Compute floor indices and fractional parts for each dimension
     let mut i0s = Vec::with_capacity(n);
@@ -637,17 +708,20 @@ fn evaluate_sampled(
     for dim in 0..n {
         let e = encoded[dim];
         let lo = e.floor() as usize;
-        let lo = lo.min(size[dim] as usize - 2); // ensure lo+1 is valid
+        // Ensure lo+1 is valid. An axis of one sample has no lo+1; its
+        // fraction is zero, so the corner that reads there weighs nothing.
+        let lo = lo.min((size[dim] as usize).saturating_sub(2));
         i0s.push(lo);
         fracs.push(e - lo as f64);
     }
 
     // Compute strides for each dimension.
     // PDF spec: first input varies fastest, so dim 0 has the smallest stride.
+    // Saturating: a table too large to index holds no samples out there.
     let mut strides = vec![0usize; n];
     strides[0] = n_outputs;
     for dim in 1..n {
-        strides[dim] = strides[dim - 1] * size[dim - 1] as usize;
+        strides[dim] = strides[dim - 1].saturating_mul(size[dim - 1] as usize);
     }
 
     // Iterate over 2^n corners and accumulate weighted contributions
@@ -659,14 +733,19 @@ fn evaluate_sampled(
         for dim in 0..n {
             if corner & (1 << dim) != 0 {
                 weight *= fracs[dim];
-                index += (i0s[dim] + 1) * strides[dim];
+                index = index.saturating_add((i0s[dim] + 1).saturating_mul(strides[dim]));
             } else {
                 weight *= 1.0 - fracs[dim];
-                index += i0s[dim] * strides[dim];
+                index = index.saturating_add(i0s[dim].saturating_mul(strides[dim]));
             }
         }
         for (j, r) in result.iter_mut().enumerate() {
-            *r += weight * samples.get(index + j).copied().unwrap_or(0.0);
+            let s = index
+                .checked_add(j)
+                .and_then(|at| samples.get(at))
+                .copied()
+                .unwrap_or(0.0);
+            *r += weight * s;
         }
     }
 
@@ -788,13 +867,12 @@ fn evaluate_calculator(
     // Clamp outputs to range
     let n_out = range.len();
     let mut result = Vec::with_capacity(n_out);
-    for i in 0..n_out {
-        let val = if i < stack.len() {
-            stack[stack.len() - n_out + i]
-        } else {
-            0.0
-        };
-        result.push(clamp(val, range[i][0], range[i][1]));
+    // The results are the top `n_out` operands; a function that leaves
+    // fewer gives zero for the ones it did not produce.
+    let base = stack.len().saturating_sub(n_out);
+    for (i, r) in range.iter().enumerate() {
+        let val = stack.get(base + i).copied().unwrap_or(0.0);
+        result.push(clamp(val, r[0], r[1]));
     }
     result
 }
@@ -802,29 +880,23 @@ fn evaluate_calculator(
 fn execute_calc_tokens(stack: &mut Vec<f64>, tokens: &[CalcToken]) {
     for token in tokens {
         match token {
-            CalcToken::Number(n) => stack.push(*n),
-            CalcToken::Bool(b) => stack.push(if *b { 1.0 } else { 0.0 }),
-            CalcToken::True => stack.push(1.0),
-            CalcToken::False => stack.push(0.0),
+            CalcToken::Number(n) => calc_push(stack, *n),
+            CalcToken::Bool(b) => calc_push(stack, if *b { 1.0 } else { 0.0 }),
+            CalcToken::True => calc_push(stack, 1.0),
+            CalcToken::False => calc_push(stack, 0.0),
 
             // Arithmetic
             CalcToken::Add => bin_op(stack, |a, b| a + b),
             CalcToken::Sub => bin_op(stack, |a, b| a - b),
             CalcToken::Mul => bin_op(stack, |a, b| a * b),
             CalcToken::Div => bin_op(stack, |a, b| if b != 0.0 { a / b } else { 0.0 }),
+            // Checked: a divisor between -1 and 1 truncates to zero, and
+            // `i64::MIN / -1` overflows; both panic in every build profile.
             CalcToken::Idiv => bin_op(stack, |a, b| {
-                if b != 0.0 {
-                    ((a as i64) / (b as i64)) as f64
-                } else {
-                    0.0
-                }
+                (a as i64).checked_div(b as i64).unwrap_or(0) as f64
             }),
             CalcToken::Mod => bin_op(stack, |a, b| {
-                if b != 0.0 {
-                    ((a as i64) % (b as i64)) as f64
-                } else {
-                    0.0
-                }
+                (a as i64).checked_rem(b as i64).unwrap_or(0) as f64
             }),
             CalcToken::Neg => un_op(stack, |a| -a),
             CalcToken::Abs => un_op(stack, |a| a.abs()),
@@ -858,16 +930,17 @@ fn execute_calc_tokens(stack: &mut Vec<f64>, tokens: &[CalcToken]) {
                 let n = a as i64;
                 let shift = b as i32;
                 if shift > 0 {
-                    (n << shift) as f64
+                    n.checked_shl(shift as u32).unwrap_or(0) as f64
                 } else {
-                    (n >> (-shift)) as f64
+                    // A shift of 64 or more leaves only the sign.
+                    (n >> shift.unsigned_abs().min(63)) as f64
                 }
             }),
 
             // Stack
             CalcToken::Dup => {
                 if let Some(&top) = stack.last() {
-                    stack.push(top);
+                    calc_push(stack, top);
                 }
             }
             CalcToken::Exch => {
@@ -884,7 +957,7 @@ fn execute_calc_tokens(stack: &mut Vec<f64>, tokens: &[CalcToken]) {
                     stack.pop();
                     let n = n as usize;
                     let len = stack.len();
-                    if n <= len {
+                    if n <= len && len + n <= MAX_CALC_STACK {
                         let items: Vec<f64> = stack[len - n..].to_vec();
                         stack.extend_from_slice(&items);
                     }
@@ -896,7 +969,7 @@ fn execute_calc_tokens(stack: &mut Vec<f64>, tokens: &[CalcToken]) {
                     let idx = n as usize;
                     let len = stack.len();
                     if idx < len {
-                        stack.push(stack[len - 1 - idx]);
+                        calc_push(stack, stack[len - 1 - idx]);
                     }
                 }
             }
@@ -939,6 +1012,13 @@ fn execute_calc_tokens(stack: &mut Vec<f64>, tokens: &[CalcToken]) {
             CalcToken::Cvi => un_op(stack, |a| a.trunc()),
             CalcToken::Cvr => {} // already f64
         }
+    }
+}
+
+/// Push an operand, unless the stack is at [`MAX_CALC_STACK`].
+fn calc_push(stack: &mut Vec<f64>, v: f64) {
+    if stack.len() < MAX_CALC_STACK {
+        stack.push(v);
     }
 }
 
@@ -1325,5 +1405,113 @@ exch sub mul 1.000000 cvr exch sub 6 1 roll 5 -1 roll 1 index \
             (out[2] - 1.0).abs() < 0.02,
             "green-only via table: Y={out:?}"
         );
+    }
+
+    fn sampled(domain: usize, size: Vec<u32>, encode: usize, samples: Vec<f64>) -> PdfFunction {
+        PdfFunction::Sampled {
+            domain: vec![[0.0, 1.0]; domain],
+            range: vec![[0.0, 1.0]],
+            encode: size
+                .iter()
+                .take(encode)
+                .map(|s| [0.0, *s as f64 - 1.0])
+                .collect(),
+            size,
+            bps: 8,
+            decode: vec![[0.0, 1.0]],
+            samples,
+            n_outputs: 1,
+        }
+    }
+
+    /// The fields are public, so evaluation cannot rely on the parser having
+    /// made them agree. Each of these indexed out of bounds or subtracted
+    /// below zero.
+    #[test]
+    fn sampled_evaluation_survives_mismatched_fields() {
+        // No axis at all.
+        assert_eq!(sampled(1, vec![], 0, vec![]).evaluate(&[0.5]), [0.0]);
+        // Fewer axes than inputs.
+        let f = sampled(2, vec![2], 1, vec![0.0, 1.0]);
+        assert_eq!(f.evaluate(&[1.0, 1.0]), [1.0]);
+        // /Encode shorter than the inputs.
+        let f = sampled(2, vec![2, 2], 1, vec![0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(f.evaluate(&[1.0, 1.0]), [1.0]);
+        // An axis of no samples, and one of a single sample in two
+        // dimensions (`size - 1` and `size - 2`).
+        assert_eq!(sampled(1, vec![0], 1, vec![]).evaluate(&[0.5]), [0.0]);
+        let f = sampled(2, vec![1, 1], 2, vec![0.25]);
+        assert_eq!(f.evaluate(&[0.7, 0.3]), [0.25]);
+    }
+
+    /// A table declared larger than its samples reads the missing ones as
+    /// zero, and strides that overflow `usize` do not wrap back into it.
+    #[test]
+    fn sampled_evaluation_reads_past_the_table_as_zero() {
+        let f = sampled(1, vec![4], 1, vec![1.0, 1.0]);
+        assert_eq!(f.evaluate(&[0.0]), [1.0]);
+        assert_eq!(f.evaluate(&[1.0]), [0.0]);
+
+        let f = sampled(4, vec![u32::MAX; 4], 4, vec![1.0; 8]);
+        assert_eq!(f.evaluate(&[1.0, 1.0, 1.0, 1.0]), [0.0]);
+    }
+
+    fn calc(code: &str, inputs: &[f64], outputs: usize) -> Vec<f64> {
+        PdfFunction::Calculator {
+            domain: vec![[-1e30, 1e30]; inputs.len()],
+            range: vec![[-1e30, 1e30]; outputs],
+            tokens: parse_calc_tokens(code).unwrap(),
+        }
+        .evaluate(inputs)
+    }
+
+    /// `idiv` and `mod` work on truncated integers, so a divisor below one
+    /// is a division by zero, and `i64::MIN / -1` overflows. Both panic in
+    /// a release build.
+    #[test]
+    fn calculator_integer_division_does_not_panic() {
+        assert_eq!(calc("{ 0.5 idiv }", &[7.0], 1), [0.0]);
+        assert_eq!(calc("{ 0.5 mod }", &[7.0], 1), [0.0]);
+        assert_eq!(calc("{ -1 idiv }", &[-1e30], 1), [0.0]);
+        assert_eq!(calc("{ -1 mod }", &[-1e30], 1), [0.0]);
+        assert_eq!(calc("{ 2 idiv }", &[7.0], 1), [3.0]);
+        assert_eq!(calc("{ 4 mod }", &[7.0], 1), [3.0]);
+    }
+
+    #[test]
+    fn calculator_bitshift_by_more_than_the_word() {
+        assert_eq!(calc("{ 200 bitshift }", &[1.0], 1), [0.0]);
+        assert_eq!(calc("{ -200 bitshift }", &[1.0], 1), [0.0]);
+        assert_eq!(calc("{ -200 bitshift }", &[-8.0], 1), [-1.0]);
+        assert_eq!(calc("{ -2147483648 bitshift }", &[1.0], 1), [0.0]);
+        assert_eq!(calc("{ 3 bitshift }", &[1.0], 1), [8.0]);
+        assert_eq!(calc("{ -1 bitshift }", &[8.0], 1), [4.0]);
+    }
+
+    /// A function leaving fewer operands than it has outputs indexed below
+    /// the bottom of the stack.
+    #[test]
+    fn calculator_with_fewer_results_than_outputs() {
+        assert_eq!(calc("{ }", &[0.5], 2), [0.5, 0.0]);
+        assert_eq!(calc("{ pop }", &[0.5], 2), [0.0, 0.0]);
+        assert_eq!(calc("{ 1 2 3 }", &[], 2), [2.0, 3.0]);
+    }
+
+    /// `2 copy 4 copy 8 copy …` doubles the stack with each pair of tokens.
+    #[test]
+    fn calculator_stack_is_bounded() {
+        let mut code = String::from("{ dup ");
+        for k in 1..60 {
+            code.push_str(&format!("{} copy ", 1u64 << k));
+        }
+        code.push('}');
+        let mut stack = vec![1.0];
+        execute_calc_tokens(&mut stack, &parse_calc_tokens(&code).unwrap());
+        assert!(stack.len() <= MAX_CALC_STACK, "{}", stack.len());
+
+        let mut stack = vec![1.0];
+        let dups = "dup ".repeat(1000);
+        execute_calc_tokens(&mut stack, &parse_calc_tokens(&dups).unwrap());
+        assert_eq!(stack.len(), MAX_CALC_STACK);
     }
 }
