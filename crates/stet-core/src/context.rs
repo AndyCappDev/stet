@@ -386,6 +386,12 @@ pub struct Context {
     // Pattern/form support
     /// Storage for pattern instances created by `makepattern`.
     pub pattern_store: Vec<PatternData>,
+    /// The `Background` colour of each shading pattern that has one, by its
+    /// index in `pattern_store`: painted under the shading across the whole
+    /// of what the pattern fills. Kept beside `PatternData` rather than in it
+    /// because that struct is public and all-fields-public, so a new field
+    /// there is a breaking change; it moves in at 0.9.0.
+    pub shading_pattern_backgrounds: rustc_hash::FxHashMap<u32, stet_graphics::color::DeviceColor>,
     /// Cache of form display lists keyed by dict EntityId.
     pub form_cache: rustc_hash::FxHashMap<EntityId, DisplayList>,
 
@@ -1314,6 +1320,7 @@ impl Context {
             cshow_pending_code: None,
             charpath_capture: None,
             pattern_store: Vec::new(),
+            shading_pattern_backgrounds: rustc_hash::FxHashMap::default(),
             form_cache: rustc_hash::FxHashMap::default(),
             cie_decode_cache: rustc_hash::FxHashMap::default(),
             #[cfg(not(target_arch = "wasm32"))]

@@ -18,7 +18,7 @@ use stet_graphics::device::{
     AxialShadingParams, ColorStop, ImageParams, MeshShadingParams, PatchShadingParams,
     RadialShadingParams, ShadingColorSpace,
 };
-use stet_graphics::display_list::DisplayElement;
+use stet_graphics::display_list::{DisplayElement, DisplayList};
 use stet_graphics::icc::{IccRenderingIntent, intent_from_byte};
 use stet_graphics::mesh_shading;
 
@@ -44,6 +44,19 @@ pub fn op_shfill(ctx: &mut Context) -> Result<(), PsError> {
         _ => return Err(PsError::TypeCheck),
     };
 
+    let ctm = ctx.gstate.ctm;
+    emit_shading(ctx, dict_entity, ctm)?;
+
+    ctx.o_stack.pop()?;
+    Ok(())
+}
+
+/// Append the display elements that paint a shading dictionary, its space
+/// mapped to device space by `ctm`.
+///
+/// `shfill` passes the current matrix; a shading pattern passes the matrix
+/// `makepattern` fixed for it.
+fn emit_shading(ctx: &mut Context, dict_entity: EntityId, ctm: Matrix) -> Result<(), PsError> {
     // Extract ShadingType (required, integer 1-7)
     let shading_type = get_dict_int(ctx, dict_entity, b"ShadingType").ok_or(PsError::RangeCheck)?;
     if !(1..=7).contains(&shading_type) {
@@ -57,9 +70,6 @@ pub fn op_shfill(ctx: &mut Context) -> Result<(), PsError> {
 
     // Extract optional BBox [llx lly urx ury]
     let bbox = get_dict_bbox(ctx, dict_entity);
-
-    // CTM snapshot
-    let ctm = ctx.gstate.ctm;
 
     // Capture the shading color space for native output (PDF, TIFF)
     let shading_cs = capture_shading_color_space(ctx, &color_space);
@@ -124,8 +134,65 @@ pub fn op_shfill(ctx: &mut Context) -> Result<(), PsError> {
         _ => {} // Already validated above
     }
 
-    ctx.o_stack.pop()?;
     Ok(())
+}
+
+/// What `makepattern` keeps of a shading pattern (PatternType 2).
+pub(crate) struct PatternShading {
+    /// The shading, placed by the pattern matrix.
+    pub elements: DisplayList,
+    /// The shading's `Background`, painted under it across the whole of
+    /// whatever the pattern fills.
+    pub background: Option<DeviceColor>,
+}
+
+/// Build the shading of a shading pattern, in the space `pattern_matrix`
+/// maps to device space.
+///
+/// A mesh whose `DataSource` is a positionable file is read from its start:
+/// "a shading pattern may access its shading dictionary multiple times"
+/// (PLRM 3, 4.9.3), which is why the manual wants a reusable stream there,
+/// and unlike `shfill` the pattern cannot depend on where an earlier use left
+/// the file.
+pub(crate) fn build_pattern_shading(
+    ctx: &mut Context,
+    shading: EntityId,
+    pattern_matrix: Matrix,
+) -> Result<PatternShading, PsError> {
+    if let Some(PsObject {
+        value: PsValue::File(file),
+        ..
+    }) = get_dict_obj(ctx, shading, b"DataSource")
+        && ctx.files.is_open(file)
+        && ctx.files.is_seekable(file)
+    {
+        ctx.files
+            .set_position(file, 0)
+            .map_err(|_| PsError::IOError)?;
+    }
+
+    let start = ctx.current_display_list_mut().len();
+    let result = emit_shading(ctx, shading, pattern_matrix);
+    let elements = ctx.current_display_list_mut().split_off(start);
+    result?;
+
+    let background = match get_dict_float_vec(ctx, shading, b"Background") {
+        Some(comps) => {
+            let cs_obj = get_dict_obj(ctx, shading, b"ColorSpace").ok_or(PsError::Undefined)?;
+            let (color_space, n_comps) = resolve_color_space_from_obj(ctx, &cs_obj)?;
+            if comps.len() != n_comps {
+                return Err(PsError::RangeCheck);
+            }
+            let color_space = precompute_cie_decode_tables(ctx, color_space)?;
+            Some(shading_color(ctx, &comps, &color_space)?)
+        }
+        None => None,
+    };
+
+    Ok(PatternShading {
+        elements,
+        background,
+    })
 }
 
 // ---- Type 2: Axial (linear gradient) ----
@@ -760,6 +827,32 @@ fn convert_tint_color(
         result[i] = ctx.o_stack.pop()?.as_f64().unwrap_or(0.0);
     }
     Ok(result)
+}
+
+/// One colour of a shading's colour space as a device colour, a Separation
+/// or DeviceN colour going through its tint transform.
+fn shading_color(
+    ctx: &mut Context,
+    comps: &[f64],
+    color_space: &ColorSpace,
+) -> Result<DeviceColor, PsError> {
+    let intent = intent_from_byte(ctx.gstate.rendering_intent);
+    if needs_tint_conversion(color_space) {
+        let alt = convert_tint_color(ctx, comps, color_space)?;
+        Ok(components_to_device_color(
+            &alt,
+            get_alt_space(color_space),
+            intent,
+            &mut ctx.icc_cache,
+        ))
+    } else {
+        Ok(components_to_device_color(
+            comps,
+            color_space,
+            intent,
+            &mut ctx.icc_cache,
+        ))
+    }
 }
 
 /// Pre-process Type 4/5 array DataSource: convert colors from source color

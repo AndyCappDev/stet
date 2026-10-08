@@ -217,6 +217,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     paints one reusable stream twice repositions it in between, and could
     not.
 
+- **A PostScript shading pattern painted nothing, and a tiling pattern
+  painted fills only.** A pattern is a paint, used by whatever `fill`,
+  `stroke` and `show` mark (PLRM 3, 4.9). A shading pattern
+  (`PatternType 2`) was accepted by `makepattern` and `setpattern` and
+  then drew nothing at all, for any shading type; a tiling pattern was
+  honoured by `fill`, `eofill` and `rectfill`, while a stroke or text set
+  in it came out in a solid colour. Now, for both kinds:
+  - **Fills, strokes (`stroke`, `rectstroke`) and text are painted with
+    the pattern.** A patterned stroke is painted as the area the stroke
+    covers and patterned text as its outlines, so every output device sees
+    an ordinary pattern fill; in PDF output such text is therefore
+    outlines rather than text.
+  - **A shading pattern** stays where `makepattern` placed it, whatever
+    the current matrix when it is used, paints its shading's `Background`
+    across what it fills, and reads a mesh's `DataSource` from the start
+    of a positionable file each time one is made.
+  - **`makepattern` no longer disturbs the graphics state.** `PaintProc`
+    ran in the program's own state, so the colour, line width and path it
+    set stayed set afterwards and the current path was lost; and a cell
+    made while another pattern was current was painted with that pattern,
+    which turned an uncoloured pattern's cell into stripes of the wrong
+    colour. It now runs between an implicit `gsave` and `grestore`, with
+    no pattern current.
+
 - **A JPEG 2000 image whose own header claims an absurd size aborted the
   process.** `stet-pdf-reader` checks an image's `/Width` and `/Height`,
   but a JPEG 2000 stream carries its own, and those are the ones the

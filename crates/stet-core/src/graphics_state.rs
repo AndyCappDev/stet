@@ -205,7 +205,8 @@ pub struct PatternData {
     pub ystep: f64,
     /// Combined matrix: matrix_arg × CTM at makepattern time.
     pub pattern_matrix: Matrix,
-    /// Pre-rendered display list from executing PaintProc.
+    /// Pre-rendered display list: what PaintProc drew (tiling), or the
+    /// shading placed by `pattern_matrix` (shading).
     pub cached_display_list: DisplayList,
 }
 

@@ -11,10 +11,11 @@ use stet_core::object::{PsObject, PsValue};
 use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
 use stet_graphics::color::{DashPattern, DeviceColor, FillRule};
 use stet_graphics::device::{
-    BgUcrState, CMYK_ALL, FillParams, HalftoneState, PatternFillParams, SimpleColorSpace,
-    SpotColor, SpotColorSpace, StrokeParams, TransferState, painted_channels_for_colorants,
+    BgUcrState, CMYK_ALL, ClipParams, FillParams, HalftoneState, PatternFillParams,
+    SimpleColorSpace, SpotColor, SpotColorSpace, StrokeParams, TransferState,
+    painted_channels_for_colorants,
 };
-use stet_graphics::display_list::DisplayElement;
+use stet_graphics::display_list::{DisplayElement, DisplayList, GroupColorSpace, GroupParams};
 
 /// Capture the current SpotColor from graphics state if in Separation/DeviceN mode.
 pub(crate) fn capture_spot_color(ctx: &Context) -> Option<SpotColor> {
@@ -240,11 +241,100 @@ fn close_subpaths(path: &PsPath) -> PsPath {
     result
 }
 
+/// Paint `path` with a shading pattern: the pattern's shading, seen through
+/// the path.
+///
+/// The clip and what it clips go in a group so that the clip ends with the
+/// fill. The shading was placed by the pattern matrix when `makepattern`
+/// built it; what belongs to the moment of painting — opacity, blend mode,
+/// transfer functions — is taken from the graphics state here.
+fn push_shading_pattern_fill(
+    ctx: &mut Context,
+    path: PsPath,
+    fill_rule: FillRule,
+    shading: DisplayList,
+    background: Option<DeviceColor>,
+) {
+    let Some(bbox) = crate::transparency_ops::path_device_bbox(&path) else {
+        return;
+    };
+    let transfer = capture_transfer_state(ctx);
+    let rendering_intent = ctx.gstate.rendering_intent;
+
+    let mut elements = DisplayList::new();
+    elements.push(DisplayElement::Clip {
+        path: path.clone(),
+        params: ClipParams {
+            fill_rule,
+            ctm: Matrix::identity(),
+            stroke_params: None,
+        },
+    });
+    if let Some(color) = background {
+        elements.push(DisplayElement::Fill {
+            path,
+            params: FillParams {
+                color,
+                fill_rule,
+                rendering_intent,
+                transfer: transfer.clone(),
+                halftone: capture_halftone_state(ctx),
+                bg_ucr: capture_bg_ucr_state(ctx),
+                ..FillParams::default()
+            },
+        });
+    }
+    for mut element in shading.into_elements() {
+        match &mut element {
+            DisplayElement::AxialShading { params } => {
+                (params.alpha, params.blend_mode, params.alpha_is_shape) = (1.0, 0, false);
+                params.transfer = transfer.clone();
+            }
+            DisplayElement::RadialShading { params } => {
+                (params.alpha, params.blend_mode, params.alpha_is_shape) = (1.0, 0, false);
+                params.transfer = transfer.clone();
+            }
+            DisplayElement::MeshShading { params } => {
+                (params.alpha, params.blend_mode, params.alpha_is_shape) = (1.0, 0, false);
+                params.transfer = transfer.clone();
+            }
+            DisplayElement::PatchShading { params } => {
+                (params.alpha, params.blend_mode, params.alpha_is_shape) = (1.0, 0, false);
+                params.transfer = transfer.clone();
+            }
+            // A function-based shading is sampled into an image.
+            DisplayElement::Image { params, .. } => {
+                (params.alpha, params.blend_mode, params.alpha_is_shape) = (1.0, 0, false);
+                params.transfer = transfer.clone();
+            }
+            _ => {}
+        }
+        elements.push(element);
+    }
+
+    let params = GroupParams {
+        bbox,
+        isolated: true,
+        knockout: false,
+        blend_mode: ctx.gstate.blend_mode,
+        alpha: ctx.gstate.fill_opacity,
+        color_space: GroupColorSpace::Inherited,
+    };
+    ctx.current_display_list_mut()
+        .push(DisplayElement::Group { elements, params });
+}
+
 /// Push either a normal fill or a pattern fill element depending on gstate.
-fn push_fill_element(ctx: &mut Context, path: PsPath, fill_rule: FillRule) {
+pub(crate) fn push_fill_element(ctx: &mut Context, path: PsPath, fill_rule: FillRule) {
     if let Some(pattern_id) = ctx.gstate.current_pattern
         && let Some(pat) = ctx.pattern_store.get(pattern_id as usize)
     {
+        if pat.pattern_type == 2 {
+            let shading = pat.cached_display_list.clone();
+            let background = ctx.shading_pattern_backgrounds.get(&pattern_id).cloned();
+            push_shading_pattern_fill(ctx, path, fill_rule, shading, background);
+            return;
+        }
         let params = PatternFillParams {
             path,
             fill_rule,
@@ -329,11 +419,33 @@ pub fn op_stroke(ctx: &mut Context) -> Result<(), PsError> {
     if capture_charpath(ctx) {
         return Ok(());
     }
-    if use_native_stroke(ctx) {
+    if ctx.gstate.current_pattern.is_some() {
+        let path = std::mem::take(&mut ctx.gstate.path);
+        ctx.gstate.current_point = None;
+        stroke_with_pattern(ctx, path)
+    } else if use_native_stroke(ctx) {
         stroke_native(ctx)
     } else {
         stroke_via_strokepath(ctx)
     }
+}
+
+/// Stroke a device-space path with the current pattern.
+///
+/// A pattern is a paint for areas, so the stroke is turned into the area it
+/// covers and that is filled: every device then sees an ordinary pattern
+/// fill, whichever way it strokes. The current path is left as it was.
+fn stroke_with_pattern(ctx: &mut Context, path: PsPath) -> Result<(), PsError> {
+    let saved_path = std::mem::replace(&mut ctx.gstate.path, path);
+    let saved_point = ctx.gstate.current_point;
+    let result = crate::path_query_ops::op_strokepath(ctx);
+    let outline = std::mem::replace(&mut ctx.gstate.path, saved_path);
+    ctx.gstate.current_point = saved_point;
+    result?;
+    if !outline.is_empty() {
+        push_fill_element(ctx, close_subpaths(&outline), FillRule::NonZeroWinding);
+    }
+    Ok(())
 }
 
 /// Divert the current path into an in-progress Type 3 `charpath`.
@@ -595,6 +707,11 @@ pub fn op_rectstroke(ctx: &mut Context) -> Result<(), PsError> {
         let path = build_rect_path_device(&ctx.gstate.ctm, &rects);
         capture_charpath_path(ctx, &path);
         return Ok(());
+    }
+
+    if ctx.gstate.current_pattern.is_some() {
+        let path = build_rect_path_device(&ctx.gstate.ctm, &rects);
+        return stroke_with_pattern(ctx, path);
     }
 
     let paint = capture_paint_color(ctx);

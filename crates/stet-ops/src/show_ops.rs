@@ -5502,6 +5502,15 @@ fn emit_text_element_with_fm(
     // Get PaintType and stroke width for PaintType 2 (stroked) fonts
     let (paint_type, stroke_width) = get_paint_info(ctx, font_entity, &fm, &ctm);
 
+    // Text painted with a pattern goes to the page as pattern-filled
+    // outlines (see `push_glyph_element`). A text element can only name a
+    // solid colour, and a device that writes text from it would lay that
+    // colour under the pattern, showing through wherever the pattern leaves
+    // gaps.
+    if paint_type != 2 && ctx.gstate.current_pattern.is_some() {
+        return;
+    }
+
     // A device that reads the font after the page is sent (PDF output) gets
     // a copy taken before any `restore` can reclaim or revert it.
     let font_snapshot = ctx
@@ -5546,6 +5555,11 @@ fn push_glyph_element(
     paint_type: i32,
     stroke_width_device: f64,
 ) {
+    // A glyph painted with a pattern is the pattern seen through its outline.
+    if paint_type != 2 && ctx.gstate.current_pattern.is_some() {
+        crate::paint_ops::push_fill_element(ctx, device_path, FillRule::NonZeroWinding);
+        return;
+    }
     let paint = crate::paint_ops::capture_paint_color(ctx);
     let transfer = crate::paint_ops::capture_transfer_state(ctx);
     let halftone = crate::paint_ops::capture_halftone_state(ctx);

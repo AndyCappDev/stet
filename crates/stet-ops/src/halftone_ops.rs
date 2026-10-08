@@ -868,6 +868,20 @@ pub fn op_makepattern(ctx: &mut Context) -> Result<(), PsError> {
     let mut ystep = 0.0f64;
     let mut paint_proc = None;
 
+    let mut shading = None;
+
+    if pattern_type == 2 {
+        let shading_key = DictKey::Name(ctx.names.intern(b"Shading"));
+        shading = match ctx.dicts.get(dict_entity, &shading_key) {
+            Some(PsObject {
+                value: PsValue::Dict(entity),
+                ..
+            }) => Some(entity),
+            Some(_) => return Err(PsError::TypeCheck),
+            None => return Err(PsError::Undefined),
+        };
+    }
+
     if pattern_type == 1 {
         let paint_type_key = DictKey::Name(ctx.names.intern(b"PaintType"));
         paint_type = ctx
@@ -923,6 +937,21 @@ pub fn op_makepattern(ctx: &mut Context) -> Result<(), PsError> {
         }
     }
 
+    // Compute pattern_matrix = matrix_arg × CTM (row-vector convention)
+    let pattern_matrix = ctx.gstate.ctm.concat(&matrix);
+
+    // A shading pattern is its shading, placed once and for all by the
+    // pattern matrix. Built before the operands are popped so that a bad
+    // shading dictionary leaves them for the error handler.
+    let pattern_shading = match shading {
+        Some(entity) => Some(crate::shading_ops::build_pattern_shading(
+            ctx,
+            entity,
+            pattern_matrix,
+        )?),
+        None => None,
+    };
+
     // Pop operands
     ctx.o_stack.pop()?; // matrix
     ctx.o_stack.pop()?; // dict
@@ -941,18 +970,24 @@ pub fn op_makepattern(ctx: &mut Context) -> Result<(), PsError> {
         ctx.dicts.put(new_dict, k, v);
     }
 
-    // Compute pattern_matrix = matrix_arg × CTM (row-vector convention)
-    let pattern_matrix = ctx.gstate.ctm.concat(&matrix);
-
     // Execute PaintProc to capture display list (Type 1 only)
     let cached_display_list = if pattern_type == 1 {
         let pp = paint_proc.unwrap();
 
-        // Save display list and CTM, set CTM to identity so PaintProc
+        // Save the display list and set the CTM to identity so PaintProc
         // captures paths in pattern space (not device space)
         let saved_dl = std::mem::take(&mut ctx.display_list);
-        let saved_ctm = ctx.gstate.ctm;
+        // PaintProc runs between an implicit gsave and grestore (PLRM 4.9.1):
+        // the colour, line width and the rest that it sets are the cell's,
+        // not the program's.
+        let saved_gstate = ctx.gstate.clone();
         ctx.gstate.ctm = Matrix::identity();
+        // And a cell is painted with what PaintProc sets, or for an
+        // uncoloured pattern with the colour given when it is used — never
+        // with a pattern that happens to be current while this one is made.
+        ctx.gstate.current_pattern = None;
+        ctx.gstate.current_pattern_dict = None;
+        ctx.gstate.pattern_underlying_color = None;
 
         // The tile is being captured, not painted, so a Type 3 `charpath`
         // running above must not swallow the PaintProc's paths — they belong
@@ -981,8 +1016,8 @@ pub fn op_makepattern(ctx: &mut Context) -> Result<(), PsError> {
         // private to the pattern in a real implementation.
         ctx.o_stack.truncate(depth_before);
 
-        // Restore CTM, display list and charpath capture
-        ctx.gstate.ctm = saved_ctm;
+        // Restore graphics state, display list and charpath capture
+        ctx.gstate = saved_gstate;
         ctx.charpath_capture = saved_charpath;
         let captured = std::mem::replace(&mut ctx.display_list, saved_dl);
 
@@ -990,6 +1025,10 @@ pub fn op_makepattern(ctx: &mut Context) -> Result<(), PsError> {
         captured
     } else {
         DisplayList::new()
+    };
+    let (cached_display_list, shading_background) = match pattern_shading {
+        Some(shading) => (shading.elements, shading.background),
+        None => (cached_display_list, None),
     };
 
     // Build PatternData and store
@@ -1004,6 +1043,10 @@ pub fn op_makepattern(ctx: &mut Context) -> Result<(), PsError> {
         pattern_matrix,
         cached_display_list,
     });
+    match shading_background {
+        Some(color) => ctx.shading_pattern_backgrounds.insert(pattern_id, color),
+        None => ctx.shading_pattern_backgrounds.remove(&pattern_id),
+    };
 
     // Store Implementation in the copied dict
     let impl_key = DictKey::Name(ctx.names.intern(b"Implementation"));

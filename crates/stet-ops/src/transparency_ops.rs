@@ -561,7 +561,7 @@ pub fn op_clearsoftmask(ctx: &mut Context) -> Result<(), PsError> {
 
 /// Best-effort bounding box of a device-space path (returns `None` for
 /// empty paths).
-fn path_device_bbox(path: &stet_fonts::geometry::PsPath) -> Option<[f64; 4]> {
+pub(crate) fn path_device_bbox(path: &stet_fonts::geometry::PsPath) -> Option<[f64; 4]> {
     let mut xmin = f64::INFINITY;
     let mut ymin = f64::INFINITY;
     let mut xmax = f64::NEG_INFINITY;
