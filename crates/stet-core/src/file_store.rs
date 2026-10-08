@@ -625,6 +625,18 @@ impl FileStore {
         self.pending_procs = self.pending_procs.saturating_sub(1);
     }
 
+    /// Everything an open in-memory file holds, from its first byte,
+    /// whatever its position — or `None` for a file of another kind or a
+    /// closed one. A `ReusableStreamDecode` filter is such a file; this is
+    /// how a consumer defined to read "from file position 0" does so
+    /// without moving it.
+    pub fn memory_contents(&self, entity: EntityId) -> Option<&[u8]> {
+        match &self.files.get(entity.raw_index())?.handle {
+            FileHandle::StringSource { data, .. } => Some(data),
+            _ => None,
+        }
+    }
+
     /// Get remaining unread bytes from a StringSource file as a slice.
     ///
     /// Returns a borrowed slice of the remaining bytes (from `pos` to end).
@@ -1360,9 +1372,14 @@ impl FileStore {
         }
     }
 
-    /// Check if a file entity is seekable (disk file).
+    /// Check if a file entity is seekable: a disk file, or one held in
+    /// memory, which is what a `ReusableStreamDecode` filter is. PLRM 3
+    /// introduces that filter precisely to make in-line data positionable.
     pub fn is_seekable(&self, entity: EntityId) -> bool {
-        matches!(self.files[entity.raw_index()].handle, FileHandle::Real(_))
+        matches!(
+            self.files[entity.raw_index()].handle,
+            FileHandle::Real(_) | FileHandle::StringSource { .. }
+        )
     }
 
     /// Get bytes available for reading. Returns -1 for stdin/filters/unknown,

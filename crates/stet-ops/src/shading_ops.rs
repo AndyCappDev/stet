@@ -437,6 +437,34 @@ fn build_type1_shading(
 
 // ---- Types 4 & 5: Triangle mesh shading ----
 
+/// The bytes of a mesh shading's `DataSource` when it is a string or a
+/// file.
+///
+/// PLRM 3 (4.9.3) allows a file for Types 4 to 7, and it is what
+/// Illustrator writes for a gradient mesh: a filter on `currentfile`, the
+/// vertex data following the dictionary in the program. A file is read to
+/// its end, which for a filter is its end-of-data marker; the mesh has no
+/// count of its own, so that is the only way its length is known.
+///
+/// It is read from where it stands, a positionable file included, which is
+/// what Ghostscript does: a program that paints one reusable stream twice
+/// repositions it in between.
+fn mesh_data_bytes(ctx: &mut Context, source: &PsObject) -> Result<Vec<u8>, PsError> {
+    match source.value {
+        PsValue::String { entity, start, len } => Ok(ctx.strings.get(entity, start, len).to_vec()),
+        PsValue::File(file) => {
+            // A closed file reads as one at its end (PLRM `closefile`), so
+            // it gives an empty mesh and not an error.
+            if !ctx.files.is_open(file) {
+                return Ok(Vec::new());
+            }
+            ctx.pump_proc_sources(file)?;
+            ctx.files.read_all(file).map_err(|_| PsError::IOError)
+        }
+        _ => Err(PsError::TypeCheck),
+    }
+}
+
 fn build_type4_shading(
     ctx: &mut Context,
     dict: EntityId,
@@ -449,14 +477,14 @@ fn build_type4_shading(
     let ds_obj = get_dict_obj(ctx, dict, b"DataSource").ok_or(PsError::Undefined)?;
 
     let triangles = match ds_obj.value {
-        PsValue::String { entity, start, len } => {
+        PsValue::String { .. } | PsValue::File(_) => {
             let bpc =
                 get_dict_int(ctx, dict, b"BitsPerCoordinate").ok_or(PsError::Undefined)? as usize;
             let bpco =
                 get_dict_int(ctx, dict, b"BitsPerComponent").ok_or(PsError::Undefined)? as usize;
             let bpfl = get_dict_int(ctx, dict, b"BitsPerFlag").ok_or(PsError::Undefined)? as usize;
             let decode = get_dict_float_vec(ctx, dict, b"Decode").ok_or(PsError::Undefined)?;
-            let data = ctx.strings.get(entity, start, len).to_vec();
+            let data = mesh_data_bytes(ctx, &ds_obj)?;
             mesh_shading::parse_type4_mesh(&data, bpc, bpco, bpfl, &decode, n_comps)
         }
         PsValue::Array { entity, start, len } => {
@@ -513,13 +541,13 @@ fn build_type5_shading(
     let ds_obj = get_dict_obj(ctx, dict, b"DataSource").ok_or(PsError::Undefined)?;
 
     let triangles = match ds_obj.value {
-        PsValue::String { entity, start, len } => {
+        PsValue::String { .. } | PsValue::File(_) => {
             let bpc =
                 get_dict_int(ctx, dict, b"BitsPerCoordinate").ok_or(PsError::Undefined)? as usize;
             let bpco =
                 get_dict_int(ctx, dict, b"BitsPerComponent").ok_or(PsError::Undefined)? as usize;
             let decode = get_dict_float_vec(ctx, dict, b"Decode").ok_or(PsError::Undefined)?;
-            let data = ctx.strings.get(entity, start, len).to_vec();
+            let data = mesh_data_bytes(ctx, &ds_obj)?;
             mesh_shading::parse_type5_mesh(&data, bpc, bpco, &decode, n_comps, verts_per_row)
         }
         PsValue::Array { entity, start, len } => {
@@ -575,14 +603,14 @@ fn build_type6_shading(
     let ds_obj = get_dict_obj(ctx, dict, b"DataSource").ok_or(PsError::Undefined)?;
 
     let patches = match ds_obj.value {
-        PsValue::String { entity, start, len } => {
+        PsValue::String { .. } | PsValue::File(_) => {
             let bpc =
                 get_dict_int(ctx, dict, b"BitsPerCoordinate").ok_or(PsError::Undefined)? as usize;
             let bpco =
                 get_dict_int(ctx, dict, b"BitsPerComponent").ok_or(PsError::Undefined)? as usize;
             let bpfl = get_dict_int(ctx, dict, b"BitsPerFlag").ok_or(PsError::Undefined)? as usize;
             let decode = get_dict_float_vec(ctx, dict, b"Decode").ok_or(PsError::Undefined)?;
-            let data = ctx.strings.get(entity, start, len).to_vec();
+            let data = mesh_data_bytes(ctx, &ds_obj)?;
             mesh_shading::parse_type6_patches(&data, bpc, bpco, bpfl, &decode, n_comps)
         }
         PsValue::Array { entity, start, len } => {
@@ -635,14 +663,14 @@ fn build_type7_shading(
     let ds_obj = get_dict_obj(ctx, dict, b"DataSource").ok_or(PsError::Undefined)?;
 
     let patches = match ds_obj.value {
-        PsValue::String { entity, start, len } => {
+        PsValue::String { .. } | PsValue::File(_) => {
             let bpc =
                 get_dict_int(ctx, dict, b"BitsPerCoordinate").ok_or(PsError::Undefined)? as usize;
             let bpco =
                 get_dict_int(ctx, dict, b"BitsPerComponent").ok_or(PsError::Undefined)? as usize;
             let bpfl = get_dict_int(ctx, dict, b"BitsPerFlag").ok_or(PsError::Undefined)? as usize;
             let decode = get_dict_float_vec(ctx, dict, b"Decode").ok_or(PsError::Undefined)?;
-            let data = ctx.strings.get(entity, start, len).to_vec();
+            let data = mesh_data_bytes(ctx, &ds_obj)?;
             mesh_shading::parse_type7_patches(&data, bpc, bpco, bpfl, &decode, n_comps)
         }
         PsValue::Array { entity, start, len } => {
@@ -1255,6 +1283,16 @@ fn eval_type0_sampled(
     let ds_obj = get_dict_obj(ctx, func_entity, b"DataSource").ok_or(PsError::Undefined)?;
     let sample_data = match ds_obj.value {
         PsValue::String { entity, start, len } => ctx.strings.get(entity, start, len).to_vec(),
+        // "A string or positionable file ... If DataSource is a file, the
+        // sample data begins at file position 0" (PLRM 3, 3.10.1). In-line
+        // data is made positionable with a ReusableStreamDecode filter,
+        // which holds it in memory; a function is evaluated many times, so
+        // the bytes are taken from there without moving the file.
+        PsValue::File(file) => ctx
+            .files
+            .memory_contents(file)
+            .ok_or(PsError::IOError)?
+            .to_vec(),
         _ => return Err(PsError::TypeCheck),
     };
 

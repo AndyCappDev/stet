@@ -199,6 +199,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A gradient mesh from Illustrator raised `typecheck` in `shfill`.** A
+  mesh or patch shading (ShadingType 4 to 7) may take its `DataSource`
+  from a file as well as a string or an array (PLRM 3, 4.9.3), and
+  Illustrator writes a gradient mesh that way: the vertex data follows
+  the dictionary in the program, behind a filter on `currentfile`. stet
+  accepted only the string and the array. A file is now read to its end,
+  from where it stands, and painted as the same bytes in a string would
+  be. Reported by @vivozi (#6), with a reproducer and the place in the
+  source. Two more of the same kind, found beside it:
+  - **A sampled (Type 0) function** may likewise take its samples from a
+    positionable file; a `ReusableStreamDecode` filter, the way in-line
+    data becomes one, was a `typecheck` there too. The samples are read
+    from position 0, as the manual says, wherever the file was left.
+  - **`setfileposition` raised `ioerror` for a `ReusableStreamDecode`
+    filter**, the one filter that exists to be positioned. A program that
+    paints one reusable stream twice repositions it in between, and could
+    not.
+
 - **A JPEG 2000 image whose own header claims an absurd size aborted the
   process.** `stet-pdf-reader` checks an image's `/Width` and `/Height`,
   but a JPEG 2000 stream carries its own, and those are the ones the
