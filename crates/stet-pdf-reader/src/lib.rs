@@ -783,7 +783,11 @@ impl<'a> PdfDocument<'a> {
                     }
                     result.extend_from_slice(&data);
                 }
-                Err(_) => continue,
+                Err(e) => self.resolver.warn_content_on(
+                    Some(page),
+                    Severity::Error,
+                    format!("content stream {obj_num} {gen_num} could not be read: {e}"),
+                ),
             }
         }
 

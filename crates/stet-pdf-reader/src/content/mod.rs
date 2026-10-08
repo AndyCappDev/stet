@@ -482,6 +482,10 @@ pub struct ContentInterpreter<'a> {
     /// What this page's nested streams have cost so far, against
     /// [`MAX_NESTED_WORK`].
     nested_work: u64,
+    /// Set when a nested stream's failure has been reported, so that the
+    /// operator that ran it does not report the same error again. Cleared
+    /// before each operator.
+    nested_failure_reported: bool,
     /// True inside a Type 3 CharProc that started with `d1`. Per PDF spec 9.6.5,
     /// color operators must be ignored (glyph uses the current text color).
     d1_color_suppressed: bool,
@@ -638,6 +642,7 @@ impl<'a> ContentInterpreter<'a> {
             depth: 0,
             executing: Vec::new(),
             nested_work: 0,
+            nested_failure_reported: false,
             d1_color_suppressed: false,
             nested_mask_flush_count: 0,
             font_cache: FontCache::new(),
@@ -783,6 +788,7 @@ impl<'a> ContentInterpreter<'a> {
                 );
             }
             self.nested_work = MAX_NESTED_WORK;
+            self.nested_failure_reported = true;
             return Err(PdfError::Other(
                 "page has more nested content than the reader will interpret".into(),
             ));
@@ -793,6 +799,13 @@ impl<'a> ContentInterpreter<'a> {
         let result = self.interpret_stream(data);
         self.depth -= 1;
         self.executing.pop();
+        // Callers carry on with the page whatever happened in here, so this
+        // is the one place a nested stream that ended early gets reported.
+        if let Err(e) = &result {
+            self.resolver
+                .warn_content(Severity::Error, format!("content stream error: {e}"));
+            self.nested_failure_reported = true;
+        }
         result
     }
 
@@ -1631,7 +1644,21 @@ impl<'a> ContentInterpreter<'a> {
 
                     if op == b"BI" {
                         self.handle_inline_image(&mut lexer)?;
-                    } else if let Err(_e) = self.dispatch_operator(&op, glued_to_prev_number) {
+                    } else {
+                        self.nested_failure_reported = false;
+                        let result = self.dispatch_operator(&op, glued_to_prev_number);
+                        // The operator is skipped and the stream goes on;
+                        // say so, or what it would have drawn is missing
+                        // with nothing to explain why. Unless the error is
+                        // a nested stream's, which has said so itself.
+                        if let Err(e) = result
+                            && !self.nested_failure_reported
+                        {
+                            self.resolver.warn_content(
+                                Severity::Warning,
+                                format!("operator {}: {e}", String::from_utf8_lossy(&op)),
+                            );
+                        }
                     }
                     self.operand_stack.clear();
                 }

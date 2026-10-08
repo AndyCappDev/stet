@@ -257,3 +257,153 @@ fn rendering_while_the_warnings_are_borrowed_does_not_panic() {
     }
     assert!(doc.parse_warnings().is_empty());
 }
+
+/// An operator that fails is skipped and the stream goes on. What it would
+/// have drawn is missing, so the page says which operator and why.
+#[test]
+fn an_operator_that_fails_is_reported_and_the_stream_goes_on() {
+    let data = two_pages(
+        "",
+        "/Missing Do 1 2 m 0 0 10 10 re f",
+        "0 0 10 10 re f",
+        &[],
+    );
+    let doc = PdfDocument::from_bytes(&data).unwrap();
+    let list = doc.render_page(0, 72.0).unwrap();
+    assert!(!list.elements().is_empty(), "the fill after it is drawn");
+    doc.render_page(1, 72.0).unwrap();
+
+    let warnings = content_warnings(&doc);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    let (page, severity, message) = &warnings[0];
+    assert_eq!((*page, *severity), (Some(0), Severity::Warning));
+    assert!(message.starts_with("operator Do: "), "{message}");
+}
+
+/// The same failure from every operator in a stream is one warning.
+#[test]
+fn an_operator_failing_the_same_way_many_times_is_reported_once() {
+    let data = two_pages("", &"/Missing Do ".repeat(5000), "", &[]);
+    let doc = PdfDocument::from_bytes(&data).unwrap();
+    doc.render_page(0, 72.0).unwrap();
+    assert_eq!(content_warnings(&doc).len(), 1);
+}
+
+/// A message can carry numbers from the file, so a hostile stream can make
+/// each one different. A page keeps 64 and then says the list is cut short.
+#[test]
+fn a_page_lists_a_bounded_number_of_problems() {
+    let xobjects: String = (0..500)
+        .map(|i| format!("/X{i} {} 0 R ", 1000 + i))
+        .collect();
+    let content: String = (0..500).map(|i| format!("/X{i} Do ")).collect();
+    let data = two_pages(
+        &format!("/XObject << {xobjects} >>"),
+        &content,
+        "/X0 Do",
+        &[],
+    );
+    let doc = PdfDocument::from_bytes(&data).unwrap();
+    doc.render_page(0, 72.0).unwrap();
+
+    let warnings = content_warnings(&doc);
+    assert_eq!(warnings.len(), 65, "{}", warnings.len());
+    assert_eq!(
+        warnings[64].2,
+        "further problems with this page's content are not listed"
+    );
+
+    // The next page starts its own count.
+    doc.render_page(1, 72.0).unwrap();
+    assert_eq!(content_warnings(&doc).len(), 66);
+}
+
+/// A form whose content ends in an error: the page carries on, and used to
+/// say nothing.
+#[test]
+fn a_form_whose_stream_fails_is_reported() {
+    let data = two_pages(
+        "/XObject << /F 7 0 R >>",
+        "/F Do 0 0 10 10 re f",
+        "",
+        &[stream(
+            "/Type /XObject /Subtype /Form /BBox [0 0 100 100]",
+            "0 0 5 5 re f BI /W (unterminated",
+        )],
+    );
+    let doc = PdfDocument::from_bytes(&data).unwrap();
+    doc.render_page(0, 72.0).unwrap();
+
+    let warnings = content_warnings(&doc);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].1, Severity::Error);
+    assert!(
+        warnings[0].2.starts_with("content stream error: "),
+        "{}",
+        warnings[0].2
+    );
+}
+
+/// One of a page's content streams cannot be decoded: the others are
+/// drawn, and the page names the one that was not.
+#[test]
+fn a_content_stream_that_cannot_be_decoded_is_reported() {
+    let objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents [4 0 R 5 0 R] >>".into(),
+        stream("", "0 0 10 10 re f"),
+        stream("/Filter /JBIG2Decode", "not a JBIG2 stream"),
+    ];
+    let data = pdf_from(&objects);
+    let doc = PdfDocument::from_bytes(&data).unwrap();
+    let list = doc.render_page(0, 72.0).unwrap();
+    assert!(!list.elements().is_empty());
+
+    let warnings = content_warnings(&doc);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!((warnings[0].0, warnings[0].1), (Some(0), Severity::Error));
+    assert!(
+        warnings[0]
+            .2
+            .starts_with("content stream 5 0 could not be read: "),
+        "{}",
+        warnings[0].2
+    );
+}
+
+/// A page tree nested past the reader's limit loses the pages below it,
+/// and one that lists a node twice uses it once. Both are said when the
+/// document is opened.
+#[test]
+fn a_page_tree_that_loses_pages_says_so() {
+    // 300 /Pages nodes in a chain, one page at the bottom.
+    let mut objects = vec!["<< /Type /Catalog /Pages 2 0 R >>".to_string()];
+    for i in 0..300 {
+        objects.push(format!("<< /Type /Pages /Kids [{} 0 R] /Count 1 >>", i + 3));
+    }
+    objects.push("<< /Type /Page /MediaBox [0 0 100 100] >>".into());
+    let data = pdf_from(&objects);
+    let doc = PdfDocument::from_bytes(&data).unwrap();
+    assert_eq!(doc.page_count(), 0);
+    let warnings = doc.parse_warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].phase, ParsePhase::PageTree);
+    assert!(warnings[0].message.contains("256 levels"), "{warnings:?}");
+    drop(warnings);
+
+    let data = pdf_from(&[
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R 2 0 R 3 0 R] /Count 1 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >>".into(),
+    ]);
+    let doc = PdfDocument::from_bytes(&data).unwrap();
+    assert_eq!(doc.page_count(), 1);
+    let warnings = doc.parse_warnings();
+    assert!(
+        warnings.iter().all(|w| w.phase == ParsePhase::PageTree
+            && matches!(w.location, Some(LocationHint::Object { .. }))),
+        "{warnings:?}"
+    );
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+}

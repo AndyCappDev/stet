@@ -2528,7 +2528,11 @@ pub(crate) fn print_content_warnings(doc: &PdfDocument) {
     };
     let printed = printed.get_or_insert_with(HashSet::new);
     for warning in doc.parse_warnings().iter() {
-        if warning.phase == ParsePhase::Content && printed.insert(warning.message.clone()) {
+        // Content problems, and a page tree that lost pages: the two that
+        // mean the output is not the whole document.
+        if matches!(warning.phase, ParsePhase::Content | ParsePhase::PageTree)
+            && printed.insert(warning.message.clone())
+        {
             eprintln!("warning: {}", warning.message);
         }
     }
@@ -2682,6 +2686,7 @@ were selected from '{}'",
         eprintln!("\n{}", "=".repeat(60));
         eprintln!("Processing PDF: {} ({} pages)", filename, page_count);
         eprintln!("{}", "=".repeat(60));
+        print_content_warnings(&doc);
 
         for page in 0..page_count {
             let page_1based = page as i32 + 1;
@@ -2839,6 +2844,7 @@ fn run_pdf_input_pdf(
             filename, page_count, output_path
         );
         eprintln!("{}", "=".repeat(60));
+        print_content_warnings(&doc);
 
         let mut device = PdfDevice::new(0, 0, 72.0);
         // The source PDF already constrains content to its page bounds, so

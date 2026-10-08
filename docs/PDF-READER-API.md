@@ -633,8 +633,8 @@ rendered:
 
 | Severity | Examples |
 |---|---|
-| `Error` | a content stream that stops making sense part-way; what came before it is drawn |
-| `Warning` | a font, a soft mask or a predefined CMap that could not be loaded; a page with more nested content than the reader will interpret; an image decoded only in part |
+| `Error` | a content stream, of the page or of a form, pattern or glyph it uses, that stops making sense part-way (what came before it is drawn); one of a page's content streams that cannot be decoded at all |
+| `Warning` | an operator that failed and was skipped — `operator Do: object 12 0 not found`, `operator sh: …`, `operator c: need 6 operands, have 4` — so an image that will not decode, a shading whose function is refused and a path with the wrong operand count all say so; a font, a soft mask or a predefined CMap that could not be loaded; a page with more nested content than the reader will interpret; an image decoded only in part |
 | `Info` | an image stream that needed the more lenient of two decoders |
 
 The page is in `location`, as `LocationHint::Page`:
@@ -656,6 +656,21 @@ Each is recorded once. Rendering a page again — which a viewer does at
 every zoom — adds nothing, so the list is bounded by what is wrong with
 the document and not by how long it stays open. The same fault on two
 pages is reported for each.
+
+A page lists at most 64 distinct content problems. A message can carry
+numbers from the file, so a hostile content stream can make every one
+different; past the limit the page gets one last warning, "further
+problems with this page's content are not listed".
+
+### Warnings from the page tree
+
+`ParsePhase::PageTree` is recorded when the document is opened, for the
+two ways a page tree can lose pages without the file failing to open: a
+branch nested more than 256 levels deep, whose pages are left out, and a
+node listed under more than one parent (which is how a loop appears),
+used the first time only and named in `location` as
+`LocationHint::Object`. A document that opens with fewer pages than
+expected, or none, is worth checking for these.
 
 The `stet` command line prints these as `warning:` lines, each distinct
 message once per run. That is its choice as an application; a GUI would

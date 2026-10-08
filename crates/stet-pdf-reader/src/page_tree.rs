@@ -4,6 +4,7 @@
 
 //! PDF page tree traversal with attribute inheritance.
 
+use crate::diagnostics::{LocationHint, ParsePhase, Severity};
 use crate::error::PdfError;
 use crate::objects::{PdfDict, PdfObj};
 use crate::resolver::Resolver;
@@ -310,9 +311,27 @@ fn collect_pages_recursive(
     // pathologically deep. Without this, a kid that points back to an ancestor
     // would recurse forever and overflow the stack.
     if depth >= MAX_PAGE_TREE_DEPTH {
+        resolver.warnings().record_once(
+            ParsePhase::PageTree,
+            None,
+            Severity::Warning,
+            format!(
+                "page tree is nested more than {MAX_PAGE_TREE_DEPTH} levels deep; \
+                 the pages below that are left out"
+            ),
+        );
         return Ok(());
     }
     if obj_num != 0 && !visited.insert(obj_num) {
+        resolver.warnings().record_once(
+            ParsePhase::PageTree,
+            Some(LocationHint::Object {
+                obj_num,
+                gen_num: 0,
+            }),
+            Severity::Warning,
+            "page tree node is listed more than once; it is used the first time only",
+        );
         return Ok(());
     }
     // Update inherited attributes from this node

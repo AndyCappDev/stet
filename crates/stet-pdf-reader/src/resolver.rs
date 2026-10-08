@@ -50,7 +50,18 @@ pub struct Resolver<'a> {
     /// The page being rendered, if one is: where content warnings are
     /// said to be.
     content_page: std::cell::Cell<Option<usize>>,
+    /// The content warnings raised for one page so far: which page, and
+    /// their messages. It is what makes a repeated warning cheap, and what
+    /// [`MAX_CONTENT_WARNINGS_PER_PAGE`] counts.
+    content_seen: RefCell<(Option<usize>, HashSet<String>)>,
 }
+
+/// Most distinct content warnings kept for one page.
+///
+/// A message can carry numbers from the file ("object 7 0 not found"), so
+/// a hostile content stream can make every one different. Past this many
+/// the page gets one last warning saying the list is cut short.
+const MAX_CONTENT_WARNINGS_PER_PAGE: usize = 64;
 
 /// The bytes of a PDF, owned: what
 /// [`PdfDocument::from_owned`](crate::PdfDocument::from_owned) takes.
@@ -149,11 +160,43 @@ impl<'a> Resolver<'a> {
         severity: crate::diagnostics::Severity,
         message: impl Into<String>,
     ) {
-        self.warnings.record_once(
-            crate::diagnostics::ParsePhase::Content,
-            self.content_page
-                .get()
-                .map(crate::diagnostics::LocationHint::Page),
+        self.warn_content_on(self.content_page.get(), severity, message.into());
+    }
+
+    /// [`warn_content`](Self::warn_content) for a named page, for content
+    /// problems found outside a render of it.
+    pub(crate) fn warn_content_on(
+        &self,
+        page: Option<usize>,
+        severity: crate::diagnostics::Severity,
+        message: String,
+    ) {
+        use crate::diagnostics::{LocationHint, ParsePhase};
+
+        // A content stream can raise the same warning for every operator
+        // in it, so the common case, a message this page has already
+        // given, must not search the document's whole list.
+        let mut seen = self.content_seen.borrow_mut();
+        if seen.0 != page {
+            *seen = (page, HashSet::new());
+        }
+        if seen.1.len() > MAX_CONTENT_WARNINGS_PER_PAGE || seen.1.contains(&message) {
+            return;
+        }
+        let (severity, message) = if seen.1.len() == MAX_CONTENT_WARNINGS_PER_PAGE {
+            // One past the limit marks the page as cut short.
+            seen.1.insert(String::new());
+            (
+                crate::diagnostics::Severity::Warning,
+                "further problems with this page's content are not listed".to_string(),
+            )
+        } else {
+            seen.1.insert(message.clone());
+            (severity, message)
+        };
+        self.warnings.record_if_new(
+            ParsePhase::Content,
+            page.map(LocationHint::Page),
             severity,
             message,
         );
@@ -204,6 +247,7 @@ impl<'a> Resolver<'a> {
             scan_map: RefCell::new(None),
             warnings: crate::diagnostics::WarningSink::new(),
             content_page: std::cell::Cell::new(None),
+            content_seen: RefCell::new((None, HashSet::new())),
         }
     }
 
@@ -234,6 +278,7 @@ impl<'a> Resolver<'a> {
             scan_map: RefCell::new(None),
             warnings: crate::diagnostics::WarningSink::new(),
             content_page: std::cell::Cell::new(None),
+            content_seen: RefCell::new((None, HashSet::new())),
         }
     }
 

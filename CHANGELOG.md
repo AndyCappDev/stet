@@ -122,6 +122,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the slice after letting the resolver go needs to keep the resolver, or
   its own reference to the file.
 
+- **What the reader skips, it now reports.** `stet-pdf-reader` carries on
+  past most of what is wrong with a page, which is right, but several of
+  the things it carried on past left no trace: the page simply had
+  something missing. These are now in `PdfDocument::parse_warnings()`:
+  - **An operator that fails.** It is skipped and the stream goes on, as
+    before, with a `ParsePhase::Content` warning naming it: `operator Do:
+    object 12 0 not found`, `operator Do: decompression error: …`,
+    `operator sh: sampled function has 18 inputs (1 to 16 supported)`,
+    `operator c: need 6 operands, have 4`. So an image that will not
+    decode and a shading whose function is refused both say so.
+  - **A form, pattern, glyph procedure or soft-mask group whose stream
+    ends in an error**, and **a page content stream that cannot be
+    decoded** when the page has others that can.
+  - **A page tree that loses pages**, under the new `ParsePhase::PageTree`:
+    nested more than 256 levels deep, or a node listed twice. Such a
+    document could open with no pages and no explanation.
+
+  A page keeps at most 64 distinct content warnings, then one saying the
+  list is cut short, and a message repeated by every operator in a stream
+  costs a hash lookup. Nothing is drawn differently. **The `stet` command
+  line prints these**, so a file that rendered silently with something
+  missing now says what: of 1,681 test PDFs, 29 gain `warning:` lines (at
+  most 28 each), most of them paths and text operators with the wrong
+  number of operands.
+
 - **`stet-pdf-reader` no longer prints to stderr.** A content stream
   error, a font or soft mask that would not load, a missing predefined
   CMap, a page cut short by the nesting budget and a CCITT image that

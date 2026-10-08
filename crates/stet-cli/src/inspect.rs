@@ -394,6 +394,7 @@ fn format_phase(phase: &ParsePhase) -> String {
         ParsePhase::EmbeddedFiles => "embedded-files".to_string(),
         ParsePhase::Layers => "layers".to_string(),
         ParsePhase::Content => "content".to_string(),
+        ParsePhase::PageTree => "page tree".to_string(),
         _ => "other".to_string(),
     }
 }

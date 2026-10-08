@@ -64,6 +64,10 @@ pub enum ParsePhase {
     /// These are recorded as pages are rendered, not when the document is
     /// opened, and once each: rendering a page again adds nothing.
     Content,
+    /// The page tree, read when the document is opened: a branch nested
+    /// too deeply to follow, or a node listed under two parents. The pages
+    /// below such a node are not in the document's page list.
+    PageTree,
 }
 
 /// Where in the document a problem occurred.
@@ -153,7 +157,18 @@ impl WarningSink {
         severity: Severity,
         message: impl Into<String>,
     ) {
-        let message = message.into();
+        self.record_if_new(phase, location, severity, message.into());
+    }
+
+    /// [`record_once`](Self::record_once), saying whether the warning was
+    /// new.
+    pub(crate) fn record_if_new(
+        &self,
+        phase: ParsePhase,
+        location: Option<LocationHint>,
+        severity: Severity,
+        message: String,
+    ) -> bool {
         let known = self
             .inner
             .borrow()
@@ -167,6 +182,7 @@ impl WarningSink {
                 severity,
             });
         }
+        !known
     }
 
     /// Borrow the underlying slice for read-only access. Held borrow
