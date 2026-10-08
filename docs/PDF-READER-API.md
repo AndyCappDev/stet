@@ -275,8 +275,62 @@ for annot in doc.page_annotations(0)? {
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-It is all or nothing, and on by default. Text inside the appearances is
-not extracted while they are off.
+That switch is all or nothing, and on by default. Text inside the
+appearances is not extracted while they are off.
+
+### Drawing some annotations and not others
+
+With the switch on, an `AnnotationFilter` chooses which annotations a
+render draws — by what the render is for, and by class:
+
+```rust
+use stet_pdf_reader::{AnnotationClass, AnnotationFilter, RenderIntent};
+
+# let mut doc: stet_pdf_reader::PdfDocument = unimplemented!();
+// An editor that draws review comments itself, as movable objects, and
+// leaves form fields and links to the renderer:
+doc.set_annotation_filter(
+    AnnotationFilter::default().with_class(AnnotationClass::Markup, false),
+);
+
+// What a printer would put on paper:
+doc.set_annotation_filter(AnnotationFilter::new(RenderIntent::Print));
+```
+
+The purpose decides how each annotation's `/F` flags are read:
+
+| `RenderIntent` | Drawn |
+|---|---|
+| `View` (the default), `Export` | unless `Hidden` or `NoView` |
+| `Print` | only with the `Print` flag, and not `Hidden` |
+
+The classes come from `AnnotationKind::class()`:
+
+| `AnnotationClass` | Subtypes |
+|---|---|
+| `Markup` | Text, FreeText, Line, Square, Circle, Polygon, PolyLine, Highlight, Underline, Squiggly, StrikeOut, Stamp, Caret, Ink, FileAttachment, Sound, Redact, Projection, and Popup |
+| `Widget` | Widget (the visible part of a form field) |
+| `Link` | Link |
+| `Other` | Screen, Movie, 3D, RichMedia, PrinterMark, TrapNet, Watermark, and unknown subtypes |
+
+`page_annotations` lists every annotation whatever the filter says.
+`filter.draws(&annotation)` is the test the renderer applies, so a caller
+that draws the remainder itself can ask it which ones those are:
+
+```rust
+# let doc: stet_pdf_reader::PdfDocument = unimplemented!();
+let filter = doc.annotation_filter();
+for annot in doc.page_annotations(0)? {
+    if !filter.draws(&annot) {
+        // not in the rendered page: draw it, or leave it out
+    }
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`AnnotationFilter` has no public fields — build it with `new`,
+`with_intent` and `with_class` — so classes can be added without breaking
+callers, and `AnnotationClass` is `#[non_exhaustive]`.
 
 ## Form fields (AcroForm)
 

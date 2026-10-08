@@ -21,6 +21,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only, and not with `--width`/`--height`. Contributed by @jungseohaan
   (#5).
 
+- **`PdfDocument::set_annotation_filter`: draw some annotations and not
+  others.** `set_render_annotations` is all or nothing, which does not
+  suit an editor that draws review comments itself, as objects the user
+  can move, but wants form fields left in the page. An `AnnotationFilter`
+  selects by class — `AnnotationClass::Markup`, `Widget`, `Link`, `Other`,
+  from the new `AnnotationKind::class()` — and by what the render is for:
+  `RenderIntent::View` leaves out `Hidden` and `NoView` annotations,
+  `RenderIntent::Print` draws only those with the `Print` flag.
+  `AnnotationFilter::draws(&annotation)` is the renderer's own test, for a
+  caller that draws the rest. The default is every class, for viewing;
+  `set_render_annotations(false)` still turns them all off. See
+  `docs/PDF-READER-API.md`, "Drawing some annotations and not others".
+
 - **`stet_render::RegionRender`: a region of a page rendered with a layer
   set.** `render_region_prepared` and its parallel variants take twelve to
   fifteen positional arguments and no `LayerSet`, so a viewer that draws a
@@ -49,6 +62,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   archives' `THIRD-PARTY-NOTICES.txt` carries it.
 
 ### Changed
+
+- **An annotation flagged `NoView` is no longer drawn.** The flag means
+  "do not display on screen"; it marks print-only content such as a
+  watermark that should appear on paper alone. stet honoured `Hidden` and
+  ignored `NoView`, so such an annotation showed in every render. A render
+  is now for viewing unless told otherwise, and
+  `set_annotation_filter(AnnotationFilter::new(RenderIntent::Print))` gives
+  the print reading, in which these annotations are drawn.
 
 - **The minimum supported Rust version is now 1.92** (was 1.88). The JBIG2,
   CCITT and JPEG 2000 decoders stet uses — `hayro-jbig2`, `hayro-ccitt` and

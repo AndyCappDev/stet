@@ -200,10 +200,11 @@ pub mod viewer_prefs;
 pub mod xref;
 
 pub use annotations::{
-    Annotation, AnnotationColor, AnnotationDate, AnnotationFlags, AnnotationKind,
-    AnnotationKindData, Border, CaretAnnotation, FileAttachmentAnnotation, FreeTextAnnotation,
-    InkAnnotation, LineAnnotation, LinkAnnotation, MarkupAnnotation, PolygonAnnotation,
-    PopupAnnotation, ShapeAnnotation, StampAnnotation, TextAnnotation,
+    Annotation, AnnotationClass, AnnotationColor, AnnotationDate, AnnotationFilter,
+    AnnotationFlags, AnnotationKind, AnnotationKindData, Border, CaretAnnotation,
+    FileAttachmentAnnotation, FreeTextAnnotation, InkAnnotation, LineAnnotation, LinkAnnotation,
+    MarkupAnnotation, PolygonAnnotation, PopupAnnotation, ShapeAnnotation, StampAnnotation,
+    TextAnnotation,
 };
 pub use destination::{Action, Destination, ViewSpec};
 pub use diagnostics::{LocationHint, ParsePhase, ParseWarning, Severity, WarningSink};
@@ -269,6 +270,9 @@ pub struct PdfDocument<'a> {
     /// Whether rendered pages include annotation appearances. On by
     /// default. See [`PdfDocument::set_render_annotations`].
     render_annotations: bool,
+    /// Which annotations are drawn when any are. See
+    /// [`PdfDocument::set_annotation_filter`].
+    annotation_filter: AnnotationFilter,
     /// Object numbers of Optional Content Groups that are OFF by default.
     /// Parsed from the catalog's /OCProperties /D /OFF array.
     ocg_off: HashSet<u32>,
@@ -404,6 +408,7 @@ impl<'a> PdfDocument<'a> {
             font_provider: None,
             overprint: true,
             render_annotations: true,
+            annotation_filter: AnnotationFilter::default(),
             text_extraction: TextExtraction::Off,
             page_area: PageArea::CropBox,
             default_rendering_intent: RenderingIntent::RelativeColorimetric,
@@ -440,6 +445,11 @@ impl<'a> PdfDocument<'a> {
     /// appearances would show twice; read them with
     /// [`page_annotations`](Self::page_annotations). Text inside the
     /// appearances is then not extracted either.
+    ///
+    /// This is the master switch. To draw some annotations and not others
+    /// — form fields but not review comments, or what prints rather than
+    /// what shows on screen — leave it on and use
+    /// [`set_annotation_filter`](Self::set_annotation_filter).
     pub fn set_render_annotations(&mut self, enabled: bool) {
         self.render_annotations = enabled;
     }
@@ -448,6 +458,29 @@ impl<'a> PdfDocument<'a> {
     /// [`set_render_annotations`](Self::set_render_annotations).
     pub fn render_annotations(&self) -> bool {
         self.render_annotations
+    }
+
+    /// Choose which annotations rendered pages draw, by purpose and by
+    /// class.
+    ///
+    /// The default is [`AnnotationFilter::default`]: every class, for
+    /// viewing, so an annotation flagged `Hidden` or `NoView` is left out.
+    /// See [`AnnotationFilter`] for printing and for selecting classes. It
+    /// has no effect while
+    /// [`set_render_annotations`](Self::set_render_annotations) is off.
+    ///
+    /// Text inside an appearance that is not drawn is not extracted, and
+    /// [`page_annotations`](Self::page_annotations) lists every annotation
+    /// whatever is set here; [`AnnotationFilter::draws`] says which of them
+    /// a render includes.
+    pub fn set_annotation_filter(&mut self, filter: AnnotationFilter) {
+        self.annotation_filter = filter;
+    }
+
+    /// The filter set by
+    /// [`set_annotation_filter`](Self::set_annotation_filter).
+    pub fn annotation_filter(&self) -> AnnotationFilter {
+        self.annotation_filter
     }
 
     /// Record the text each page shows, for extraction, at `level`.
@@ -734,6 +767,7 @@ impl<'a> PdfDocument<'a> {
             interpreter.set_pdfx_cmyk_intent();
         }
         interpreter.set_text_extraction(self.text_extraction);
+        interpreter.set_annotation_filter(self.annotation_filter);
         interpreter.set_initial_rendering_intent(self.default_rendering_intent);
 
         // Render page content

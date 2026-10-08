@@ -28,6 +28,7 @@
 
 use crate::destination::{Action, Destination, parse_action, parse_destination};
 use crate::diagnostics::{LocationHint, ParsePhase, Severity, WarningSink};
+use crate::layers::RenderIntent;
 use crate::metadata::{PdfDate, pdf_string_to_rust_pub};
 use crate::objects::{PdfDict, PdfObj};
 use crate::page_tree::PageInfo;
@@ -120,7 +121,45 @@ pub enum AnnotationKind {
 }
 
 impl AnnotationKind {
-    fn from_name(name: &[u8]) -> Self {
+    /// The class this kind belongs to, which is what an
+    /// [`AnnotationFilter`] selects by.
+    pub fn class(&self) -> AnnotationClass {
+        match self {
+            AnnotationKind::Widget => AnnotationClass::Widget,
+            AnnotationKind::Link => AnnotationClass::Link,
+            AnnotationKind::Text
+            | AnnotationKind::FreeText
+            | AnnotationKind::Line
+            | AnnotationKind::Square
+            | AnnotationKind::Circle
+            | AnnotationKind::Polygon
+            | AnnotationKind::PolyLine
+            | AnnotationKind::Highlight
+            | AnnotationKind::Underline
+            | AnnotationKind::Squiggly
+            | AnnotationKind::StrikeOut
+            | AnnotationKind::Stamp
+            | AnnotationKind::Caret
+            | AnnotationKind::Ink
+            | AnnotationKind::FileAttachment
+            | AnnotationKind::Sound
+            | AnnotationKind::Popup => AnnotationClass::Markup,
+            // Markup annotations with no variant of their own.
+            AnnotationKind::Other(name) if name == "Redact" || name == "Projection" => {
+                AnnotationClass::Markup
+            }
+            AnnotationKind::Screen
+            | AnnotationKind::PrinterMark
+            | AnnotationKind::TrapNet
+            | AnnotationKind::Watermark
+            | AnnotationKind::Movie
+            | AnnotationKind::ThreeD
+            | AnnotationKind::RichMedia
+            | AnnotationKind::Other(_) => AnnotationClass::Other,
+        }
+    }
+
+    pub(crate) fn from_name(name: &[u8]) -> Self {
         match name {
             b"Text" => AnnotationKind::Text,
             b"Link" => AnnotationKind::Link,
@@ -169,7 +208,7 @@ pub struct AnnotationFlags {
 }
 
 impl AnnotationFlags {
-    fn from_bits(bits: i64) -> Self {
+    pub(crate) fn from_bits(bits: i64) -> Self {
         Self {
             invisible: bits & 0x0001 != 0,
             hidden: bits & 0x0002 != 0,
@@ -182,6 +221,128 @@ impl AnnotationFlags {
             toggle_no_view: bits & 0x0100 != 0,
             locked_contents: bits & 0x0200 != 0,
         }
+    }
+}
+
+/// The broad class of an annotation: what an [`AnnotationFilter`] selects
+/// by. Every [`AnnotationKind`] has one, from
+/// [`AnnotationKind::class`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum AnnotationClass {
+    /// The markup annotations of ISO 32000-2 Table 171 — the comments a
+    /// reviewer adds: Text (sticky note), FreeText, Line, Square, Circle,
+    /// Polygon, PolyLine, Highlight, Underline, Squiggly, StrikeOut, Stamp,
+    /// Caret, Ink, FileAttachment, Sound, Redact, Projection — and the
+    /// Popup that belongs to one.
+    Markup,
+    /// Widget: the visible part of a form field.
+    Widget,
+    /// Link.
+    Link,
+    /// Everything else: Screen, Movie, 3D, RichMedia, PrinterMark, TrapNet,
+    /// Watermark, and subtypes this reader does not know.
+    Other,
+}
+
+/// Which annotations a page render draws: by purpose (on screen or in
+/// print) and by class. Set it with
+/// [`PdfDocument::set_annotation_filter`](crate::PdfDocument::set_annotation_filter).
+///
+/// The purpose decides how the `/F` flags are read (ISO 32000-2 Table 167):
+///
+/// - [`RenderIntent::View`] draws an annotation unless it is `Hidden` or
+///   `NoView`. This is the default, and [`RenderIntent::Export`] is read
+///   the same way.
+/// - [`RenderIntent::Print`] draws an annotation only if it has the `Print`
+///   flag and is not `Hidden`; `NoView` does not matter on paper.
+///
+/// The classes then narrow it. An editor that draws review comments itself,
+/// as objects the user can move, but leaves form fields to the renderer:
+///
+/// ```
+/// use stet_pdf_reader::{AnnotationClass, AnnotationFilter};
+///
+/// let filter = AnnotationFilter::default().with_class(AnnotationClass::Markup, false);
+/// assert!(!filter.draws_class(AnnotationClass::Markup));
+/// assert!(filter.draws_class(AnnotationClass::Widget));
+/// ```
+///
+/// The default — view, every class — is what a viewer shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnnotationFilter {
+    intent: RenderIntent,
+    markup: bool,
+    widgets: bool,
+    links: bool,
+    other: bool,
+}
+
+impl Default for AnnotationFilter {
+    fn default() -> Self {
+        Self::new(RenderIntent::View)
+    }
+}
+
+impl AnnotationFilter {
+    /// Every class of annotation, with flags read for `intent`.
+    pub fn new(intent: RenderIntent) -> Self {
+        Self {
+            intent,
+            markup: true,
+            widgets: true,
+            links: true,
+            other: true,
+        }
+    }
+
+    /// The same classes, with flags read for `intent`.
+    pub fn with_intent(mut self, intent: RenderIntent) -> Self {
+        self.intent = intent;
+        self
+    }
+
+    /// The same filter with `class` drawn, or not.
+    pub fn with_class(mut self, class: AnnotationClass, drawn: bool) -> Self {
+        match class {
+            AnnotationClass::Markup => self.markup = drawn,
+            AnnotationClass::Widget => self.widgets = drawn,
+            AnnotationClass::Link => self.links = drawn,
+            AnnotationClass::Other => self.other = drawn,
+        }
+        self
+    }
+
+    /// The purpose the flags are read for.
+    pub fn intent(&self) -> RenderIntent {
+        self.intent
+    }
+
+    /// Whether annotations of `class` are drawn, flags permitting.
+    pub fn draws_class(&self, class: AnnotationClass) -> bool {
+        match class {
+            AnnotationClass::Markup => self.markup,
+            AnnotationClass::Widget => self.widgets,
+            AnnotationClass::Link => self.links,
+            AnnotationClass::Other => self.other,
+        }
+    }
+
+    /// Whether an annotation with these flags is drawn, class permitting.
+    pub fn draws_flags(&self, flags: AnnotationFlags) -> bool {
+        if flags.hidden {
+            return false;
+        }
+        match self.intent {
+            RenderIntent::Print => flags.print,
+            _ => !flags.no_view,
+        }
+    }
+
+    /// Whether a page render draws `annotation` under this filter — the
+    /// test the renderer itself applies, for a caller that draws the rest.
+    pub fn draws(&self, annotation: &Annotation) -> bool {
+        self.draws_class(annotation.kind.class()) && self.draws_flags(annotation.flags)
     }
 }
 

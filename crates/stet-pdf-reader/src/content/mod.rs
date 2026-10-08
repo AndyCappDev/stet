@@ -459,6 +459,9 @@ pub struct ContentInterpreter<'a> {
     /// How much text show operators record as `TextRun` elements. Off by
     /// default; see [`Self::set_text_extraction`].
     text_extraction: TextExtraction,
+    /// Which annotations [`Self::render_annotation`] draws; see
+    /// [`Self::set_annotation_filter`].
+    annotation_filter: crate::annotations::AnnotationFilter,
     /// Text-extraction data for each font resolved while `text_extraction`
     /// is on, keyed by the font's `Arc` address. The `Arc` is held so the
     /// address cannot be reused by another font.
@@ -549,6 +552,7 @@ impl<'a> ContentInterpreter<'a> {
             in_smask_form: false,
             overprint_enabled,
             text_extraction: TextExtraction::Off,
+            annotation_filter: crate::annotations::AnnotationFilter::default(),
             font_text: std::collections::HashMap::new(),
             text_show: None,
             last_text_run: None,
@@ -570,6 +574,13 @@ impl<'a> ContentInterpreter<'a> {
     /// to match compositing in CMYK space (produces more muted, accurate colors).
     pub fn set_page_group_cmyk(&mut self) {
         self.page_group_is_cmyk = true;
+    }
+
+    /// Choose which annotations [`Self::render_annotation`] draws. The
+    /// default draws every class and reads the flags for viewing, so
+    /// `Hidden` and `NoView` annotations are skipped.
+    pub fn set_annotation_filter(&mut self, filter: crate::annotations::AnnotationFilter) {
+        self.annotation_filter = filter;
     }
 
     /// Record `TextRun` elements for text extraction, at `level`,
@@ -731,12 +742,16 @@ impl<'a> ContentInterpreter<'a> {
 
         let subtype = annot_dict.get_name(b"Subtype").unwrap_or(b"");
 
-        // Check annotation flags (/F). PDF spec Table 165:
-        // Bit 1 (0x01) = Invisible, Bit 2 (0x02) = Hidden, Bit 6 (0x20) = NoView.
-        // Skip annotations that shouldn't be rendered on screen.
-        let flags = annot_dict.get_int(b"F").unwrap_or(0);
-        if flags & 0x02 != 0 {
-            return Ok(()); // Hidden
+        // The filter decides by class (markup, widget, link, other) and by
+        // the /F flags, read for viewing or for printing: Hidden never
+        // draws, NoView does not draw on screen, and only Print draws on
+        // paper.
+        let flags =
+            crate::annotations::AnnotationFlags::from_bits(annot_dict.get_int(b"F").unwrap_or(0));
+        let class = crate::annotations::AnnotationKind::from_name(subtype).class();
+        if !(self.annotation_filter.draws_class(class) && self.annotation_filter.draws_flags(flags))
+        {
+            return Ok(());
         }
 
         // Get /Rect [llx, lly, urx, ury], normalizing swapped coordinates.
