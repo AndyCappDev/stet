@@ -64,6 +64,16 @@ fn the_user_password_opens_every_revision() {
     }
 }
 
+/// The owner password opens a file as well as the user one does. Before
+/// revision 5 it does so by decrypting `/O` to recover the user password;
+/// from revision 5 it has its own hash and its own wrapped key, `/OE`.
+#[test]
+fn the_owner_password_opens_every_revision() {
+    for (what, data) in EVERY_REVISION {
+        opens(what, data, b"owner");
+    }
+}
+
 #[test]
 fn a_wrong_password_is_refused_at_every_revision() {
     for (what, data) in EVERY_REVISION {
@@ -92,8 +102,20 @@ fn an_aes256_password_is_prepared_with_saslprep() {
     );
 }
 
+/// The owner password of an AES-256 file is prepared the same way.
+#[cfg(feature = "saslprep")]
+#[test]
+fn an_aes256_owner_password_is_prepared_with_saslprep() {
+    opens(
+        "R6, owner password typed with U+00AA and U+00AD",
+        R6_SASLPREP,
+        "S\u{aa}SL\u{ad}prepOwner".as_bytes(),
+    );
+}
+
 #[test]
 fn an_aes256_password_already_in_prepared_form_opens() {
     opens("R6, prepared form", R6_SASLPREP, b"SaSLprep");
+    opens("R6, owner, prepared form", R6_SASLPREP, b"SaSLprepOwner");
     is_refused("R6, wrong case", R6_SASLPREP, b"saslprep");
 }

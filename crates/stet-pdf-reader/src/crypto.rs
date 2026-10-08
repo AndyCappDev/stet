@@ -42,9 +42,10 @@ impl EncryptionState {
         Self::try_open_with_password(encrypt_dict, trailer, file_id, b"")
     }
 
-    /// Try to decrypt with the given user password.
-    /// Returns `Ok(state)` on success and
-    /// `Err(PdfError::PasswordRequired)` when the password doesn't match.
+    /// Try to decrypt with the given password, which may be the file's
+    /// user password or its owner password: it is tried as each, user
+    /// first. Returns `Ok(state)` on success and
+    /// `Err(PdfError::PasswordRequired)` when it is neither.
     pub fn try_open_with_password(
         encrypt_dict: &PdfDict,
         _trailer: &PdfDict,
@@ -84,7 +85,7 @@ impl EncryptionState {
 
         if v == 5 {
             // AES-256 (PDF 2.0)
-            return Self::try_open_v5(encrypt_dict, &u_value, r, password);
+            return Self::try_open_v5(encrypt_dict, &o_value, &u_value, r, password);
         }
 
         // V4: check if both StmF and StrF are Identity — if so, nothing is encrypted
@@ -111,20 +112,30 @@ impl EncryptionState {
                 _ => None,
             })
             .unwrap_or(true);
-        let key = compute_encryption_key(
-            password,
-            &o_value,
-            p_value,
-            file_id,
-            key_length,
-            r,
-            encrypt_metadata,
-        );
+        // The file key a user password gives, if it is the right one
+        // (Algorithms 2 and 6).
+        let key_for_user_password = |user_password: &[u8]| {
+            let key = compute_encryption_key(
+                user_password,
+                &o_value,
+                p_value,
+                file_id,
+                key_length,
+                r,
+                encrypt_metadata,
+            );
+            verify_user_password(&key, &u_value, file_id, r).then_some(key)
+        };
 
-        // Verify against /U value
-        if !verify_user_password(&key, &u_value, file_id, r) {
-            return Err(PdfError::PasswordRequired);
-        }
+        // An owner password is not a key to the file directly: it decrypts
+        // /O, which holds the user password, and that opens the file
+        // (Algorithm 7).
+        let key = key_for_user_password(password)
+            .or_else(|| {
+                let user_password = user_password_from_owner(password, &o_value, key_length, r);
+                key_for_user_password(&user_password)
+            })
+            .ok_or(PdfError::PasswordRequired)?;
 
         // Acrobat quirk: when V=4 specifies a sub-128-bit /Length (e.g. 40-bit
         // RC4 keys in some Adobe InDesign / PDF Library 8.0 files), Acrobat
@@ -163,6 +174,7 @@ impl EncryptionState {
 
     fn try_open_v5(
         encrypt_dict: &PdfDict,
+        o_value: &[u8],
         u_value: &[u8],
         r: i32,
         password: &[u8],
@@ -172,17 +184,78 @@ impl EncryptionState {
             return Err(PdfError::Other("AES-256: /U too short".into()));
         }
 
-        for candidate in aes256_password_candidates(password) {
-            if let Some(file_key) = Self::user_key_v5(encrypt_dict, u_value, r, &candidate)? {
-                return Ok(Self {
-                    key: file_key,
-                    version: 5,
-                    stm_method: CryptMethod::AesV3,
-                    str_method: CryptMethod::AesV3,
-                });
+        let opened = |file_key: Vec<u8>| Self {
+            key: file_key,
+            version: 5,
+            stm_method: CryptMethod::AesV3,
+            str_method: CryptMethod::AesV3,
+        };
+        let candidates = aes256_password_candidates(password);
+        for candidate in &candidates {
+            if let Some(file_key) = Self::user_key_v5(encrypt_dict, u_value, r, candidate)? {
+                return Ok(opened(file_key));
+            }
+        }
+        for candidate in &candidates {
+            if let Some(file_key) =
+                Self::owner_key_v5(encrypt_dict, o_value, u_value, r, candidate)?
+            {
+                return Ok(opened(file_key));
             }
         }
         Err(PdfError::PasswordRequired)
+    }
+
+    /// The file encryption key, if `password` is the owner password of an
+    /// AES-256 file (ISO 32000-2 Algorithms 2.A and 12). `Ok(None)` means
+    /// the password does not match, or the file's `/O` is too short to
+    /// hold an owner password at all.
+    ///
+    /// The owner hashes differ from the user ones in two ways: the salts
+    /// come from `/O`, and the first 48 bytes of `/U` are hashed in after
+    /// them. The key is wrapped in `/OE`.
+    fn owner_key_v5(
+        encrypt_dict: &PdfDict,
+        o_value: &[u8],
+        u_value: &[u8],
+        r: i32,
+        password: &[u8],
+    ) -> Result<Option<Vec<u8>>, PdfError> {
+        if o_value.len() < 48 {
+            return Ok(None);
+        }
+        let validation_salt = &o_value[32..40];
+        let key_salt = &o_value[40..48];
+        let u_key = &u_value[..48];
+
+        let hash = if r >= 6 {
+            compute_hash_r6(password, validation_salt, u_key)
+        } else {
+            sha256(&[password, validation_salt, u_key])
+        };
+        if hash[..] != o_value[..32] {
+            return Ok(None);
+        }
+
+        let key_hash = if r >= 6 {
+            compute_hash_r6(password, key_salt, u_key)
+        } else {
+            sha256(&[password, key_salt, u_key])
+        };
+
+        let oe = encrypt_dict
+            .get(b"OE")
+            .and_then(|o| o.as_str())
+            .ok_or(PdfError::Other("Encrypt missing /OE".into()))?;
+        if oe.len() < 32 {
+            return Err(PdfError::Other("AES-256: /OE too short".into()));
+        }
+
+        Ok(Some(aes_cbc_decrypt_no_pad(
+            &key_hash,
+            &[0u8; 16],
+            &oe[..32],
+        )))
     }
 
     /// The file encryption key, if `password` is the user password of an
@@ -390,6 +463,46 @@ fn verify_user_password(key: &[u8], u_value: &[u8], file_id: &[u8], revision: i3
 
         // Compare first 16 bytes
         u_value.len() >= 16 && result[..16] == u_value[..16]
+    }
+}
+
+/// The user password an owner password unlocks, for RC4 and AES-128 files
+/// (Algorithm 7, steps a and b). The result is the 32-byte padded form,
+/// which [`compute_encryption_key`] takes as it stands; if `owner_password`
+/// is wrong it is 32 bytes of noise that then fail the `/U` check.
+fn user_password_from_owner(
+    owner_password: &[u8],
+    o_value: &[u8],
+    key_length: usize,
+    revision: i32,
+) -> Vec<u8> {
+    // Algorithm 3, steps a to d: the RC4 key the writer encrypted the
+    // user password with.
+    let mut hash = md5::compute(pad_password(owner_password)).0;
+    if revision >= 3 {
+        for _ in 0..50 {
+            hash = md5::compute(hash).0;
+        }
+    }
+    // Revision 2 keys are always 40 bits, whatever /Length says.
+    let key_length = if revision <= 2 {
+        5
+    } else {
+        key_length.clamp(1, hash.len())
+    };
+    let key = &hash[..key_length];
+
+    if revision <= 2 {
+        rc4(key, o_value)
+    } else {
+        // The writer made 20 passes with the key XORed by 0 to 19; undo
+        // them last first.
+        let mut result = o_value.to_vec();
+        for i in (0..=19u8).rev() {
+            let pass_key: Vec<u8> = key.iter().map(|&b| b ^ i).collect();
+            result = rc4(&pass_key, &result);
+        }
+        result
     }
 }
 

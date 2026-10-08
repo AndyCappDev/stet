@@ -181,6 +181,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its Unicode tables (about 170 KB in the `stet` binary), and a build
   without it behaves as before. RC4 and AES-128 files are unaffected.
 
+- **A PDF's owner password did not open it.** An encrypted PDF has two
+  passwords, and either one decrypts the file. stet tried the password it
+  was given only as the user password, so `--password` with the owner
+  password, or `PdfDocument::from_bytes_with_password` with it, was refused
+  as wrong at every revision of the Standard security handler. It is now
+  tried as each, user first: for RC4 and AES-128 files by decrypting `/O`
+  to recover the user password, for AES-256 files against the owner hash
+  and the key wrapped in `/OE`.
+
 - **A `/Matte` image whose soft mask was cut short panicked.** An image
   premultiplied against a matte colour is divided back out by its soft
   mask; when the mask's stream ended early the loop read past its last

@@ -38,7 +38,8 @@
 //! `from_bytes` / `from_bytes_with_icc` try the empty password. If the
 //! file uses a non-empty user password they return
 //! [`PdfError::PasswordRequired`]; the caller can then prompt the user
-//! and retry with [`PdfDocument::from_bytes_with_password`]:
+//! and retry with [`PdfDocument::from_bytes_with_password`], which takes
+//! either the user password or the owner password:
 //!
 //! ```no_run
 //! use stet_pdf_reader::{PdfDocument, PdfError};
@@ -326,9 +327,10 @@ impl<'a> PdfDocument<'a> {
 
     /// Parse a PDF from bytes using a user-supplied password.
     ///
-    /// Returns `PdfError::PasswordRequired` if the password does not
-    /// match; callers can retry by calling this again with a different
-    /// password.
+    /// `password` may be the file's user password or its owner password;
+    /// either opens the document, and the reader does not report which it
+    /// was. Returns `PdfError::PasswordRequired` if it is neither; callers
+    /// can retry by calling this again with a different password.
     pub fn from_bytes_with_password(
         data: &'a [u8],
         icc_cache: IccCache,
