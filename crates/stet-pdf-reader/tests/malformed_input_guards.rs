@@ -164,6 +164,80 @@ fn deeply_nested_calculator_function_does_not_overflow_the_stack() {
     ));
 }
 
+/// A page showing text in a composite font whose `/Encoding` is the CMap
+/// stream `encoding` and whose `/ToUnicode` is the CMap stream `to_unicode`.
+fn type0_font_doc(encoding: &[u8], to_unicode: &[u8]) -> Vec<u8> {
+    one_page_doc(
+        b"/Resources<</Font<</F1 5 0 R>>>>",
+        b"BT /F1 12 Tf 10 50 Td <00410042> Tj ET\n",
+        &[
+            (
+                5,
+                b"<</Type/Font/Subtype/Type0/BaseFont/X/Encoding 7 0 R\
+                  /DescendantFonts[6 0 R]/ToUnicode 8 0 R>>"
+                    .to_vec(),
+            ),
+            (
+                6,
+                b"<</Type/Font/Subtype/CIDFontType2/BaseFont/X\
+                  /CIDSystemInfo<</Registry(Adobe)/Ordering(Identity)/Supplement 0>>\
+                  /FontDescriptor 9 0 R/DW 1000>>"
+                    .to_vec(),
+            ),
+            (7, stream_obj(encoding)),
+            (8, stream_obj(to_unicode)),
+            (
+                9,
+                b"<</Type/FontDescriptor/FontName/X/Flags 4/FontBBox[0 0 1000 1000]\
+                  /ItalicAngle 0/Ascent 800/Descent -200/CapHeight 700/StemV 80>>"
+                    .to_vec(),
+            ),
+        ],
+    )
+}
+
+const IDENTITY_CMAP: &[u8] = b"1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n\
+    1 begincidrange\n<0000> <FFFF> 0\nendcidrange\n";
+
+/// CMap streams are read as text, lossily, so a byte that is not UTF-8
+/// becomes a three-byte replacement character. A hex string holding some
+/// was then cut at a fixed byte offset, inside a character: a panic in
+/// every build. Found by the fuzzer in a `/ToUnicode` stream.
+#[test]
+fn non_utf8_bytes_in_a_tounicode_hex_string_do_not_panic() {
+    for dst in [&b"\xff\xff\xff"[..], b"0\xff\xff", b"00\xe9\xe9", b"\xff"] {
+        let mut cmap = b"1 beginbfchar\n<0041> <".to_vec();
+        cmap.extend_from_slice(dst);
+        cmap.extend_from_slice(b">\nendbfchar\n1 beginbfrange\n<0042> <0043> <");
+        cmap.extend_from_slice(dst);
+        cmap.extend_from_slice(b">\nendbfrange\n1 beginbfrange\n<0044> <0045> [<");
+        cmap.extend_from_slice(dst);
+        cmap.extend_from_slice(b">]\nendbfrange\n");
+        load_and_render(&type0_font_doc(IDENTITY_CMAP, &cmap));
+    }
+}
+
+/// The same cut, two bytes at a time, in an embedded encoding CMap.
+#[test]
+fn non_utf8_bytes_in_an_encoding_cmap_hex_string_do_not_panic() {
+    for hex in [&b"\xff"[..], b"0\xff", b"00\xff\xff", b"\xe9\xe9\xe9"] {
+        // One range to a line: the parser reads the ranges from the
+        // lines after the one ending in `begincodespacerange`.
+        let mut cmap = b"1 begincodespacerange\n<".to_vec();
+        cmap.extend_from_slice(hex);
+        cmap.extend_from_slice(b"> <");
+        cmap.extend_from_slice(hex);
+        cmap.extend_from_slice(b">\nendcodespacerange\n1 begincidrange\n<");
+        cmap.extend_from_slice(hex);
+        cmap.extend_from_slice(b"> <");
+        cmap.extend_from_slice(hex);
+        cmap.extend_from_slice(b"> 0\nendcidrange\n1 begincidchar\n<");
+        cmap.extend_from_slice(hex);
+        cmap.extend_from_slice(b"> 5\nendcidchar\n");
+        load_and_render(&type0_font_doc(&cmap, b""));
+    }
+}
+
 /// A page whose one shading takes its colours from function object 6.
 fn shading_with_function(function: Vec<u8>) -> Vec<u8> {
     one_page_doc(

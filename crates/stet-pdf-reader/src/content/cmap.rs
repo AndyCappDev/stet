@@ -284,16 +284,15 @@ fn parse_codespace_range(line: &str) -> Option<(Vec<u8>, Vec<u8>)> {
 fn parse_hex_bytes(s: &str) -> Option<Vec<u8>> {
     let s = s.trim();
     if s.starts_with('<') && s.ends_with('>') {
-        let hex = &s[1..s.len() - 1];
-        let mut bytes = Vec::new();
-        let mut i = 0;
-        while i + 1 < hex.len() {
-            bytes.push(u8::from_str_radix(&hex[i..i + 2], 16).ok()?);
-            i += 2;
-        }
-        // Odd-length hex: pad last nibble
-        if i < hex.len() {
-            bytes.push(u8::from_str_radix(&format!("{}0", &hex[i..]), 16).ok()?);
+        // Work on bytes: the text is a lossy decoding of the stream, so
+        // it can hold multi-byte characters a pair of offsets would split.
+        let nibble = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
+        let hex = &s.as_bytes()[1..s.len() - 1];
+        let mut bytes = Vec::with_capacity(hex.len().div_ceil(2));
+        for pair in hex.chunks(2) {
+            // Odd-length hex: pad last nibble
+            let low = pair.get(1).map_or(Some(0), |b| nibble(*b))?;
+            bytes.push(nibble(pair[0])? << 4 | low);
         }
         Some(bytes)
     } else {

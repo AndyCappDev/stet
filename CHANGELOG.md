@@ -157,6 +157,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A CMap with a byte that is not UTF-8 inside a hex string panicked.**
+  `stet-pdf-reader` reads CMap streams as text, so such a byte becomes a
+  three-byte replacement character, and two places then cut the hex string
+  at a fixed byte offset — inside the character. A `/ToUnicode` stream with
+  `<0041> <ÿÿÿ>` did it, and so did an embedded encoding CMap with a
+  codespace range of `<ÿ>`; both are a panic in a release build, on opening
+  the page. Found by the fuzzer. Such a string is now not a hex string, and
+  the entry is skipped.
+
 - **A PDF function could abort the process, panic, or take all the memory
   there is.** Functions colour every shading and convert every spot colour,
   and `stet-pdf-reader` took their dictionaries at their word. Found by the

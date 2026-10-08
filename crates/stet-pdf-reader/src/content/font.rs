@@ -3436,8 +3436,10 @@ fn hex_to_unicode(hex: &str) -> Option<u32> {
             "017F0074" => Some(0xFB05),     // ſt (long s + t)
             "00730074" => Some(0xFB06),     // st
             _ => {
-                // Unknown sequence — use first 16-bit codepoint
-                u32::from_str_radix(&hex[..hex.len().min(4)], 16).ok()
+                // Unknown sequence — use first 16-bit codepoint. `get`,
+                // because the text is a lossy decoding of the stream and
+                // byte 4 may fall inside a replacement character.
+                u32::from_str_radix(hex.get(..4)?, 16).ok()
             }
         }
     }
