@@ -59,6 +59,42 @@ Every accessor below parses lazily on first call and caches its
 result. A document the caller only renders pays nothing for the
 structural API surface.
 
+### Keeping a document
+
+`from_bytes` borrows the file, so the document cannot outlive the buffer:
+an application that keeps documents open has to keep each buffer beside
+its document. `from_owned` takes the buffer instead and returns a
+`PdfDocument<'static>`, which goes in a struct or a cache on its own:
+
+```rust
+use std::sync::Arc;
+use stet_graphics::icc::IccCache;
+use stet_pdf_reader::{PdfDocument, PdfError};
+
+struct OpenFile {
+    doc: PdfDocument<'static>,
+}
+
+// A Vec<u8> is kept as it is; nothing is copied.
+let doc = PdfDocument::from_owned(std::fs::read("document.pdf")?)?;
+let open = OpenFile { doc };
+
+// A failed open consumes the bytes. To ask for a password and try again,
+// pass an Arc<[u8]> and keep a clone, which is shared and not copied.
+let bytes: Arc<[u8]> = std::fs::read("encrypted.pdf")?.into();
+let doc = match PdfDocument::from_owned(Arc::clone(&bytes)) {
+    Err(PdfError::PasswordRequired) => {
+        PdfDocument::from_owned_with_password(bytes, IccCache::new(), b"secret")?
+    }
+    other => other?,
+};
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`from_owned`, `from_owned_with_icc` and `from_owned_with_password` mirror
+the three `from_bytes` constructors. They take `impl Into<PdfBytes>`,
+which a `Vec<u8>`, a `Box<[u8]>` and an `Arc<[u8]>` all are.
+
 ---
 
 ## Document metadata

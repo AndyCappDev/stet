@@ -231,6 +231,7 @@ pub use objects::{PdfDict, PdfObj};
 pub use outline::{OutlineItem, OutlineStyle};
 pub use page_boxes::{PageArea, PageBoxes};
 pub use page_tree::PageInfo;
+pub use resolver::PdfBytes;
 /// The level for [`PdfDocument::set_text_extraction`], from `stet-graphics`.
 pub use stet_graphics::device::TextExtraction;
 pub use stet_graphics::rendering_intent::RenderingIntent;
@@ -314,6 +315,60 @@ pub struct PdfDocument<'a> {
     configurations_cache: OnceCell<Vec<Configuration>>,
 }
 
+impl PdfDocument<'static> {
+    /// Parse a PDF from bytes the document then owns.
+    ///
+    /// [`from_bytes`](Self::from_bytes) borrows the file, so the document
+    /// cannot outlive the buffer and the two have to be kept side by side.
+    /// This one takes the buffer — a `Vec<u8>`, a `Box<[u8]>` or an
+    /// `Arc<[u8]>`, none of them copied — and returns a document with no
+    /// borrow in it, which can go in a struct, a cache or another thread
+    /// on its own:
+    ///
+    /// ```no_run
+    /// use stet_pdf_reader::PdfDocument;
+    ///
+    /// struct OpenFile {
+    ///     doc: PdfDocument<'static>,
+    /// }
+    ///
+    /// let doc = PdfDocument::from_owned(std::fs::read("file.pdf")?)?;
+    /// let open = OpenFile { doc };
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// The bytes are gone if this fails. A caller that may try again — on
+    /// [`PdfError::PasswordRequired`], with a password — should pass an
+    /// `Arc<[u8]>` and keep a clone of it, which costs nothing.
+    ///
+    /// Everything else is as [`from_bytes`](Self::from_bytes), including
+    /// the search for a system CMYK profile.
+    pub fn from_owned(data: impl Into<PdfBytes>) -> Result<Self, PdfError> {
+        let mut icc_cache = IccCache::new();
+        icc_cache.search_system_cmyk_profile();
+        Self::open(resolver::Source::Owned(data.into()), icc_cache, b"")
+    }
+
+    /// [`from_owned`](Self::from_owned) with a pre-loaded ICC cache, as
+    /// [`from_bytes_with_icc`](Self::from_bytes_with_icc).
+    pub fn from_owned_with_icc(
+        data: impl Into<PdfBytes>,
+        icc_cache: IccCache,
+    ) -> Result<Self, PdfError> {
+        Self::open(resolver::Source::Owned(data.into()), icc_cache, b"")
+    }
+
+    /// [`from_owned`](Self::from_owned) with a password, as
+    /// [`from_bytes_with_password`](Self::from_bytes_with_password).
+    pub fn from_owned_with_password(
+        data: impl Into<PdfBytes>,
+        icc_cache: IccCache,
+        password: &[u8],
+    ) -> Result<Self, PdfError> {
+        Self::open(resolver::Source::Owned(data.into()), icc_cache, password)
+    }
+}
+
 impl<'a> PdfDocument<'a> {
     /// Parse a PDF from bytes.
     pub fn from_bytes(data: &'a [u8]) -> Result<Self, PdfError> {
@@ -349,6 +404,16 @@ impl<'a> PdfDocument<'a> {
         icc_cache: IccCache,
         password: &[u8],
     ) -> Result<Self, PdfError> {
+        Self::open(resolver::Source::Borrowed(data), icc_cache, password)
+    }
+
+    /// Open a document over bytes that are lent or owned.
+    fn open(
+        source: resolver::Source<'a>,
+        icc_cache: IccCache,
+        password: &[u8],
+    ) -> Result<Self, PdfError> {
+        let data: &[u8] = &source;
         // Validate header — PDF spec allows up to 1024 bytes before %PDF-
         if !has_pdf_header(data) {
             return Err(PdfError::NotAPdf);
@@ -387,7 +452,7 @@ impl<'a> PdfDocument<'a> {
             None
         };
 
-        let resolver = Resolver::with_encryption(data, xref, encryption);
+        let resolver = Resolver::from_source(source, xref, encryption);
         let (pages, box_notes) = page_tree::collect_pages_noted(&resolver)?;
         for (page, message) in box_notes {
             resolver.warnings().record(

@@ -22,7 +22,7 @@ struct ObjStmCache {
 
 /// Resolves indirect object references, caching parsed objects.
 pub struct Resolver<'a> {
-    data: &'a [u8],
+    data: Source<'a>,
     xref: XrefTable,
     /// Cache of parsed objects, populated on demand.
     cache: RefCell<HashMap<u32, PdfObj>>,
@@ -50,6 +50,67 @@ pub struct Resolver<'a> {
     /// The page being rendered, if one is: where content warnings are
     /// said to be.
     content_page: std::cell::Cell<Option<usize>>,
+}
+
+/// The bytes of a PDF, owned: what
+/// [`PdfDocument::from_owned`](crate::PdfDocument::from_owned) takes.
+///
+/// Made from a `Vec<u8>` or a `Box<[u8]>`, which are kept as they are, or
+/// from an `Arc<[u8]>`, which is shared, so the caller's own handle on the
+/// bytes stays good. Nothing is copied in either case.
+#[derive(Debug, Clone)]
+pub struct PdfBytes(OwnedBytes);
+
+#[derive(Debug, Clone)]
+enum OwnedBytes {
+    Vec(Vec<u8>),
+    Shared(std::sync::Arc<[u8]>),
+}
+
+impl From<Vec<u8>> for PdfBytes {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self(OwnedBytes::Vec(bytes))
+    }
+}
+
+impl From<Box<[u8]>> for PdfBytes {
+    fn from(bytes: Box<[u8]>) -> Self {
+        Self(OwnedBytes::Vec(bytes.into_vec()))
+    }
+}
+
+impl From<std::sync::Arc<[u8]>> for PdfBytes {
+    fn from(bytes: std::sync::Arc<[u8]>) -> Self {
+        Self(OwnedBytes::Shared(bytes))
+    }
+}
+
+impl std::ops::Deref for PdfBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match &self.0 {
+            OwnedBytes::Vec(bytes) => bytes,
+            OwnedBytes::Shared(bytes) => bytes,
+        }
+    }
+}
+
+/// Where a resolver's bytes live: lent by the caller for `'a`, or its own.
+pub(crate) enum Source<'a> {
+    Borrowed(&'a [u8]),
+    Owned(PdfBytes),
+}
+
+impl std::ops::Deref for Source<'_> {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            Source::Borrowed(bytes) => bytes,
+            Source::Owned(bytes) => bytes,
+        }
+    }
 }
 
 /// Marks a page as the one being rendered until dropped; see
@@ -132,7 +193,7 @@ impl<'a> Resolver<'a> {
     /// Encrypt dict before encryption state is known).
     pub(crate) fn new(data: &'a [u8], xref: &XrefTable) -> Self {
         Self {
-            data,
+            data: Source::Borrowed(data),
             xref: xref.clone(),
             cache: RefCell::new(HashMap::new()),
             resolving: RefCell::new(HashSet::new()),
@@ -149,6 +210,15 @@ impl<'a> Resolver<'a> {
     /// Create a resolver with optional encryption state.
     pub fn with_encryption(
         data: &'a [u8],
+        xref: XrefTable,
+        encryption: Option<crate::crypto::EncryptionState>,
+    ) -> Self {
+        Self::from_source(Source::Borrowed(data), xref, encryption)
+    }
+
+    /// A resolver over bytes that are lent or owned.
+    pub(crate) fn from_source(
+        data: Source<'a>,
         xref: XrefTable,
         encryption: Option<crate::crypto::EncryptionState>,
     ) -> Self {
@@ -407,8 +477,8 @@ impl<'a> Resolver<'a> {
     }
 
     /// Access the raw file data.
-    pub fn data(&self) -> &'a [u8] {
-        self.data
+    pub fn data(&self) -> &[u8] {
+        &self.data
     }
 
     /// Number of entries in the xref table.
@@ -510,7 +580,7 @@ impl<'a> Resolver<'a> {
     /// versions later in the file.
     fn build_scan_map(&self) -> HashMap<u32, usize> {
         let mut map = HashMap::new();
-        let data = self.data;
+        let data: &[u8] = &self.data;
         let len = data.len();
         let mut pos = 0;
 
@@ -599,7 +669,7 @@ impl<'a> Resolver<'a> {
             })
             .ok_or(PdfError::InvalidObject(offset))?;
 
-        let mut lexer = Lexer::at(self.data, actual_offset);
+        let mut lexer = Lexer::at(&self.data, actual_offset);
 
         // Parse the "N G obj" header and verify the object number
         let parsed_num = match lexer.next_token()? {
@@ -675,7 +745,7 @@ impl<'a> Resolver<'a> {
         if offset >= self.data.len() {
             return None;
         }
-        let mut lexer = Lexer::at(self.data, offset);
+        let mut lexer = Lexer::at(&self.data, offset);
         if !matches!(lexer.next_token().ok()?, Token::Int(_)) {
             return None;
         }

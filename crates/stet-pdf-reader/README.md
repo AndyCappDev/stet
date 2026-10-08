@@ -60,6 +60,11 @@ for page in 0..doc.page_count() {
 }
 ```
 
+`from_bytes` borrows the file. To keep a document without keeping its
+buffer beside it, hand the buffer over — `PdfDocument::from_owned(data)`
+takes a `Vec<u8>`, a `Box<[u8]>` or an `Arc<[u8]>` without copying it, and
+returns a `PdfDocument<'static>`.
+
 ### Transparent pages
 
 For a PDF placed over other content, leave the unpainted areas clear

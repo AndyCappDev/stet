@@ -21,6 +21,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only, and not with `--width`/`--height`. Contributed by @jungseohaan
   (#5).
 
+- **`PdfDocument::from_owned`: a document that owns its bytes.**
+  `from_bytes` borrows the file, so a `PdfDocument<'a>` cannot outlive the
+  buffer, and an application that keeps documents open — a viewer, a
+  server with a cache — had to store each buffer beside its document or
+  resort to a self-referential struct. `from_owned`, `from_owned_with_icc`
+  and `from_owned_with_password` take the buffer and return a
+  `PdfDocument<'static>`. They accept a `Vec<u8>`, a `Box<[u8]>` or an
+  `Arc<[u8]>` (through the new `PdfBytes`) and copy none of them; an `Arc`
+  stays shared, so a caller can keep its handle and try again with a
+  password. The `from_bytes` constructors are unchanged.
+
 - **`PdfDocument::set_annotation_filter`: draw some annotations and not
   others.** `set_render_annotations` is all or nothing, which does not
   suit an editor that draws review comments itself, as objects the user
@@ -62,6 +73,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   archives' `THIRD-PARTY-NOTICES.txt` carries it.
 
 ### Changed
+
+- **`Resolver::data()` returns `&[u8]` borrowed from the resolver**, where
+  it returned `&'a [u8]` borrowed from the file. A resolver may now own
+  its bytes, so the longer lifetime can no longer be promised. Code that
+  uses the slice while it holds the resolver is unaffected; code that kept
+  the slice after letting the resolver go needs to keep the resolver, or
+  its own reference to the file.
 
 - **`stet-pdf-reader` no longer prints to stderr.** A content stream
   error, a font or soft mask that would not load, a missing predefined
