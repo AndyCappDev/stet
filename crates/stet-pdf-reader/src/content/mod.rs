@@ -4311,6 +4311,15 @@ impl<'a> ContentInterpreter<'a> {
             color_space
         };
 
+        // A DeviceN space with more colourants than a tint table can span
+        // has no `ImageColorSpace` of its own: its samples are unpacked and
+        // decoded here by its own component count, then put through the
+        // tint transform below.
+        let source_comps = match &resolved_cs {
+            Some(rcs) if color_space::devicen_without_table(rcs) => rcs.num_components() as u32,
+            _ => color_space.num_components(),
+        };
+
         let is_indexed = matches!(&color_space, ImageColorSpace::Indexed { .. });
         // Expand sub-byte samples (1/2/4 BPC) to 8-bit since they're packed
         // with geometry-dependent alignment. Reduce 16-bit samples to the
@@ -4339,14 +4348,7 @@ impl<'a> ContentInterpreter<'a> {
             )
         } else {
             (
-                expand_bits_to_bytes(
-                    &sample_data,
-                    bpc,
-                    width,
-                    height,
-                    color_space.num_components(),
-                    is_indexed,
-                ),
+                expand_bits_to_bytes(&sample_data, bpc, width, height, source_comps, is_indexed),
                 8,
             )
         };
@@ -4357,7 +4359,7 @@ impl<'a> ContentInterpreter<'a> {
         // CMYK images may use [1 0 1 0 1 0 1 0] to invert values.
         let mut decoded = false;
         let sample_data = if let Some(decode) = dict.get_array(b"Decode") {
-            let n_comps = color_space.num_components() as usize;
+            let n_comps = source_comps as usize;
             let decode_vals: Vec<f64> = decode.iter().filter_map(|o| o.as_f64()).collect();
             if decode_vals.len() >= n_comps * 2 {
                 let effective_bpc = if already_8bit { 8 } else { bpc };
@@ -4447,6 +4449,14 @@ impl<'a> ContentInterpreter<'a> {
                 rgba[pi + 2] = b;
             }
             (ImageColorSpace::PreconvertedRGBA, rgba)
+        } else if let Some(direct) = resolved_cs
+            .as_ref()
+            .and_then(|rcs| color_space::tint_directly(rcs, &sample_data))
+        {
+            // Too many colourants for a tint table, and an alternate space
+            // the branch above does not take: the same evaluation, left in
+            // the alternate space.
+            direct
         } else {
             (color_space, sample_data)
         };

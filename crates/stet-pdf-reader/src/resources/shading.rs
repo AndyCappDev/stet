@@ -996,14 +996,22 @@ fn resolved_cs_to_shading_cs(cs: &ResolvedColorSpace) -> ShadingColorSpace {
             names,
             alt,
             tint_fn,
-        } if matches!(**alt, ResolvedColorSpace::DeviceCMYK) => match tint_fn {
-            Some(tint) => ShadingColorSpace::DeviceN {
-                names: names.clone(),
-                alternate: SimpleColorSpace::DeviceCMYK,
-                tint_function: sample_tint_function_nd(tint, names.len(), 8),
-            },
-            None => ShadingColorSpace::DeviceCMYK,
-        },
+        } if matches!(**alt, ResolvedColorSpace::DeviceCMYK) => {
+            // With no tint transform, or more colourants than a sampled
+            // grid can span, the shading is carried as the CMYK its stops
+            // were already transformed to.
+            match tint_fn
+                .as_ref()
+                .and_then(|tint| sample_tint_function_nd(tint, names.len(), 8))
+            {
+                Some(tint_function) => ShadingColorSpace::DeviceN {
+                    names: names.clone(),
+                    alternate: SimpleColorSpace::DeviceCMYK,
+                    tint_function,
+                },
+                None => ShadingColorSpace::DeviceCMYK,
+            }
+        }
         _ => ShadingColorSpace::DeviceRGB,
     }
 }
@@ -1031,11 +1039,19 @@ fn sample_tint_function_1d(tint: &PdfFunction, samples_per_dim: usize) -> SpotTi
 /// Sample an N-component tint function on a uniform N-dimensional grid in
 /// `[0, 1]^N`. Output ordering is row-major with the first input axis
 /// varying slowest (matching PDF's SampledFunction convention).
+///
+/// `samples_per_dim` is what the caller would like; the grid gets fewer
+/// when that many would exceed the ceiling every tint table shares, and
+/// `None` when `input_dim` is more than a grid can span at all.
 fn sample_tint_function_nd(
     tint: &PdfFunction,
     input_dim: usize,
     samples_per_dim: usize,
-) -> SpotTintFunction {
+) -> Option<SpotTintFunction> {
+    let samples_per_dim = stet_graphics::device::TintLookupTable::grid_samples(
+        u32::try_from(input_dim).ok()?,
+        u32::try_from(samples_per_dim).ok()?,
+    )? as usize;
     let total = samples_per_dim.pow(input_dim as u32);
     let mut cmyk_samples = Vec::with_capacity(total * 4);
     let mut input = vec![0.0_f64; input_dim];
@@ -1052,9 +1068,9 @@ fn sample_tint_function_nd(
             cmyk_samples.push(out.get(k).copied().unwrap_or(0.0));
         }
     }
-    SpotTintFunction {
+    Some(SpotTintFunction {
         input_dim,
         samples_per_dim,
         cmyk_samples: Arc::new(cmyk_samples),
-    }
+    })
 }

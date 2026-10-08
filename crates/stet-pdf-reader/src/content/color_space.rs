@@ -846,11 +846,23 @@ pub fn to_image_color_space(cs: &ResolvedColorSpace) -> ImageColorSpace {
             base,
             hival,
             lookup,
-        } => ImageColorSpace::Indexed {
-            base: Box::new(to_image_color_space(base)),
-            hival: *hival,
-            lookup: lookup.clone(),
-        },
+        } => {
+            // A palette over a DeviceN space too wide for a tint table is
+            // put through the tint transform here, entry by entry: it has
+            // at most 256 of them.
+            if let Some((alt_cs, converted)) = tint_directly(base, lookup) {
+                return ImageColorSpace::Indexed {
+                    base: Box::new(alt_cs),
+                    hival: *hival,
+                    lookup: converted,
+                };
+            }
+            ImageColorSpace::Indexed {
+                base: Box::new(to_image_color_space(base)),
+                hival: *hival,
+                lookup: lookup.clone(),
+            }
+        }
         ResolvedColorSpace::Separation { name, alt, tint_fn } => {
             if let Some(func) = tint_fn {
                 build_1d_tint_image_cs(func, alt, name.clone())
@@ -863,11 +875,14 @@ pub fn to_image_color_space(cs: &ResolvedColorSpace) -> ImageColorSpace {
             alt,
             tint_fn,
         } => {
-            if let Some(func) = tint_fn {
-                build_nd_tint_image_cs(func, alt, names.clone())
-            } else {
-                ImageColorSpace::DeviceGray
-            }
+            // With no tint transform, or more colourants than a table can
+            // span, there is nothing to carry: image painting evaluates the
+            // transform itself in that case (see `tint_directly`), and never
+            // asks for this.
+            tint_fn
+                .as_ref()
+                .and_then(|func| build_nd_tint_image_cs(func, alt, names.clone()))
+                .unwrap_or(ImageColorSpace::DeviceGray)
         }
         ResolvedColorSpace::CalGray { params } => ImageColorSpace::CIEBasedA {
             params: std::sync::Arc::new(params.clone()),
@@ -989,29 +1004,107 @@ fn build_1d_tint_image_cs(
     }
 }
 
-/// Build an N-D TintLookupTable for DeviceN image color space.
-fn build_nd_tint_image_cs(
-    func: &PdfFunction,
-    alt: &ResolvedColorSpace,
-    names: Vec<Vec<u8>>,
-) -> ImageColorSpace {
-    let n_inputs = names.len();
+/// The samples per dimension this reader would like in a tint table of
+/// `n_inputs` inputs. Fewer for wider spaces: the table has
+/// `spd ^ n_inputs` entries.
+fn preferred_tint_samples(n_inputs: usize) -> u32 {
+    match n_inputs {
+        1 => 256,
+        2 => 64,
+        3 => 17,
+        _ => 9,
+    }
+}
+
+/// The samples per dimension a tint table of `n_inputs` inputs gets, or
+/// `None` when the space is too wide for one.
+fn tint_table_samples(n_inputs: usize) -> Option<u32> {
+    let n = u32::try_from(n_inputs).ok()?;
+    TintLookupTable::grid_samples(n, preferred_tint_samples(n_inputs))
+}
+
+/// Whether `cs` is a DeviceN space with a tint transform and too many
+/// colourants for a [`TintLookupTable`]. Samples in such a space are put
+/// through the transform directly, by [`tint_directly`].
+pub fn devicen_without_table(cs: &ResolvedColorSpace) -> bool {
+    matches!(
+        cs,
+        ResolvedColorSpace::DeviceN { names, tint_fn: Some(_), .. }
+            if tint_table_samples(names.len()).is_none()
+    )
+}
+
+/// Put 8-bit samples in a table-less DeviceN space (see
+/// [`devicen_without_table`]) through its tint transform, one pixel at a
+/// time. Returns the space the result is in and its 8-bit samples; `None`
+/// for any other colour space.
+///
+/// Exact, where a table interpolates, and bounded by the number of samples
+/// where a table is bounded by `spd ^ colourants`.
+pub fn tint_directly(
+    cs: &ResolvedColorSpace,
+    samples: &[u8],
+) -> Option<(ImageColorSpace, Vec<u8>)> {
+    if !devicen_without_table(cs) {
+        return None;
+    }
+    let ResolvedColorSpace::DeviceN {
+        names,
+        alt,
+        tint_fn: Some(func),
+    } = cs
+    else {
+        return None;
+    };
+    let ni = names.len();
     let cie = is_cie_space(alt);
     let (alt_cs, n_out) = if cie {
         (ImageColorSpace::DeviceRGB, 3)
     } else {
         (tint_alt_device_cs(alt), alt.num_components())
     };
-    // Use fewer samples per dimension for higher-dimensional spaces.
-    // Total table entries = spd^n_inputs × n_out, so balance quality vs memory.
-    // These tables are used for fills/strokes; images with ≥2 inputs bypass
-    // the table via direct per-pixel function evaluation (see mod.rs).
-    let spd = match n_inputs {
-        1 => 256u32,
-        2 => 64,
-        3 => 17,
-        _ => 9,
+    let mut inputs = vec![0.0f64; ni];
+    let mut comps: Vec<f32> = Vec::with_capacity(n_out);
+    let mut out = Vec::with_capacity(samples.len() / ni * n_out);
+    for pixel in samples.chunks_exact(ni) {
+        for (inp, &b) in inputs.iter_mut().zip(pixel) {
+            *inp = b as f64 / 255.0;
+        }
+        let tinted = func.evaluate(&inputs);
+        comps.clear();
+        if cie {
+            push_cie_converted(alt, &tinted, &mut comps);
+        } else {
+            comps.extend((0..n_out).map(|j| tinted.get(j).copied().unwrap_or(0.0) as f32));
+        }
+        out.extend(
+            comps
+                .iter()
+                .map(|c| (c.clamp(0.0, 1.0) * 255.0 + 0.5) as u8),
+        );
+    }
+    Some((alt_cs, out))
+}
+
+/// Build an N-D TintLookupTable for DeviceN image color space. `None` when
+/// the space has more colourants than a table can span.
+fn build_nd_tint_image_cs(
+    func: &PdfFunction,
+    alt: &ResolvedColorSpace,
+    names: Vec<Vec<u8>>,
+) -> Option<ImageColorSpace> {
+    let n_inputs = names.len();
+    let spd = tint_table_samples(n_inputs)?;
+    let cie = is_cie_space(alt);
+    let (alt_cs, n_out) = if cie {
+        (ImageColorSpace::DeviceRGB, 3)
+    } else {
+        (tint_alt_device_cs(alt), alt.num_components())
     };
+    // Total table entries = spd^n_inputs × n_out; `tint_table_samples`
+    // balances quality against memory and keeps the total within a ceiling.
+    // Images with ≥2 inputs and a Gray or RGB alternate bypass the table
+    // via direct per-pixel function evaluation (see mod.rs).
     let total: usize = (spd as usize).pow(n_inputs as u32);
     let mut data = Vec::with_capacity(total * n_out);
     let mut inputs = vec![0.0f64; n_inputs];
@@ -1037,11 +1130,11 @@ fn build_nd_tint_image_cs(
         samples_per_dim: spd,
         data,
     };
-    ImageColorSpace::DeviceN {
+    Some(ImageColorSpace::DeviceN {
         names,
         alt_space: Box::new(alt_cs),
         tint_table: Arc::new(table),
-    }
+    })
 }
 
 /// Build a round-tripable [`IccColor`](stet_graphics::device::IccColor)
@@ -1099,23 +1192,16 @@ fn simple_alt_for_spot(
 /// Sample a tint function into a `TintLookupTable` whose outputs match the
 /// requested `SimpleColorSpace`. CIE alternate spaces produce RGB samples
 /// via `push_cie_converted`; device alternates pass tint outputs through
-/// directly.
+/// directly. `None` when the space has more colourants than a table can
+/// span.
 fn sample_tint_table(
     func: &PdfFunction,
     n_inputs: usize,
     alt: &ResolvedColorSpace,
     n_out: usize,
-) -> TintLookupTable {
+) -> Option<TintLookupTable> {
     let cie = is_cie_space(alt);
-    let spd = if n_inputs == 1 {
-        256u32
-    } else {
-        match n_inputs {
-            2 => 64,
-            3 => 17,
-            _ => 9,
-        }
-    };
+    let spd = tint_table_samples(n_inputs)?;
     let total: usize = (spd as usize).pow(n_inputs as u32);
     let mut data = Vec::with_capacity(total * n_out);
     let mut inputs = vec![0.0f64; n_inputs];
@@ -1134,12 +1220,12 @@ fn sample_tint_table(
             }
         }
     }
-    TintLookupTable {
+    Some(TintLookupTable {
         num_inputs: n_inputs as u32,
         num_outputs: n_out as u32,
         samples_per_dim: spd,
         data,
-    }
+    })
 }
 
 /// Cache key for a spot/DeviceN tint table. Identifies the colorspace by
@@ -1190,7 +1276,7 @@ pub fn build_spot_color(
             } else {
                 let func = tint_fn.as_ref()?;
                 let (_, n_out) = simple_alt_for_spot(alt);
-                let t = Arc::new(sample_tint_table(func, 1, alt, n_out));
+                let t = Arc::new(sample_tint_table(func, 1, alt, n_out)?);
                 cache.insert(key, Arc::clone(&t));
                 t
             };
@@ -1214,7 +1300,7 @@ pub fn build_spot_color(
             } else {
                 let func = tint_fn.as_ref()?;
                 let (_, n_out) = simple_alt_for_spot(alt);
-                let t = Arc::new(sample_tint_table(func, names.len(), alt, n_out));
+                let t = Arc::new(sample_tint_table(func, names.len(), alt, n_out)?);
                 cache.insert(key, Arc::clone(&t));
                 t
             };

@@ -665,39 +665,90 @@ pub struct TintLookupTable {
 }
 
 impl TintLookupTable {
+    /// The most inputs a table can have. [`lookup_nd`](Self::lookup_nd)
+    /// blends the `2^n` grid points around a colour, so each further input
+    /// doubles the cost of every lookup as well as multiplying the table.
+    pub const MAX_INPUTS: u32 = 8;
+
+    /// The most grid points (`samples_per_dim ^ num_inputs`) a table may
+    /// hold: `9^7`, the largest table built for a colour space that the
+    /// sampling choices below were tuned on. At four outputs that is 73 MiB
+    /// of samples.
+    pub const MAX_GRID_POINTS: usize = 4_782_969;
+
+    /// How many samples per dimension a table of `num_inputs` inputs can
+    /// have: `preferred`, or the largest smaller count that keeps the table
+    /// within [`MAX_GRID_POINTS`](Self::MAX_GRID_POINTS).
+    ///
+    /// `None` when no table can be built — no inputs, more than
+    /// [`MAX_INPUTS`](Self::MAX_INPUTS), or fewer than two samples asked
+    /// for. The caller then evaluates the tint transform directly, or does
+    /// without the table.
+    ///
+    /// The number of inputs comes from the file: a DeviceN space may name
+    /// 32 colourants, and a grid of even 9 samples a side over 9 of them is
+    /// 387 million points. Every table is sized through here so that
+    /// arithmetic is done once, with a ceiling.
+    pub fn grid_samples(num_inputs: u32, preferred: u32) -> Option<u32> {
+        if num_inputs == 0 || num_inputs > Self::MAX_INPUTS {
+            return None;
+        }
+        (2..=preferred).rev().find(|&spd| {
+            (spd as usize)
+                .checked_pow(num_inputs)
+                .is_some_and(|points| points <= Self::MAX_GRID_POINTS)
+        })
+    }
+
     /// Linear interpolation lookup for 1D (Separation) tint transforms.
+    ///
+    /// Writes zeros when the table is not a usable 1-D table.
     #[inline]
     pub fn lookup_1d(&self, tint: f32, out: &mut [f32]) {
         let n = self.samples_per_dim as usize;
-        let no = self.num_outputs as usize;
-        let idx = tint * (n - 1) as f32;
+        let no = (self.num_outputs as usize).min(out.len());
+        if n < 2 || self.data.len() < n * self.num_outputs as usize {
+            out[..no].fill(0.0);
+            return;
+        }
+        let stride = self.num_outputs as usize;
+        let idx = tint.clamp(0.0, 1.0) * (n - 1) as f32;
         let i0 = (idx as usize).min(n - 2);
         let frac = idx - i0 as f32;
-        let base0 = i0 * no;
-        let base1 = (i0 + 1) * no;
+        let base0 = i0 * stride;
+        let base1 = (i0 + 1) * stride;
         for (c, out_val) in out[..no].iter_mut().enumerate() {
             *out_val = self.data[base0 + c] * (1.0 - frac) + self.data[base1 + c] * frac;
         }
     }
 
     /// Multilinear interpolation lookup for N-D (DeviceN) tint transforms.
+    ///
+    /// Writes zeros when the table has more than
+    /// [`MAX_INPUTS`](Self::MAX_INPUTS) inputs, fewer than two samples per
+    /// dimension, or `inputs` is shorter than its input count.
     pub fn lookup_nd(&self, inputs: &[f32], out: &mut [f32]) {
         let ni = self.num_inputs as usize;
-        let no = self.num_outputs as usize;
+        let stride = self.num_outputs as usize;
+        let no = stride.min(out.len());
         let n = self.samples_per_dim as usize;
 
-        let mut idx = [0usize; 8];
-        let mut frac = [0.0f32; 8];
+        for out_val in out[..no].iter_mut() {
+            *out_val = 0.0;
+        }
+        if ni == 0 || ni > Self::MAX_INPUTS as usize || n < 2 || inputs.len() < ni {
+            return;
+        }
+
+        let mut idx = [0usize; Self::MAX_INPUTS as usize];
+        let mut frac = [0.0f32; Self::MAX_INPUTS as usize];
         for d in 0..ni {
-            let fi = inputs[d] * (n - 1) as f32;
+            let fi = inputs[d].clamp(0.0, 1.0) * (n - 1) as f32;
             idx[d] = (fi as usize).min(n - 2);
             frac[d] = fi - idx[d] as f32;
         }
 
         let corners = 1usize << ni;
-        for out_val in out[..no].iter_mut() {
-            *out_val = 0.0;
-        }
         for corner in 0..corners {
             let mut weight = 1.0f32;
             let mut linear_idx = 0usize;
@@ -705,12 +756,11 @@ impl TintLookupTable {
                 let bit = (corner >> d) & 1;
                 let dim_idx = idx[d] + bit;
                 weight *= if bit == 1 { frac[d] } else { 1.0 - frac[d] };
-                let stride = n.pow((ni - 1 - d) as u32);
-                linear_idx += dim_idx * stride;
+                linear_idx = linear_idx.wrapping_mul(n).wrapping_add(dim_idx);
             }
-            let base = linear_idx * no;
+            let base = linear_idx.wrapping_mul(stride);
             for (c, out_val) in out[..no].iter_mut().enumerate() {
-                *out_val += weight * self.data.get(base + c).copied().unwrap_or(0.0);
+                *out_val += weight * self.data.get(base.wrapping_add(c)).copied().unwrap_or(0.0);
             }
         }
     }
@@ -1420,6 +1470,76 @@ pub trait PageSinkFactory: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tint_grids_keep_their_size_until_the_ceiling() {
+        // Unchanged where the grid already fitted.
+        assert_eq!(TintLookupTable::grid_samples(1, 256), Some(256));
+        assert_eq!(TintLookupTable::grid_samples(2, 64), Some(64));
+        assert_eq!(TintLookupTable::grid_samples(4, 17), Some(17));
+        assert_eq!(TintLookupTable::grid_samples(7, 9), Some(9));
+        // 9^8 is 43 million points: fewer per side.
+        assert_eq!(TintLookupTable::grid_samples(8, 9), Some(6));
+        // No table at all.
+        assert_eq!(TintLookupTable::grid_samples(0, 9), None);
+        assert_eq!(TintLookupTable::grid_samples(9, 9), None);
+        assert_eq!(TintLookupTable::grid_samples(u32::MAX, 9), None);
+        assert_eq!(TintLookupTable::grid_samples(3, 1), None);
+        for n in 1..=TintLookupTable::MAX_INPUTS {
+            let spd = TintLookupTable::grid_samples(n, 256).unwrap() as usize;
+            assert!(spd.pow(n) <= TintLookupTable::MAX_GRID_POINTS, "{n} inputs");
+        }
+    }
+
+    #[test]
+    fn a_malformed_tint_table_looks_up_zeros() {
+        let mut out = [9.0f32; 4];
+        // More inputs than the lookup blends.
+        let wide = TintLookupTable {
+            num_inputs: 9,
+            num_outputs: 4,
+            samples_per_dim: 2,
+            data: vec![1.0; 512 * 4],
+        };
+        wide.lookup_nd(&[0.5; 9], &mut out);
+        assert_eq!(out, [0.0; 4]);
+        // A single sample per dimension has nothing to interpolate between.
+        let flat = TintLookupTable {
+            num_inputs: 1,
+            num_outputs: 4,
+            samples_per_dim: 1,
+            data: vec![1.0; 4],
+        };
+        out = [9.0; 4];
+        flat.lookup_1d(0.5, &mut out);
+        assert_eq!(out, [0.0; 4]);
+        out = [9.0; 4];
+        flat.lookup_nd(&[0.5], &mut out);
+        assert_eq!(out, [0.0; 4]);
+        // Data shorter than the grid it claims.
+        let short = TintLookupTable {
+            num_inputs: 2,
+            num_outputs: 4,
+            samples_per_dim: 4,
+            data: vec![1.0; 8],
+        };
+        short.lookup_nd(&[1.0, 1.0], &mut out);
+        assert_eq!(out, [0.0; 4]);
+    }
+
+    #[test]
+    fn a_tint_table_interpolates_between_its_grid_points() {
+        // Two inputs, one output: f(a, b) = a at each corner.
+        let table = TintLookupTable {
+            num_inputs: 2,
+            num_outputs: 1,
+            samples_per_dim: 2,
+            data: vec![0.0, 0.0, 1.0, 1.0],
+        };
+        let mut out = [0.0f32];
+        table.lookup_nd(&[0.25, 0.9], &mut out);
+        assert!((out[0] - 0.25).abs() < 1e-6, "{}", out[0]);
+    }
 
     #[test]
     fn painted_channels_union_the_process_colorants() {

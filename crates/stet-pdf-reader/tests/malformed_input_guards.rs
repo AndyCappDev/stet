@@ -782,3 +782,189 @@ fn a_valueless_startxref_with_no_xref_table_is_rebuilt_by_scanning() {
     let doc = PdfDocument::from_bytes(&cut).expect("opens by scanning");
     assert_eq!(doc.page_count(), 1);
 }
+
+/// `[/DeviceN [c0 … c(n-1)] /DeviceCMYK <tint>]` as object 6, with a tint
+/// transform (object 7) that keeps its first input as cyan.
+fn wide_devicen(n: usize) -> Vec<(u32, Vec<u8>)> {
+    let names: String = (0..n).map(|i| format!("/c{i} ")).collect();
+    let tint = format!("{{ {}0 0 0 }}", "pop ".repeat(n - 1));
+    let domain = "0 1 ".repeat(n);
+    vec![
+        (
+            6,
+            format!("[/DeviceN [{names}] /DeviceCMYK 7 0 R]").into_bytes(),
+        ),
+        (
+            7,
+            format!(
+                "<</FunctionType 4/Domain[{domain}]/Range[0 1 0 1 0 1 0 1]/Length {}>>\n\
+                 stream\n{tint}\nendstream",
+                tint.len()
+            )
+            .into_bytes(),
+        ),
+    ]
+}
+
+/// A tint table has `samples ^ colourants` entries, and the colourant count
+/// is the file's to choose. pdf.js's `postscript_type4_many_outputs.pdf` —
+/// an axial shading in a nine-colourant DeviceN space, 1.1 KB on disk —
+/// took 4.2 GB to open. A regression here does not fail: it exhausts memory.
+#[test]
+fn a_shading_in_a_wide_devicen_space_builds_no_giant_tint_table() {
+    for n in [9usize, 32] {
+        let mut extra = wide_devicen(n);
+        let ramp = format!("{{ {}}}", "dup ".repeat(n - 1));
+        extra.push((
+            8,
+            b"<</ShadingType 2/ColorSpace 6 0 R/Coords[0 0 100 0]/Function 9 0 R>>".to_vec(),
+        ));
+        extra.push((
+            9,
+            format!(
+                "<</FunctionType 4/Domain[0 1]/Range[{}]/Length {}>>\nstream\n{ramp}\nendstream",
+                "0 1 ".repeat(n),
+                ramp.len()
+            )
+            .into_bytes(),
+        ));
+        let pdf = one_page_doc(b"/Resources<</Shading<</Sh 8 0 R>>>>", b"/Sh sh", &extra);
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        assert!(
+            !doc.render_page(0, 72.0).unwrap().is_empty(),
+            "{n} colourants"
+        );
+    }
+}
+
+/// The colour a fill in a wide DeviceN space is painted with comes from the
+/// tint transform itself, so it is right at any width; only the sampled
+/// table kept for writing the spot colour back out is given up.
+#[test]
+fn a_fill_in_a_wide_devicen_space_keeps_its_colour() {
+    use stet_graphics::device::SpotColorSpace;
+    use stet_graphics::display_list::DisplayElement;
+    for n in [8usize, 9, 32] {
+        let contents = format!("/CS cs 1 {}scn 20 20 10 10 re f", "0 ".repeat(n - 1));
+        let pdf = one_page_doc(
+            b"/Resources<</ColorSpace<</CS 6 0 R>>>>",
+            contents.as_bytes(),
+            &wide_devicen(n),
+        );
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let list = doc.render_page(0, 72.0).unwrap();
+        let params = list
+            .elements()
+            .iter()
+            .find_map(|e| match e {
+                DisplayElement::Fill { params, .. } => Some(params),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{n} colourants: no fill"));
+        // Cyan: red well below green and blue.
+        let c = &params.color;
+        assert!(c.r < 0.4 && c.b > 0.6 && c.g > 0.4, "{n} colourants: {c:?}");
+        match (&params.spot_color, n) {
+            (Some(spot), 8) => {
+                let SpotColorSpace::DeviceN { tint_table, .. } = &spot.color_space else {
+                    panic!("not DeviceN");
+                };
+                // 9 samples a side would be 43 million grid points.
+                assert_eq!(tint_table.samples_per_dim, 6);
+                assert_eq!(tint_table.data.len(), 6usize.pow(8) * 4);
+            }
+            (None, 8) => panic!("8 colourants fit a table"),
+            (spot, _) => assert!(spot.is_none(), "{n} colourants carry no table"),
+        }
+    }
+}
+
+/// An image in a DeviceN space too wide for a table is put through the tint
+/// transform pixel by pixel and carried in the alternate space.
+#[test]
+fn an_image_in_a_wide_devicen_space_is_tinted_directly() {
+    use stet_graphics::device::ImageColorSpace;
+    use stet_graphics::display_list::DisplayElement;
+    let n = 9usize;
+    // Two pixels: full first colourant, then no ink at all.
+    let mut samples = vec![0u8; 2 * n];
+    samples[0] = 255;
+    let mut image = format!(
+        "<</Type/XObject/Subtype/Image/Width 2/Height 1/BitsPerComponent 8\
+         /ColorSpace 6 0 R/Length {}>>\nstream\n",
+        samples.len()
+    )
+    .into_bytes();
+    image.extend_from_slice(&samples);
+    image.extend_from_slice(b"\nendstream");
+    let mut extra = wide_devicen(n);
+    extra.push((8, image));
+    let pdf = one_page_doc(
+        b"/Resources<</XObject<</Im 8 0 R>>>>",
+        b"100 0 0 100 0 0 cm /Im Do",
+        &extra,
+    );
+    let doc = PdfDocument::from_bytes(&pdf).unwrap();
+    let list = doc.render_page(0, 72.0).unwrap();
+    let (data, params) = list
+        .elements()
+        .iter()
+        .find_map(|e| match e {
+            DisplayElement::Image {
+                sample_data,
+                params,
+            } => Some((sample_data, params)),
+            _ => None,
+        })
+        .expect("an image");
+    assert!(
+        matches!(params.color_space, ImageColorSpace::DeviceCMYK),
+        "{:?}",
+        params.color_space
+    );
+    assert_eq!(data.as_slice(), [255, 0, 0, 0, 0, 0, 0, 0]);
+}
+
+/// The same space under an Indexed palette: the palette is converted, the
+/// image keeps its indices.
+#[test]
+fn a_palette_over_a_wide_devicen_space_is_converted() {
+    use stet_graphics::device::ImageColorSpace;
+    use stet_graphics::display_list::DisplayElement;
+    let n = 9usize;
+    let mut palette = String::new();
+    for entry in [[0u8; 9], [255, 0, 0, 0, 0, 0, 0, 0, 0]] {
+        for b in entry {
+            palette.push_str(&format!("{b:02x}"));
+        }
+    }
+    let mut extra = wide_devicen(n);
+    extra.push((
+        8,
+        format!(
+            "<</Type/XObject/Subtype/Image/Width 2/Height 1/BitsPerComponent 8\
+             /ColorSpace[/Indexed 6 0 R 1 <{palette}>]/Length 2>>\nstream\n\x00\x01\nendstream"
+        )
+        .into_bytes(),
+    ));
+    let pdf = one_page_doc(
+        b"/Resources<</XObject<</Im 8 0 R>>>>",
+        b"100 0 0 100 0 0 cm /Im Do",
+        &extra,
+    );
+    let doc = PdfDocument::from_bytes(&pdf).unwrap();
+    let list = doc.render_page(0, 72.0).unwrap();
+    let cs = list
+        .elements()
+        .iter()
+        .find_map(|e| match e {
+            DisplayElement::Image { params, .. } => Some(&params.color_space),
+            _ => None,
+        })
+        .expect("an image");
+    let ImageColorSpace::Indexed { base, lookup, .. } = cs else {
+        panic!("{cs:?}");
+    };
+    assert!(matches!(**base, ImageColorSpace::DeviceCMYK), "{base:?}");
+    assert_eq!(lookup.as_slice(), [0, 0, 0, 0, 255, 0, 0, 0]);
+}

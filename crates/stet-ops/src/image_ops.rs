@@ -1953,10 +1953,8 @@ fn capture_image_color_space(ctx: &mut Context) -> Option<ImageColorSpace> {
             tint_transform,
             num_alt_components,
         } => {
-            // Cap at 8 colorants for sampling; fall back for more
-            if num_colorants > 8 {
-                return None;
-            }
+            // More colorants than a table can span: `sample_tint_transform`
+            // returns `None` and the caller falls back.
             let alt_ics = alt_space_to_image_cs(&alt_space);
             let table =
                 sample_tint_transform(ctx, tint_transform, num_colorants, num_alt_components)?;
@@ -1982,22 +1980,26 @@ fn alt_space_to_image_cs(cs: &ColorSpace) -> ImageColorSpace {
 }
 
 /// Sample a tint transform into a lookup table by evaluating it at grid points.
+///
+/// `None` when the transform fails, or when `num_inputs` is more than a
+/// table can span: the number of colorants is the program's to choose, and
+/// the grid has `samples ^ num_inputs` points, each one a run of the tint
+/// transform procedure.
 pub(crate) fn sample_tint_transform(
     ctx: &mut Context,
     tint_transform: PsObject,
     num_inputs: u32,
     num_outputs: u32,
 ) -> Option<stet_graphics::device::TintLookupTable> {
-    let samples_per_dim = if num_inputs == 1 {
-        256u32
-    } else {
-        match num_inputs {
-            2 => 33,
-            3 => 17,
-            4 => 17,
-            _ => 9,
-        }
+    let preferred = match num_inputs {
+        1 => 256u32,
+        2 => 33,
+        3 => 17,
+        4 => 17,
+        _ => 9,
     };
+    let samples_per_dim =
+        stet_graphics::device::TintLookupTable::grid_samples(num_inputs, preferred)?;
     let total_entries = (samples_per_dim as usize).pow(num_inputs);
     let mut data = Vec::with_capacity(total_entries * num_outputs as usize);
 

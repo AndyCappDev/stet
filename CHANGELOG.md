@@ -120,6 +120,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   command line also reports a page too small to have any pixels at the
   chosen resolution as an error and exits 1, where it would have
   panicked. Found with `boundingBox_invalid.pdf` from the pdf.js test set.
+- **A DeviceN colour space with many colourants could exhaust memory, in
+  PDF and in PostScript.** A tint transform is sampled into a table of
+  `samples ^ colourants` entries, and the colourant count is the file's to
+  choose. A 1.1 KB PDF with an axial shading in a nine-colourant space took
+  4.2 GB to open; eight colourants cost 540 to 690 MB for each such space;
+  and in PostScript `setcolorspace` ran the tint transform procedure once
+  per entry, 387 million times for nine colourants. Every such table now
+  shares one ceiling, `TintLookupTable::MAX_GRID_POINTS`, sized by
+  `TintLookupTable::grid_samples`. Up to seven colourants nothing changes.
+  Eight get six samples a side where they had nine (eight, in a shading).
+  Beyond eight there is no table: colours are computed from the tint
+  transform itself, which is exact — a fill or stroke as before, an image
+  pixel by pixel, an Indexed palette entry by entry — and what is given up
+  is the spot identity of that colour in `--device pdf` output, which is
+  written in the alternate space. `TintLookupTable::lookup_1d` and
+  `lookup_nd` also return zeros for a table they cannot interpolate, where
+  `lookup_nd` indexed out of bounds for more than eight inputs. Found with
+  `postscript_type4_many_outputs.pdf` from the pdf.js test set.
 
 ## [0.8.4] — 2026-10-04
 
