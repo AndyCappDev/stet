@@ -521,7 +521,7 @@ impl<'a> PdfDocument<'a> {
 
     /// [`page_area_rect`](Self::page_area_rect), widened outward to whole
     /// device pixels of a render of the crop box (the default page area) at
-    /// `dpi`, and clipped to the crop box.
+    /// `dpi`, and clipped to the MediaBox as every page area is.
     ///
     /// An area whose edges fall between device pixels is rasterised at its
     /// own sub-pixel phase, so its antialiasing differs from the same area
@@ -529,7 +529,9 @@ impl<'a> PdfDocument<'a> {
     /// rectangle as a [`PageArea::Rect`] renders it on the page's own pixel
     /// grid: the result equals the matching pixels of a crop-box render at
     /// `dpi`. The output can be up to one pixel larger on each side than the
-    /// area asked for.
+    /// area asked for. An area reaching outside the crop box — a bleed, the
+    /// MediaBox — keeps that reach, on the same grid; where it meets the
+    /// MediaBox it stops there, on the grid or not.
     pub fn page_area_rect_on_pixel_grid(
         &self,
         page: usize,
@@ -540,8 +542,13 @@ impl<'a> PdfDocument<'a> {
             .get(page)
             .ok_or(PdfError::PageOutOfRange(page, self.pages.len()))?;
         let area = page_boxes::resolve_page_area(&self.resolver, info, page, self.page_area)?;
-        let snapped =
-            page_boxes::snap_area_to_pixel_grid(area, info.crop_box, info.rotate, dpi / 72.0);
+        let snapped = page_boxes::snap_area_to_pixel_grid(
+            area,
+            info.crop_box,
+            info.media_box,
+            info.rotate,
+            dpi / 72.0,
+        );
         if snapped[2] > snapped[0] && snapped[3] > snapped[1] {
             Ok(snapped)
         } else {

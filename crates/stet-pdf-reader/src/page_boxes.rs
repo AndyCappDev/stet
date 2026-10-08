@@ -102,7 +102,12 @@ pub(crate) fn resolve_page_area(
 
 /// `area` widened outward to whole device pixels of a render of `base` at
 /// `scale` device pixels per point and `/Rotate rotate`, then clipped to
-/// `base`.
+/// `bounds`.
+///
+/// `base` fixes where the grid lies and `bounds` how far an area may reach;
+/// they are the crop box and the MediaBox. The grid does not stop at the
+/// crop box's edge, so an area that takes in the bleed keeps it — clipping
+/// to `base` instead turned `--box media --box-snap` into the crop box.
 ///
 /// A render puts device pixel 0 on one edge of `base` along each axis (which
 /// edge depends on the rotation, as in `PdfDocument::render_page`'s CTM), so
@@ -116,6 +121,7 @@ pub(crate) fn resolve_page_area(
 pub(crate) fn snap_area_to_pixel_grid(
     area: [f64; 4],
     base: [f64; 4],
+    bounds: [f64; 4],
     rotate: i32,
     scale: f64,
 ) -> [f64; 4] {
@@ -144,7 +150,12 @@ pub(crate) fn snap_area_to_pixel_grid(
         270 => (from_max(ax0, ax1, bx1), from_max(ay0, ay1, by1)),
         _ => (from_min(ax0, ax1, bx0), from_max(ay0, ay1, by1)),
     };
-    [x0.max(bx0), y0.max(by0), x1.min(bx1), y1.min(by1)]
+    [
+        x0.max(bounds[0]),
+        y0.max(bounds[1]),
+        x1.min(bounds[2]),
+        y1.min(bounds[3]),
+    ]
 }
 
 /// Page geometry and presentation hints, drawn from the page dict
@@ -359,7 +370,7 @@ mod pixel_grid_tests {
         let area = [40.0, 30.0, 160.0, 130.0];
         for rotate in [0, 90, 180, 270] {
             assert!(
-                close(snap_area_to_pixel_grid(area, BASE, rotate, 1.0), area),
+                close(snap_area_to_pixel_grid(area, BASE, BASE, rotate, 1.0), area),
                 "/Rotate {rotate}"
             );
         }
@@ -370,12 +381,12 @@ mod pixel_grid_tests {
         let area = [40.3, 30.6, 159.2, 129.9];
         // /Rotate 0 counts x up from the left edge and y down from the top edge.
         assert!(close(
-            snap_area_to_pixel_grid(area, BASE, 0, 1.0),
+            snap_area_to_pixel_grid(area, BASE, BASE, 0, 1.0),
             [40.0, 30.0, 160.0, 130.0]
         ));
         // At 2 px/pt the grid is half a point.
         assert!(close(
-            snap_area_to_pixel_grid(area, BASE, 0, 2.0),
+            snap_area_to_pixel_grid(area, BASE, BASE, 0, 2.0),
             [40.0, 30.5, 159.5, 130.0]
         ));
     }
@@ -387,16 +398,40 @@ mod pixel_grid_tests {
         let base = [10.0, 10.0, 290.5, 190.25];
         let area = [100.2, 50.2, 200.8, 150.8];
         // Counted from the right edge (290.5): 100.2 → 99.5, 200.8 → 201.5.
-        let r180 = snap_area_to_pixel_grid(area, base, 180, 1.0);
+        let r180 = snap_area_to_pixel_grid(area, base, base, 180, 1.0);
         assert!(close(r180, [99.5, 50.0, 201.5, 151.0]), "{r180:?}");
         // /Rotate 270 counts y down from the top edge (190.25): 50.2 → 49.25, 150.8 → 151.25.
-        let r270 = snap_area_to_pixel_grid(area, base, 270, 1.0);
+        let r270 = snap_area_to_pixel_grid(area, base, base, 270, 1.0);
         assert!(close(r270, [99.5, 49.25, 201.5, 151.25]), "{r270:?}");
     }
 
     #[test]
-    fn the_result_stays_inside_the_base() {
+    fn the_result_stays_inside_the_bounds() {
         let area = [9.5, 9.5, 290.4, 190.9];
-        assert!(close(snap_area_to_pixel_grid(area, BASE, 0, 1.0), BASE));
+        assert!(close(
+            snap_area_to_pixel_grid(area, BASE, BASE, 0, 1.0),
+            BASE
+        ));
+    }
+
+    /// The grid carries on past the base: an area reaching into the bleed
+    /// keeps it, on the same grid, and stops only at the bounds.
+    #[test]
+    fn an_area_beyond_the_base_is_kept_as_far_as_the_bounds() {
+        let bounds = [0.0, 0.0, 300.0, 200.0];
+        // Base edges at .25, so its grid is off the whole points.
+        let base = [10.25, 10.25, 290.25, 190.25];
+        let area = [2.6, 3.1, 295.9, 197.0];
+        // x counts up from 10.25: 2.6 → 2.25, 295.9 → 296.25.
+        // y counts down from 190.25: 3.1 → 2.25, 197.0 → 197.25.
+        assert!(close(
+            snap_area_to_pixel_grid(area, base, bounds, 0, 1.0),
+            [2.25, 2.25, 296.25, 197.25]
+        ));
+        // Widening stops at the bounds, off the grid if they are.
+        assert!(close(
+            snap_area_to_pixel_grid(bounds, base, bounds, 0, 1.0),
+            bounds
+        ));
     }
 }

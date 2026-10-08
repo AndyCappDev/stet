@@ -304,6 +304,55 @@ fn an_area_on_the_pixel_grid_renders_the_pages_pixels() {
     }
 }
 
+/// Snapping keeps an area's reach beyond the crop box. The grid is the crop
+/// box's, but it does not end there: the bleed box on the grid is still the
+/// bleed box, a pixel wider at most, and the page's pixels are where the
+/// page has them. Clipped to the crop box instead, `--box bleed --box-snap`
+/// rendered the crop box.
+#[test]
+fn an_area_beyond_the_crop_box_keeps_its_reach_on_the_grid() {
+    let dpi = 150.0;
+    let scale = dpi / 72.0;
+    let probe = [100.3, 50.7, 250.6, 150.2];
+    for rotate in [0, 90, 180, 270] {
+        let pdf = fixture(rotate);
+        let mut doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let (page, page_w, _) = doc.render_page_to_rgba(0, dpi).unwrap();
+        doc.set_page_area(PageArea::Rect(probe));
+        let probe = doc.page_area_rect_on_pixel_grid(0, dpi).unwrap();
+
+        doc.set_page_area(PageArea::BleedBox);
+        let snapped = doc.page_area_rect_on_pixel_grid(0, dpi).unwrap();
+        for i in 0..2 {
+            assert!(
+                snapped[i] <= BLEED[i] && snapped[i + 2] >= BLEED[i + 2],
+                "/Rotate {rotate}: {snapped:?} does not cover the bleed box"
+            );
+            assert!(
+                snapped[i] >= MEDIA[i] && snapped[i + 2] <= MEDIA[i + 2],
+                "/Rotate {rotate}: {snapped:?} leaves the MediaBox"
+            );
+        }
+
+        doc.set_page_area(PageArea::Rect(snapped));
+        let (rgba, w, _) = doc.render_page_to_rgba(0, dpi).unwrap();
+        let worst = worst_difference(
+            &crop(&rgba, w, device_rect_at(snapped, probe, rotate, scale)),
+            &crop(&page, page_w, device_rect_at(CROP, probe, rotate, scale)),
+        );
+        assert!(
+            worst <= 2,
+            "/Rotate {rotate}: a pixel differs from the page's by {worst} levels"
+        );
+    }
+
+    // The MediaBox bounds every area, so on the grid it is itself.
+    let pdf = fixture(0);
+    let mut doc = PdfDocument::from_bytes(&pdf).unwrap();
+    doc.set_page_area(PageArea::MediaBox);
+    assert_eq!(doc.page_area_rect_on_pixel_grid(0, dpi).unwrap(), MEDIA);
+}
+
 /// The check above is not vacuous: without the grid, the same area's pixels
 /// differ from the page's by far more than f32 rounding.
 #[test]
