@@ -401,7 +401,7 @@ pub fn op_nulldevice(ctx: &mut Context) -> Result<(), PsError> {
     ctx.gstate.default_ctm = Matrix::identity();
 
     // Set clipping to degenerate path (single MoveTo)
-    ctx.gstate.clip_path = Some({
+    ctx.gstate.set_clip({
         let mut p = stet_fonts::geometry::PsPath::new();
         p.segments.push(PathSegment::MoveTo(0.0, 0.0));
         p

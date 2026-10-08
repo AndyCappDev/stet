@@ -220,6 +220,151 @@ pub struct GstateEntry {
     pub saved_by_save: bool,
 }
 
+/// The clip regions set since the last `initclip`, outermost first: the
+/// clip is their intersection.
+///
+/// `clip`, `eoclip` and `rectclip` each narrow the clip to its intersection
+/// with a new path, and the display list records that as one more
+/// [`Clip`](stet_graphics::display_list::DisplayElement::Clip) element. When
+/// `grestore`, `restore`, `setgstate` or `cliprestore` brings an earlier
+/// clip back, the device's clip has to be rebuilt from nothing, and that
+/// takes every region, not only the last one set.
+///
+/// Cloning shares the regions, so a `gsave` does not copy paths.
+#[derive(Clone, Debug, Default)]
+pub struct ClipChain {
+    head: Option<Arc<ClipLink>>,
+}
+
+#[derive(Debug)]
+struct ClipLink {
+    path: PsPath,
+    fill_rule: FillRule,
+    parent: Option<Arc<ClipLink>>,
+}
+
+impl Drop for ClipLink {
+    /// Unlinks iteratively: a program may set a great many clips in a row,
+    /// and dropping the chain link by link through recursion would be as
+    /// deep as the chain is long.
+    fn drop(&mut self) {
+        let mut next = self.parent.take();
+        while let Some(link) = next {
+            match Arc::try_unwrap(link) {
+                Ok(mut link) => next = link.parent.take(),
+                Err(_) => break,
+            }
+        }
+    }
+}
+
+impl ClipChain {
+    /// An unclipped page: no regions.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// True when no region has been set.
+    pub fn is_empty(&self) -> bool {
+        self.head.is_none()
+    }
+
+    /// Drop every region (`initclip`).
+    pub fn clear(&mut self) {
+        self.head = None;
+    }
+
+    /// Narrow the clip to its intersection with `path`, a device-space path
+    /// filled by `fill_rule`.
+    ///
+    /// Two axis-aligned rectangles in a row are kept as the one rectangle
+    /// they have in common, which is the same region, so a program that
+    /// clips to a rectangle over and over does not grow the chain.
+    pub fn intersect(&mut self, path: PsPath, fill_rule: FillRule) {
+        if let Some(head) = &self.head
+            && let Some(a) = device_rect(&head.path)
+            && let Some(b) = device_rect(&path)
+        {
+            let common = [
+                a[0].max(b[0]),
+                a[1].max(b[1]),
+                a[2].min(b[2]),
+                a[3].min(b[3]),
+            ];
+            self.head = Some(Arc::new(ClipLink {
+                path: rect_path(common),
+                fill_rule: FillRule::NonZeroWinding,
+                parent: head.parent.clone(),
+            }));
+            return;
+        }
+        self.head = Some(Arc::new(ClipLink {
+            path,
+            fill_rule,
+            parent: self.head.take(),
+        }));
+    }
+
+    /// The regions, outermost first, each with the rule it is filled by.
+    pub fn regions(&self) -> Vec<(&PsPath, FillRule)> {
+        let mut regions = Vec::new();
+        let mut link = self.head.as_deref();
+        while let Some(l) = link {
+            regions.push((&l.path, l.fill_rule));
+            link = l.parent.as_deref();
+        }
+        regions.reverse();
+        regions
+    }
+
+    /// The innermost region when it is the whole clip: a chain of exactly
+    /// one region.
+    pub fn sole_region(&self) -> Option<&PsPath> {
+        match self.head.as_deref() {
+            Some(link) if link.parent.is_none() => Some(&link.path),
+            _ => None,
+        }
+    }
+}
+
+/// `[x_min, y_min, x_max, y_max]` of a path that is one closed axis-aligned
+/// rectangle, as `rectclip` and `rectfill` build under an unrotated matrix.
+fn device_rect(path: &PsPath) -> Option<[f64; 4]> {
+    let [
+        PathSegment::MoveTo(x0, y0),
+        PathSegment::LineTo(x1, y1),
+        PathSegment::LineTo(x2, y2),
+        PathSegment::LineTo(x3, y3),
+        PathSegment::ClosePath,
+    ] = path.segments.as_slice()
+    else {
+        return None;
+    };
+    let horizontal_first = y0 == y1 && x1 == x2 && y2 == y3 && x3 == x0;
+    let vertical_first = x0 == x1 && y1 == y2 && x2 == x3 && y3 == y0;
+    if !(horizontal_first || vertical_first) {
+        return None;
+    }
+    Some([x0.min(*x2), y0.min(*y2), x0.max(*x2), y0.max(*y2)])
+}
+
+/// The closed rectangle `[x_min, y_min, x_max, y_max]`; a rectangle with no
+/// area is the empty region, spelled as a lone `MoveTo` like every other
+/// empty clip.
+fn rect_path(r: [f64; 4]) -> PsPath {
+    let mut path = PsPath::new();
+    if r[2] <= r[0] || r[3] <= r[1] {
+        path.segments.push(PathSegment::MoveTo(0.0, 0.0));
+        return path;
+    }
+    path.segments.push(PathSegment::MoveTo(r[0], r[1]));
+    path.segments.push(PathSegment::LineTo(r[2], r[1]));
+    path.segments.push(PathSegment::LineTo(r[2], r[3]));
+    path.segments.push(PathSegment::LineTo(r[0], r[3]));
+    path.segments.push(PathSegment::ClosePath);
+    path
+}
+
 /// Complete graphics state (cloned for gsave/grestore).
 #[derive(Clone, Debug)]
 pub struct GraphicsState {
@@ -247,6 +392,14 @@ pub struct GraphicsState {
 
     // Clip save/restore stack (per graphics state)
     pub clip_stack: Vec<Option<PsPath>>,
+    /// Every clip region in force, outermost first. `clip_path` is the
+    /// last of them (or their intersection, where that is one rectangle);
+    /// this is what a restored clip is rebuilt from. Change the clip
+    /// through [`Self::intersect_clip`], [`Self::set_clip`] and
+    /// [`Self::reset_clip`], which keep the two in step.
+    pub clip_chain: ClipChain,
+    /// The chains saved by `clipsave`, alongside `clip_stack`.
+    pub clip_chain_stack: Vec<ClipChain>,
 
     // Current font (set by setfont, used by show operators)
     pub current_font: Option<crate::object::PsObject>,
@@ -361,6 +514,8 @@ impl GraphicsState {
             smoothness: 1.0,
             default_ctm: Matrix::identity(),
             clip_stack: Vec::new(),
+            clip_chain: ClipChain::new(),
+            clip_chain_stack: Vec::new(),
             current_font: None,
             root_font: None,
             page_device: None,
@@ -424,6 +579,7 @@ impl GraphicsState {
             path,
             current_point,
             clip_path,
+            clip_chain,
             line_width,
             line_cap,
             line_join,
@@ -455,6 +611,7 @@ impl GraphicsState {
             overprint_mode: _,
             smoothness: _,
             clip_stack: _,
+            clip_chain_stack: _,
             current_font: _,
             root_font: _,
             page_device: _,
@@ -481,6 +638,7 @@ impl GraphicsState {
         self.path = path;
         self.current_point = current_point;
         self.clip_path = clip_path;
+        self.clip_chain = clip_chain;
         self.clip_path_version += 1;
         self.line_width = line_width;
         self.line_cap = line_cap;
@@ -500,6 +658,37 @@ impl GraphicsState {
         self.blend_mode = blend_mode;
         self.alpha_is_shape = alpha_is_shape;
         self.text_knockout = text_knockout;
+    }
+}
+
+impl GraphicsState {
+    /// Narrow the clip to its intersection with `path`, a device-space
+    /// path filled by `fill_rule` (`clip`, `eoclip`, `rectclip`).
+    pub fn intersect_clip(&mut self, path: PsPath, fill_rule: FillRule) {
+        self.clip_chain.intersect(path.clone(), fill_rule);
+        // Where the whole clip is known as one path, `clippath` can return
+        // it; otherwise the newest region stands in for the intersection.
+        self.clip_path = Some(match self.clip_chain.sole_region() {
+            Some(region) => region.clone(),
+            None => path,
+        });
+        self.clip_path_version += 1;
+    }
+
+    /// Replace the clip with one region, whatever it was.
+    pub fn set_clip(&mut self, path: PsPath) {
+        self.clip_chain.clear();
+        self.clip_chain
+            .intersect(path.clone(), FillRule::NonZeroWinding);
+        self.clip_path = Some(path);
+        self.clip_path_version += 1;
+    }
+
+    /// Remove the clip: the page is the limit again (`initclip`).
+    pub fn reset_clip(&mut self) {
+        self.clip_chain.clear();
+        self.clip_path = None;
+        self.clip_path_version += 1;
     }
 }
 

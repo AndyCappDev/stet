@@ -100,6 +100,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`stet_core::graphics_state::GraphicsState` has two new public fields,
+  `clip_chain` and `clip_chain_stack`** (see Fixed, "A restored clip
+  forgot all but its last region"), with a new `ClipChain` type and the
+  methods `intersect_clip`, `set_clip` and `reset_clip` to change the
+  clip through. Code that builds a `GraphicsState` with a struct literal
+  needs the two fields; `GraphicsState::new()` and `..` updates are
+  unaffected. As with `overprint_mode` in 0.8.3, the struct becomes
+  `#[non_exhaustive]` in 0.9.0. Code that sets `clip_path` directly still
+  works: a state with a path and an empty chain is restored from the path.
+
 - **`stet` exits 1 when a job fails.** A PostScript job stopped by an
   error, a timeout or a memory limit was reported on standard error as
   `Job N FAILED` while the process exited 0, so a script, a `make` rule
@@ -227,6 +237,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     filter**, the one filter that exists to be positioned. A program that
     paints one reusable stream twice repositions it in between, and could
     not.
+
+- **A restored clip forgot all but its last region.** The clip is the
+  intersection of every region set since `initclip`, but the interpreter
+  kept only the most recent one. Nothing went wrong while clips only
+  narrowed; once a `grestore`, `restore`, `setgstate` or `cliprestore`
+  brought an earlier clip back, it came back as its last region alone, so
+  a page that clipped twice and then ran any nested `gsave … clip …
+  grestore` painted outside the first clip from then on. An `eoclip` also
+  came back as a non-zero winding clip, filling its holes. Every region is
+  now kept, with its rule, and the restored clip is rebuilt from all of
+  them. Successive rectangles are kept as the one rectangle they share,
+  which `clippath` now returns in place of the last rectangle set.
 
 - **A PostScript shading pattern painted nothing, and a tiling pattern
   painted fills only.** A pattern is a paint, used by whatever `fill`,

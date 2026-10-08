@@ -105,22 +105,38 @@ pub fn op_grestoreall(ctx: &mut Context) -> Result<(), PsError> {
 
 /// Restore device clip after grestore/grestoreall/restore.
 /// Skips emitting display list elements if the clip hasn't changed.
+///
+/// The device's clip can only be narrowed or reset, so the restored clip is
+/// rebuilt from the page: every region in force, outermost first, each with
+/// the rule it was set by.
 pub fn restore_device_clip(ctx: &mut Context, old_version: u32) {
     if ctx.gstate.clip_path_version == old_version {
         return; // clip unchanged, skip
     }
-    ctx.current_display_list_mut()
-        .push(DisplayElement::InitClip);
-    if let Some(ref clip) = ctx.gstate.clip_path {
-        let params = stet_graphics::device::ClipParams {
-            fill_rule: FillRule::NonZeroWinding,
-            ctm: stet_fonts::geometry::Matrix::identity(),
-            stroke_params: None,
-        };
-        let clip_path = clip.clone();
-        ctx.current_display_list_mut().push(DisplayElement::Clip {
-            path: clip_path,
-            params,
+    let mut regions: Vec<(stet_fonts::geometry::PsPath, FillRule)> = ctx
+        .gstate
+        .clip_chain
+        .regions()
+        .into_iter()
+        .map(|(path, rule)| (path.clone(), rule))
+        .collect();
+    // A state whose clip was set without the chain (built by hand, or by
+    // code that predates it) still has its one path.
+    if regions.is_empty()
+        && let Some(clip) = ctx.gstate.clip_path.clone()
+    {
+        regions.push((clip, FillRule::NonZeroWinding));
+    }
+    let display_list = ctx.current_display_list_mut();
+    display_list.push(DisplayElement::InitClip);
+    for (path, fill_rule) in regions {
+        display_list.push(DisplayElement::Clip {
+            path,
+            params: stet_graphics::device::ClipParams {
+                fill_rule,
+                ctm: stet_fonts::geometry::Matrix::identity(),
+                stroke_params: None,
+            },
         });
     }
 }

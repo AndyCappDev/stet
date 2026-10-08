@@ -71,8 +71,8 @@ pub fn op_clip(ctx: &mut Context) -> Result<(), PsError> {
         return Ok(());
     }
     close_subpaths(&mut path);
-    ctx.gstate.clip_path = Some(path.clone());
-    ctx.gstate.clip_path_version += 1;
+    ctx.gstate
+        .intersect_clip(path.clone(), FillRule::NonZeroWinding);
     let params = ClipParams {
         fill_rule: FillRule::NonZeroWinding,
         ctm: Matrix::identity(),
@@ -94,8 +94,7 @@ pub fn op_eoclip(ctx: &mut Context) -> Result<(), PsError> {
         return Ok(());
     }
     close_subpaths(&mut path);
-    ctx.gstate.clip_path = Some(path.clone());
-    ctx.gstate.clip_path_version += 1;
+    ctx.gstate.intersect_clip(path.clone(), FillRule::EvenOdd);
     let params = ClipParams {
         fill_rule: FillRule::EvenOdd,
         ctm: Matrix::identity(),
@@ -176,11 +175,10 @@ pub fn op_initclip(ctx: &mut Context) -> Result<(), PsError> {
         // Null device: degenerate clip
         let mut p = stet_fonts::geometry::PsPath::new();
         p.segments.push(PathSegment::MoveTo(0.0, 0.0));
-        ctx.gstate.clip_path = Some(p);
+        ctx.gstate.set_clip(p);
         return Ok(());
     }
-    ctx.gstate.clip_path = None;
-    ctx.gstate.clip_path_version += 1;
+    ctx.gstate.reset_clip();
     ctx.current_display_list_mut()
         .push(DisplayElement::InitClip);
     Ok(())
@@ -204,8 +202,8 @@ pub fn op_rectclip(ctx: &mut Context) -> Result<(), PsError> {
         crate::paint_ops::build_rect_path_device(&ctx.gstate.ctm, &rects)
     };
 
-    ctx.gstate.clip_path = Some(path.clone());
-    ctx.gstate.clip_path_version += 1;
+    ctx.gstate
+        .intersect_clip(path.clone(), FillRule::NonZeroWinding);
     let params = ClipParams {
         fill_rule: FillRule::NonZeroWinding,
         ctm: Matrix::identity(),
@@ -222,6 +220,8 @@ pub fn op_rectclip(ctx: &mut Context) -> Result<(), PsError> {
 /// `clipsave`: — → — (push clip path)
 pub fn op_clipsave(ctx: &mut Context) -> Result<(), PsError> {
     ctx.gstate.clip_stack.push(ctx.gstate.clip_path.clone());
+    let chain = ctx.gstate.clip_chain.clone();
+    ctx.gstate.clip_chain_stack.push(chain);
     Ok(())
 }
 
@@ -232,23 +232,20 @@ pub fn op_cliprestore(ctx: &mut Context) -> Result<(), PsError> {
     if let Some(saved_clip) = ctx.gstate.clip_stack.pop() {
         let old_version = ctx.gstate.clip_path_version;
         ctx.gstate.clip_path = saved_clip;
-        ctx.gstate.clip_path_version += 1;
-        // Restore device clip only if it changed
-        if ctx.gstate.clip_path_version != old_version {
-            ctx.current_display_list_mut()
-                .push(DisplayElement::InitClip);
-            if let Some(clip_path) = ctx.gstate.clip_path.clone() {
-                let params = ClipParams {
-                    fill_rule: FillRule::NonZeroWinding,
-                    ctm: Matrix::identity(),
-                    stroke_params: None,
-                };
-                ctx.current_display_list_mut().push(DisplayElement::Clip {
-                    path: clip_path,
-                    params,
-                });
+        // The two stacks are pushed together; a state built by hand with
+        // only the path falls back to that path as the whole clip.
+        ctx.gstate.clip_chain = match ctx.gstate.clip_chain_stack.pop() {
+            Some(chain) => chain,
+            None => {
+                let mut chain = stet_core::graphics_state::ClipChain::new();
+                if let Some(path) = ctx.gstate.clip_path.clone() {
+                    chain.intersect(path, FillRule::NonZeroWinding);
+                }
+                chain
             }
-        }
+        };
+        ctx.gstate.clip_path_version += 1;
+        crate::graphics_state_ops::restore_device_clip(ctx, old_version);
     }
     Ok(())
 }
