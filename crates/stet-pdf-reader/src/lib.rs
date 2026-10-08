@@ -519,6 +519,36 @@ impl<'a> PdfDocument<'a> {
         page_boxes::resolve_page_area(&self.resolver, info, page, self.page_area)
     }
 
+    /// [`page_area_rect`](Self::page_area_rect), widened outward to whole
+    /// device pixels of a render of the crop box (the default page area) at
+    /// `dpi`, and clipped to the crop box.
+    ///
+    /// An area whose edges fall between device pixels is rasterised at its
+    /// own sub-pixel phase, so its antialiasing differs from the same area
+    /// cropped out of a render of the whole page. Setting the returned
+    /// rectangle as a [`PageArea::Rect`] renders it on the page's own pixel
+    /// grid: the result equals the matching pixels of a crop-box render at
+    /// `dpi`. The output can be up to one pixel larger on each side than the
+    /// area asked for.
+    pub fn page_area_rect_on_pixel_grid(
+        &self,
+        page: usize,
+        dpi: f64,
+    ) -> Result<[f64; 4], PdfError> {
+        let info = self
+            .pages
+            .get(page)
+            .ok_or(PdfError::PageOutOfRange(page, self.pages.len()))?;
+        let area = page_boxes::resolve_page_area(&self.resolver, info, page, self.page_area)?;
+        let snapped =
+            page_boxes::snap_area_to_pixel_grid(area, info.crop_box, info.rotate, dpi / 72.0);
+        if snapped[2] > snapped[0] && snapped[3] > snapped[1] {
+            Ok(snapped)
+        } else {
+            Err(PdfError::EmptyPageArea { page })
+        }
+    }
+
     /// Set a font data provider for environments without filesystem access.
     pub fn set_font_provider(&mut self, provider: FontProvider) {
         self.font_provider = Some(provider);

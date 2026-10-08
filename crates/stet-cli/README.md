@@ -156,6 +156,9 @@ Common options:
   --box <BOX>                Render one area of each PDF page as the page:
                              media, crop, bleed, trim, art, or llx,lly,urx,ury
                              in PDF points (PDF input; --device png or pdf)
+  --box-snap                 Widen the --box area onto the page's pixel grid,
+                             so it matches the page cropped to it
+                             (--device png; not with --width/--height)
   --threads <N>              Worker-thread count (default: 75% of cores in
                              viewer mode, 8 otherwise)
   --password <PW>            Password for encrypted PDF input

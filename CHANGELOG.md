@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`--box-snap`, and `PdfDocument::page_area_rect_on_pixel_grid`** in
+  `stet-pdf-reader`: a `--box` area whose edges fall between device pixels
+  is rasterised at its own sub-pixel phase, so it antialiases differently
+  from the same area cropped out of a full-page render — 20 % of the pixels
+  of a 751 × 666 crop of a textbook spread at 150 dpi differed, by up to 200
+  levels. `--box-snap` widens the area outward to whole pixels of the crop
+  box's pixel grid at the chosen resolution (and clips it to the crop box),
+  so it renders the page's own pixels; the output can be up to one pixel
+  larger per side. `--device png` only, and not with `--width`/`--height`.
+
 - **`stet-wasm`: `set_max_vm(interp, bytes)`** caps PostScript VM in the
   browser, as `--max-vm` does on the command line. The default there is
   1 GiB, a quarter of the address space, which is more than most pages

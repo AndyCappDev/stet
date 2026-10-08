@@ -128,6 +128,7 @@ fn main() {
     let mut no_aa = false;
     let mut transparent = false;
     let mut page_area: Option<PageArea> = None;
+    let mut box_snap = false;
     let mut output_profile_path: Option<String> = None;
     let mut cmyk_profile_path: Option<String> = None;
     let mut bpc_mode = BpcMode::Auto;
@@ -233,6 +234,11 @@ fn main() {
             }
             "--transparent" => {
                 transparent = true;
+                i += 1;
+                continue;
+            }
+            "--box-snap" => {
+                box_snap = true;
                 i += 1;
                 continue;
             }
@@ -596,6 +602,25 @@ writes all pages to one file",
             std::process::exit(1);
         }
     }
+    // `--box-snap` moves the area onto the page's pixel grid, which only a
+    // raster output at a known resolution has.
+    if box_snap {
+        if page_area.is_none() {
+            eprintln!("Error: --box-snap requires --box");
+            std::process::exit(1);
+        }
+        if !matches!(device.as_str(), "png" | "viewport-png") {
+            eprintln!(
+                "Error: --box-snap is only supported for --device png (got '{}')",
+                device
+            );
+            std::process::exit(1);
+        }
+        if target_width.is_some() || target_height.is_some() {
+            eprintln!("Error: --box-snap cannot be combined with --width/--height");
+            std::process::exit(1);
+        }
+    }
 
     match device.as_str() {
         "png" => {
@@ -606,6 +631,7 @@ writes all pages to one file",
                 no_aa,
                 transparent,
                 page_area,
+                box_snap,
                 page_filter,
                 false,
                 password.as_deref(),
@@ -628,6 +654,7 @@ writes all pages to one file",
                 no_aa,
                 false,
                 page_area,
+                box_snap,
                 page_filter,
                 true,
                 password.as_deref(),
@@ -726,6 +753,7 @@ fn run_png_mode(
     no_aa: bool,
     transparent: bool,
     page_area: Option<PageArea>,
+    box_snap: bool,
     page_filter: Option<std::collections::HashSet<i32>>,
     use_viewport: bool,
     password: Option<&str>,
@@ -746,6 +774,7 @@ fn run_png_mode(
             no_aa,
             transparent,
             page_area,
+            box_snap,
             use_viewport,
             icc_cfg,
             password,
@@ -1351,6 +1380,11 @@ Common options:
                             llx,lly,urx,ury in PDF points in the page's
                             unrotated space. A box the page does not declare
                             is its crop box. PDF input; --device png or pdf.
+    --box-snap              Widen the --box area outward to whole pixels of
+                            the full page's pixel grid, so it renders the
+                            same pixels as the page cropped to it (up to one
+                            pixel larger per side). --device png only; not
+                            with --width/--height.
     --threads <N>           Parallel band-rendering thread count. Defaults to
                             75% of cores in viewer mode and 8 otherwise, where
                             sequential PNG writing limits the benefit of more.
@@ -2528,6 +2562,7 @@ fn run_pdf_input_png(
     no_aa: bool,
     transparent: bool,
     page_area: Option<PageArea>,
+    box_snap: bool,
     use_viewport: bool,
     icc_cfg: &IccCliConfig,
     password: Option<&str>,
@@ -2621,6 +2656,19 @@ were selected from '{}'",
                 && !filter.contains(&page_1based)
             {
                 continue;
+            }
+
+            // `--box-snap`: widen this page's area onto its own pixel grid, so the
+            // area renders the pixels a full-page render has there.
+            if box_snap && let Some(area) = page_area {
+                doc.set_page_area(area);
+                match doc.page_area_rect_on_pixel_grid(page, dpi) {
+                    Ok(rect) => doc.set_page_area(PageArea::Rect(rect)),
+                    Err(e) => {
+                        eprintln!("  Page {}: render error: {}", page_1based, e);
+                        continue;
+                    }
+                }
             }
 
             match render_pdf_page_to_rgba(

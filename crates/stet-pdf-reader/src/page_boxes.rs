@@ -100,6 +100,53 @@ pub(crate) fn resolve_page_area(
     }
 }
 
+/// `area` widened outward to whole device pixels of a render of `base` at
+/// `scale` device pixels per point and `/Rotate rotate`, then clipped to
+/// `base`.
+///
+/// A render puts device pixel 0 on one edge of `base` along each axis (which
+/// edge depends on the rotation, as in `PdfDocument::render_page`'s CTM), so
+/// its pixel boundaries lie at that edge plus whole multiples of `1 / scale`.
+/// An area whose edges sit on those boundaries renders on the same grid as
+/// `base` does, pixel for pixel; one that does not is sampled at a different
+/// sub-pixel phase and antialiases differently.
+///
+/// Widening rather than rounding keeps every pixel the area touches. Edges
+/// already on the grid (to within a millionth of a pixel) do not move.
+pub(crate) fn snap_area_to_pixel_grid(
+    area: [f64; 4],
+    base: [f64; 4],
+    rotate: i32,
+    scale: f64,
+) -> [f64; 4] {
+    const EPS: f64 = 1e-6;
+    // Pixels counted up from `anchor`, the lower edge of the axis.
+    let from_min = |lo: f64, hi: f64, anchor: f64| {
+        (
+            anchor + ((lo - anchor) * scale + EPS).floor() / scale,
+            anchor + ((hi - anchor) * scale - EPS).ceil() / scale,
+        )
+    };
+    // Pixels counted down from `anchor`, the upper edge of the axis.
+    let from_max = |lo: f64, hi: f64, anchor: f64| {
+        (
+            anchor - ((anchor - lo) * scale - EPS).ceil() / scale,
+            anchor - ((anchor - hi) * scale + EPS).floor() / scale,
+        )
+    };
+    let [bx0, by0, bx1, by1] = base;
+    let [ax0, ay0, ax1, ay1] = area;
+    // The edge of `base` each axis of user space is measured from: device x
+    // and y start at the top-left of the rotated page.
+    let ((x0, x1), (y0, y1)) = match rotate.rem_euclid(360) {
+        90 => (from_min(ax0, ax1, bx0), from_min(ay0, ay1, by0)),
+        180 => (from_max(ax0, ax1, bx1), from_min(ay0, ay1, by0)),
+        270 => (from_max(ax0, ax1, bx1), from_max(ay0, ay1, by1)),
+        _ => (from_min(ax0, ax1, bx0), from_max(ay0, ay1, by1)),
+    };
+    [x0.max(bx0), y0.max(by0), x1.min(bx1), y1.min(by1)]
+}
+
 /// Page geometry and presentation hints, drawn from the page dict
 /// plus the inherited MediaBox/CropBox already resolved on
 /// [`PageInfo`].
@@ -293,5 +340,63 @@ mod tests {
         ];
         // Silent failure for the third entry → None.
         assert!(parse_box(&arr).is_none());
+    }
+}
+
+#[cfg(test)]
+mod pixel_grid_tests {
+    use super::snap_area_to_pixel_grid;
+
+    const BASE: [f64; 4] = [10.0, 10.0, 290.0, 190.0];
+
+    fn close(a: [f64; 4], b: [f64; 4]) -> bool {
+        a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-9)
+    }
+
+    #[test]
+    fn an_area_on_the_grid_does_not_move() {
+        // 72 dpi: one pixel per point, so whole-point offsets from the base are on the grid.
+        let area = [40.0, 30.0, 160.0, 130.0];
+        for rotate in [0, 90, 180, 270] {
+            assert!(
+                close(snap_area_to_pixel_grid(area, BASE, rotate, 1.0), area),
+                "/Rotate {rotate}"
+            );
+        }
+    }
+
+    #[test]
+    fn fractional_edges_widen_outward() {
+        let area = [40.3, 30.6, 159.2, 129.9];
+        // /Rotate 0 counts x up from the left edge and y down from the top edge.
+        assert!(close(
+            snap_area_to_pixel_grid(area, BASE, 0, 1.0),
+            [40.0, 30.0, 160.0, 130.0]
+        ));
+        // At 2 px/pt the grid is half a point.
+        assert!(close(
+            snap_area_to_pixel_grid(area, BASE, 0, 2.0),
+            [40.0, 30.5, 159.5, 130.0]
+        ));
+    }
+
+    #[test]
+    fn the_grid_starts_at_the_edge_the_rotation_puts_first() {
+        // A base whose width and height are not whole pixels at 1 px/pt, so a
+        // grid counted from the left edge differs from one counted from the right.
+        let base = [10.0, 10.0, 290.5, 190.25];
+        let area = [100.2, 50.2, 200.8, 150.8];
+        // Counted from the right edge (290.5): 100.2 → 99.5, 200.8 → 201.5.
+        let r180 = snap_area_to_pixel_grid(area, base, 180, 1.0);
+        assert!(close(r180, [99.5, 50.0, 201.5, 151.0]), "{r180:?}");
+        // /Rotate 270 counts y down from the top edge (190.25): 50.2 → 49.25, 150.8 → 151.25.
+        let r270 = snap_area_to_pixel_grid(area, base, 270, 1.0);
+        assert!(close(r270, [99.5, 49.25, 201.5, 151.25]), "{r270:?}");
+    }
+
+    #[test]
+    fn the_result_stays_inside_the_base() {
+        let area = [9.5, 9.5, 290.4, 190.9];
+        assert!(close(snap_area_to_pixel_grid(area, BASE, 0, 1.0), BASE));
     }
 }
