@@ -140,10 +140,16 @@ impl EncryptionState {
         // An owner password is not a key to the file directly: it decrypts
         // /O, which holds the user password, and that opens the file
         // (Algorithm 7).
-        let key = key_for_user_password(password)
+        let candidates = legacy_password_candidates(password);
+        let key = candidates
+            .iter()
+            .find_map(|candidate| key_for_user_password(candidate))
             .or_else(|| {
-                let user_password = user_password_from_owner(password, &o_value, key_length, r);
-                key_for_user_password(&user_password)
+                candidates.iter().find_map(|candidate| {
+                    let user_password =
+                        user_password_from_owner(candidate, &o_value, key_length, r);
+                    key_for_user_password(&user_password)
+                })
             })
             .ok_or(PdfError::PasswordRequired)?;
 
@@ -355,6 +361,30 @@ impl EncryptionState {
             }
         }
     }
+}
+
+/// The forms of a password to try against an RC4 or AES-128 file, most
+/// likely first.
+///
+/// These handlers define the password as PDFDocEncoding bytes (ISO 32000-1
+/// Algorithm 2 step a), which is Latin-1 for accented letters and its own
+/// arrangement for a few others, the euro sign among them. A caller passes
+/// what the user typed, which today is UTF-8, and the two agree only for
+/// ASCII. So the bytes as given come first — right for ASCII, for a caller
+/// that already encoded the password, and for the writers that hashed UTF-8
+/// regardless — and then, when they are UTF-8 holding something beyond
+/// ASCII that the encoding can express, the PDFDocEncoding form.
+fn legacy_password_candidates(password: &[u8]) -> Vec<Vec<u8>> {
+    let mut candidates = vec![password.to_vec()];
+    if !password.is_ascii() {
+        let encoded = std::str::from_utf8(password)
+            .ok()
+            .and_then(crate::metadata::encode_pdfdoc);
+        if let Some(encoded) = encoded {
+            candidates.push(encoded);
+        }
+    }
+    candidates
 }
 
 /// The longest password an AES-256 handler reads, in bytes of UTF-8
@@ -1173,6 +1203,27 @@ mod tests {
         let ciphertext = [0u8; 16];
         let result = aes_cbc_decrypt(&key, &iv, &ciphertext);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn legacy_password_is_tried_as_given_then_in_pdfdoc_encoding() {
+        assert_eq!(legacy_password_candidates(b"user"), vec![b"user".to_vec()]);
+        let typed = "\u{e6}\u{f8}\u{e5}";
+        assert_eq!(
+            legacy_password_candidates(typed.as_bytes()),
+            vec![typed.as_bytes().to_vec(), vec![0xE6, 0xF8, 0xE5]]
+        );
+        // Already encoded by the caller: not UTF-8, so nothing to add.
+        assert_eq!(
+            legacy_password_candidates(&[0xE6, 0xF8, 0xE5]),
+            vec![vec![0xE6, 0xF8, 0xE5]]
+        );
+        // Greek has no place in PDFDocEncoding.
+        let greek = "\u{3b1}\u{3b2}";
+        assert_eq!(
+            legacy_password_candidates(greek.as_bytes()),
+            vec![greek.as_bytes().to_vec()]
+        );
     }
 
     #[test]

@@ -234,6 +234,20 @@ fn decode_pdf_text_string(bytes: &[u8]) -> String {
     out
 }
 
+/// `text` in PDFDocEncoding, or `None` if it has a character the encoding
+/// cannot hold. The inverse of [`decode_pdf_text_string`] for strings with
+/// no byte-order mark.
+pub(crate) fn encode_pdfdoc(text: &str) -> Option<Vec<u8>> {
+    text.chars()
+        .map(|c| {
+            if c.is_ascii() {
+                return Some(c as u8);
+            }
+            (0x80..=0xFFu8).find(|&b| c != '\u{FFFD}' && pdfdoc_encoding_to_char(b) == c)
+        })
+        .collect()
+}
+
 /// Map a PDFDocEncoding byte (0–255) to its Unicode code point.
 ///
 /// Per ISO 32000-2 Annex D.2. The 0x80..=0x9F range carries glyphs that in
@@ -450,6 +464,30 @@ mod tests {
     fn decode_pdfdocencoding_a4_euro() {
         // 0xA0 maps to U+20AC (EURO SIGN).
         assert_eq!(decode_pdf_text_string(&[0xA0]), "\u{20AC}");
+    }
+
+    #[test]
+    fn pdfdoc_encoding_round_trips() {
+        // Latin-1 letters keep their code; the euro sign does not (0xA0),
+        // and the bullet lives where C1 controls would be.
+        assert_eq!(
+            encode_pdfdoc("\u{e6}\u{f8}\u{e5}"),
+            Some(vec![0xE6, 0xF8, 0xE5])
+        );
+        assert_eq!(
+            encode_pdfdoc("a\u{20ac}\u{2022}"),
+            Some(vec![b'a', 0xA0, 0x80])
+        );
+        assert_eq!(encode_pdfdoc("plain"), Some(b"plain".to_vec()));
+        // Outside the encoding.
+        assert_eq!(encode_pdfdoc("\u{3b1}"), None);
+        assert_eq!(encode_pdfdoc("\u{fffd}"), None);
+        for b in 0..=255u8 {
+            let c = pdfdoc_encoding_to_char(b);
+            if c != '\u{FFFD}' {
+                assert_eq!(encode_pdfdoc(&c.to_string()), Some(vec![b]));
+            }
+        }
     }
 
     #[test]

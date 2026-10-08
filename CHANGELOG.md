@@ -211,6 +211,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to recover the user password, for AES-256 files against the owner hash
   and the key wrapped in `/OE`.
 
+- **A password with an accented letter did not open an RC4 or AES-128
+  PDF.** Those security handlers store the password in PDFDocEncoding —
+  Latin-1 for accented letters, its own codes for a few characters such as
+  the euro sign — and a caller passes what the user typed, which is UTF-8.
+  The two agree only for ASCII, so `--password æøå` was refused on a file
+  whose password is exactly that. The bytes as given are still tried
+  first; when they are UTF-8 with something beyond ASCII, the
+  PDFDocEncoding form is tried after them, for the user and the owner
+  password alike. AES-256 files, which store UTF-8, already worked.
+
 - **An encrypted PDF stating an impossible key length panicked.** The
   `/Length` in an `/Encrypt` dictionary was used as the key size without a
   check: zero divided by zero in RC4, and anything over 128 bits read past

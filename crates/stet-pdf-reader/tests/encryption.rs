@@ -23,6 +23,16 @@ const R6: &[u8] = include_bytes!("data/encryption/r6.pdf");
 /// R6 with the user password `SaSLprep`.
 const R6_SASLPREP: &[u8] = include_bytes!("data/encryption/r6-saslprep.pdf");
 
+/// R2, R4 and R6 with the user password `æøå` and the owner password
+/// `öwner`, given to qpdf as UTF-8. qpdf stores the first two in
+/// PDFDocEncoding, as those handlers define, and the third in UTF-8.
+const R2_LATIN: &[u8] = include_bytes!("data/encryption/r2-latin.pdf");
+const R4_LATIN: &[u8] = include_bytes!("data/encryption/r4-latin.pdf");
+const R6_LATIN: &[u8] = include_bytes!("data/encryption/r6-latin.pdf");
+/// R4 with the user password `pass€word` and the owner password `own€r`:
+/// the euro sign is 0xA0 in PDFDocEncoding, and not in Latin-1 at all.
+const R4_EURO: &[u8] = include_bytes!("data/encryption/r4-euro.pdf");
+
 const EVERY_REVISION: [(&str, &[u8]); 5] = [
     ("R2, RC4 40-bit", R2),
     ("R3, RC4 128-bit", R3),
@@ -147,4 +157,22 @@ fn a_key_length_out_of_range_does_not_panic() {
         opens(bits, &data, b"user");
         opens(bits, &data, b"owner");
     }
+}
+
+/// A caller passes the password as the user typed it, in UTF-8. An RC4 or
+/// AES-128 file holds it in PDFDocEncoding, so beyond ASCII the two differ
+/// and the reader has to bridge them.
+#[test]
+fn a_password_beyond_ascii_opens_an_rc4_or_aes128_file() {
+    for (what, data) in [("R2", R2_LATIN), ("R4", R4_LATIN), ("R6", R6_LATIN)] {
+        opens(what, data, "\u{e6}\u{f8}\u{e5}".as_bytes());
+        opens(what, data, "\u{f6}wner".as_bytes());
+        is_refused(what, data, "\u{e6}\u{f8}\u{e6}".as_bytes());
+    }
+    // A caller that encoded the password itself is still right.
+    opens("R2, Latin-1 bytes", R2_LATIN, &[0xE6, 0xF8, 0xE5]);
+    opens("R4, Latin-1 bytes", R4_LATIN, &[0xE6, 0xF8, 0xE5]);
+    // Not Latin-1: the euro sign has its own place in PDFDocEncoding.
+    opens("R4, euro", R4_EURO, "pass\u{20ac}word".as_bytes());
+    opens("R4, euro, owner", R4_EURO, "own\u{20ac}r".as_bytes());
 }
