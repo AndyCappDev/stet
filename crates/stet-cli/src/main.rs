@@ -1428,6 +1428,11 @@ Subcommands:
                             --word-boxes adds each word's. Use
                             `stet text --help` for details.
 
+Exit status:
+    0 when every job succeeded; 1 when a file could not be read or any
+    job failed (a PostScript error, a timeout, a memory limit). The jobs
+    after a failed one still run.
+
 Examples:
 {}    stet --device png --pages 1 doc.pdf # render PDF page 1 to PNG
     stet -o out.png --pages 1 doc.pdf   # render one page to a chosen path
@@ -1649,6 +1654,7 @@ fn run_file_jobs(
     use stet_graphics::display_list::DisplayList;
 
     let num_jobs = file_args.len();
+    let mut failed_jobs = 0usize;
 
     for (job_idx, filename) in file_args.iter().enumerate() {
         let display_name = std::path::Path::new(filename)
@@ -1745,12 +1751,14 @@ fn run_file_jobs(
                     // the job did not do what was asked.
                     stet_core::error::PsError::Quit => {
                         if ctx.exit_code.unwrap_or(0) != 0 {
+                            failed_jobs += 1;
                             eprintln!("Job {} FAILED: {}", job_idx + 1, display_name);
                         } else {
                             eprintln!("Job {} completed (quit): {}", job_idx + 1, display_name);
                         }
                     }
                     _ => {
+                        failed_jobs += 1;
                         eprintln!("Job {} FAILED: {}", job_idx + 1, display_name);
                     }
                 }
@@ -1772,9 +1780,14 @@ fn run_file_jobs(
     // Final summary
     eprintln!("\n{}", "=".repeat(60));
     eprintln!(
-        "Processed {} job{}",
+        "Processed {} job{}{}",
         num_jobs,
-        if num_jobs == 1 { "" } else { "s" }
+        if num_jobs == 1 { "" } else { "s" },
+        if failed_jobs > 0 {
+            format!(", {failed_jobs} failed")
+        } else {
+            String::new()
+        }
     );
     eprintln!("{}", "=".repeat(60));
 
@@ -1788,8 +1801,17 @@ fn run_file_jobs(
     // a specific shell exit code (e.g. `unit_tests/ps_tests.ps` exits 1
     // when any test fails). Propagate to the process now so downstream
     // tooling and CI gates see the requested status.
-    if let Some(code) = ctx.exit_code {
-        std::process::exit(code);
+    //
+    // A job that failed — stopped by a PostScript error, a timeout or a
+    // memory limit — fails the run as well: every remaining job is still
+    // processed, and the status is 1 unless a program asked for another
+    // non-zero one. Not in the viewer, where this runs beside the window
+    // and exiting would close it on the pages the job did produce.
+    match ctx.exit_code {
+        Some(code) if code != 0 => std::process::exit(code),
+        _ if failed_jobs > 0 && device != "viewer" => std::process::exit(1),
+        Some(code) => std::process::exit(code),
+        None => {}
     }
 }
 

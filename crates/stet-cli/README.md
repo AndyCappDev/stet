@@ -59,6 +59,11 @@ stet                       # no files → REPL; viewer opens when PS calls showp
 stet --device png page1.ps page2.pdf illustration.eps
 ```
 
+Each file is a job of its own. A job that fails — a PostScript error, a
+timeout, a memory limit — is reported on standard error as `Job N FAILED`
+and the jobs after it still run; the exit status is then 1, and 0 only
+when every job succeeded.
+
 ### Page size for PostScript input
 
 A plain `%!PS` program is rendered onto whatever page the device provides,

@@ -100,6 +100,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`stet` exits 1 when a job fails.** A PostScript job stopped by an
+  error, a timeout or a memory limit was reported on standard error as
+  `Job N FAILED` while the process exited 0, so a script, a `make` rule
+  or a CI step took a failed conversion for a good one. The status is now
+  1 if any job failed — the remaining files are still processed, as
+  before, and the closing line counts the failures (`Processed 3 jobs, 1
+  failed`). A status a program asks for with `.quitwithcode` still wins,
+  `quit` is still a success, and the interactive viewer is unaffected.
+  Anything that ran `stet` over PostScript known to raise errors and
+  relied on a zero status needs to allow for the new one.
+
 - **A page that draws one gradient thousands of times renders in a tenth
   of the time and a third of the memory.** Some producers build a gradient
   out of thin clipped strips, each a separate `sh` of the same shading:

@@ -27,9 +27,11 @@ the previous ad-hoc sweep take the machine down instead of reporting a bug:
 
   3. **stdout is examined, not just stderr.** stet writes the PLRM
      ``%%[ Error: … ]%%`` banner to *stdout* (per PLRM, the error handler
-     writes to the standard output file) and exits 0 even when a job fails.
-     A sweep that reads only stderr and only checks the exit status reports a
-     clean run over a corpus where ~18% of files raise a PostScript error.
+     writes to the standard output file), and until 0.8.5 exited 0 even when
+     a job failed. A sweep that read only stderr and only checked the exit
+     status reported a clean run over a corpus where ~18% of files raise a
+     PostScript error. The banner is still what names the error, so it is
+     looked for before the exit status.
 
 Usage:
     ./scripts/ps_corpus_sweep.py --jobs 4 --mem-max 3G

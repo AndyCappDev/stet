@@ -251,6 +251,13 @@ which write no file. Given without `--device`, it selects `png`, so
 a `%d` token there is rejected rather than silently ignored. Writing to
 stdout (`-o -`) is not supported yet.
 
+### Exit status
+
+Each file is a job of its own. A job that fails — a PostScript error, a
+timeout, a memory limit — is reported on standard error as `Job N FAILED`
+and the jobs after it still run; the exit status is then 1, and 0 only
+when every job succeeded.
+
 ### Page size
 
 A PostScript program is rendered onto whatever page the device provides,
