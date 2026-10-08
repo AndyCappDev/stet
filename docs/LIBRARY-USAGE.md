@@ -195,6 +195,21 @@ A box the page does not declare is its crop box, and every area is
 clipped to the MediaBox (not the crop box, so a bleed renders). The CLI
 equivalent is `--box`.
 
+An area whose edges fall between device pixels is rasterised at its own
+sub-pixel phase, so its antialiasing differs from the same area cropped out
+of a full-page render. To get the page's own pixels, widen the area onto the
+page's pixel grid at the resolution you render at:
+
+```rust
+doc.set_page_area(PageArea::Rect([100.3, 200.7, 591.2, 1438.6]));
+let on_grid = doc.page_area_rect_on_pixel_grid(0, 300.0)?;
+doc.set_page_area(PageArea::Rect(on_grid));
+let (rgba, w, h) = doc.render_page_to_rgba(0, 300.0)?;
+```
+
+The result can be up to one pixel larger on each side than the area asked
+for. The CLI equivalent is `--box ... --box-snap`.
+
 ## Text Extraction
 
 Both the PostScript interpreter and the PDF reader can record the text a

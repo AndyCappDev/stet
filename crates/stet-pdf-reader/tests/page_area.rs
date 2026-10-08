@@ -228,3 +228,99 @@ fn an_area_off_the_page_is_an_error() {
         );
     }
 }
+
+/// Where `area` lies in a render of `base` at `scale` pixels per point, at
+/// `rotate`: `device_rect` for any resolution, rounding each edge to the
+/// nearest pixel (it is on the grid to within float error when this is used).
+fn device_rect_at(
+    base: [f64; 4],
+    area: [f64; 4],
+    rotate: i32,
+    scale: f64,
+) -> (usize, usize, usize, usize) {
+    let [bx0, by0, bx1, by1] = base;
+    let [ax0, ay0, ax1, ay1] = area;
+    let (x0, x1, y0, y1) = match rotate {
+        0 => (ax0 - bx0, ax1 - bx0, by1 - ay1, by1 - ay0),
+        90 => (ay0 - by0, ay1 - by0, ax0 - bx0, ax1 - bx0),
+        180 => (bx1 - ax1, bx1 - ax0, ay0 - by0, ay1 - by0),
+        270 => (by1 - ay1, by1 - ay0, bx1 - ax1, bx1 - ax0),
+        _ => unreachable!(),
+    };
+    let px = |v: f64| (v * scale).round() as usize;
+    (px(x0), px(y0), px(x1) - px(x0), px(y1) - px(y0))
+}
+
+fn worst_difference(a: &[u8], b: &[u8]) -> u8 {
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| x.abs_diff(*y))
+        .max()
+        .unwrap_or(0)
+}
+
+/// An area whose edges fall between device pixels antialiases differently
+/// from the page; the same area widened onto the page's pixel grid renders
+/// the pixels a crop-box render has there, at every rotation.
+#[test]
+fn an_area_on_the_pixel_grid_renders_the_pages_pixels() {
+    let dpi = 150.0;
+    let scale = dpi / 72.0;
+    let area = [100.3, 50.7, 250.6, 150.2];
+    for rotate in [0, 90, 180, 270] {
+        let pdf = fixture(rotate);
+        let mut doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let (page, page_w, _) = doc.render_page_to_rgba(0, dpi).unwrap();
+
+        doc.set_page_area(PageArea::Rect(area));
+        let snapped = doc.page_area_rect_on_pixel_grid(0, dpi).unwrap();
+        for i in 0..2 {
+            assert!(
+                snapped[i] <= area[i] && snapped[i + 2] >= area[i + 2],
+                "/Rotate {rotate}: {snapped:?} does not cover {area:?}"
+            );
+            assert!(
+                snapped[i + 2] - snapped[i] - (area[i + 2] - area[i]) < 2.0 / scale,
+                "/Rotate {rotate}: widened by more than a pixel per side"
+            );
+        }
+
+        doc.set_page_area(PageArea::Rect(snapped));
+        let (rgba, w, h) = doc.render_page_to_rgba(0, dpi).unwrap();
+        let at = device_rect_at(CROP, snapped, rotate, scale);
+        assert_eq!(
+            (w as usize, h as usize),
+            (at.2, at.3),
+            "/Rotate {rotate}: size"
+        );
+        // Within two levels: the f32 rounding `an_area_renders_the_pixels_it_covers_on_the_page`
+        // describes, over the larger translations a 150-dpi render makes (at /Rotate 180, 6 of
+        // 262,504 values differ by 2). Off the grid, edges differ by hundreds of levels.
+        let worst = worst_difference(&rgba, &crop(&page, page_w, at));
+        assert!(
+            worst <= 2,
+            "/Rotate {rotate}: a pixel differs from the page's by {worst} levels"
+        );
+    }
+}
+
+/// The check above is not vacuous: without the grid, the same area's pixels
+/// differ from the page's by far more than f32 rounding.
+#[test]
+fn an_area_off_the_pixel_grid_does_not_render_the_pages_pixels() {
+    let dpi = 150.0;
+    let scale = dpi / 72.0;
+    let pdf = fixture(0);
+    let mut doc = PdfDocument::from_bytes(&pdf).unwrap();
+    let (page, page_w, _) = doc.render_page_to_rgba(0, dpi).unwrap();
+    let area = [100.3, 50.7, 250.6, 150.2];
+    doc.set_page_area(PageArea::Rect(area));
+    let (rgba, w, h) = doc.render_page_to_rgba(0, dpi).unwrap();
+    // The nearest whole-pixel placement of the area on the page.
+    let (x, y, _, _) = device_rect_at(CROP, area, 0, scale);
+    let worst = worst_difference(&rgba, &crop(&page, page_w, (x, y, w as usize, h as usize)));
+    assert!(
+        worst > 16,
+        "an off-grid area matched the page to within {worst} levels"
+    );
+}
