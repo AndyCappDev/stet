@@ -1351,3 +1351,68 @@ fn a_matte_image_with_a_truncated_soft_mask_does_not_panic() {
     let doc = PdfDocument::from_bytes(&pdf).unwrap();
     assert!(!doc.render_page(0, 72.0).unwrap().is_empty());
 }
+
+/// A JPEG 2000 image is as large as its codestream says, whatever the
+/// `/Width` and `/Height` beside it say, and the decoder allocates for the
+/// codestream. A real 512 x 384 image with its header rewritten to claim
+/// 2^31 x 2^31 samples asked for 1.8e16 bytes and aborted the process; the
+/// image dictionary still said 512 x 384, so the check on that passed.
+#[cfg(feature = "jpx")]
+#[test]
+fn jpeg2000_codestream_claiming_an_absurd_size_is_refused() {
+    use stet_pdf_reader::{ImageResolution, ParsePhase};
+
+    let fixture: &[u8] = include_bytes!("data/jpx/photo-512x384.jp2");
+    let siz = fixture
+        .windows(4)
+        .position(|w| w == [0xff, 0x4f, 0xff, 0x51])
+        .expect("codestream")
+        + 2;
+    let ihdr = fixture.windows(4).position(|w| w == b"ihdr").expect("ihdr");
+
+    for (width, height) in [(1u32 << 31, 1u32 << 31), (200_000, 200_000), (u32::MAX, 1)] {
+        let mut jp2 = fixture.to_vec();
+        // SIZ: Xsiz, Ysiz at +6, the tile size XTsiz, YTsiz at +22.
+        jp2[siz + 6..siz + 10].copy_from_slice(&width.to_be_bytes());
+        jp2[siz + 10..siz + 14].copy_from_slice(&height.to_be_bytes());
+        jp2[siz + 22..siz + 26].copy_from_slice(&width.to_be_bytes());
+        jp2[siz + 26..siz + 30].copy_from_slice(&height.to_be_bytes());
+        jp2[ihdr + 4..ihdr + 8].copy_from_slice(&height.to_be_bytes());
+        jp2[ihdr + 8..ihdr + 12].copy_from_slice(&width.to_be_bytes());
+
+        let mut image = format!(
+            "<</Type/XObject/Subtype/Image/Width 512/Height 384/ColorSpace/DeviceRGB\
+             /BitsPerComponent 8/Filter/JPXDecode/Length {}>>\nstream\n",
+            jp2.len()
+        )
+        .into_bytes();
+        image.extend_from_slice(&jp2);
+        image.extend_from_slice(b"\nendstream");
+        let data = one_page_doc(
+            b"/Resources<</XObject<</I 5 0 R>>>>",
+            b"100 0 0 100 0 0 cm /I Do\n",
+            &[(5, image)],
+        );
+
+        // At the stored resolution, and at the reduced one a rasterising
+        // caller asks for: both read the header first. A reduced decode is
+        // of a smaller image, so only a size still absurd after the
+        // codestream's five halvings is refused there.
+        let mut resolutions = vec![ImageResolution::Full];
+        if width >> 5 > 100_000 {
+            resolutions.push(ImageResolution::Rendered);
+        }
+        for resolution in resolutions {
+            let mut doc = PdfDocument::from_bytes(&data).unwrap();
+            doc.set_image_resolution(resolution);
+            let _ = doc.render_page(0, 72.0);
+            assert!(
+                doc.parse_warnings()
+                    .iter()
+                    .any(|w| w.phase == ParsePhase::Content && w.message.contains("too large")),
+                "{width} x {height}: {:?}",
+                doc.parse_warnings()
+            );
+        }
+    }
+}

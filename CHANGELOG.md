@@ -182,6 +182,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A JPEG 2000 image whose own header claims an absurd size aborted the
+  process.** `stet-pdf-reader` checks an image's `/Width` and `/Height`,
+  but a JPEG 2000 stream carries its own, and those are the ones the
+  decoder allocates for. A real 25 KB image with its header rewritten to
+  2³¹ × 2³¹ samples, in a dictionary still saying 512 × 384, asked for
+  1.8 × 10¹⁶ bytes: an allocation failure, which no caller can catch. The
+  size in the stream is now held to the limits every other image is
+  (100,000 samples a side, 4 × 10⁹ in all), and an image over them is
+  refused with a warning. Found while measuring where the memory goes on a
+  212-megapixel JPEG 2000 page.
+
 - **A CMap with a byte that is not UTF-8 inside a hex string panicked.**
   `stet-pdf-reader` reads CMap streams as text, so such a byte becomes a
   three-byte replacement character, and two places then cut the hex string

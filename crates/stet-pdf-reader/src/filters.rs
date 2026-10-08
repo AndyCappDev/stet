@@ -1707,14 +1707,44 @@ fn decode_jpx(data: &[u8]) -> Result<Vec<u8>, PdfError> {
         return Ok(Vec::new());
     }
 
-    let image = hayro_jpeg2000::Image::new(data, &hayro_jpeg2000::DecodeSettings::default())
-        .map_err(|e| PdfError::DecompressionError(format!("JPXDecode: {e}")))?;
+    let image = open_jpx(data, &hayro_jpeg2000::DecodeSettings::default())?;
 
     let mut ctx = hayro_jpeg2000::DecoderContext::default();
     let decoded = image
         .decode(&mut ctx)
         .map_err(|e| PdfError::DecompressionError(format!("JPXDecode: {e}")))?;
     Ok(decoded.data_u8())
+}
+
+/// Read a JPEG 2000 header, refusing an image larger than any image may be.
+///
+/// The size that matters is the one in the codestream, which is what the
+/// decoder allocates for, and it need not agree with the `/Width` and
+/// `/Height` beside it that the caller has already checked: a 25 KB stream
+/// declaring 2^31 x 2^31 samples asked for 1.8e16 bytes and aborted the
+/// process. With a [`target_resolution`] the size checked is the reduced
+/// one, which is the one decoded.
+///
+/// [`target_resolution`]: hayro_jpeg2000::DecodeSettings::target_resolution
+#[cfg(feature = "jpx")]
+fn open_jpx<'a>(
+    data: &'a [u8],
+    settings: &hayro_jpeg2000::DecodeSettings,
+) -> Result<hayro_jpeg2000::Image<'a>, PdfError> {
+    use stet_graphics::image_limits::{validate_image_dimension, validate_image_size};
+
+    let image = hayro_jpeg2000::Image::new(data, settings)
+        .map_err(|e| PdfError::DecompressionError(format!("JPXDecode: {e}")))?;
+    let (width, height) = (image.width(), image.height());
+    validate_image_dimension(Some(i64::from(width)))
+        .zip(validate_image_dimension(Some(i64::from(height))))
+        .and_then(|(w, h)| validate_image_size(w, h))
+        .ok_or_else(|| {
+            PdfError::DecompressionError(format!(
+                "JPXDecode: image of {width} x {height} samples is too large"
+            ))
+        })?;
+    Ok(image)
 }
 
 /// JPXDecode without resolving the JP2-internal palette.
@@ -1738,8 +1768,7 @@ pub fn decode_jpx_no_palette(data: &[u8]) -> Result<(Vec<u8>, u8), PdfError> {
         resolve_palette_indices: false,
         ..Default::default()
     };
-    let image = hayro_jpeg2000::Image::new(data, &settings)
-        .map_err(|e| PdfError::DecompressionError(format!("JPXDecode: {e}")))?;
+    let image = open_jpx(data, &settings)?;
     let bit_depth = image.original_bit_depth();
 
     let mut ctx = hayro_jpeg2000::DecoderContext::default();
@@ -1767,8 +1796,7 @@ pub(crate) fn decode_jpx_reduced(
         target_resolution: Some(target),
         ..Default::default()
     };
-    let image = hayro_jpeg2000::Image::new(data, &settings)
-        .map_err(|e| PdfError::DecompressionError(format!("JPXDecode: {e}")))?;
+    let image = open_jpx(data, &settings)?;
     let mut ctx = hayro_jpeg2000::DecoderContext::default();
     let decoded = image
         .decode(&mut ctx)
