@@ -968,3 +968,165 @@ fn a_palette_over_a_wide_devicen_space_is_converted() {
     assert!(matches!(**base, ImageColorSpace::DeviceCMYK), "{base:?}");
     assert_eq!(lookup.as_slice(), [0, 0, 0, 0, 255, 0, 0, 0]);
 }
+
+/// How many fills page 0 draws, groups and layers included.
+fn count_fills(pdf: &[u8]) -> usize {
+    use stet_graphics::display_list::{DisplayElement, DisplayList};
+    fn count(list: &DisplayList) -> usize {
+        list.elements()
+            .iter()
+            .map(|e| match e {
+                DisplayElement::Fill { .. } => 1,
+                DisplayElement::Group { elements, .. }
+                | DisplayElement::OcgGroup { elements, .. } => count(elements),
+                _ => 0,
+            })
+            .sum()
+    }
+    let doc = PdfDocument::from_bytes(pdf).expect("fixture parses");
+    count(&doc.render_page(0, 72.0).expect("fixture renders"))
+}
+
+fn form(resources: &str, content: &str) -> Vec<u8> {
+    format!(
+        "<</Type/XObject/Subtype/Form/BBox[0 0 100 100]{resources}/Length {}>>\n\
+         stream\n{content}\nendstream",
+        content.len()
+    )
+    .into_bytes()
+}
+
+/// A form that draws itself eight times. The depth cap alone allows 8^20
+/// executions of it; before re-entry was refused this ran until it was
+/// killed. Its own rectangle is still drawn, once.
+#[test]
+fn a_form_drawing_itself_many_times_is_entered_once() {
+    let content = format!("20 20 10 10 re f {}", "/F Do ".repeat(8));
+    let pdf = one_page_doc(
+        b"/Resources<</XObject<</F 5 0 R>>>>",
+        b"/F Do",
+        &[(5, form("/Resources<</XObject<</F 5 0 R>>>>", &content))],
+    );
+    assert_eq!(count_fills(&pdf), 1);
+}
+
+/// The same through a ring: A draws B eight times, B draws A eight times.
+#[test]
+fn a_ring_of_forms_is_entered_once_each() {
+    let res = "/Resources<</XObject<</A 5 0 R/B 6 0 R>>>>";
+    let pdf = one_page_doc(
+        b"/Resources<</XObject<</A 5 0 R>>>>",
+        b"/A Do",
+        &[
+            (
+                5,
+                form(res, &format!("20 20 10 10 re f {}", "/B Do ".repeat(8))),
+            ),
+            (
+                6,
+                form(res, &format!("40 40 10 10 re f {}", "/A Do ".repeat(8))),
+            ),
+        ],
+    );
+    // A once, then B from each of A's eight uses.
+    assert_eq!(count_fills(&pdf), 9);
+}
+
+/// Refusing re-entry must not refuse reuse: a form drawn twice in a row,
+/// or from two different parents, is drawn each time.
+#[test]
+fn a_form_used_repeatedly_is_drawn_each_time() {
+    let leaf = "/Resources<</XObject<</L 7 0 R>>>>";
+    let pdf = one_page_doc(
+        b"/Resources<</XObject<</A 5 0 R/B 6 0 R/L 7 0 R>>>>",
+        b"/L Do /L Do /A Do /B Do /A Do",
+        &[
+            (5, form(leaf, "/L Do /L Do")),
+            (6, form(leaf, "/L Do")),
+            (7, form("", "20 20 10 10 re f")),
+        ],
+    );
+    assert_eq!(count_fills(&pdf), 2 + 2 + 1 + 2);
+}
+
+/// A tiling pattern whose cell paints with the same pattern, eight times.
+#[test]
+fn a_tiling_pattern_painting_with_itself_returns() {
+    let content = "/Pattern cs /P scn 0 0 5 5 re f ".repeat(8);
+    let pattern = format!(
+        "<</Type/Pattern/PatternType 1/PaintType 1/TilingType 1/BBox[0 0 10 10]\
+         /XStep 10/YStep 10/Resources<</Pattern<</P 5 0 R>>>>/Length {}>>\n\
+         stream\n{content}\nendstream",
+        content.len()
+    );
+    let pdf = one_page_doc(
+        b"/Resources<</Pattern<</P 5 0 R>>>>",
+        b"/Pattern cs /P scn 0 0 100 100 re f",
+        &[(5, pattern.into_bytes())],
+    );
+    load_and_render(&pdf);
+}
+
+/// A Type 3 glyph that shows eight copies of itself.
+#[test]
+fn a_type3_glyph_showing_itself_many_times_returns() {
+    let glyph = format!("10 0 d0 BT /T 1 Tf {}ET", "(a) Tj ".repeat(8));
+    let pdf = one_page_doc(
+        b"/Resources<</Font<</T 5 0 R>>>>",
+        b"BT /T 10 Tf (a) Tj ET",
+        &[
+            (
+                5,
+                b"<</Type/Font/Subtype/Type3/FontBBox[0 0 10 10]/FontMatrix[0.1 0 0 0.1 0 0]\
+                  /CharProcs<</a 6 0 R>>/Encoding<</Type/Encoding/Differences[97/a]>>\
+                  /FirstChar 97/LastChar 97/Widths[10]/Resources<</Font<</T 5 0 R>>>>>>"
+                    .to_vec(),
+            ),
+            (6, stream_obj(glyph.as_bytes())),
+        ],
+    );
+    load_and_render(&pdf);
+}
+
+/// Nineteen forms, each drawing the next twice: no cycle, nothing malformed,
+/// and half a million executions of the last one. Refusing re-entry does
+/// not help here; the page's budget for nested content does. A regression
+/// exhausts memory rather than failing.
+#[test]
+fn a_chain_of_forms_that_doubles_at_each_level_is_cut_short() {
+    let depth = 19u32;
+    let mut objs = Vec::new();
+    for i in 0..depth {
+        let num = 5 + i;
+        objs.push(if i + 1 < depth {
+            form(
+                &format!("/Resources<</XObject<</N {} 0 R>>>>", num + 1),
+                "/N Do /N Do",
+            )
+        } else {
+            form("", "20 20 10 10 re f")
+        });
+    }
+    let extra: Vec<(u32, Vec<u8>)> = (5..).zip(objs).collect();
+    let pdf = one_page_doc(b"/Resources<</XObject<</N 5 0 R>>>>", b"/N Do", &extra);
+    let fills = count_fills(&pdf);
+    // Left alone it would draw 2^18 rectangles. What it draws is bounded,
+    // and it does draw: the budget is spent, not refused up front.
+    assert!(fills > 0 && fills < 100_000, "{fills} fills");
+}
+
+/// A page well inside the budget is untouched by it: a form stepped and
+/// repeated 2,000 times, each showing a nested form.
+#[test]
+fn heavy_ordinary_reuse_is_drawn_in_full() {
+    let content = "/A Do ".repeat(2000);
+    let pdf = one_page_doc(
+        b"/Resources<</XObject<</A 5 0 R>>>>",
+        content.as_bytes(),
+        &[
+            (5, form("/Resources<</XObject<</L 6 0 R>>>>", "/L Do /L Do")),
+            (6, form("", "20 20 10 10 re f")),
+        ],
+    );
+    assert_eq!(count_fills(&pdf), 4000);
+}

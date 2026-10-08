@@ -63,6 +63,58 @@ use stet_graphics::text::GlyphStep;
 /// and is kept here so the bound does not change for files that render today.
 const MAX_CONTENT_NESTING: u32 = 20;
 
+/// How much nested content one page may interpret, in units of nesting
+/// level: a stream entered from the page costs 1, one entered from that
+/// stream 2, and so on.
+///
+/// [`MAX_CONTENT_NESTING`] bounds how deep streams nest and not how many
+/// run: twenty forms, each drawing the next twice, are a million executions
+/// from a file of a few hundred bytes. Nothing separates that from heavy
+/// legitimate reuse except how much of it there is, so this is a ceiling on
+/// the amount.
+///
+/// The charge grows with depth because the cost does. A nested stream
+/// leaves about three display-list elements behind per level of nesting it
+/// sits at (its clip, and the enclosing clips restored after it), so a deep
+/// execution is several times dearer than a shallow one — and deep is where
+/// a hostile file has to go, while real reuse is shallow: Type 3 text on a
+/// page or in a form, a label stepped and repeated across a sheet.
+///
+/// Across 33,567 pages of 2,690 local PDFs the busiest page cost 8,680
+/// (4,339 Type 3 glyphs inside a form), and no page nested deeper than six
+/// levels. The ceiling is 115 times that: room for a million glyphs set
+/// straight on a page, or half a million inside a page-sized form. A file
+/// built to reach it costs about a second and 1.2 GB, which is the display
+/// list those executions leave behind.
+const MAX_NESTED_WORK: u64 = 1_000_000;
+
+/// Which nested content stream is being interpreted, for refusing to enter
+/// one that is already running.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum StreamId {
+    /// An indirect object: every Form XObject, pattern, soft-mask group and
+    /// appearance stream.
+    Object(u32, u16),
+    /// A stream known only by its decoded bytes, at this address and of this
+    /// length — a Type 3 CharProc, which its font decodes once and keeps.
+    Bytes(usize, usize),
+}
+
+impl StreamId {
+    /// The identity of the stream `obj` refers to, whose decoded bytes are
+    /// `data`.
+    fn of(obj: &PdfObj, data: &[u8]) -> Self {
+        match obj {
+            PdfObj::Ref(n, g) => Self::Object(*n, *g),
+            _ => Self::of_bytes(data),
+        }
+    }
+
+    fn of_bytes(data: &[u8]) -> Self {
+        Self::Bytes(data.as_ptr() as usize, data.len())
+    }
+}
+
 /// One entry on the marked-content stack. Pushed on every BDC/BMC, popped
 /// on every EMC — so the stack stays balanced regardless of how OC and
 /// non-OC blocks interleave. Only `Ocg` entries swap the display list;
@@ -334,6 +386,13 @@ pub struct ContentInterpreter<'a> {
     /// (directly or through a ring), and unguarded re-entry aborts the process
     /// with a stack overflow rather than a catchable panic.
     depth: u32,
+    /// The nested streams being interpreted right now, outermost first. A
+    /// stream already on this list is not entered again: see
+    /// [`Self::interpret_nested`].
+    executing: Vec<StreamId>,
+    /// What this page's nested streams have cost so far, against
+    /// [`MAX_NESTED_WORK`].
+    nested_work: u64,
     /// True inside a Type 3 CharProc that started with `d1`. Per PDF spec 9.6.5,
     /// color operators must be ignored (glyph uses the current text color).
     d1_color_suppressed: bool,
@@ -475,6 +534,8 @@ impl<'a> ContentInterpreter<'a> {
             initial_ctm,
             in_text: false,
             depth: 0,
+            executing: Vec::new(),
+            nested_work: 0,
             d1_color_suppressed: false,
             nested_mask_flush_count: 0,
             font_cache: FontCache::new(),
@@ -566,6 +627,52 @@ impl<'a> ContentInterpreter<'a> {
         // Return partial display list even on error — handles malformed PDFs
         // where flate decompression produces truncated content streams.
         Ok(self.display_list)
+    }
+
+    /// Interpret a stream nested in the one being interpreted: a Form
+    /// XObject, a tiling pattern's cell, a Type 3 CharProc, a soft-mask
+    /// group or an annotation's appearance.
+    ///
+    /// Every such stream goes through here, which is what bounds the work a
+    /// page can ask for. Depth alone does not: [`MAX_CONTENT_NESTING`]
+    /// levels with each stream entering the next twice is a million
+    /// executions from a file of twenty small objects.
+    ///
+    /// - A stream that is already running is not entered again. A form
+    ///   cannot draw itself (ISO 32000-1 §8.10.1) and nor can anything
+    ///   else here, so there is nothing to draw; the file is malformed.
+    /// - Otherwise it is charged to the page's budget,
+    ///   [`MAX_NESTED_WORK`]. Once that is spent no further nested stream
+    ///   runs on this page, and each attempt is an error, which ends the
+    ///   stream that asked wherever the caller propagates it.
+    ///
+    /// The caller has already saved the state the nested stream may change,
+    /// and restores it whether or not the stream ran.
+    fn interpret_nested(&mut self, id: StreamId, data: &[u8]) -> Result<(), PdfError> {
+        if self.executing.contains(&id) {
+            return Ok(());
+        }
+        let cost = u64::from(self.depth) + 1;
+        if self.nested_work.saturating_add(cost) > MAX_NESTED_WORK {
+            if self.nested_work < MAX_NESTED_WORK {
+                eprintln!(
+                    "warning: page has more nested content than the reader will \
+                     interpret; the rest of it is not drawn"
+                );
+            }
+            // Spend what is left, so the page stays over budget from here.
+            self.nested_work = MAX_NESTED_WORK;
+            return Err(PdfError::Other(
+                "page has more nested content than the reader will interpret".into(),
+            ));
+        }
+        self.nested_work += cost;
+        self.executing.push(id);
+        self.depth += 1;
+        let result = self.interpret_stream(data);
+        self.depth -= 1;
+        self.executing.pop();
+        result
     }
 
     /// Interpret a content stream, keeping the interpreter alive for further use.
@@ -783,9 +890,7 @@ impl<'a> ContentInterpreter<'a> {
 
         // Interpret the form content
         let form_data = self.resolver.stream_data_from_obj(&n_ref)?;
-        self.depth += 1;
-        let _ = self.interpret_stream(&form_data);
-        self.depth -= 1;
+        let _ = self.interpret_nested(StreamId::of(&n_ref, &form_data), &form_data);
 
         // Restore state — truncate gstate stack to handle unbalanced q/Q in stream
         self.gstate_stack.truncate(saved_stack_depth);
@@ -3742,8 +3847,10 @@ impl<'a> ContentInterpreter<'a> {
         if self.depth >= MAX_CONTENT_NESTING {
             return;
         }
-        let proc_data = match font.type3_char_proc(char_code) {
-            Some(data) => data.to_vec(),
+        // The font keeps each CharProc decoded, so its address identifies it
+        // for as long as the font is loaded.
+        let (proc_id, proc_data) = match font.type3_char_proc(char_code) {
+            Some(data) => (StreamId::of_bytes(data), data.to_vec()),
             None => return,
         };
         let resources = match font.type3_resources() {
@@ -3795,9 +3902,7 @@ impl<'a> ContentInterpreter<'a> {
         let saved_d1 = self.d1_color_suppressed;
         self.d1_color_suppressed = false;
         let suspended = self.suspend_text_extraction();
-        self.depth += 1;
-        let _ = self.interpret_stream(&proc_data);
-        self.depth -= 1;
+        let _ = self.interpret_nested(proc_id, &proc_data);
         self.resume_text_extraction(suspended);
         self.d1_color_suppressed = saved_d1;
         // Collect glyph display elements and append to main display list
@@ -5901,9 +6006,7 @@ impl<'a> ContentInterpreter<'a> {
             }
 
             // Interpret form content into group_list (now in self.display_list)
-            self.depth += 1;
-            form_result = self.interpret_stream(&form_data);
-            self.depth -= 1;
+            form_result = self.interpret_nested(StreamId::of(obj, &form_data), &form_data);
 
             // Flush any soft mask scope opened inside the group
             self.flush_soft_mask();
@@ -5963,9 +6066,7 @@ impl<'a> ContentInterpreter<'a> {
                 }
             }
 
-            self.depth += 1;
-            form_result = self.interpret_stream(&form_data);
-            self.depth -= 1;
+            form_result = self.interpret_nested(StreamId::of(obj, &form_data), &form_data);
 
             self.form_cull_y = saved_cull;
         }
@@ -7163,9 +7264,7 @@ impl<'a> ContentInterpreter<'a> {
 
         let saved_nested_mask_flush_count = self.nested_mask_flush_count;
         let suspended = self.suspend_text_extraction();
-        self.depth += 1;
-        let _ = self.interpret_stream(&form_data);
-        self.depth -= 1;
+        let _ = self.interpret_nested(StreamId::of(g_ref, &form_data), &form_data);
         self.resume_text_extraction(suspended);
 
         self.in_smask_form = saved_in_smask_form;
@@ -7689,9 +7788,7 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.text_rendering_mode = 0;
 
         let suspended = self.suspend_text_extraction();
-        self.depth += 1;
-        let _ = self.interpret_stream(&pattern_data);
-        self.depth -= 1;
+        let _ = self.interpret_nested(StreamId::of(pat_obj, &pattern_data), &pattern_data);
         self.resume_text_extraction(suspended);
 
         // Flush any pending soft mask scope from the pattern stream

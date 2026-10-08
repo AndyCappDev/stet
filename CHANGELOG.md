@@ -138,6 +138,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `lookup_nd` also return zeros for a table they cannot interpolate, where
   `lookup_nd` indexed out of bounds for more than eight inputs. Found with
   `postscript_type4_many_outputs.pdf` from the pdf.js test set.
+- **A small PDF could ask for an unbounded amount of nested content.**
+  Form XObjects, tiling patterns, Type 3 glyphs, soft-mask groups and
+  annotation appearances may nest twenty deep, and nothing limited how many
+  ran: a form drawing itself eight times, or a Type 3 glyph showing three
+  copies of itself, ran until the process was killed, and so did nineteen
+  ordinary forms each drawing the next twice. Two things bound it now. A
+  stream that is already being interpreted is not entered again — a form
+  cannot draw itself, so there is nothing to draw — which makes every
+  self-referencing file finish at once. And each page has a budget for
+  nested content, charged by depth, 115 times what the busiest of 33,567
+  real pages used; a page that spends it draws what it had drawn, warns,
+  and stops. The files that used to be killed now take up to a second and
+  1.2 GB, which is the display list of what they did draw.
+  Reuse is unaffected: a form or glyph used any number of times in a row is
+  drawn each time.
 
 ## [0.8.4] — 2026-10-04
 
