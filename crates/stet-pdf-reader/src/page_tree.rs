@@ -42,8 +42,88 @@ struct Inherited {
     resources: Option<PdfDict>,
 }
 
+/// What the reader did about a page whose boxes could not be used as
+/// written: the 0-based page index and a message for
+/// [`parse_warnings`](crate::PdfDocument::parse_warnings).
+pub(crate) type PageBoxNotes = Vec<(usize, String)>;
+
+/// The pages found so far, with the notes on their boxes.
+#[derive(Default)]
+struct Collected {
+    pages: Vec<PageInfo>,
+    notes: PageBoxNotes,
+}
+
+/// US Letter, the size a page with no usable MediaBox is given.
+const DEFAULT_MEDIA_BOX: [f64; 4] = [0.0, 0.0, 612.0, 792.0];
+
+/// Whether a box encloses some area: four finite numbers, with neither side
+/// of zero length.
+fn box_has_area(b: &[f64; 4]) -> bool {
+    b.iter().all(|v| v.is_finite()) && b[0] != b[2] && b[1] != b[3]
+}
+
+/// A page's MediaBox and crop box from what the page tree declares.
+///
+/// The MediaBox is required, and its absence has always meant US Letter
+/// here. One that encloses no area is no more usable than a missing one —
+/// a page of zero width cannot be rendered at any resolution — so it is
+/// replaced the same way, with a note. A CropBox defaults to the MediaBox
+/// and is reduced to its intersection with it (ISO 32000-1 §14.11.2); when
+/// nothing is left, because it is empty itself or lies outside the
+/// MediaBox, the MediaBox is used and that is noted too. This is what
+/// poppler does with each page of pdf.js's `boundingBox_invalid.pdf`.
+fn usable_page_boxes(
+    media: Option<[f64; 4]>,
+    crop: Option<[f64; 4]>,
+    page: usize,
+    notes: &mut PageBoxNotes,
+) -> ([f64; 4], [f64; 4]) {
+    let media_box = match media {
+        Some(m) if box_has_area(&m) => m,
+        Some(m) => {
+            notes.push((
+                page,
+                format!("/MediaBox {m:?} encloses no area; US Letter is used instead"),
+            ));
+            DEFAULT_MEDIA_BOX
+        }
+        None => DEFAULT_MEDIA_BOX,
+    };
+    let crop_box = match crop {
+        Some(c) => {
+            // CropBox defaults to MediaBox; clamp to MediaBox if it extends
+            // beyond (per PDF spec: "should be equal to or smaller than the
+            // media box").
+            let clamped = clamp_box_to_media(&c, &media_box);
+            if box_has_area(&c) && clamped[0] < clamped[2] && clamped[1] < clamped[3] {
+                clamped
+            } else {
+                notes.push((
+                    page,
+                    format!(
+                        "/CropBox {c:?} leaves no area inside the MediaBox; \
+                         the MediaBox is used instead"
+                    ),
+                ));
+                clamp_box_to_media(&media_box, &media_box)
+            }
+        }
+        None => clamp_box_to_media(&media_box, &media_box),
+    };
+    (media_box, crop_box)
+}
+
 /// Traverse the page tree and collect all leaf pages in order.
 pub fn collect_pages(resolver: &Resolver) -> Result<Vec<PageInfo>, PdfError> {
+    collect_pages_noted(resolver).map(|(pages, _)| pages)
+}
+
+/// [`collect_pages`], also returning a note for each page whose boxes had
+/// to be replaced.
+pub(crate) fn collect_pages_noted(
+    resolver: &Resolver,
+) -> Result<(Vec<PageInfo>, PageBoxNotes), PdfError> {
     // Get /Root -> Catalog (may be an indirect reference or an inline dict)
     let catalog_owned;
     let catalog_dict = if let Some(root_ref) = resolver.trailer().get_ref(b"Root") {
@@ -83,7 +163,7 @@ pub fn collect_pages(resolver: &Resolver) -> Result<Vec<PageInfo>, PdfError> {
         None => return collect_pages_by_scan(resolver),
     };
 
-    let mut pages = Vec::new();
+    let mut found = Collected::default();
     let inherited = Inherited::default();
     let mut visited: HashSet<u32> = HashSet::new();
     collect_pages_recursive(
@@ -91,17 +171,19 @@ pub fn collect_pages(resolver: &Resolver) -> Result<Vec<PageInfo>, PdfError> {
         pages_dict,
         0,
         &inherited,
-        &mut pages,
+        &mut found,
         &mut visited,
         0,
     )?;
 
-    Ok(pages)
+    Ok((found.pages, found.notes))
 }
 
 /// Try to find the real Catalog's /Pages tree by scanning for a /Type /Catalog
 /// object. Falls back to raw page scanning only if no valid Catalog is found.
-fn collect_pages_via_catalog_scan(resolver: &Resolver) -> Result<Vec<PageInfo>, PdfError> {
+fn collect_pages_via_catalog_scan(
+    resolver: &Resolver,
+) -> Result<(Vec<PageInfo>, PageBoxNotes), PdfError> {
     let xref_len = resolver.xref_len();
     for obj_num in 0..xref_len as u32 {
         if let Ok(obj) = resolver.resolve(obj_num, 0)
@@ -111,7 +193,7 @@ fn collect_pages_via_catalog_scan(resolver: &Resolver) -> Result<Vec<PageInfo>, 
             && let Ok(pages_obj) = resolver.deref(pages_ref)
             && let Some(pages_dict) = pages_obj.as_dict()
         {
-            let mut pages = Vec::new();
+            let mut found = Collected::default();
             let inherited = Inherited::default();
             let mut visited: HashSet<u32> = HashSet::new();
             if collect_pages_recursive(
@@ -119,14 +201,14 @@ fn collect_pages_via_catalog_scan(resolver: &Resolver) -> Result<Vec<PageInfo>, 
                 pages_dict,
                 0,
                 &inherited,
-                &mut pages,
+                &mut found,
                 &mut visited,
                 0,
             )
             .is_ok()
-                && !pages.is_empty()
+                && !found.pages.is_empty()
             {
-                return Ok(pages);
+                return Ok((found.pages, found.notes));
             }
         }
     }
@@ -135,8 +217,9 @@ fn collect_pages_via_catalog_scan(resolver: &Resolver) -> Result<Vec<PageInfo>, 
 
 /// Fallback: scan all xref entries for `/Type /Page` objects.
 /// Used when the page tree root is missing (e.g., truncated PDF).
-fn collect_pages_by_scan(resolver: &Resolver) -> Result<Vec<PageInfo>, PdfError> {
+fn collect_pages_by_scan(resolver: &Resolver) -> Result<(Vec<PageInfo>, PageBoxNotes), PdfError> {
     let mut pages = Vec::new();
+    let mut notes = PageBoxNotes::new();
     let xref_len = resolver.xref_len();
 
     for obj_num in 0..xref_len as u32 {
@@ -145,11 +228,11 @@ fn collect_pages_by_scan(resolver: &Resolver) -> Result<Vec<PageInfo>, PdfError>
             && dict.get_name(b"Type") == Some(b"Page")
             && dict.get(b"Kids").is_none()
         {
-            let media_box =
-                parse_rect(dict, b"MediaBox", resolver).unwrap_or([0.0, 0.0, 612.0, 792.0]);
-            let crop_box = clamp_box_to_media(
-                &parse_rect(dict, b"CropBox", resolver).unwrap_or(media_box),
-                &media_box,
+            let (media_box, crop_box) = usable_page_boxes(
+                parse_rect(dict, b"MediaBox", resolver),
+                parse_rect(dict, b"CropBox", resolver),
+                pages.len(),
+                &mut notes,
             );
             let rotate = dict.get_int(b"Rotate").unwrap_or(0) as i32;
             let resources = resolve_resources_inherited(dict, resolver);
@@ -172,7 +255,7 @@ fn collect_pages_by_scan(resolver: &Resolver) -> Result<Vec<PageInfo>, PdfError>
         return Err(PdfError::MissingKey("Pages"));
     }
 
-    Ok(pages)
+    Ok((pages, notes))
 }
 
 /// Resolve /Resources, walking up the /Parent chain if not found on the page.
@@ -219,7 +302,7 @@ fn collect_pages_recursive(
     node_dict: &PdfDict,
     obj_num: u32,
     parent_inherited: &Inherited,
-    pages: &mut Vec<PageInfo>,
+    found: &mut Collected,
     visited: &mut HashSet<u32>,
     depth: u32,
 ) -> Result<(), PdfError> {
@@ -264,10 +347,12 @@ fn collect_pages_recursive(
 
     if !has_kids && (type_name.is_none() || matches!(type_name, Some(b"Page"))) {
         // Leaf page node
-        let media_box = inherited.media_box.unwrap_or([0.0, 0.0, 612.0, 792.0]); // Default US Letter
-        // CropBox defaults to MediaBox; clamp to MediaBox if it extends beyond
-        // (per PDF spec: "should be equal to or smaller than the media box").
-        let crop_box = clamp_box_to_media(&inherited.crop_box.unwrap_or(media_box), &media_box);
+        let (media_box, crop_box) = usable_page_boxes(
+            inherited.media_box,
+            inherited.crop_box,
+            found.pages.len(),
+            &mut found.notes,
+        );
         let rotate = inherited.rotate.unwrap_or(0);
         let resources = inherited.resources.clone().unwrap_or_default();
 
@@ -277,7 +362,7 @@ fn collect_pages_recursive(
         // Parse /Annots (annotation references)
         let annots = parse_annots(node_dict, resolver);
 
-        pages.push(PageInfo {
+        found.pages.push(PageInfo {
             obj_num,
             media_box,
             crop_box,
@@ -311,7 +396,7 @@ fn collect_pages_recursive(
                             child_dict,
                             *n,
                             &inherited,
-                            pages,
+                            found,
                             visited,
                             depth + 1,
                         )?;
@@ -325,7 +410,7 @@ fn collect_pages_recursive(
                             child_dict,
                             0,
                             &inherited,
-                            pages,
+                            found,
                             visited,
                             depth + 1,
                         )?;

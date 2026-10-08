@@ -98,6 +98,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already handled. Such a file now opens the same way: from the
   cross-reference table when one is there, otherwise by scanning for its
   objects. Found with `issue6069.pdf` from the pdf.js test set.
+- **A PDF page with a zero-size MediaBox crashed the PNG writer.** A page
+  declaring `/MediaBox [0 0 0 0]` rendered to a 0 × 0 image, and `stet
+  --device png` panicked writing it. A MediaBox that encloses no area is
+  now treated as a missing one always was, and replaced by US Letter; a
+  CropBox with nothing left inside the MediaBox — empty, or lying wholly
+  outside it — is replaced by the MediaBox. Each replacement is reported
+  by `PdfDocument::parse_warnings`, as `ParsePhase::PageBoxes`. The
+  command line also reports a page too small to have any pixels at the
+  chosen resolution as an error and exits 1, where it would have
+  panicked. Found with `boundingBox_invalid.pdf` from the pdf.js test set.
 
 ## [0.8.4] — 2026-10-04
 

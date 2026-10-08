@@ -2692,7 +2692,10 @@ were selected from '{}'",
                         None if page_count == 1 => format!("{}.png", output_base),
                         None => format!("{}-{:03}.png", output_base, page_1based),
                     };
-                    write_png_file(&out_path, &rgba, w, h);
+                    if let Err(e) = write_png_file(&out_path, &rgba, w, h) {
+                        eprintln!("Error: page {}: {}", page_1based, e);
+                        std::process::exit(1);
+                    }
                     eprintln!("  Page {}: {}x{} → {}", page_1based, w, h, out_path);
                 }
                 Err(e) => {
@@ -2871,19 +2874,28 @@ fn run_pdf_input_pdf(
 }
 
 /// Write RGBA data to a PNG file.
-fn write_png_file(path: &str, rgba: &[u8], width: u32, height: u32) {
-    let file = std::fs::File::create(path).unwrap_or_else(|e| {
-        eprintln!("Error: cannot create '{}': {}", path, e);
-        std::process::exit(1);
-    });
+///
+/// Fails rather than panics: the size comes from the page, and a page
+/// smaller than half a pixel at the chosen resolution has none to write.
+fn write_png_file(path: &str, rgba: &[u8], width: u32, height: u32) -> Result<(), String> {
+    if width == 0 || height == 0 {
+        return Err(format!(
+            "cannot write '{path}': the page is {width}x{height} pixels at this resolution"
+        ));
+    }
+    let file = std::fs::File::create(path).map_err(|e| format!("cannot create '{path}': {e}"))?;
     let w = std::io::BufWriter::new(file);
     let mut encoder = png::Encoder::new(w, width, height);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
     encoder.set_compression(png::Compression::Default);
     encoder.set_adaptive_filter(png::AdaptiveFilterType::Adaptive);
-    let mut writer = encoder.write_header().unwrap();
-    writer.write_image_data(rgba).unwrap();
+    let mut writer = encoder
+        .write_header()
+        .map_err(|e| format!("cannot write '{path}': {e}"))?;
+    writer
+        .write_image_data(rgba)
+        .map_err(|e| format!("cannot write '{path}': {e}"))
 }
 
 /// Locate the `resources/` directory relative to the executable.

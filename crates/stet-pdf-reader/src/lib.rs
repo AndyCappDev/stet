@@ -374,7 +374,16 @@ impl<'a> PdfDocument<'a> {
         };
 
         let resolver = Resolver::with_encryption(data, xref, encryption);
-        let pages = page_tree::collect_pages(&resolver)?;
+        let (pages, box_notes) = page_tree::collect_pages_noted(&resolver)?;
+        let warnings = WarningSink::new();
+        for (page, message) in box_notes {
+            warnings.record(
+                ParsePhase::PageBoxes { page },
+                Some(LocationHint::Page(page)),
+                Severity::Warning,
+                message,
+            );
+        }
         let ocg_off = parse_ocg_off(&resolver);
         let output_intent_icc = parse_output_intent_icc(&resolver);
 
@@ -400,7 +409,7 @@ impl<'a> PdfDocument<'a> {
             embedded_files_cache: OnceCell::new(),
             layers_cache: OnceCell::new(),
             configurations_cache: OnceCell::new(),
-            warnings: WarningSink::new(),
+            warnings,
         })
     }
 

@@ -32,6 +32,12 @@ use crate::resolver::Resolver;
 /// is reduced to its intersection with the MediaBox (§14.11.2). The crop
 /// box is not a limit, so a bleed area outside it renders.
 ///
+/// A page whose own boxes cannot be used still renders: a MediaBox that
+/// encloses no area is replaced by US Letter, as a missing one is, and a
+/// CropBox with nothing left inside the MediaBox is replaced by the
+/// MediaBox. Each replacement is reported through
+/// [`PdfDocument::parse_warnings`](crate::PdfDocument::parse_warnings).
+///
 /// Marked `#[non_exhaustive]`: other areas may be added, so `match` on it
 /// with a wildcard arm.
 ///

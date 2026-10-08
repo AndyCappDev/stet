@@ -229,6 +229,84 @@ fn an_area_off_the_page_is_an_error() {
     }
 }
 
+/// Three pages in the shape of pdf.js's `boundingBox_invalid.pdf`, where the
+/// first used to reach the PNG writer as a 0 x 0 image and panic there.
+fn pages_with_boxes(boxes: &[&str]) -> Vec<u8> {
+    let kids: Vec<String> = (0..boxes.len()).map(|i| format!("{} 0 R", i + 3)).collect();
+    let mut objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        format!(
+            "<< /Type /Pages /Kids [{}] /Count {} >>",
+            kids.join(" "),
+            boxes.len()
+        )
+        .into_bytes(),
+    ];
+    for b in boxes {
+        objects.push(format!("<< /Type /Page /Parent 2 0 R {b} /Resources << >> >>").into_bytes());
+    }
+    pdf_from(&objects)
+}
+
+#[test]
+fn a_media_box_with_no_area_becomes_us_letter() {
+    let pdf = pages_with_boxes(&[
+        "/MediaBox [0 0 0 0] /CropBox [0 0 0 0]",
+        "/MediaBox [0 0 0 500]",
+        "/MediaBox [0 0 0 0] /CropBox [100 100 300 400]",
+        "/MediaBox [0 0 600 800]",
+    ]);
+    let mut doc = PdfDocument::from_bytes(&pdf).unwrap();
+    assert_eq!(doc.page_size(0).unwrap(), (612.0, 792.0));
+    assert_eq!(doc.page_size(1).unwrap(), (612.0, 792.0));
+    // A usable CropBox is still honoured, inside the substituted MediaBox.
+    assert_eq!(doc.page_area_rect(2).unwrap(), [100.0, 100.0, 300.0, 400.0]);
+    assert_eq!(doc.page_size(3).unwrap(), (600.0, 800.0));
+
+    let (rgba, w, h) = doc.render_page_to_rgba(0, 72.0).unwrap();
+    assert_eq!((w, h, rgba.len()), (612, 792, 612 * 792 * 4));
+
+    doc.set_page_area(PageArea::MediaBox);
+    assert_eq!(doc.page_size(0).unwrap(), (612.0, 792.0));
+
+    // One warning per replaced box: the MediaBox of pages 1 to 3 and the
+    // CropBox of page 1. The sound page has none.
+    let warned: Vec<usize> = doc
+        .parse_warnings()
+        .iter()
+        .map(|w| match w.phase {
+            stet_pdf_reader::ParsePhase::PageBoxes { page } => page,
+            ref other => panic!("unexpected warning phase {other:?}"),
+        })
+        .collect();
+    assert_eq!(warned, [0, 0, 1, 2]);
+}
+
+#[test]
+fn a_crop_box_with_nothing_inside_the_media_box_is_the_media_box() {
+    let pdf = pages_with_boxes(&[
+        // Wholly outside, as in the pdf.js file.
+        "/MediaBox [0 0 800 600] /CropBox [600 800 1000 1000]",
+        // A line, not an area.
+        "/MediaBox [0 0 800 600] /CropBox [10 10 10 500]",
+        // Not finite once parsed.
+        "/MediaBox [0 0 800 600] /CropBox [0 0 1e999 600]",
+    ]);
+    let doc = PdfDocument::from_bytes(&pdf).unwrap();
+    for page in 0..2 {
+        assert_eq!(doc.page_size(page).unwrap(), (800.0, 600.0), "page {page}");
+        assert_eq!(
+            doc.page_area_rect(page).unwrap(),
+            [0.0, 0.0, 800.0, 600.0],
+            "page {page}"
+        );
+    }
+    // Whatever the reader makes of the third, it has a size that renders.
+    let (w, h) = doc.page_size(2).unwrap();
+    assert!(w > 0.0 && h > 0.0 && w.is_finite() && h.is_finite());
+    assert!(doc.parse_warnings().len() >= 2);
+}
+
 /// Where `area` lies in a render of `base` at `scale` pixels per point, at
 /// `rotate`: `device_rect` for any resolution, rounding each edge to the
 /// nearest pixel (it is on the grid to within float error when this is used).

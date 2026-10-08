@@ -197,3 +197,30 @@ fn a_bad_value_is_refused() {
     assert_ne!(code, 0);
     assert!(out.contains("invalid --box value 'artbox'"), "{out}");
 }
+
+/// An area under half a pixel at the chosen resolution has no pixels to
+/// write. That used to reach the PNG encoder as a zero-width image and
+/// panic there; it is an error with a message now.
+#[test]
+fn an_area_smaller_than_a_pixel_is_an_error_not_a_panic() {
+    let dir = TempDir::new("subpixel");
+    dir.write_pdf("in.pdf");
+    let (code, out) = run_in(
+        &dir,
+        &[
+            "--device",
+            "png",
+            "--dpi",
+            "72",
+            "--box",
+            "40,30,40.3,30.3",
+            "-o",
+            "out.png",
+            "in.pdf",
+        ],
+    );
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("0x0 pixels at this resolution"), "{out}");
+    assert!(!out.contains("panicked"), "{out}");
+    assert!(!dir.path().join("out.png").exists());
+}
