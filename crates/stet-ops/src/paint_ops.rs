@@ -331,7 +331,7 @@ pub(crate) fn push_fill_element(ctx: &mut Context, path: PsPath, fill_rule: Fill
     {
         if pat.pattern_type == 2 {
             let shading = pat.cached_display_list.clone();
-            let background = ctx.shading_pattern_backgrounds.get(&pattern_id).cloned();
+            let background = pat.shading_background.clone();
             push_shading_pattern_fill(ctx, path, fill_rule, shading, background);
             return;
         }

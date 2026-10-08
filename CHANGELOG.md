@@ -100,6 +100,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`stet_core::graphics_state::PatternData` has a new public field,
+  `shading_background`**: the `Background` colour of a shading pattern
+  (see Fixed). Code that builds a `PatternData` with a struct literal
+  needs the field.
 - **`stet_core::graphics_state::GraphicsState` has two new public fields,
   `clip_chain` and `clip_chain_stack`** (see Fixed, "A restored clip
   forgot all but its last region"), with a new `ClipChain` type and the

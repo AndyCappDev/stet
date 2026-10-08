@@ -208,6 +208,10 @@ pub struct PatternData {
     /// Pre-rendered display list: what PaintProc drew (tiling), or the
     /// shading placed by `pattern_matrix` (shading).
     pub cached_display_list: DisplayList,
+    /// A shading pattern's `Background` colour, painted under the shading
+    /// across the whole of what the pattern fills. `None` for a tiling
+    /// pattern and for a shading without one.
+    pub shading_background: Option<DeviceColor>,
 }
 
 /// Entry on the graphics state stack, tracking whether it was created by

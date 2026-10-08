@@ -1042,11 +1042,8 @@ pub fn op_makepattern(ctx: &mut Context) -> Result<(), PsError> {
         ystep,
         pattern_matrix,
         cached_display_list,
+        shading_background,
     });
-    match shading_background {
-        Some(color) => ctx.shading_pattern_backgrounds.insert(pattern_id, color),
-        None => ctx.shading_pattern_backgrounds.remove(&pattern_id),
-    };
 
     // Store Implementation in the copied dict
     let impl_key = DictKey::Name(ctx.names.intern(b"Implementation"));
