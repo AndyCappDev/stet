@@ -242,6 +242,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     paints one reusable stream twice repositions it in between, and could
     not.
 
+- **A tiling pattern painted under a soft mask ignored the mask.** In
+  `stet-pdf-reader`, a soft mask set with `gs` covers what the stream
+  paints from then on, which the reader tracks as a scope over its
+  display list. A tiling pattern's cell is interpreted into a display
+  list of its own, and the scope was left open across that: it was closed
+  inside the cell, around the cell's own contents, and the fill or stroke
+  that used the pattern was painted whole. A page that set a mask and
+  then filled with a tiling pattern — a patterned shape with a feathered
+  edge, text punched out of a texture — showed the pattern across the
+  whole shape, and the pattern's cell could lose part of its own content
+  for every later use. A Type 3 glyph procedure that sets a soft mask of
+  its own had the same fault, dropping the mask from everything painted
+  before the glyph. The cell and the glyph procedure are now interpreted
+  with no scope open, and the page's scope carries on after them. Shading
+  patterns were not affected.
+
 - **A restored clip forgot all but its last region.** The clip is the
   intersection of every region set since `initclip`, but the interpreter
   kept only the most recent one. Nothing went wrong while clips only

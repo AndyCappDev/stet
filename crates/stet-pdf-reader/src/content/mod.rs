@@ -4047,11 +4047,18 @@ impl<'a> ContentInterpreter<'a> {
 
         let saved_d1 = self.d1_color_suppressed;
         self.d1_color_suppressed = false;
+        // A soft mask scope open in the parent indexes the parent's display
+        // list. The glyph's elements join that list below and are masked
+        // with it; a mask the glyph procedure sets itself is closed over the
+        // glyph's own list here.
+        let saved_scope = self.soft_mask_scope.take();
         let suspended = self.suspend_text_extraction();
         self.unscaled_nesting += 1;
         let _ = self.interpret_nested(proc_id, &proc_data);
         self.unscaled_nesting -= 1;
         self.resume_text_extraction(suspended);
+        self.flush_soft_mask();
+        self.soft_mask_scope = saved_scope;
         self.d1_color_suppressed = saved_d1;
         // Collect glyph display elements and append to main display list
         let glyph_elements = std::mem::replace(&mut self.display_list, saved_display_list);
@@ -8082,6 +8089,13 @@ impl<'a> ContentInterpreter<'a> {
         // Reset text rendering mode so pattern tiles don't inherit
         // fill+stroke or other modes from the parent content stream.
         self.gstate.text_rendering_mode = 0;
+        // A soft mask open in the parent stream masks what the pattern
+        // paints, not what is drawn inside its cell, and its scope indexes
+        // the parent's display list, not the cell's. Left in place, the
+        // flush below closed it over the cell's own elements and the fill
+        // that used the pattern went unmasked.
+        self.gstate.soft_mask = None;
+        let saved_scope = self.soft_mask_scope.take();
 
         let suspended = self.suspend_text_extraction();
         self.unscaled_nesting += 1;
@@ -8091,6 +8105,7 @@ impl<'a> ContentInterpreter<'a> {
 
         // Flush any pending soft mask scope from the pattern stream
         self.flush_soft_mask();
+        self.soft_mask_scope = saved_scope;
 
         let tile_display_list = std::mem::replace(&mut self.display_list, saved_display_list);
         self.content_stream_ctm = saved_content_stream_ctm;
