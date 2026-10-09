@@ -3,7 +3,7 @@
 <p align="center">A pure-Rust graphics engine for PDF, PostScript, and EPS.</p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-0.8.4-blue" alt="Version 0.8.4">
+  <img src="https://img.shields.io/badge/Version-0.8.5-blue" alt="Version 0.8.5">
   <img src="https://img.shields.io/badge/License-Apache--2.0_OR_MIT-green" alt="License Apache-2.0 OR MIT">
   <img src="https://img.shields.io/badge/Rust-1.92+-orange" alt="Rust 1.92+">
 </p>
@@ -76,9 +76,9 @@ there is nothing to install alongside it.
 in — the rest of the command is the same for all four:
 
 ```bash
-ASSET=stet-0.8.4-x86_64-unknown-linux-musl.tar.gz     # see the table above
+ASSET=stet-0.8.5-x86_64-unknown-linux-musl.tar.gz     # see the table above
 
-curl -fL "https://github.com/AndyCappDev/stet/releases/download/v0.8.4/$ASSET" | tar xz
+curl -fL "https://github.com/AndyCappDev/stet/releases/download/v0.8.5/$ASSET" | tar xz
 cd "${ASSET%.tar.gz}"
 ./stet --version
 ```
@@ -102,9 +102,9 @@ different arguments — so call `curl.exe` explicitly. Windows 10 1803 and later
 ship both it and `tar`:
 
 ```powershell
-curl.exe -fL -O https://github.com/AndyCappDev/stet/releases/download/v0.8.4/stet-0.8.4-x86_64-pc-windows-msvc.zip
-tar -xf stet-0.8.4-x86_64-pc-windows-msvc.zip
-cd stet-0.8.4-x86_64-pc-windows-msvc
+curl.exe -fL -O https://github.com/AndyCappDev/stet/releases/download/v0.8.5/stet-0.8.5-x86_64-pc-windows-msvc.zip
+tar -xf stet-0.8.5-x86_64-pc-windows-msvc.zip
+cd stet-0.8.5-x86_64-pc-windows-msvc
 .\stet.exe --version
 ```
 
@@ -118,8 +118,8 @@ every archive. The quick commands above stream the archive straight into
 file first:
 
 ```bash
-ASSET=stet-0.8.4-x86_64-unknown-linux-musl.tar.gz     # see the table above
-URL=https://github.com/AndyCappDev/stet/releases/download/v0.8.4/
+ASSET=stet-0.8.5-x86_64-unknown-linux-musl.tar.gz     # see the table above
+URL=https://github.com/AndyCappDev/stet/releases/download/v0.8.5/
 
 curl -fL -O "$URL$ASSET"
 curl -fL -O "${URL}SHA256SUMS"
@@ -134,8 +134,8 @@ an upper-case digest while `SHA256SUMS` is lower-case, so compare them
 case-folded:
 
 ```powershell
-$name = "stet-0.8.4-x86_64-pc-windows-msvc.zip"
-curl.exe -fL -O https://github.com/AndyCappDev/stet/releases/download/v0.8.4/SHA256SUMS
+$name = "stet-0.8.5-x86_64-pc-windows-msvc.zip"
+curl.exe -fL -O https://github.com/AndyCappDev/stet/releases/download/v0.8.5/SHA256SUMS
 $want = ((Select-String -Path SHA256SUMS -SimpleMatch $name).Line -split '\s+')[0]
 $got  = (Get-FileHash $name -Algorithm SHA256).Hash.ToLower()
 if ($got -eq $want) { "OK" } else { "MISMATCH" }
@@ -294,7 +294,7 @@ document.pdf
 Metadata:
   Title: Annual Report 2026
   Author: Scott Bowman
-  Producer: stet 0.8.4
+  Producer: stet 0.8.5
   Created: 2026-04-27 12:00:00 UTC
 
 Pages: 4

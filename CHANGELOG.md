@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.5] — 2026-10-09
+
 ### Added
 
 - **`PdfDocument::set_max_image_pixels`: an application's own ceiling on
