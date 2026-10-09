@@ -437,3 +437,110 @@ fn cff_private_dict_offset_overflow_reproducer() {
         }
     }
 }
+
+// === Found by the 2026-10-08 fuzz campaign ================================
+
+/// A simple glyph of `end_points.len()` contours and 65,535 points, every
+/// point at the origin: the flags repeat and each coordinate is "same as
+/// the last", so the points cost no data at all.
+fn simple_glyph_of_free_points(end_points: &[u16]) -> Vec<u8> {
+    let mut g = Vec::new();
+    g.extend_from_slice(&(end_points.len() as i16).to_be_bytes());
+    g.extend_from_slice(&[0u8; 8]); // bounding box
+    for end in end_points {
+        g.extend_from_slice(&end.to_be_bytes());
+    }
+    g.extend_from_slice(&[0, 0]); // no instructions
+    // On-curve, x and y unchanged, repeated: 256 points per pair of bytes.
+    for _ in 0..256 {
+        g.extend_from_slice(&[0x01 | 0x08 | 0x10 | 0x20, 255]);
+    }
+    g
+}
+
+/// Each contour of a simple glyph ends after the one before it, and the
+/// parser started each where the last ended. End points that go backwards
+/// made every other contour start again from the beginning, so a glyph
+/// could claim its 65,535 points once per contour: a 256 KB PDF built a
+/// 3.7 GB path. Found as an out-of-memory report by the PDF fuzz target.
+#[test]
+fn glyph_contours_that_go_backwards_do_not_multiply_the_points() {
+    let end_points: Vec<u16> = (0..2000)
+        .map(|i| if i % 2 == 0 { 65_534 } else { 0 })
+        .collect();
+    let glyph = simple_glyph_of_free_points(&end_points);
+    assert!(glyph.len() < 5000);
+    let path = parse_glyf_to_path(&glyph, &|_| None);
+    assert!(
+        path.segments.len() <= 2 * 65_536 + end_points.len() * 2,
+        "{} segments from 65,535 points",
+        path.segments.len()
+    );
+}
+
+/// The well-formed neighbour: contours in order are all read.
+#[test]
+fn glyph_contours_in_order_are_all_read() {
+    let glyph = simple_glyph_of_free_points(&[9, 19, 65_534]);
+    let path = parse_glyf_to_path(&glyph, &|_| None);
+    let moves = path
+        .segments
+        .iter()
+        .filter(|s| matches!(s, stet_fonts::geometry::PathSegment::MoveTo(..)))
+        .count();
+    assert_eq!(moves, 3);
+    assert!(path.segments.len() > 65_535);
+}
+
+/// The expansion budget bounds how many components a composite takes, not
+/// how large they are: 4096 components of 65,535 free points each is 268
+/// million points. No conforming glyph has more than 65,535 (`maxp` counts
+/// them in 16 bits), so a composite stops taking components once it holds
+/// that many.
+#[test]
+fn composite_glyph_points_are_bounded() {
+    let big = simple_glyph_of_free_points(&[65_534]);
+    let mut composite = Vec::new();
+    composite.extend_from_slice(&(-1i16).to_be_bytes());
+    composite.extend_from_slice(&[0u8; 8]);
+    for i in 0..3000u16 {
+        let more = if i + 1 < 3000 { 0x0020u16 } else { 0 };
+        composite.extend_from_slice(&more.to_be_bytes());
+        composite.extend_from_slice(&(i + 1).to_be_bytes());
+        composite.extend_from_slice(&[0u8, 0u8]);
+    }
+    let resolver = |_: u16| -> Option<Vec<u8>> { Some(big.clone()) };
+    let path = parse_glyf_to_path(&composite, &resolver);
+    assert!(
+        path.segments.len() <= 2 * 65_536 + 8,
+        "{} segments",
+        path.segments.len()
+    );
+    // What fits is kept.
+    assert!(path.segments.len() > 65_535);
+}
+
+/// `table_data` returns a table only as far as the font's data goes.
+#[test]
+fn a_table_is_returned_only_as_far_as_the_data_goes() {
+    use stet_fonts::truetype::table_data;
+    let font_with = |offset: u32, length: u32| {
+        let mut font = b"OTTO".to_vec();
+        font.extend_from_slice(&[0, 1, 0, 0, 0, 0, 0, 0]);
+        font.extend_from_slice(b"CFF ");
+        font.extend_from_slice(&[0; 4]);
+        font.extend_from_slice(&offset.to_be_bytes());
+        font.extend_from_slice(&length.to_be_bytes());
+        font.extend_from_slice(b"abcdefgh");
+        font
+    };
+    assert_eq!(table_data(&font_with(28, 4), b"CFF "), Some(&b"abcd"[..]));
+    assert_eq!(
+        table_data(&font_with(30, 400), b"CFF "),
+        Some(&b"cdefgh"[..])
+    );
+    assert_eq!(table_data(&font_with(36, 4), b"CFF "), Some(&b""[..]));
+    assert_eq!(table_data(&font_with(37, 4), b"CFF "), None);
+    assert_eq!(table_data(&font_with(u32::MAX, u32::MAX), b"CFF "), None);
+    assert_eq!(table_data(&font_with(28, 4), b"glyf"), None);
+}

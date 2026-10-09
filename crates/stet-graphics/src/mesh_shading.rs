@@ -114,6 +114,29 @@ fn decode_scale(bits: usize, min: f64, max: f64) -> f64 {
     }
 }
 
+/// Whether a mesh shading's stream layout can be read at all.
+///
+/// Each vertex is a flag (Types 4, 6 and 7; pass `None` for Type 5), two
+/// coordinates and the colour components, at the bit widths given, and the
+/// `Decode` array's first four entries are the coordinates' ranges. A
+/// coordinate or component of no width would make every vertex take no
+/// data, and the data would never run out; a width over 32 bits cannot be
+/// read; and without those four `Decode` entries there are no coordinates.
+/// The parsers return an empty mesh for a layout that fails this, so a
+/// caller checks it first only to report the reason.
+pub fn mesh_layout_is_readable(
+    bits_per_coordinate: usize,
+    bits_per_component: usize,
+    bits_per_flag: Option<usize>,
+    decode: &[f64],
+) -> bool {
+    let width_ok = |bits: usize| (1..=32).contains(&bits);
+    width_ok(bits_per_coordinate)
+        && width_ok(bits_per_component)
+        && bits_per_flag.is_none_or(width_ok)
+        && decode.len() >= 4
+}
+
 /// Convert color components to DeviceColor based on component count.
 /// Uses ICC CMYK profile when available for 4-component colors.
 fn components_to_color(comps: &[f64]) -> (DeviceColor, Vec<f64>) {
@@ -163,6 +186,9 @@ pub fn parse_type4_mesh(
     decode: &[f64],
     n_comps: usize,
 ) -> Vec<ShadingTriangle> {
+    if !mesh_layout_is_readable(bpc, bpco, Some(bpfl), decode) {
+        return Vec::new();
+    }
     let mut reader = BitReader::new(data);
     let mut triangles = Vec::new();
 
@@ -285,6 +311,9 @@ pub fn parse_type5_mesh(
     n_comps: usize,
     verts_per_row: usize,
 ) -> Vec<ShadingTriangle> {
+    if !mesh_layout_is_readable(bpc, bpco, None, decode) {
+        return Vec::new();
+    }
     let mut reader = BitReader::new(data);
     let mut all_vertices = Vec::new();
 
@@ -379,6 +408,9 @@ pub fn parse_type6_patches(
     decode: &[f64],
     n_comps: usize,
 ) -> Vec<ShadingPatch> {
+    if !mesh_layout_is_readable(bpc, bpco, Some(bpfl), decode) {
+        return Vec::new();
+    }
     let mut reader = BitReader::new(data);
     let mut patches = Vec::new();
 
@@ -558,6 +590,9 @@ pub fn parse_type7_patches(
     decode: &[f64],
     n_comps: usize,
 ) -> Vec<ShadingPatch> {
+    if !mesh_layout_is_readable(bpc, bpco, Some(bpfl), decode) {
+        return Vec::new();
+    }
     let mut reader = BitReader::new(data);
     let mut patches = Vec::new();
 

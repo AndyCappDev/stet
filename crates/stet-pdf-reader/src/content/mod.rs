@@ -8325,6 +8325,17 @@ fn bilinear_upsample_image(
     }
     let src_stride = sw as usize * n;
     let dst_stride = dw as usize * n;
+    // An image whose data stops short of its declared size reads as zero
+    // from there on, as it does when drawn without a mask.
+    let padded;
+    let data = if data.len() < src_stride * sh as usize {
+        let mut full = data.to_vec();
+        full.resize(src_stride * sh as usize, 0);
+        padded = full;
+        &padded[..]
+    } else {
+        data
+    };
     let mut out = vec![0u8; dst_stride * dh as usize];
 
     for dy in 0..dh as usize {

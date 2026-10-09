@@ -1096,11 +1096,10 @@ fn cjk_fullwidth_alternative(unicode: u32) -> Option<u32> {
 
 /// Check if an OpenType/CFF font contains a CID-keyed CFF (has ROS operator).
 fn is_cff_cid_keyed(otf_data: &[u8]) -> bool {
-    use stet_fonts::truetype::find_table;
-    let Some((cff_off, cff_len)) = find_table(otf_data, b"CFF ") else {
+    use stet_fonts::truetype::table_data;
+    let Some(cff_data) = table_data(otf_data, b"CFF ") else {
         return false;
     };
-    let cff_data = &otf_data[cff_off..cff_off + cff_len];
     match parse_cff(cff_data) {
         Ok(fonts) => fonts.first().is_some_and(|f| f.is_cid),
         Err(_) => false,
@@ -1143,12 +1142,11 @@ fn create_cid_cff_from_otf(
         dw2,
         w2,
     } = metrics;
-    use stet_fonts::truetype::find_table;
+    use stet_fonts::truetype::table_data;
 
     // Extract CFF table from OpenType font
-    let (cff_off, cff_len) = find_table(otf_data, b"CFF ")
+    let cff_data = table_data(otf_data, b"CFF ")
         .ok_or(PdfError::Other("OpenType font has no CFF table".into()))?;
-    let cff_data = &otf_data[cff_off..cff_off + cff_len];
     let fonts =
         parse_cff(cff_data).map_err(|e| PdfError::Other(format!("CFF parse error: {e}")))?;
     let font = fonts
@@ -2212,10 +2210,9 @@ fn resolve_type1(
             let raw_data = resolver.stream_data_from_obj(ff3_ref)?;
             // If data starts with "OTTO" it's an OpenType container — extract CFF table
             let font_data = if raw_data.starts_with(b"OTTO") {
-                use stet_fonts::truetype::find_table;
-                let (offset, length) = find_table(&raw_data, b"CFF ")
-                    .ok_or(PdfError::Other("OpenType font has no CFF table".into()))?;
-                raw_data[offset..offset + length].to_vec()
+                stet_fonts::truetype::table_data(&raw_data, b"CFF ")
+                    .ok_or(PdfError::Other("OpenType font has no CFF table".into()))?
+                    .to_vec()
             } else {
                 raw_data
             };
@@ -2602,10 +2599,9 @@ fn build_cff_font(
 ) -> Result<PdfFont, PdfError> {
     // If data starts with "OTTO" it's an OpenType container — extract CFF table
     let font_data = if raw_data.starts_with(b"OTTO") {
-        use stet_fonts::truetype::find_table;
-        let (offset, length) = find_table(&raw_data, b"CFF ")
-            .ok_or(PdfError::Other("OpenType font has no CFF table".into()))?;
-        raw_data[offset..offset + length].to_vec()
+        stet_fonts::truetype::table_data(&raw_data, b"CFF ")
+            .ok_or(PdfError::Other("OpenType font has no CFF table".into()))?
+            .to_vec()
     } else {
         raw_data
     };
@@ -2937,14 +2933,13 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     // For non-CID CFF fonts, the CIDToGIDMap provides the actual
                     // CID→GID mapping and must be used.
                     let is_cid_keyed = {
-                        use stet_fonts::truetype::find_table;
-                        let cff_range = if is_otf_cff {
-                            find_table(&font_data, b"CFF ")
+                        let cff_data = if is_otf_cff {
+                            stet_fonts::truetype::table_data(&font_data, b"CFF ")
                         } else {
-                            Some((0, font_data.len()))
+                            Some(&font_data[..])
                         };
-                        cff_range
-                            .and_then(|(off, len)| parse_cff(&font_data[off..off + len]).ok())
+                        cff_data
+                            .and_then(|cff| parse_cff(cff).ok())
                             .and_then(|fonts| fonts.into_iter().next())
                             .is_some_and(|f| f.is_cid)
                     };

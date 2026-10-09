@@ -552,6 +552,9 @@ fn build_type4_shading(
             let bpfl = get_dict_int(ctx, dict, b"BitsPerFlag").ok_or(PsError::Undefined)? as usize;
             let decode = get_dict_float_vec(ctx, dict, b"Decode").ok_or(PsError::Undefined)?;
             let data = mesh_data_bytes(ctx, &ds_obj)?;
+            if !mesh_shading::mesh_layout_is_readable(bpc, bpco, Some(bpfl), &decode) {
+                return Err(PsError::RangeCheck);
+            }
             mesh_shading::parse_type4_mesh(&data, bpc, bpco, bpfl, &decode, n_comps)
         }
         PsValue::Array { entity, start, len } => {
@@ -615,6 +618,9 @@ fn build_type5_shading(
                 get_dict_int(ctx, dict, b"BitsPerComponent").ok_or(PsError::Undefined)? as usize;
             let decode = get_dict_float_vec(ctx, dict, b"Decode").ok_or(PsError::Undefined)?;
             let data = mesh_data_bytes(ctx, &ds_obj)?;
+            if !mesh_shading::mesh_layout_is_readable(bpc, bpco, None, &decode) {
+                return Err(PsError::RangeCheck);
+            }
             mesh_shading::parse_type5_mesh(&data, bpc, bpco, &decode, n_comps, verts_per_row)
         }
         PsValue::Array { entity, start, len } => {
@@ -678,6 +684,9 @@ fn build_type6_shading(
             let bpfl = get_dict_int(ctx, dict, b"BitsPerFlag").ok_or(PsError::Undefined)? as usize;
             let decode = get_dict_float_vec(ctx, dict, b"Decode").ok_or(PsError::Undefined)?;
             let data = mesh_data_bytes(ctx, &ds_obj)?;
+            if !mesh_shading::mesh_layout_is_readable(bpc, bpco, Some(bpfl), &decode) {
+                return Err(PsError::RangeCheck);
+            }
             mesh_shading::parse_type6_patches(&data, bpc, bpco, bpfl, &decode, n_comps)
         }
         PsValue::Array { entity, start, len } => {
@@ -738,6 +747,9 @@ fn build_type7_shading(
             let bpfl = get_dict_int(ctx, dict, b"BitsPerFlag").ok_or(PsError::Undefined)? as usize;
             let decode = get_dict_float_vec(ctx, dict, b"Decode").ok_or(PsError::Undefined)?;
             let data = mesh_data_bytes(ctx, &ds_obj)?;
+            if !mesh_shading::mesh_layout_is_readable(bpc, bpco, Some(bpfl), &decode) {
+                return Err(PsError::RangeCheck);
+            }
             mesh_shading::parse_type7_patches(&data, bpc, bpco, bpfl, &decode, n_comps)
         }
         PsValue::Array { entity, start, len } => {

@@ -242,6 +242,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     paints one reusable stream twice repositions it in between, and could
     not.
 
+- **Four ways a damaged PDF could stop the process**, found by fuzzing
+  `stet-pdf-reader` and present in every build:
+  - **An embedded OpenType font whose `CFF ` table lies past the end of
+    the font** panicked: the table was sliced at its declared offset and
+    length without checking either. It is now read as far as the data
+    goes. New: `stet_fonts::truetype::table_data`.
+  - **A mesh shading (Types 4 to 7) with a short or missing `/Decode`**
+    panicked, and one whose coordinates and colour components were
+    declared zero bits wide never finished reading, taking memory until
+    none was left. A layout that cannot describe a vertex is now refused,
+    with a warning from the reader and `rangecheck` from `shfill`. New:
+    `stet_graphics::mesh_shading::mesh_layout_is_readable`.
+  - **An image smaller than its soft mask, with less data than its
+    dimensions promise,** panicked while being enlarged to the mask's
+    size. The missing samples are read as zero.
+  - **A TrueType glyph whose contours end out of order** could claim all
+    of its points again for every contour, so a 256 KB file asked for
+    3.7 GB. Such a contour is now empty, and a composite glyph is held to
+    the 65,535 points the format allows in total.
+
 - **A tiling pattern painted under a soft mask ignored the mask.** In
   `stet-pdf-reader`, a soft mask set with `gs` covers what the stream
   paints from then on, which the reader tracks as a scope over its

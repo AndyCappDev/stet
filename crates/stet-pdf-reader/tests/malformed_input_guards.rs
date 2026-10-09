@@ -1468,3 +1468,226 @@ fn jpeg2000_within_the_built_in_limits_is_held_to_the_applications_ceiling() {
         doc.parse_warnings()
     );
 }
+
+// === Found by the 2026-10-08 fuzz campaign ================================
+
+/// An OpenType container whose table directory lists one `CFF ` table at
+/// `offset`, `length` bytes long, in a file that ends with the directory.
+fn otto_with_cff_table(offset: u32, length: u32) -> Vec<u8> {
+    let mut font = b"OTTO".to_vec();
+    font.extend_from_slice(&[0, 1, 0, 0, 0, 0, 0, 0]); // one table
+    font.extend_from_slice(b"CFF ");
+    font.extend_from_slice(&[0; 4]); // checksum
+    font.extend_from_slice(&offset.to_be_bytes());
+    font.extend_from_slice(&length.to_be_bytes());
+    font
+}
+
+fn font_file3(subtype: &str, font: &[u8]) -> Vec<u8> {
+    let mut v = format!("<</Subtype/{subtype}/Length {}>>\nstream\n", font.len()).into_bytes();
+    v.extend_from_slice(font);
+    v.extend_from_slice(b"\nendstream");
+    v
+}
+
+const DESCRIPTOR: &[u8] = b"<</Type/FontDescriptor/FontName/X/Flags 4/FontBBox[0 0 1000 1000]\
+    /ItalicAngle 0/Ascent 800/Descent -200/CapHeight 700/StemV 80/FontFile3 7 0 R>>";
+
+/// A font's embedded program names its tables by offset and length, and
+/// the reader took the `CFF ` table as `data[offset..offset + length]`
+/// in five places without asking whether the file was that long. A table
+/// that starts or ends past the end of the data was a panic in every
+/// build. Three fuzzer inputs reached two of the sites; the tests below
+/// cover simple and composite fonts, each with a table that starts past
+/// the end and one that only ends past it.
+#[test]
+fn a_cff_table_past_the_end_of_a_simple_font_does_not_panic() {
+    for (offset, length) in [(10_922, 4), (28, 23_440), (u32::MAX, u32::MAX)] {
+        for subtype in ["OpenType", "Type1C"] {
+            load_and_render(&one_page_doc(
+                b"/Resources<</Font<</F1 5 0 R>>>>",
+                b"BT /F1 12 Tf 10 50 Td (AB) Tj ET\n",
+                &[
+                    (
+                        5,
+                        b"<</Type/Font/Subtype/Type1/BaseFont/X/FirstChar 65/LastChar 66\
+                          /Widths[500 500]/FontDescriptor 6 0 R>>"
+                            .to_vec(),
+                    ),
+                    (6, DESCRIPTOR.to_vec()),
+                    (7, font_file3(subtype, &otto_with_cff_table(offset, length))),
+                ],
+            ));
+        }
+    }
+}
+
+#[test]
+fn a_cff_table_past_the_end_of_a_composite_font_does_not_panic() {
+    for (offset, length) in [(10_922, 4), (28, 23_440), (u32::MAX, u32::MAX)] {
+        for (cid_subtype, file_subtype) in [
+            ("CIDFontType0", "OpenType"),
+            ("CIDFontType0", "CIDFontType0C"),
+            ("CIDFontType2", "OpenType"),
+        ] {
+            let cid_font = format!(
+                "<</Type/Font/Subtype/{cid_subtype}/BaseFont/X\
+                 /CIDSystemInfo<</Registry(Adobe)/Ordering(Identity)/Supplement 0>>\
+                 /FontDescriptor 6 0 R/DW 1000/CIDToGIDMap/Identity>>"
+            );
+            load_and_render(&one_page_doc(
+                b"/Resources<</Font<</F1 5 0 R>>>>",
+                b"BT /F1 12 Tf 10 50 Td <00410042> Tj ET\n",
+                &[
+                    (
+                        5,
+                        b"<</Type/Font/Subtype/Type0/BaseFont/X/Encoding/Identity-H\
+                          /DescendantFonts[8 0 R]>>"
+                            .to_vec(),
+                    ),
+                    (6, DESCRIPTOR.to_vec()),
+                    (
+                        7,
+                        font_file3(file_subtype, &otto_with_cff_table(offset, length)),
+                    ),
+                    (8, cid_font.into_bytes()),
+                ],
+            ));
+        }
+    }
+}
+
+/// A page painting a mesh shading (Types 4 to 7) whose dictionary carries
+/// `entries` and whose stream is `data`.
+fn mesh_shading_doc(shading_type: u8, entries: &str, data: &[u8]) -> Vec<u8> {
+    let mut shading = format!(
+        "<</ShadingType {shading_type}/ColorSpace/DeviceRGB {entries}/Length {}>>\nstream\n",
+        data.len()
+    )
+    .into_bytes();
+    shading.extend_from_slice(data);
+    shading.extend_from_slice(b"\nendstream");
+    one_page_doc(
+        b"/Resources<</Shading<</S 5 0 R>>>>",
+        b"/S sh\n",
+        &[(5, shading)],
+    )
+}
+
+/// The mesh parsers read `Decode[0]` to `Decode[3]` for the coordinate
+/// ranges before reading anything else, so an empty or short `/Decode`
+/// was a panic in every build (four fuzzer inputs).
+#[test]
+fn mesh_shading_with_a_short_decode_array_does_not_panic() {
+    for shading_type in 4..=7 {
+        for decode in ["", "/Decode[]", "/Decode[0 1 0]"] {
+            load_and_render(&mesh_shading_doc(
+                shading_type,
+                &format!(
+                    "/BitsPerCoordinate 8/BitsPerComponent 8/BitsPerFlag 8\
+                     /VerticesPerRow 2 {decode}"
+                ),
+                &[0x40; 64],
+            ));
+        }
+    }
+}
+
+/// A vertex whose coordinates and components are all zero bits wide takes
+/// no data, so the data never ran out and the mesh grew until memory did.
+/// A width over 32 bits cannot be read at all, and a negative one arrives
+/// as a very large number.
+#[test]
+fn mesh_shading_with_unreadable_bit_widths_is_refused() {
+    use stet_pdf_reader::ParsePhase;
+    for shading_type in 4..=7 {
+        for (bpc, bpco, bpfl) in [(0, 0, 0), (0, 8, 8), (8, 0, 8), (64, 8, 8), (-8, 8, 8)] {
+            let data = mesh_shading_doc(
+                shading_type,
+                &format!(
+                    "/BitsPerCoordinate {bpc}/BitsPerComponent {bpco}/BitsPerFlag {bpfl}\
+                     /VerticesPerRow 2/Decode[0 100 0 100 0 1 0 1 0 1]"
+                ),
+                &[0x40; 64],
+            );
+            let doc = PdfDocument::from_bytes(&data).unwrap();
+            let _ = doc.render_page(0, 72.0);
+            assert!(
+                doc.parse_warnings()
+                    .iter()
+                    .any(|w| w.phase == ParsePhase::Content
+                        && w.message.contains("mesh shading cannot be read")),
+                "type {shading_type}, widths {bpc} {bpco} {bpfl}: {:?}",
+                doc.parse_warnings()
+            );
+        }
+    }
+}
+
+/// A flag of zero width is not an error for a lattice (Type 5), which has
+/// no flags.
+#[test]
+fn lattice_mesh_ignores_bits_per_flag() {
+    use stet_graphics::display_list::DisplayElement;
+    // A 2 x 2 lattice: x, y, r, g, b for each vertex.
+    let mut data = Vec::new();
+    for (x, y) in [(10u8, 10u8), (90, 10), (10, 90), (90, 90)] {
+        data.extend_from_slice(&[x, y, 255, 0, 0]);
+    }
+    let pdf = mesh_shading_doc(
+        5,
+        "/BitsPerCoordinate 8/BitsPerComponent 8/BitsPerFlag 0/VerticesPerRow 2\
+         /Decode[0 255 0 255 0 1 0 1 0 1]",
+        &data,
+    );
+    let doc = PdfDocument::from_bytes(&pdf).unwrap();
+    let list = doc.render_page(0, 72.0).unwrap();
+    assert!(
+        doc.parse_warnings().is_empty(),
+        "{:?}",
+        doc.parse_warnings()
+    );
+    assert!(
+        list.elements()
+            .iter()
+            .any(|e| matches!(e, DisplayElement::MeshShading { .. }))
+    );
+}
+
+/// An image smaller than its soft mask is enlarged to the mask's size, and
+/// the enlargement read every sample the image's dimensions promise. An
+/// image whose data stops short of them was read past its end: a panic in
+/// every build (three fuzzer inputs).
+#[test]
+fn enlarging_an_image_with_short_data_to_its_mask_does_not_panic() {
+    for (short, colour_space, components) in [
+        (3usize, "/DeviceGray", 1usize),
+        (15, "/DeviceGray", 1),
+        (47, "/DeviceRGB", 3),
+        (0, "/DeviceRGB", 3),
+    ] {
+        assert!(short < 16 * components);
+        let image_data = vec![0x80u8; short];
+        let mut image = format!(
+            "<</Type/XObject/Subtype/Image/Width 4/Height 4/BitsPerComponent 8\
+             /ColorSpace{colour_space}/SMask 6 0 R/Length {}>>\nstream\n",
+            image_data.len()
+        )
+        .into_bytes();
+        image.extend_from_slice(&image_data);
+        image.extend_from_slice(b"\nendstream");
+
+        let mask_data = vec![0xffu8; 64];
+        let mut mask = b"<</Type/XObject/Subtype/Image/Width 8/Height 8/BitsPerComponent 8\
+                         /ColorSpace/DeviceGray/Length 64>>\nstream\n"
+            .to_vec();
+        mask.extend_from_slice(&mask_data);
+        mask.extend_from_slice(b"\nendstream");
+
+        load_and_render(&one_page_doc(
+            b"/Resources<</XObject<</I 5 0 R>>>>",
+            b"100 0 0 100 0 0 cm /I Do\n",
+            &[(5, image), (6, mask)],
+        ));
+    }
+}

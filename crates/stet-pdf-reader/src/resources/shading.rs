@@ -437,6 +437,26 @@ fn cs_has_spot_with_cmyk_alt(cs: &ResolvedColorSpace) -> bool {
     }
 }
 
+/// The error for a mesh shading whose bit widths or `Decode` array cannot
+/// describe a vertex.
+fn unreadable_mesh_layout(
+    bpc: usize,
+    bpco: usize,
+    bpfl: Option<usize>,
+    decode: &[f64],
+) -> PdfError {
+    // A negative width in the file arrives here as a very large number.
+    let bits = |b: usize| b as i64;
+    let flag = bpfl.map_or(String::new(), |b| format!(", BitsPerFlag {}", bits(b)));
+    PdfError::Other(format!(
+        "mesh shading cannot be read: BitsPerCoordinate {}, BitsPerComponent {}{flag}, \
+         Decode has {} entries",
+        bits(bpc),
+        bits(bpco),
+        decode.len()
+    ))
+}
+
 #[expect(clippy::too_many_arguments)]
 fn handle_mesh(
     shading_obj: &PdfObj,
@@ -479,6 +499,11 @@ fn handle_mesh(
     } else {
         cs_comps
     };
+
+    let flag_bits = (shading_type == 4).then_some(bpfl);
+    if !stet_graphics::mesh_shading::mesh_layout_is_readable(bpc, bpco, flag_bits, &decode) {
+        return Err(unreadable_mesh_layout(bpc, bpco, flag_bits, &decode));
+    }
 
     let data = resolver.stream_data_from_obj(shading_obj)?;
 
@@ -668,6 +693,10 @@ fn handle_patches(
     } else {
         cs_comps
     };
+
+    if !stet_graphics::mesh_shading::mesh_layout_is_readable(bpc, bpco, Some(bpfl), &decode) {
+        return Err(unreadable_mesh_layout(bpc, bpco, Some(bpfl), &decode));
+    }
 
     let data = resolver.stream_data_from_obj(shading_obj)?;
 

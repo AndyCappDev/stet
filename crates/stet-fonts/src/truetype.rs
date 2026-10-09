@@ -82,6 +82,19 @@ pub fn concatenate_sfnts(strings: &[&[u8]]) -> Vec<u8> {
     result
 }
 
+/// The bytes of a table in the sfnt table directory.
+///
+/// [`find_table`] reports the offset and length the directory declares,
+/// which a damaged or hostile font may set to anything. This returns the
+/// table as far as the data goes: `None` when it starts past the end, and
+/// a shorter slice when its declared length runs past the end, leaving it
+/// to the table's own parser to say what is missing.
+pub fn table_data<'a>(font_data: &'a [u8], tag: &[u8; 4]) -> Option<&'a [u8]> {
+    let (offset, length) = find_table(font_data, tag)?;
+    let rest = font_data.get(offset..)?;
+    Some(rest.get(..length).unwrap_or(rest))
+}
+
 /// Find a table in the sfnt table directory, returning (offset, length).
 pub fn find_table(font_data: &[u8], tag: &[u8; 4]) -> Option<(usize, usize)> {
     if font_data.len() < 12 {
@@ -389,6 +402,16 @@ fn parse_simple_glyph(glyf_data: &[u8], num_contours: i16) -> Option<Vec<Vec<Gly
     let mut contours = Vec::with_capacity(nc);
     let mut start = 0;
     for &end in &end_pts {
+        // Each contour ends after the one before it. An end point that goes
+        // backwards would start the next contour over points already used,
+        // and 32,767 contours may each then claim the glyph's 65,535 points:
+        // two billion from a few hundred bytes. Such a contour has no points
+        // of its own, and the next one carries on from where this glyph had
+        // got to.
+        if end < start {
+            contours.push(Vec::new());
+            continue;
+        }
         let mut contour = Vec::new();
         for i in start..=end {
             if i < num_points {
@@ -436,6 +459,26 @@ const MAX_COMPOSITE_DEPTH: u32 = 8;
 /// past any legitimate glyph.
 const MAX_COMPOSITE_EXPANSIONS: u32 = 4096;
 
+/// Maximum number of points in one top-level glyph, components included.
+///
+/// The expansion budget bounds the work but not the result: a component may
+/// be a simple glyph of 65,535 points drawn from a few dozen bytes (flags
+/// repeat, and a coordinate may be "same as the last" at no cost), and 4096
+/// of those is 268 million points — a 3.7 GB path from a 256 KB file, found
+/// by fuzzing. The format itself sets the limit: `maxp` records the most
+/// points in any glyph, simple (`maxPoints`) or composite
+/// (`maxCompositePoints`), in 16 bits each, so no conforming glyph has more
+/// than 65,535. A composite stops taking components once it is full.
+const MAX_GLYPH_POINTS: usize = u16::MAX as usize;
+
+/// What is left of a top-level glyph's allowance while its composites expand.
+struct CompositeBudget {
+    /// Component expansions, see [`MAX_COMPOSITE_EXPANSIONS`].
+    expansions: u32,
+    /// Points, see [`MAX_GLYPH_POINTS`].
+    points: usize,
+}
+
 /// Parse a composite glyph, recursively resolving components.
 ///
 /// `active` holds the glyph IDs on the current path so a cycle is rejected.
@@ -447,7 +490,7 @@ fn parse_composite_glyph(
     resolver: &dyn Fn(u16) -> Option<Vec<u8>>,
     active: &mut Vec<u16>,
     depth: u32,
-    budget: &mut u32,
+    budget: &mut CompositeBudget,
 ) -> Vec<Vec<GlyfPoint>> {
     let mut all_contours = Vec::new();
     let mut offset = 10; // skip header
@@ -539,10 +582,10 @@ fn parse_composite_glyph(
             }
             continue;
         }
-        if *budget == 0 {
+        if budget.expansions == 0 || budget.points == 0 {
             break;
         }
-        *budget -= 1;
+        budget.expansions -= 1;
         if let Some(component_data) = resolver(glyph_index)
             && component_data.len() >= 2
         {
@@ -550,6 +593,17 @@ fn parse_composite_glyph(
             let child_contours =
                 parse_glyf_to_contours_at(&component_data, resolver, active, depth + 1, budget);
             active.pop();
+            // A nested composite has already charged for its own points; a
+            // simple component is charged here, and dropped whole if the
+            // glyph has no room left for it.
+            if is_simple_glyph(&component_data) {
+                let points: usize = child_contours.iter().map(Vec::len).sum();
+                if points > budget.points {
+                    budget.points = 0;
+                    break;
+                }
+                budget.points -= points;
+            }
             // Transform and merge
             for contour in child_contours {
                 let transformed: Vec<GlyfPoint> = contour
@@ -578,8 +632,17 @@ fn parse_glyf_to_contours(
     glyf_data: &[u8],
     resolver: &dyn Fn(u16) -> Option<Vec<u8>>,
 ) -> Vec<Vec<GlyfPoint>> {
-    let mut budget = MAX_COMPOSITE_EXPANSIONS;
+    let mut budget = CompositeBudget {
+        expansions: MAX_COMPOSITE_EXPANSIONS,
+        points: MAX_GLYPH_POINTS,
+    };
     parse_glyf_to_contours_at(glyf_data, resolver, &mut Vec::new(), 0, &mut budget)
+}
+
+/// Whether glyf data is a simple glyph (a positive contour count) rather
+/// than a composite.
+fn is_simple_glyph(glyf_data: &[u8]) -> bool {
+    glyf_data.len() >= 2 && read_i16(glyf_data, 0) > 0
 }
 
 /// [`parse_glyf_to_contours`], carrying the composite depth, path set, and
@@ -589,7 +652,7 @@ fn parse_glyf_to_contours_at(
     resolver: &dyn Fn(u16) -> Option<Vec<u8>>,
     active: &mut Vec<u16>,
     depth: u32,
-    budget: &mut u32,
+    budget: &mut CompositeBudget,
 ) -> Vec<Vec<GlyfPoint>> {
     if glyf_data.len() < 10 {
         return Vec::new();
