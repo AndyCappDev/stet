@@ -474,8 +474,11 @@ stet requires **Rust 1.92** or newer. This is verified on every push by a CI
 job that compiles the workspace on exactly that toolchain, so the number above
 is a tested fact rather than an estimate.
 
-The MSRV is not covered by semantic versioning: it may be raised in any minor
-release. Any change to it is called out in [CHANGELOG.md](CHANGELOG.md).
+The MSRV is not covered by semantic versioning: it may be raised in any
+release, a patch release included, when a dependency stet needs moves its own
+floor. Any change to it is called out in [CHANGELOG.md](CHANGELOG.md), and
+every published crate declares its `rust-version`, so a cargo that resolves by
+Rust version keeps an older toolchain on the last release it can build.
 
 ## Crate Overview
 
