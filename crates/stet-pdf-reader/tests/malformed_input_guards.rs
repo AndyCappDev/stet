@@ -1691,3 +1691,186 @@ fn enlarging_an_image_with_short_data_to_its_mask_does_not_panic() {
         ));
     }
 }
+
+/// A font object that cannot be resolved is replaced by a substitute, and
+/// the substitute was remembered under the font's resource name only. A
+/// name finds nothing when another resource dictionary gives it to a
+/// different object, which is what nested Type 3 glyph procedures do, so
+/// the broken font was resolved again, and the substitute read again, for
+/// every glyph shown: a 7 KB file took fifteen seconds (three fuzzer
+/// inputs). Here fourteen Type 3 fonts each show two glyphs of the next,
+/// and the last names a font with no glyph procedures at all.
+#[test]
+fn an_unresolvable_font_is_resolved_once() {
+    const LEVELS: u32 = 14;
+    let mut extra: Vec<(u32, Vec<u8>)> = Vec::new();
+    for level in 0..LEVELS {
+        let font = 5 + level * 2;
+        let charproc = font + 1;
+        let next_font = font + 2;
+        extra.push((
+            font,
+            format!(
+                "<</Type/Font/Subtype/Type3/FontBBox[0 0 1000 1000]\
+                 /FontMatrix[0.001 0 0 0.001 0 0]/FirstChar 97/LastChar 97/Widths[600]\
+                 /Encoding<</Type/Encoding/Differences[97/a]>>\
+                 /CharProcs<</a {charproc} 0 R>>\
+                 /Resources<</Font<</F {next_font} 0 R>>>>>>"
+            )
+            .into_bytes(),
+        ));
+        extra.push((
+            charproc,
+            stream_obj(b"600 0 d0 0 0 100 100 re f BT /F 1 Tf (aa) Tj ET\n"),
+        ));
+    }
+    // The font the last level names: a Type 3 font without `/CharProcs`.
+    extra.push((
+        5 + LEVELS * 2,
+        b"<</Type/Font/Subtype/Type3/FontBBox[0 0 1000 1000]\
+          /FontMatrix[0.001 0 0 0.001 0 0]/FirstChar 97/LastChar 97/Widths[600]>>"
+            .to_vec(),
+    ));
+    let data = one_page_doc(
+        b"/Resources<</Font<</F 5 0 R>>>>",
+        b"BT /F 10 Tf 10 50 Td (a) Tj ET\n",
+        &extra,
+    );
+
+    let start = std::time::Instant::now();
+    load_and_render(&data);
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed.as_secs() < 10,
+        "took {elapsed:?}: the broken font is being resolved for every glyph"
+    );
+}
+
+/// The cross-reference stream may place thousands of objects in one object
+/// stream. When that stream could not be read, each of those objects
+/// decoded it again to find that out, and a damaged file with a costly
+/// stream spent eleven seconds opening (one fuzzer input, whose stream was
+/// a JPEG). Here 20,000 objects sit in a stream that inflates to 8 MB and
+/// then proves to have no `/N`.
+#[test]
+fn an_unreadable_object_stream_is_decoded_once() {
+    use flate2::Compression;
+    use flate2::write::ZlibEncoder;
+    use std::io::Write;
+
+    const IN_STREAM: u32 = 20_000;
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+    encoder.write_all(&vec![b' '; 8 << 20]).unwrap();
+    let packed = encoder.finish().unwrap();
+
+    let mut pdf = b"%PDF-1.7\n".to_vec();
+    let objstm_at = pdf.len();
+    pdf.extend_from_slice(
+        format!(
+            "1 0 obj\n<</Type/ObjStm/First 0/Filter/FlateDecode/Length {}>>\nstream\n",
+            packed.len()
+        )
+        .as_bytes(),
+    );
+    pdf.extend_from_slice(&packed);
+    pdf.extend_from_slice(b"\nendstream\nendobj\n");
+
+    // Entries of one type byte, four of offset or stream number, two of
+    // generation or index.
+    let size = IN_STREAM + 3;
+    let xref_at = pdf.len();
+    let mut entries = Vec::new();
+    entries.extend_from_slice(&[0, 0, 0, 0, 0, 0xff, 0xff]);
+    entries.push(1);
+    entries.extend_from_slice(&(objstm_at as u32).to_be_bytes());
+    entries.extend_from_slice(&[0, 0]);
+    entries.push(1);
+    entries.extend_from_slice(&(xref_at as u32).to_be_bytes());
+    entries.extend_from_slice(&[0, 0]);
+    for index in 0..IN_STREAM {
+        entries.push(2);
+        entries.extend_from_slice(&1u32.to_be_bytes());
+        entries.extend_from_slice(&(index as u16).to_be_bytes());
+    }
+    pdf.extend_from_slice(
+        format!(
+            "2 0 obj\n<</Type/XRef/Size {size}/W[1 4 2]/Root 3 0 R/Length {}>>\nstream\n",
+            entries.len()
+        )
+        .as_bytes(),
+    );
+    pdf.extend_from_slice(&entries);
+    pdf.extend_from_slice(format!("\nendstream\nendobj\nstartxref\n{xref_at}\n%%EOF\n").as_bytes());
+
+    let start = std::time::Instant::now();
+    load_and_render(&pdf);
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed.as_secs() < 10,
+        "took {elapsed:?}: the object stream is being decoded for every object in it"
+    );
+}
+
+/// The page's budget for nested content counted how many nested streams
+/// ran and not how long each was, so a long stream run many times went
+/// almost uncharged: 70 KB run 23,000 times took 23 seconds on 6% of the
+/// budget (two fuzzer inputs). The charge now grows with the stream's
+/// length. Here a megabyte of white space sits ten forms deep and the page
+/// asks for it 500 times, which the budget stops well short of.
+#[test]
+fn nested_content_is_charged_by_its_length() {
+    use stet_pdf_reader::ParsePhase;
+    const DEPTH: u32 = 10;
+    let form = |body: &[u8], resources: &str| {
+        let mut v = format!(
+            "<</Type/XObject/Subtype/Form/BBox[0 0 100 100]{resources}/Length {}>>\nstream\n",
+            body.len()
+        )
+        .into_bytes();
+        v.extend_from_slice(body);
+        v.extend_from_slice(b"\nendstream");
+        v
+    };
+    let mut extra: Vec<(u32, Vec<u8>)> = Vec::new();
+    for level in 0..DEPTH {
+        let this = 5 + level;
+        let resources = format!("/Resources<</XObject<</X {} 0 R>>>>", this + 1);
+        extra.push((this, form(b"/X Do\n", &resources)));
+    }
+    extra.push((5 + DEPTH, form(&vec![b' '; 1 << 20], "")));
+    let data = one_page_doc(
+        b"/Resources<</XObject<</X 5 0 R>>>>",
+        "/X Do\n".repeat(500).as_bytes(),
+        &extra,
+    );
+
+    let doc = PdfDocument::from_bytes(&data).unwrap();
+    let _ = doc.render_page(0, 72.0);
+    assert!(
+        doc.parse_warnings()
+            .iter()
+            .any(|w| w.phase == ParsePhase::Content && w.message.contains("more nested content")),
+        "{:?}",
+        doc.parse_warnings()
+    );
+}
+
+/// The neighbour that must not change: many small nested streams cost what
+/// they always did, one unit per level each.
+#[test]
+fn small_nested_content_costs_what_it_did() {
+    let mut form = b"<</Type/XObject/Subtype/Form/BBox[0 0 100 100]/Length 14>>\nstream\n".to_vec();
+    form.extend_from_slice(b"0 0 10 10 re f\nendstream");
+    let data = one_page_doc(
+        b"/Resources<</XObject<</X 5 0 R>>>>",
+        "/X Do\n".repeat(50_000).as_bytes(),
+        &[(5, form)],
+    );
+    let doc = PdfDocument::from_bytes(&data).unwrap();
+    let _ = doc.render_page(0, 72.0);
+    assert!(
+        doc.parse_warnings().is_empty(),
+        "{:?}",
+        doc.parse_warnings()
+    );
+}

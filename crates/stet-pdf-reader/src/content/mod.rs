@@ -89,6 +89,20 @@ const MAX_CONTENT_NESTING: u32 = 20;
 /// list those executions leave behind.
 const MAX_NESTED_WORK: u64 = 1_000_000;
 
+/// The length of nested stream that costs one unit of [`MAX_NESTED_WORK`]
+/// per level; a longer one costs in proportion.
+///
+/// Counting executions alone left the size of each one out. A glyph
+/// procedure or form of 70 KB run 23,000 times is 1.6 GB of content to
+/// interpret and took 23 seconds, having spent 6% of the budget; spending
+/// all of it would have taken a quarter of an hour, and a larger stream
+/// longer still (found by fuzzing). A stream up to this length costs what
+/// it did before, which is every Type 3 glyph and small form the ceiling
+/// was measured on, so those measurements stand. With the weighting, the
+/// budget is at most 4 GB of nested content for a page, about a minute of
+/// interpreting — a 1 MB form stepped and repeated four thousand times.
+const NESTED_WORK_UNIT_BYTES: u64 = 4096;
+
 /// Which nested content stream is being interpreted, for refusing to enter
 /// one that is already running.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -768,7 +782,8 @@ impl<'a> ContentInterpreter<'a> {
     ///   cannot draw itself (ISO 32000-1 §8.10.1) and nor can anything
     ///   else here, so there is nothing to draw; the file is malformed.
     /// - Otherwise it is charged to the page's budget,
-    ///   [`MAX_NESTED_WORK`]. Once that is spent no further nested stream
+    ///   [`MAX_NESTED_WORK`], by its depth and its length
+    ///   ([`NESTED_WORK_UNIT_BYTES`]). Once that is spent no further nested stream
     ///   runs on this page, and each attempt is an error, which ends the
     ///   stream that asked wherever the caller propagates it.
     ///
@@ -778,7 +793,8 @@ impl<'a> ContentInterpreter<'a> {
         if self.executing.contains(&id) {
             return Ok(());
         }
-        let cost = u64::from(self.depth) + 1;
+        let size = (data.len() as u64).div_ceil(NESTED_WORK_UNIT_BYTES).max(1);
+        let cost = (u64::from(self.depth) + 1).saturating_mul(size);
         if self.nested_work.saturating_add(cost) > MAX_NESTED_WORK {
             if self.nested_work < MAX_NESTED_WORK {
                 self.resolver.warn_content(
@@ -3295,6 +3311,18 @@ impl<'a> ContentInterpreter<'a> {
                 if let Some(fallback) = font::fallback_font(self.font_provider.as_ref()) {
                     let arc = Arc::new(fallback);
                     self.register_font_text(&arc, &font_ref, false);
+                    // Under the object's key as well as the name: a font
+                    // that cannot be resolved cannot be resolved the next
+                    // time either, and a name alone does not find it again
+                    // when another resource dictionary gives that name to a
+                    // different object. Nested Type 3 glyph procedures do
+                    // exactly that, and re-resolving the broken font and
+                    // re-reading the substitute for every glyph shown turned
+                    // a 7 KB file into fifteen seconds of work.
+                    if let PdfObj::Ref(obj_num, _) = &font_ref {
+                        self.font_cache
+                            .insert(obj_num.to_le_bytes().to_vec(), Arc::clone(&arc));
+                    }
                     self.font_cache.insert(name.to_vec(), Arc::clone(&arc));
                     self.current_font = Some(arc);
                 } else {

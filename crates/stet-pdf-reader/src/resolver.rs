@@ -40,6 +40,11 @@ pub struct Resolver<'a> {
     /// Cache of decompressed object streams (ObjStm).
     /// Avoids re-decompressing the same ObjStm for every object within it.
     objstm_cache: RefCell<HashMap<u32, ObjStmCache>>,
+    /// Object streams that could not be read. Every object the
+    /// cross-reference table places in such a stream fails the same way,
+    /// and without this each one decoded the stream again to find that out:
+    /// a damaged file with a costly stream spent eleven seconds opening.
+    objstm_failed: RefCell<HashSet<u32>>,
     /// Cached scan map: obj_num → file offset of last `N 0 obj` marker.
     /// Built once on first xref miss, then reused for all subsequent lookups.
     scan_map: RefCell<Option<HashMap<u32, usize>>>,
@@ -259,6 +264,7 @@ impl<'a> Resolver<'a> {
             stream_cache: RefCell::new(HashMap::new()),
             stream_seen: RefCell::new(HashSet::new()),
             objstm_cache: RefCell::new(HashMap::new()),
+            objstm_failed: RefCell::new(HashSet::new()),
             scan_map: RefCell::new(None),
             warnings: crate::diagnostics::WarningSink::new(),
             content_page: std::cell::Cell::new(None),
@@ -291,6 +297,7 @@ impl<'a> Resolver<'a> {
             stream_cache: RefCell::new(HashMap::new()),
             stream_seen: RefCell::new(HashSet::new()),
             objstm_cache: RefCell::new(HashMap::new()),
+            objstm_failed: RefCell::new(HashSet::new()),
             scan_map: RefCell::new(None),
             warnings: crate::diagnostics::WarningSink::new(),
             content_page: std::cell::Cell::new(None),
@@ -893,7 +900,20 @@ impl<'a> Resolver<'a> {
         if self.objstm_cache.borrow().contains_key(&stream_obj_num) {
             return Ok(());
         }
+        if self.objstm_failed.borrow().contains(&stream_obj_num) {
+            return Err(PdfError::Other(format!(
+                "object stream {stream_obj_num} could not be read"
+            )));
+        }
+        let result = self.load_objstm(stream_obj_num);
+        if result.is_err() {
+            self.objstm_failed.borrow_mut().insert(stream_obj_num);
+        }
+        result
+    }
 
+    /// Decode an object stream and its header into `objstm_cache`.
+    fn load_objstm(&self, stream_obj_num: u32) -> Result<(), PdfError> {
         let stream_obj = self.resolve(stream_obj_num, 0)?;
         let (dict, data_offset, data_len) = match stream_obj {
             PdfObj::Stream {

@@ -262,6 +262,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     3.7 GB. Such a contour is now empty, and a composite glyph is held to
     the 65,535 points the format allows in total.
 
+- **Three ways a small damaged PDF could take a very long time**, found
+  by fuzzing `stet-pdf-reader`:
+  - **A font that cannot be resolved, used inside nested Type 3 glyphs,**
+    was resolved again, and its substitute read again, for every glyph
+    shown: a 7 KB file took fifteen seconds. The substitute is now
+    remembered for the font object and not only for its resource name.
+  - **An object stream that cannot be read** was decoded again for every
+    object the cross-reference table placed in it, so opening a file with
+    a costly broken stream took eleven seconds. It is now tried once.
+  - **The limit on a page's nested content counted streams, not their
+    length.** A long form or glyph procedure run thousands of times went
+    almost uncharged — 23 seconds on 6% of the allowance, and a quarter
+    of an hour had it all been spent. The charge now grows with the
+    stream's length beyond 4 KB, which bounds a page at about 4 GB of
+    nested content; shorter streams, which is every Type 3 glyph and
+    small form, cost what they did. No page of the 2,690 PDFs the limit
+    was first measured on reaches it.
+
 - **A tiling pattern painted under a soft mask ignored the mask.** In
   `stet-pdf-reader`, a soft mask set with `gs` covers what the stream
   paints from then on, which the reader tracks as a scope over its
