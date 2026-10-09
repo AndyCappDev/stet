@@ -14,6 +14,15 @@ crates/stet-pdf-reader/fonts/** linguist-vendored
 # Embedded CMYK ICC profile (binary, not language content).
 *.icc                  binary
 
+# Test fixtures in binary formats. Git guesses "text" for a file with no NUL
+# byte near its start, and seven of the ten encrypted PDFs under
+# crates/stet-pdf-reader/tests/data/encryption/ qualify: on a Windows checkout
+# with core.autocrlf on, every LF in them became CRLF, moving the offsets in
+# the cross-reference table and changing the encrypted bytes, and the
+# `encryption` tests that `include_bytes!` them failed there and nowhere else.
+*.pdf                  binary
+*.jp2                  binary
+
 # Unit-test PostScript programs — ported test fixtures, not language
 # we maintain.
 unit_tests/**          linguist-vendored
