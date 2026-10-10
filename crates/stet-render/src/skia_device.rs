@@ -6490,6 +6490,25 @@ fn bilinear_prescale(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> 
 /// painted.
 const MAX_PATTERN_TILES: i64 = 10000;
 
+/// The pixel of the surface a tile's corner at device coordinate `corner`
+/// is stamped at, the surface starting at `origin`.
+///
+/// The same pixel of the page wherever the surface starts. The corner used
+/// to be truncated after the origin was taken off, which rounds towards the
+/// surface's own edge — up for a tile starting above or left of it, down for
+/// the rest — so a tile crossing from one band into the next was drawn a
+/// pixel apart in the two. When the origin is a whole pixel, as a band's
+/// always is, the corner is placed on the page first and the origin taken
+/// off afterwards, so that no rounding of the difference can move it.
+fn tile_pixel(corner: f64, origin: f64, scale: f64) -> i32 {
+    let origin_px = origin * scale;
+    if origin_px.fract() == 0.0 {
+        ((corner * scale).floor() - origin_px) as i32
+    } else {
+        ((corner - origin) * scale).floor() as i32
+    }
+}
+
 fn render_pattern_fill(
     pixmap: &mut Pixmap,
     band_state: &mut BandState,
@@ -6790,8 +6809,8 @@ fn render_pattern_fill(
                 for tu in tile_x_start..tile_x_end {
                     let offset_x = tu as f64 * step_ux + tv as f64 * step_vx;
                     let offset_y = tu as f64 * step_uy + tv as f64 * step_vy;
-                    let px = ((td_x0 + offset_x - dev_vp_x) * sx_f) as i32;
-                    let py = ((td_y0 + offset_y - dev_vp_y) * sy_f) as i32;
+                    let px = tile_pixel(td_x0 + offset_x, dev_vp_x, sx_f);
+                    let py = tile_pixel(td_y0 + offset_y, dev_vp_y, sy_f);
                     let paint = stet_tiny_skia::PixmapPaint {
                         opacity: 1.0,
                         blend_mode: BlendMode::SourceOver,
