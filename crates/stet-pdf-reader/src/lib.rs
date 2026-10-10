@@ -842,6 +842,60 @@ impl<'a> PdfDocument<'a> {
         self.build_display_list(page, dpi, self.image_resolution)
     }
 
+    /// [`render_page`](Self::render_page), giving up once `cancelled` is
+    /// set: for a viewer whose user has scrolled past the page, or a
+    /// service with a deadline to keep.
+    ///
+    /// Returns `Ok(None)` when the page was abandoned, and the complete
+    /// display list otherwise — never a partial one. Setting the flag is
+    /// a request to stop that cannot be withdrawn: once it has been seen
+    /// set the page is abandoned even if it is cleared again, so use a
+    /// fresh flag (or clear it between calls) for the next page.
+    ///
+    /// The flag is read before each token of the page's content and of
+    /// every form, pattern, glyph procedure and annotation appearance it
+    /// draws, so the call returns as soon as the operator being carried
+    /// out finishes. That is the limit of how promptly: one operator is
+    /// not interrupted, and decoding a single very large image is one
+    /// operator. To bound that as well, see
+    /// [`set_max_image_pixels`](Self::set_max_image_pixels). What had been
+    /// built is freed before the call returns, which on a page of millions
+    /// of elements takes a noticeable fraction of a second.
+    ///
+    /// An abandoned page adds nothing to
+    /// [`parse_warnings`](Self::parse_warnings) for the content it did not
+    /// reach. Rasterising the list has its own flag: see
+    /// `stet_render::RegionRender::render_parallel_cancellable`.
+    ///
+    /// ```no_run
+    /// # use std::sync::atomic::{AtomicBool, Ordering};
+    /// # use stet_pdf_reader::PdfDocument;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let doc = PdfDocument::from_owned(std::fs::read("document.pdf")?)?;
+    /// let cancelled = AtomicBool::new(false);
+    /// std::thread::scope(|scope| {
+    ///     scope.spawn(|| {
+    ///         std::thread::sleep(std::time::Duration::from_secs(20));
+    ///         cancelled.store(true, Ordering::Relaxed);
+    ///     });
+    ///     match doc.render_page_cancellable(0, 150.0, &cancelled) {
+    ///         Ok(Some(list)) => println!("{} elements", list.elements().len()),
+    ///         Ok(None) => println!("gave up"),
+    ///         Err(e) => println!("{e}"),
+    ///     }
+    /// });
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn render_page_cancellable(
+        &self,
+        page: usize,
+        dpi: f64,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<Option<DisplayList>, PdfError> {
+        self.build_display_list_until(page, dpi, self.image_resolution, Some(cancelled))
+    }
+
     /// [`render_page`](Self::render_page), with the image resolution said
     /// by the caller: the paths that rasterise at once pass
     /// [`ImageResolution::Rendered`].
@@ -851,6 +905,23 @@ impl<'a> PdfDocument<'a> {
         dpi: f64,
         image_resolution: ImageResolution,
     ) -> Result<DisplayList, PdfError> {
+        // With no flag to watch the page is always carried through.
+        Ok(self
+            .build_display_list_until(page, dpi, image_resolution, None)?
+            .unwrap_or_default())
+    }
+
+    /// [`build_display_list`](Self::build_display_list), abandoned with
+    /// `Ok(None)` once `cancel` is set.
+    fn build_display_list_until(
+        &self,
+        page: usize,
+        dpi: f64,
+        image_resolution: ImageResolution,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<Option<DisplayList>, PdfError> {
+        let cancel_requested =
+            || cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed));
         let info = self
             .pages
             .get(page)
@@ -888,6 +959,9 @@ impl<'a> PdfDocument<'a> {
         };
 
         // Get page content stream
+        if cancel_requested() {
+            return Ok(None);
+        }
         let content_data = self.page_contents(page)?;
 
         // Interpret content stream
@@ -943,6 +1017,9 @@ impl<'a> PdfDocument<'a> {
         interpreter.set_annotation_filter(self.annotation_filter);
         interpreter.set_image_resolution(image_resolution);
         interpreter.set_initial_rendering_intent(self.default_rendering_intent);
+        if let Some(cancel) = cancel {
+            interpreter.set_cancel_flag(cancel);
+        }
 
         // Render page content
         if let Err(e) = interpreter.interpret_stream_public(&content_data) {
@@ -956,15 +1033,21 @@ impl<'a> PdfDocument<'a> {
         if self.render_annotations && !info.annots.is_empty() {
             interpreter.reset_clip_for_annotations();
             for &(n, g) in &info.annots {
+                if interpreter.was_cancelled() {
+                    break;
+                }
                 let _ = interpreter.render_annotation(n, g);
             }
         }
 
+        if interpreter.was_cancelled() {
+            return Ok(None);
+        }
         let mut dl = interpreter.into_display_list();
         if page_group_is_cmyk {
             dl.set_page_group_color_space(stet_graphics::display_list::GroupColorSpace::DeviceCMYK);
         }
-        Ok(dl)
+        Ok(Some(dl))
     }
 
     /// Render a page to RGBA pixel data at the given DPI.

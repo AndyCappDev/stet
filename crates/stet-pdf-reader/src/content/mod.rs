@@ -30,6 +30,7 @@ use self::graphics_state::{
     ColorSource, ColorSourceKind, ColorSpaceRef, DEFAULT_RENDERING_INTENT, PdfGraphicsState,
 };
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use self::font::{FontCache, PdfFont};
@@ -496,6 +497,12 @@ pub struct ContentInterpreter<'a> {
     /// What this page's nested streams have cost so far, against
     /// [`MAX_NESTED_WORK`].
     nested_work: u64,
+    /// The caller's request to stop, when the page is being read through
+    /// [`PdfDocument::render_page_cancellable`](crate::PdfDocument::render_page_cancellable).
+    cancel: Option<&'a AtomicBool>,
+    /// Set once `cancel` has been seen set, and never cleared: the page is
+    /// abandoned from then on even if the caller clears the flag again.
+    cancelled: bool,
     /// Set when a nested stream's failure has been reported, so that the
     /// operator that ran it does not report the same error again. Cleared
     /// before each operator.
@@ -656,6 +663,8 @@ impl<'a> ContentInterpreter<'a> {
             depth: 0,
             executing: Vec::new(),
             nested_work: 0,
+            cancel: None,
+            cancelled: false,
             nested_failure_reported: false,
             d1_color_suppressed: false,
             nested_mask_flush_count: 0,
@@ -688,6 +697,32 @@ impl<'a> ContentInterpreter<'a> {
             image_cache: std::collections::HashMap::new(),
             spot_tint_table_cache: std::collections::HashMap::new(),
         }
+    }
+
+    /// Give the interpreter a flag to watch: once it is set, every content
+    /// stream ends at its next token and no further nested stream is
+    /// entered. What has been built by then is not a page; the caller asks
+    /// [`was_cancelled`](Self::was_cancelled) and throws it away.
+    pub fn set_cancel_flag(&mut self, cancel: &'a AtomicBool) {
+        self.cancel = Some(cancel);
+    }
+
+    /// Whether the flag given to [`set_cancel_flag`](Self::set_cancel_flag)
+    /// was seen set at any point.
+    pub fn was_cancelled(&mut self) -> bool {
+        self.cancel_requested()
+    }
+
+    /// Look at the caller's flag, and remember having seen it set.
+    #[inline]
+    fn cancel_requested(&mut self) -> bool {
+        if !self.cancelled
+            && let Some(cancel) = self.cancel
+            && cancel.load(Ordering::Relaxed)
+        {
+            self.cancelled = true;
+        }
+        self.cancelled
     }
 
     /// Mark this page as having a DeviceCMYK transparency group.
@@ -790,7 +825,7 @@ impl<'a> ContentInterpreter<'a> {
     /// The caller has already saved the state the nested stream may change,
     /// and restores it whether or not the stream ran.
     fn interpret_nested(&mut self, id: StreamId, data: &[u8]) -> Result<(), PdfError> {
-        if self.executing.contains(&id) {
+        if self.executing.contains(&id) || self.cancel_requested() {
             return Ok(());
         }
         let size = (data.len() as u64).div_ceil(NESTED_WORK_UNIT_BYTES).max(1);
@@ -1587,6 +1622,11 @@ impl<'a> ContentInterpreter<'a> {
         // Ocular, and Firefox all interpret these as `<number> <operator>`.
         let mut prev_token_was_glued_number = false;
         loop {
+            // A cancelled page is abandoned, not failed: the stream ends
+            // here without an error, so nothing is reported as skipped.
+            if self.cancel_requested() {
+                return Ok(());
+            }
             // Capture position before next_token so we can detect whether the
             // upcoming token is glued to the previous one (no whitespace
             // separator).  If the previous token was a number that ended on a

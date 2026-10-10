@@ -171,6 +171,45 @@ What is counted is the size decoded:
   in its dictionary. A soft mask over the ceiling takes its image with
   it: the image without its mask would be the wrong picture.
 
+### Giving up on a page
+
+A viewer whose user has scrolled on, or a service with a deadline, can
+stop a page that is still being read. `render_page_cancellable` is
+`render_page` with a flag to watch:
+
+```rust
+# use std::sync::atomic::{AtomicBool, Ordering};
+# let doc: stet_pdf_reader::PdfDocument = unimplemented!();
+let cancelled = AtomicBool::new(false);
+// ... another thread: cancelled.store(true, Ordering::Relaxed);
+match doc.render_page_cancellable(0, 150.0, &cancelled)? {
+    Some(list) => { /* the whole page */ }
+    None => { /* abandoned */ }
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The result is the complete display list or `None`, never part of a page.
+An abandoned page adds no warnings for the content it did not reach, and
+leaves the document as it was: the same page can be read again.
+
+The flag is read before every token of the page's content and of each
+form, pattern, glyph procedure and annotation appearance it draws, so the
+call returns when the operator being carried out finishes. One operator
+is not interrupted, and decoding one very large image is one operator;
+the ceiling above bounds that. What had been built is then freed, which
+takes time of its own on a very large page: a sheet of 29 million
+operators abandoned halfway, with two million elements built, returned
+0.6 s after the flag was set. Setting the flag cannot be withdrawn: once
+it has been seen set the page is abandoned even if it is cleared, so
+clear it between pages rather than during one.
+
+There is no time limit to set instead, because the right one depends on
+the machine and on what the caller does with the page; a caller that
+wants one sets the flag from a timer. Rasterising the list is a separate
+step with its own flag, `RegionRender::render_parallel_cancellable` in
+`stet-render`.
+
 ---
 
 ## Document metadata

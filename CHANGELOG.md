@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`PdfDocument::render_page_cancellable`: give up on a page that is
+  still being read.** It is `render_page` with an `AtomicBool` to watch,
+  for a viewer whose user has scrolled past the page or a service with a
+  deadline. Once the flag is set the call returns `Ok(None)` as soon as
+  the operator being carried out finishes — the flag is read before every
+  token of the page's content and of each form, pattern, glyph procedure
+  and annotation appearance it draws. The result is the whole display
+  list or nothing, an abandoned page adds no warnings, and the document
+  can go on to read the same page again. One operator is not interrupted,
+  so a single very large image still decodes to its end;
+  `set_max_image_pixels` bounds that. Rasterising already had a flag
+  (`RegionRender::render_parallel_cancellable`), so both halves of
+  drawing a page can now be stopped. See `docs/PDF-READER-API.md`,
+  "Giving up on a page".
+
 ## [0.8.5] — 2026-10-09
 
 ### Added
