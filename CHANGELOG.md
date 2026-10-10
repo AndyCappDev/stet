@@ -77,6 +77,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drawn once and stamped; the stamp's position was truncated towards the
   band's own top-left corner, so a tile crossing two bands could sit one
   pixel differently in each. It is now placed on the page's pixel grid.
+- **Pattern fills cost what the shape covers, not what the page does.**
+  Each one drew its tiles into a buffer the size of the band and painted
+  the whole buffer through the shape. The buffer is now the rows the shape
+  reaches. A page of ten thousand small pattern-filled shapes at 72 dpi
+  went from 0.94 s to 0.17 s on one thread and from 190 ms to 43 ms on 24.
+  Because a tile's position is rounded in single precision relative to
+  that buffer, a pattern fill can differ from before by a level or two
+  along its edges, and occasionally by a row or pixel of the tile's own
+  detail.
 - **Bands no longer wait on each other to build paths.** The renderer
   grew each path it built a few points at a time, and with every band
   doing that for every glyph the threads spent their time queued in the

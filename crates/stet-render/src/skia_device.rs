@@ -6525,6 +6525,91 @@ fn render_pattern_fill(
         return;
     };
 
+    // The tiles are drawn into a buffer of their own and that buffer is
+    // painted through the shape, so the work is the buffer's size whatever
+    // the shape's. Give it only the rows the shape can reach: a page of
+    // small pattern-filled shapes paid for the whole surface once per shape.
+    let Some((row_start, row_end)) = pattern_fill_rows(params, ctx) else {
+        return;
+    };
+    if row_start == 0 && row_end == ctx.out_h {
+        paint_pattern_fill(&mut pixmap.as_mut(), mask_ref, params, ctx);
+        return;
+    }
+    let rows = row_end - row_start;
+    let width = ctx.out_w as usize;
+    let row_clip = match mask_ref {
+        Some(mask) => {
+            let data = mask.data()[row_start as usize * width..row_end as usize * width].to_vec();
+            let Some(size) = stet_tiny_skia::IntSize::from_wh(ctx.out_w, rows) else {
+                return;
+            };
+            let Some(mask) = Mask::from_vec(data, size) else {
+                return;
+            };
+            Some(mask)
+        }
+        None => None,
+    };
+    let row_ctx = RenderContext {
+        vp_y: ctx.vp_y + row_start as f32 / ctx.scale_y,
+        out_h: rows,
+        ..*ctx
+    };
+    let pixels =
+        &mut pixmap.data_mut()[row_start as usize * width * 4..row_end as usize * width * 4];
+    let Some(mut row_pixmap) = stet_tiny_skia::PixmapMut::from_bytes(pixels, ctx.out_w, rows)
+    else {
+        return;
+    };
+    paint_pattern_fill(&mut row_pixmap, row_clip.as_ref(), params, &row_ctx);
+}
+
+/// The rows of the surface a pattern fill can paint, as `(first, one past
+/// the last)`, or `None` when it can paint none.
+///
+/// Generous: a stroke's reach is taken as its mitre limit's, and a few rows
+/// are added for anti-aliasing and for a hairline drawn wider than it is.
+fn pattern_fill_rows(
+    params: &stet_graphics::device::PatternFillParams,
+    ctx: &RenderContext<'_>,
+) -> Option<(u32, u32)> {
+    const SLACK_ROWS: f64 = 3.0;
+    let bbox = pattern_fill_full_bbox(params)?;
+    let (mut y_min, mut y_max) = (bbox.y_min, bbox.y_max);
+    if let Some(ref sp) = params.stroke_params {
+        // `pattern_fill_full_bbox` allowed half the line width; a mitre or
+        // a square cap reaches further.
+        let ctm = &sp.ctm;
+        let half_w = sp.line_width
+            * 0.5
+            * (ctm.a * ctm.a + ctm.b * ctm.b)
+                .sqrt()
+                .max((ctm.c * ctm.c + ctm.d * ctm.d).sqrt());
+        let reach = half_w * (sp.miter_limit.max(1.5) - 1.0);
+        y_min -= reach;
+        y_max += reach;
+    }
+    let scale = ctx.scale_y as f64;
+    let first = ((y_min - ctx.vp_y as f64) * scale).floor() - SLACK_ROWS;
+    let last = ((y_max - ctx.vp_y as f64) * scale).ceil() + SLACK_ROWS;
+    if !(first.is_finite() && last.is_finite()) {
+        return Some((0, ctx.out_h));
+    }
+    let first = first.clamp(0.0, ctx.out_h as f64) as u32;
+    let last = last.clamp(0.0, ctx.out_h as f64) as u32;
+    (first < last).then_some((first, last))
+}
+
+/// Paint a pattern fill onto `pixmap`, which is `ctx.out_w` × `ctx.out_h`
+/// and may be only some rows of the surface (see [`render_pattern_fill`]).
+/// `mask_ref` is the clip in force, the same size.
+fn paint_pattern_fill(
+    pixmap: &mut stet_tiny_skia::PixmapMut<'_>,
+    mask_ref: Option<&Mask>,
+    params: &stet_graphics::device::PatternFillParams,
+    ctx: &RenderContext<'_>,
+) {
     let pm = &params.pattern_matrix;
 
     // Tile step vectors in device space (handles rotation/shear)
