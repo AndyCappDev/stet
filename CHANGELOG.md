@@ -65,6 +65,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   outlines for the rest of the page. Building the display list for the
   first page of six office documents went from 11–19 ms to 6–12 ms; the
   lists are the same.
+- **Painting through a clipping rectangle no longer builds a mask per
+  element.** With a rectangular clip smaller than the page — how word
+  processors write every page — the renderer allocated and filled a
+  surface-sized mask of the rectangle for every element it painted, so
+  once per glyph. The mask is made once and kept while the clip stands.
+  With the outline change above, the first page of six office documents
+  at 144 dpi went from 18–32 ms to 13–26 ms, and from 29–56 ms to
+  25–40 ms on one thread. Pages render byte for byte as before.
 - **Opening a second PDF no longer pays for the system CMYK profile
   again.** `PdfDocument::from_bytes` and `from_owned` searched for the
   profile, read it and built its transforms on every call: about 30 ms,

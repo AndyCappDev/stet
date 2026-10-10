@@ -77,8 +77,37 @@ impl ClipRect {
 
 /// Clip region: either a simple rectangle (fast) or a full rasterized mask.
 enum ClipRegion {
-    Rect(ClipRect),
+    Rect(ClipRect, RectMask),
     Mask(Mask),
+}
+
+impl ClipRegion {
+    /// A rectangular clip, with no mask made for it yet.
+    fn rect(rect: ClipRect) -> Self {
+        ClipRegion::Rect(rect, RectMask::default())
+    }
+}
+
+/// The mask of a rectangular clip, made the first time something is painted
+/// through it and kept for as long as the clip stands.
+///
+/// Painting takes a mask, so a rectangle that is not the whole surface has
+/// to become one. Making it afresh for every element allocated and filled a
+/// surface-sized buffer per glyph: on a page of text inside a clipping
+/// rectangle, which is how word processors write every page, that was more
+/// work than drawing the glyphs. The clip changes a few dozen times on such
+/// a page and is painted through thousands of times.
+#[derive(Default)]
+struct RectMask(std::sync::OnceLock<(u32, u32, Option<Mask>)>);
+
+impl RectMask {
+    /// The mask of `rect` on a `w` x `h` surface, if this is the size it
+    /// was first asked for at. `None` means it was made for another size:
+    /// the caller makes its own.
+    fn get(&self, rect: ClipRect, w: u32, h: u32) -> Option<Option<&Mask>> {
+        let (made_w, made_h, mask) = self.0.get_or_init(|| (w, h, rect.make_mask(w, h)));
+        ((*made_w, *made_h) == (w, h)).then_some(mask.as_ref())
+    }
 }
 
 /// tiny-skia based raster device.
@@ -655,12 +684,15 @@ fn resolve_clip_mask<'a>(
     match clip_region {
         None => Some(None),
         Some(ClipRegion::Mask(m)) => Some(Some(m)),
-        Some(ClipRegion::Rect(rect)) => {
+        Some(ClipRegion::Rect(rect, kept)) => {
             if rect.is_empty() {
                 return None; // empty clip → skip painting
             }
             if rect.is_full_page(w, h) {
                 return Some(None); // full page → no mask needed
+            }
+            if let Some(mask) = kept.get(*rect, w, h) {
+                return Some(mask);
             }
             *temp_mask = rect.make_mask(w, h);
             Some(temp_mask.as_ref())
@@ -3652,11 +3684,13 @@ fn render_element(
                 let mask_ref = match &band_state.clip_region {
                     None => None,
                     Some(ClipRegion::Mask(m)) => Some(m as &Mask),
-                    Some(ClipRegion::Rect(rect)) => {
+                    Some(ClipRegion::Rect(rect, kept)) => {
                         if rect.is_empty() {
                             return;
                         } else if rect.is_full_page(ctx.out_w, ctx.out_h) {
                             None
+                        } else if let Some(mask) = kept.get(*rect, ctx.out_w, ctx.out_h) {
+                            mask
                         } else {
                             temp_mask = rect.make_mask(ctx.out_w, ctx.out_h);
                             temp_mask.as_ref()
@@ -3765,11 +3799,13 @@ fn render_element(
                 let mask_ref = match &band_state.clip_region {
                     None => None,
                     Some(ClipRegion::Mask(m)) => Some(m as &Mask),
-                    Some(ClipRegion::Rect(rect)) => {
+                    Some(ClipRegion::Rect(rect, kept)) => {
                         if rect.is_empty() {
                             return;
                         } else if rect.is_full_page(ctx.out_w, ctx.out_h) {
                             None
+                        } else if let Some(mask) = kept.get(*rect, ctx.out_w, ctx.out_h) {
+                            mask
                         } else {
                             temp_mask = rect.make_mask(ctx.out_w, ctx.out_h);
                             temp_mask.as_ref()
@@ -7054,7 +7090,7 @@ fn clip_path_unified(
             if let Some(ClipRegion::Mask(mask)) = band_state.clip_region.take() {
                 band_state.recycle_mask(mask);
             }
-            band_state.clip_region = Some(ClipRegion::Rect(ClipRect {
+            band_state.clip_region = Some(ClipRegion::rect(ClipRect {
                 x0: 0,
                 y0: 0,
                 x1: 0,
@@ -7080,10 +7116,10 @@ fn clip_path_unified(
             let new_rect = translate_clip_rect(&dev_rect, y_start, ctx.out_h);
             match band_state.clip_region.take() {
                 None => {
-                    band_state.clip_region = Some(ClipRegion::Rect(new_rect));
+                    band_state.clip_region = Some(ClipRegion::rect(new_rect));
                 }
-                Some(ClipRegion::Rect(existing)) => {
-                    band_state.clip_region = Some(ClipRegion::Rect(existing.intersect(&new_rect)));
+                Some(ClipRegion::Rect(existing, _)) => {
+                    band_state.clip_region = Some(ClipRegion::rect(existing.intersect(&new_rect)));
                 }
                 Some(ClipRegion::Mask(mut mask)) => {
                     intersect_mask_with_rect(&mut mask, &new_rect, ctx.out_w, ctx.out_h);
@@ -7152,12 +7188,12 @@ fn clip_path_unified(
         None => {
             band_state.clip_region = Some(ClipRegion::Mask(path_mask));
         }
-        Some(ClipRegion::Rect(rect)) => {
+        Some(ClipRegion::Rect(rect, _)) => {
             if rect.is_empty() {
                 band_state.recycle_mask(path_mask);
                 // Intersection with empty clip is still empty — preserve empty state.
                 // Without this, clip_region stays None (= no clip = paint everything).
-                band_state.clip_region = Some(ClipRegion::Rect(rect));
+                band_state.clip_region = Some(ClipRegion::rect(rect));
             } else {
                 let mut mask = path_mask;
                 intersect_mask_with_rect(&mut mask, &rect, ctx.out_w, ctx.out_h);
@@ -7244,11 +7280,11 @@ impl OutputDevice for SkiaDevice {
         if let Some(new_rect) = detect_rect(path, w, h) {
             match self.clip_region.take() {
                 None => {
-                    self.clip_region = Some(ClipRegion::Rect(new_rect));
+                    self.clip_region = Some(ClipRegion::rect(new_rect));
                 }
-                Some(ClipRegion::Rect(existing)) => {
+                Some(ClipRegion::Rect(existing, _)) => {
                     // O(1) rect-rect intersection
-                    self.clip_region = Some(ClipRegion::Rect(existing.intersect(&new_rect)));
+                    self.clip_region = Some(ClipRegion::rect(existing.intersect(&new_rect)));
                 }
                 Some(ClipRegion::Mask(mut mask)) => {
                     // Zero mask pixels outside rect
@@ -7304,7 +7340,7 @@ impl OutputDevice for SkiaDevice {
             None => {
                 self.clip_region = Some(ClipRegion::Mask(path_mask));
             }
-            Some(ClipRegion::Rect(rect)) => {
+            Some(ClipRegion::Rect(rect, _)) => {
                 if rect.is_empty() {
                     self.spare_mask = Some(path_mask); // recycle
                 } else {
@@ -8013,7 +8049,7 @@ fn render_overprint_fill(
     // Intersect with clip mask
     let clip_coverage: Option<&[u8]> = match &band_state.clip_region {
         None => None,
-        Some(ClipRegion::Rect(r)) => {
+        Some(ClipRegion::Rect(r, _)) => {
             // Only zero coverage within the path bbox (not the full page)
             let data = coverage_mask.data_mut();
             let stride = out_w as usize;
@@ -8580,7 +8616,7 @@ fn update_cmyk_buffer_for_fill(
     // Constrain iteration to the path's device-space bounding box
     let (mut bx0, mut by0, mut bx1, mut by1) =
         path_device_bbox(&skia_path, transform, out_w, out_h);
-    if let Some(ClipRegion::Rect(r)) = clip_region {
+    if let Some(ClipRegion::Rect(r, _)) = clip_region {
         bx0 = bx0.max(r.x0 as usize);
         by0 = by0.max(r.y0 as usize);
         bx1 = bx1.min(r.x1 as usize);
@@ -8672,7 +8708,7 @@ fn render_overprint_stroke(
     // Intersect with clip mask (same logic as render_overprint_fill).
     let clip_coverage: Option<&[u8]> = match &band_state.clip_region {
         None => None,
-        Some(ClipRegion::Rect(r)) => {
+        Some(ClipRegion::Rect(r, _)) => {
             let data = coverage_mask.data_mut();
             let stride = out_w as usize;
             for y in bbox_y0..bbox_y1 {
@@ -9088,7 +9124,7 @@ fn update_cmyk_buffer_for_stroke(
 
     let (mut bx0, mut by0, mut bx1, mut by1) =
         path_device_bbox(&stroked, Transform::identity(), out_w, out_h);
-    if let Some(ClipRegion::Rect(r)) = clip_region {
+    if let Some(ClipRegion::Rect(r, _)) = clip_region {
         bx0 = bx0.max(r.x0 as usize);
         by0 = by0.max(r.y0 as usize);
         bx1 = bx1.min(r.x1 as usize);
@@ -9159,7 +9195,7 @@ fn render_overprint_image(
         _ => None,
     };
     let clip_rect = match &band_state.clip_region {
-        Some(ClipRegion::Rect(r)) => Some(*r),
+        Some(ClipRegion::Rect(r, _)) => Some(*r),
         _ => None,
     };
 
@@ -9559,7 +9595,7 @@ fn update_cmyk_buffer_for_image(
         _ => None,
     };
     let clip_rect = match clip_region {
-        Some(ClipRegion::Rect(r)) => Some(*r),
+        Some(ClipRegion::Rect(r, _)) => Some(*r),
         _ => None,
     };
 
