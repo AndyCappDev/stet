@@ -34,6 +34,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   command does, as before. Whether a profile was found is
   `IccCache::default_cmyk_hash` being `Some`.
 
+### Fixed
+
+- **Pages set in embedded TrueType fonts are several times faster to
+  read.** Every glyph outline set up the font's hinting afresh, which
+  runs the font's `fpgm` and `prep` programs: far more work than drawing
+  the glyph. It is now set up once per font. On office documents set in
+  an embedded Calibri, the first page went from 370–640 ms to 100–140 ms
+  end to end; the pages come out byte for byte the same. This is the PDF
+  reader only — the PostScript interpreter's Type 42 path was not
+  affected.
+
 ## [0.8.5] — 2026-10-09
 
 ### Added

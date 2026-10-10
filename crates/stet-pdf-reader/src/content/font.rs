@@ -81,6 +81,9 @@ pub struct TrueTypePdfFont {
     /// (e.g. g003a = GID 58). Set when any gNNNN name contains hex letters (a-f).
     /// When false, gNNNN names use decimal (e.g. g1863 = GID 1863).
     pub gid_hex: bool,
+    /// The font's hinting state, set up the first time an outline is asked
+    /// for: see [`TrueTypeHinting`].
+    hinting: TrueTypeHinting,
 }
 
 pub struct CffPdfFont {
@@ -128,6 +131,9 @@ pub struct CidTrueTypePdfFont {
     /// Per-CID vertical metrics from /W2: CID → (w1, v_x, v_y).
     /// w1 = vertical advance, v_x/v_y = position vector components (in 1/1000 em).
     pub w2: HashMap<u16, [f64; 3]>,
+    /// The font's hinting state, set up the first time an outline is asked
+    /// for: see [`TrueTypeHinting`].
+    hinting: TrueTypeHinting,
 }
 
 /// CIDFontType0: CFF outlines accessed by CID (2-byte char codes).
@@ -403,6 +409,7 @@ pub fn resolve_font(
             to_unicode,
             identity_gid: false, // system font substitutes use normal cmap
             gid_hex,
+            hinting: TrueTypeHinting::default(),
         }));
     }
 
@@ -2552,6 +2559,7 @@ fn resolve_truetype(
         },
         identity_gid,
         gid_hex,
+        hinting: TrueTypeHinting::default(),
     }))
 }
 
@@ -3032,9 +3040,10 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 .is_some_and(|v| v.as_name().is_none_or(|n| n != b"Identity"));
             if !substituted && !cid_widths.is_empty() && !has_cid_to_gid_map {
                 let upm_f = get_units_per_em(&data) as f64;
+                let hinting = skrifa_hinting(&data, upm_f);
                 let any_glyph = cid_widths
                     .keys()
-                    .any(|&cid| skrifa_glyph_path(&data, cid, upm_f).is_some());
+                    .any(|&cid| skrifa_glyph_path(&data, cid, upm_f, hinting.as_ref()).is_some());
                 if !any_glyph {
                     let base_font = cid_font_dict
                         .get_name(b"BaseFont")
@@ -3143,6 +3152,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 wmode,
                 dw2,
                 w2: w2.clone(),
+                hinting: TrueTypeHinting::default(),
             }))
         }
         b"CIDFontType0" => {
@@ -3181,6 +3191,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                         wmode,
                         dw2,
                         w2: w2.clone(),
+                        hinting: TrueTypeHinting::default(),
                     }));
                 }
                 // FontFile3 may be raw CFF or OpenType/CFF (OTTO wrapper)
@@ -3382,6 +3393,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     wmode,
                     dw2,
                     w2,
+                    hinting: TrueTypeHinting::default(),
                 }))
             }
         }
@@ -3936,13 +3948,15 @@ impl TrueTypePdfFont {
     fn glyph_path(&self, char_code: u8) -> Option<PsPath> {
         let gid = self.char_code_to_gid(char_code);
         let gid = gid?;
-        let path = skrifa_glyph_path(&self.data, gid, self.units_per_em).or_else(|| {
-            // Fallback for locx/glyx PDF-subset fonts that skrifa can't parse
-            let glyf_data = get_glyf_data(&self.data, gid)?;
-            let data_ref = &self.data;
-            let p = parse_glyf_to_path(&glyf_data, &|cid| get_glyf_data(data_ref, cid));
-            if p.is_empty() { None } else { Some(p) }
-        })?;
+        let hinting = self.hinting.get(&self.data, self.units_per_em);
+        let path =
+            skrifa_glyph_path(&self.data, gid, self.units_per_em, hinting).or_else(|| {
+                // Fallback for locx/glyx PDF-subset fonts that skrifa can't parse
+                let glyf_data = get_glyf_data(&self.data, gid)?;
+                let data_ref = &self.data;
+                let p = parse_glyf_to_path(&glyf_data, &|cid| get_glyf_data(data_ref, cid));
+                if p.is_empty() { None } else { Some(p) }
+            })?;
         let scale = 1.0 / self.units_per_em;
         let m = Matrix::scale(scale, scale);
         Some(path.transform(&m))
@@ -4148,7 +4162,8 @@ impl CidTrueTypePdfFont {
         } else {
             cid
         };
-        let path = skrifa_glyph_path(&self.data, gid, self.units_per_em).or_else(|| {
+        let hinting = self.hinting.get(&self.data, self.units_per_em);
+        let path = skrifa_glyph_path(&self.data, gid, self.units_per_em, hinting).or_else(|| {
             // Fallback for fonts where skrifa can't render a glyph (e.g. locx/glyx
             // PDF-subset tables, or skrifa CFF rendering gaps).
             let glyf_data = get_glyf_data(&self.data, gid)?;
@@ -4248,7 +4263,8 @@ impl CidTrueTypePdfFont {
     /// Used when malformed PDFs embed WinAnsi literal strings in a CID font.
     fn glyph_path_unicode(&self, unicode: u16) -> Option<PsPath> {
         let &gid = self.cmap.get(&(unicode as u32))?;
-        let path = skrifa_glyph_path(&self.data, gid, self.units_per_em)?;
+        let hinting = self.hinting.get(&self.data, self.units_per_em);
+        let path = skrifa_glyph_path(&self.data, gid, self.units_per_em, hinting)?;
         let scale = 1.0 / self.units_per_em;
         let m = Matrix::scale(scale, scale);
         Some(path.transform(&m))
@@ -4610,17 +4626,40 @@ fn hmtx_advance_width(font_data: &[u8], gid: u16, units_per_em: f64) -> Option<f
     Some(advance as f64 / units_per_em * 1000.0)
 }
 
-fn skrifa_glyph_path(font_data: &[u8], gid: u16, units_per_em: f64) -> Option<PsPath> {
+/// A TrueType font's hinting state for [`skrifa_glyph_path`], set up once
+/// for the font and used for every glyph after.
+///
+/// Setting it up runs the font's `fpgm` and `prep` programs, which costs
+/// far more than drawing a glyph: rendering a page of text in an embedded
+/// Calibri took 639 ms when each glyph set up its own, and takes 137 ms
+/// with one per font. Drawing a glyph does not change it, so the outlines
+/// are the same.
+#[derive(Default)]
+struct TrueTypeHinting(std::sync::OnceLock<Option<skrifa::outline::HintingInstance>>);
+
+impl TrueTypeHinting {
+    /// The state for `font_data`, set up on first use. `None` when the
+    /// font cannot be hinted, and its glyphs are then drawn unhinted.
+    fn get(
+        &self,
+        font_data: &[u8],
+        units_per_em: f64,
+    ) -> Option<&skrifa::outline::HintingInstance> {
+        self.0
+            .get_or_init(|| skrifa_hinting(font_data, units_per_em))
+            .as_ref()
+    }
+}
+
+/// Set up hinting for a font at the size [`skrifa_glyph_path`] draws at.
+fn skrifa_hinting(font_data: &[u8], units_per_em: f64) -> Option<skrifa::outline::HintingInstance> {
     // Use from_index(0) to handle both plain TrueType and TTC files.
     let font_ref = skrifa::FontRef::from_index(font_data, 0).ok()?;
-    let outlines = font_ref.outline_glyphs();
-    let glyph = outlines.get(skrifa::GlyphId::new(gid as u32))?;
-
     // Use TrueType bytecode interpreter with mono hinting for correct composite
     // glyph assembly. Some fonts have TT instructions that adjust component positions;
     // the auto-hinter doesn't handle these correctly.
-    let hinting = skrifa::outline::HintingInstance::new(
-        &outlines,
+    skrifa::outline::HintingInstance::new(
+        &font_ref.outline_glyphs(),
         skrifa::prelude::Size::new(units_per_em as f32),
         skrifa::instance::LocationRef::default(),
         skrifa::outline::HintingOptions {
@@ -4628,7 +4667,19 @@ fn skrifa_glyph_path(font_data: &[u8], gid: u16, units_per_em: f64) -> Option<Ps
             target: skrifa::outline::Target::Mono,
         },
     )
-    .ok();
+    .ok()
+}
+
+fn skrifa_glyph_path(
+    font_data: &[u8],
+    gid: u16,
+    units_per_em: f64,
+    hinting: Option<&skrifa::outline::HintingInstance>,
+) -> Option<PsPath> {
+    // Use from_index(0) to handle both plain TrueType and TTC files.
+    let font_ref = skrifa::FontRef::from_index(font_data, 0).ok()?;
+    let outlines = font_ref.outline_glyphs();
+    let glyph = outlines.get(skrifa::GlyphId::new(gid as u32))?;
 
     let mut pen = PsPathPen {
         path: PsPath::new(),
@@ -4636,7 +4687,7 @@ fn skrifa_glyph_path(font_data: &[u8], gid: u16, units_per_em: f64) -> Option<Ps
         cur_y: 0.0,
     };
 
-    let result = if let Some(ref instance) = hinting {
+    let result = if let Some(instance) = hinting {
         glyph.draw(instance, &mut pen)
     } else {
         glyph.draw(
