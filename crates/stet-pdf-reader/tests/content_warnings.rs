@@ -407,3 +407,36 @@ fn a_page_tree_that_loses_pages_says_so() {
     );
     assert_eq!(warnings.len(), 2, "{warnings:?}");
 }
+
+/// A page filling a square in an ICCBased colour space whose profile
+/// stream holds `profile`.
+fn icc_page(profile: &str) -> Vec<u8> {
+    two_pages(
+        "/ColorSpace << /CS0 [/ICCBased 7 0 R] >>",
+        "/CS0 cs 1 0 0 sc 0 0 50 50 re f",
+        "0 0 50 50 re f",
+        &[stream("/N 3 /Alternate /DeviceRGB", profile)],
+    )
+}
+
+#[test]
+fn an_icc_profile_that_cannot_be_used_is_reported_for_its_page() {
+    let data = icc_page("this is not an ICC profile, however long it goes on for");
+    let doc = PdfDocument::from_bytes(&data).unwrap();
+    assert!(content_warnings(&doc).is_empty());
+
+    // The page is still drawn, in the alternate colour space.
+    assert!(!doc.render_page(0, 72.0).unwrap().is_empty());
+    let warnings = content_warnings(&doc);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    let (page, severity, message) = &warnings[0];
+    assert_eq!((*page, *severity), (Some(0), Severity::Warning));
+    assert!(message.starts_with("ICC profile: "), "{message}");
+
+    // Again, and through the rasterising path, adds nothing; nor does the
+    // page that does not use the profile.
+    doc.render_page(0, 72.0).unwrap();
+    doc.render_page_to_rgba(0, 72.0).unwrap();
+    doc.render_page(1, 72.0).unwrap();
+    assert_eq!(content_warnings(&doc).len(), 1);
+}

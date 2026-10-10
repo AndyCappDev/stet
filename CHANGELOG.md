@@ -33,6 +33,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every document it opened. The library no longer says it; the `stet`
   command does, as before. Whether a profile was found is
   `IccCache::default_cmyk_hash` being `Some`.
+- **An ICC profile that cannot be used is reported, not printed.** A
+  profile that would not parse, was in a colour space stet does not
+  convert from, or that no transform could be built from, and an image
+  conversion that failed, each wrote a line to stderr from inside
+  `stet-graphics`. `IccCache` now writes nothing; it reports to a sink the
+  caller sets with the new `IccCache::set_diagnostic_sink`, and to nobody
+  by default. The PDF reader sets one on every document, so these arrive
+  in `parse_warnings` as `ParsePhase::Content` warnings for the page that
+  uses the profile (`ICC profile: Failed to parse profile: …`). The `stet`
+  command still prints them: for a PostScript job as before
+  (`[ICC] Failed to parse profile: …`), and for a PDF with the document's
+  other warnings (`warning: ICC profile: Failed to parse profile: …`). The
+  cache the renderer builds for itself from a display list has no sink, so
+  a failure met only there is no longer printed.
 
 ### Fixed
 

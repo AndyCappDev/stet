@@ -708,7 +708,7 @@ rendered:
 | Severity | Examples |
 |---|---|
 | `Error` | a content stream, of the page or of a form, pattern or glyph it uses, that stops making sense part-way (what came before it is drawn); one of a page's content streams that cannot be decoded at all |
-| `Warning` | an operator that failed and was skipped — `operator Do: object 12 0 not found`, `operator sh: …`, `operator c: need 6 operands, have 4` — so an image that will not decode, a shading whose function is refused and a path with the wrong operand count all say so; a font, a soft mask or a predefined CMap that could not be loaded; a page with more nested content than the reader will interpret; an image decoded only in part |
+| `Warning` | an operator that failed and was skipped — `operator Do: object 12 0 not found`, `operator sh: …`, `operator c: need 6 operands, have 4` — so an image that will not decode, a shading whose function is refused and a path with the wrong operand count all say so; a font, a soft mask or a predefined CMap that could not be loaded; an ICC profile that could not be used (`ICC profile: Failed to parse profile: …`), in which case the colour space's alternate is drawn; a page with more nested content than the reader will interpret; an image decoded only in part |
 | `Info` | an image stream that needed the more lenient of two decoders |
 
 The page is in `location`, as `LocationHint::Page`:
@@ -725,6 +725,9 @@ for w in doc.parse_warnings().iter() {
 }
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
+
+A profile that belongs to the document and not to a page — the output
+intent's — is reported with no location.
 
 Each is recorded once. Rendering a page again — which a viewer does at
 every zoom — adds nothing, so the list is bounded by what is wrong with

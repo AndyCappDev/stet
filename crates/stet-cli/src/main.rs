@@ -1510,11 +1510,26 @@ fn parse_page_ranges(spec: &str) -> Result<std::collections::HashSet<i32>, Strin
 fn build_icc_cache(icc_cfg: &IccCliConfig) -> stet_graphics::icc::IccCache {
     use stet_graphics::icc::IccCache;
 
-    if icc_cfg.no_icc {
-        return IccCache::new_with_options(IccCacheOptions {
+    // The cache says nothing by itself; the command reports what it could
+    // not use on stderr. The sink is set before any profile is loaded, so
+    // that a `--cmyk-profile` or `--output-profile` it rejects is reported
+    // too.
+    let new_cache = |profile: Option<Vec<u8>>| {
+        let mut cache = IccCache::new_with_options(IccCacheOptions {
             bpc_mode: icc_cfg.effective_bpc_mode(),
             source_cmyk_profile: None,
         });
+        cache.set_diagnostic_sink(Some(std::sync::Arc::new(|message: &str| {
+            eprintln!("[ICC] {message}");
+        })));
+        if let Some(bytes) = profile {
+            cache.load_cmyk_profile_bytes(&bytes);
+        }
+        cache
+    };
+
+    if icc_cfg.no_icc {
+        return new_cache(None);
     }
 
     if let Some(path) = icc_cfg.cmyk_profile_path.as_deref() {
@@ -1524,10 +1539,7 @@ fn build_icc_cache(icc_cfg: &IccCliConfig) -> stet_graphics::icc::IccCache {
         });
         validate_cmyk_icc(&bytes, path);
         eprintln!("[ICC] Loaded source CMYK profile: {}", path);
-        return IccCache::new_with_options(IccCacheOptions {
-            bpc_mode: icc_cfg.effective_bpc_mode(),
-            source_cmyk_profile: Some(bytes),
-        });
+        return new_cache(Some(bytes));
     }
 
     if let Some(path) = icc_cfg.output_profile_path.as_deref() {
@@ -1540,16 +1552,10 @@ fn build_icc_cache(icc_cfg: &IccCliConfig) -> stet_graphics::icc::IccCache {
             std::process::exit(1);
         }
         eprintln!("[ICC] Loaded output profile: {}", path);
-        return IccCache::new_with_options(IccCacheOptions {
-            bpc_mode: icc_cfg.effective_bpc_mode(),
-            source_cmyk_profile: Some(bytes),
-        });
+        return new_cache(Some(bytes));
     }
 
-    let mut cache = IccCache::new_with_options(IccCacheOptions {
-        bpc_mode: icc_cfg.effective_bpc_mode(),
-        source_cmyk_profile: None,
-    });
+    let mut cache = new_cache(None);
     cache.search_system_cmyk_profile();
     if cache.default_cmyk_hash().is_some() {
         eprintln!("[ICC] Loaded system CMYK profile");

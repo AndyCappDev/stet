@@ -251,6 +251,11 @@ use stet_graphics::display_list::DisplayList;
 use stet_graphics::document_structure::OutputIntentRecord;
 use stet_graphics::icc::IccCache;
 
+/// The most messages from a document's colour cache held between two
+/// readings of them. They are read at the end of every page, so this is
+/// reached only by a page with that many distinct failures.
+const MAX_PENDING_ICC_DIAGNOSTICS: usize = 256;
+
 /// Font data provider: maps a font file name (e.g. "NimbusSans-Regular") to raw .t1 bytes.
 ///
 /// Used for environments without filesystem access (WASM) where fonts are embedded.
@@ -288,6 +293,10 @@ pub struct PdfDocument<'a> {
     resolver: Resolver<'a>,
     pages: Vec<PageInfo>,
     icc_cache: IccCache,
+    /// What `icc_cache`, and the copies of it pages are read with, have
+    /// reported and [`Self::note_icc_diagnostics`] has not yet moved into
+    /// the document's warnings.
+    icc_diagnostics: Arc<std::sync::Mutex<Vec<String>>>,
     font_provider: Option<FontProvider>,
     /// When false (default), PDF overprint flags (OP/op) are suppressed —
     /// skips the expensive CMYK buffer simulation that most viewers omit.
@@ -440,9 +449,25 @@ impl<'a> PdfDocument<'a> {
     /// Open a document over bytes that are lent or owned.
     fn open(
         source: resolver::Source<'a>,
-        icc_cache: IccCache,
+        mut icc_cache: IccCache,
         password: &[u8],
     ) -> Result<Self, PdfError> {
+        // The cache is this document's from here on, and what it cannot
+        // use is the document's to report: its diagnostics go to
+        // `parse_warnings` with the reader's own, whatever sink it came
+        // with. They are collected here, because the cache reports from
+        // whichever thread is converting, and moved across by
+        // `note_icc_diagnostics`.
+        let icc_diagnostics = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let pending = Arc::clone(&icc_diagnostics);
+        icc_cache.set_diagnostic_sink(Some(Arc::new(move |message: &str| {
+            if let Ok(mut pending) = pending.lock()
+                && pending.len() < MAX_PENDING_ICC_DIAGNOSTICS
+                && !pending.iter().any(|m: &String| m == message)
+            {
+                pending.push(message.to_owned());
+            }
+        })));
         let data: &[u8] = &source;
         // Validate header — PDF spec allows up to 1024 bytes before %PDF-
         if !has_pdf_header(data) {
@@ -500,6 +525,7 @@ impl<'a> PdfDocument<'a> {
             resolver,
             pages,
             icc_cache,
+            icc_diagnostics,
             font_provider: None,
             overprint: true,
             render_annotations: true,
@@ -1040,6 +1066,8 @@ impl<'a> PdfDocument<'a> {
             }
         }
 
+        // Still within the page, so that these are reported for it.
+        self.note_icc_diagnostics(Some(page));
         if interpreter.was_cancelled() {
             return Ok(None);
         }
@@ -1118,8 +1146,26 @@ impl<'a> PdfDocument<'a> {
             layer_set,
             background,
         );
+        self.note_icc_diagnostics(Some(page));
 
         Ok((rgba, pixel_w, pixel_h))
+    }
+
+    /// Move what the document's colour cache has reported into the
+    /// document's warnings, as [`ParsePhase::Content`] for `page`, or for no
+    /// page when the profile at fault is the document's and not a page's.
+    fn note_icc_diagnostics(&self, page: Option<usize>) {
+        let pending = match self.icc_diagnostics.lock() {
+            Ok(mut pending) => std::mem::take(&mut *pending),
+            Err(_) => return,
+        };
+        for message in pending {
+            self.resolver.warn_content_on(
+                page,
+                Severity::Warning,
+                format!("ICC profile: {message}"),
+            );
+        }
     }
 
     /// Access the ICC color profile cache.
@@ -1308,13 +1354,19 @@ impl<'a> PdfDocument<'a> {
     /// error, a font that would not load, an image decoded only in part —
     /// as [`ParsePhase::Content`] with the page as its location, when the
     /// page is first rendered. Neither repeats: a cached accessor and a
-    /// page rendered again add nothing. The reader prints nothing to
-    /// stderr; this list is where its diagnostics go.
+    /// page rendered again add nothing. An ICC profile that could not be
+    /// used — one that does not parse, or is in a colour space the reader
+    /// does not convert from — is reported the same way, for the page that
+    /// uses it. The reader prints nothing to stderr; this list is where
+    /// its diagnostics go.
     ///
     /// Returns a borrow of the underlying slice — drop the returned
     /// `Ref` before calling an accessor or rendering a page. A warning
     /// raised while the borrow is held is not recorded.
     pub fn parse_warnings(&self) -> std::cell::Ref<'_, [ParseWarning]> {
+        // Anything the colour cache reported outside a page: the output
+        // intent's profile, or a conversion made by the caller.
+        self.note_icc_diagnostics(None);
         self.resolver.warnings().borrow_slice()
     }
 

@@ -334,6 +334,10 @@ impl CachedTransform {
     }
 }
 
+/// Where an [`IccCache`] reports a profile it could not use or a
+/// conversion that failed: see [`IccCache::set_diagnostic_sink`].
+pub type IccDiagnosticSink = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// ICC color profile cache and transform manager.
 #[derive(Clone)]
 pub struct IccCache {
@@ -384,6 +388,9 @@ pub struct IccCache {
     /// CMYK-group blends — GWG 22.1's ColorBurn form over a Lab BG is the
     /// canonical case where the indirect path drifts visibly.
     lab_to_oi_per_intent: [Option<Arc<hand_rolled::LabToCmykSampler>>; 4],
+    /// Where problems are reported, if anywhere: see
+    /// [`Self::set_diagnostic_sink`].
+    diagnostic_sink: Option<IccDiagnosticSink>,
 }
 
 impl Default for IccCache {
@@ -443,11 +450,36 @@ impl IccCache {
             bpc_mode: opts.bpc_mode,
             proofing_enabled: false,
             lab_to_oi_per_intent: [None, None, None, None],
+            diagnostic_sink: None,
         };
         if let Some(bytes) = opts.source_cmyk_profile {
             cache.load_cmyk_profile_bytes(&bytes);
         }
         cache
+    }
+
+    /// Say where this cache reports a profile it cannot use — one that
+    /// does not parse, is in a colour space it does not handle, or that no
+    /// transform can be built from — and an image conversion that fails.
+    ///
+    /// Each is reported as one line of text, when it happens. With no sink,
+    /// which is the default, nothing is reported: the cache never writes to
+    /// stderr itself, and every such failure is also visible to the caller
+    /// as a `None` result. A clone of the cache reports to the same sink.
+    ///
+    /// A profile given through [`IccCacheOptions::source_cmyk_profile`] is
+    /// registered before a sink can be set; to hear about that one, build
+    /// the cache without it, set the sink, and call
+    /// [`load_cmyk_profile_bytes`](Self::load_cmyk_profile_bytes).
+    pub fn set_diagnostic_sink(&mut self, sink: Option<IccDiagnosticSink>) {
+        self.diagnostic_sink = sink;
+    }
+
+    /// Report a problem to the sink, if there is one.
+    fn report(&self, message: std::fmt::Arguments<'_>) {
+        if let Some(sink) = &self.diagnostic_sink {
+            sink(&message.to_string());
+        }
     }
 
     /// Current Black Point Compensation mode.
@@ -493,7 +525,7 @@ impl IccCache {
         let profile = match ColorProfile::new_from_slice(bytes) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("[ICC] Failed to parse profile: {e}");
+                self.report(format_args!("Failed to parse profile: {e}"));
                 return None;
             }
         };
@@ -504,10 +536,10 @@ impl IccCache {
             DataColorSpace::Cmyk => 4,
             DataColorSpace::Lab => 3,
             _ => {
-                eprintln!(
-                    "[ICC] Unsupported profile color space: {:?}",
+                self.report(format_args!(
+                    "Unsupported profile color space: {:?}",
                     profile.color_space
-                );
+                ));
                 return None;
             }
         };
@@ -575,10 +607,10 @@ impl IccCache {
                 return self.register_gray_identity(hash, profile);
             }
             None => {
-                eprintln!(
-                    "[ICC] Failed to create 8-bit transform (cs={:?})",
+                self.report(format_args!(
+                    "Failed to create 8-bit transform (cs={:?})",
                     profile.color_space
-                );
+                ));
                 return None;
             }
         };
@@ -609,10 +641,10 @@ impl IccCache {
                 return self.register_gray_identity(hash, profile);
             }
             None => {
-                eprintln!(
-                    "[ICC] Failed to create f64 transform (cs={:?})",
+                self.report(format_args!(
+                    "Failed to create f64 transform (cs={:?})",
                     profile.color_space
-                );
+                ));
                 return None;
             }
         };
@@ -1371,7 +1403,9 @@ impl IccCache {
                 Some(dst)
             }
             Err(e) => {
-                eprintln!("[ICC] Image transform failed (intent {intent:?}): {e}");
+                self.report(format_args!(
+                    "Image transform failed (intent {intent:?}): {e}"
+                ));
                 None
             }
         }
@@ -1432,7 +1466,7 @@ impl IccCache {
                 Some(dst)
             }
             Err(e) => {
-                eprintln!("[ICC] Image transform failed: {e}");
+                self.report(format_args!("Image transform failed: {e}"));
                 None
             }
         }
@@ -2213,6 +2247,30 @@ fn scan_dir_for_cmyk_icc(dir: &std::path::Path) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_profile_that_cannot_be_used_is_reported_to_the_sink_and_only_there() {
+        let heard = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sink = Arc::clone(&heard);
+        let mut cache = IccCache::new();
+        // With no sink the failure is the `None` and nothing else.
+        assert!(cache.register_profile(b"not a profile").is_none());
+        assert!(heard.lock().unwrap().is_empty());
+
+        cache.set_diagnostic_sink(Some(Arc::new(move |message: &str| {
+            sink.lock().unwrap().push(message.to_owned());
+        })));
+        assert!(cache.register_profile(b"not a profile").is_none());
+        // A copy of the cache reports to the same place.
+        assert!(cache.clone().register_profile(b"nor is this").is_none());
+        let heard = heard.lock().unwrap();
+        assert_eq!(heard.len(), 2, "{heard:?}");
+        assert!(
+            heard
+                .iter()
+                .all(|m| m.starts_with("Failed to parse profile"))
+        );
+    }
 
     #[test]
     fn test_icc_cache_new() {
