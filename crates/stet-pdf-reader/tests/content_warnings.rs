@@ -440,3 +440,19 @@ fn an_icc_profile_that_cannot_be_used_is_reported_for_its_page() {
     doc.render_page(1, 72.0).unwrap();
     assert_eq!(content_warnings(&doc).len(), 1);
 }
+
+#[test]
+fn documents_opened_without_a_colour_cache_do_not_share_one() {
+    let data = icc_page("this is not an ICC profile, however long it goes on for");
+    let first = PdfDocument::from_bytes(&data).unwrap();
+    let second = PdfDocument::from_bytes(&data).unwrap();
+    // Both start from the same system profile, when there is one.
+    assert_eq!(
+        first.icc_cache().default_cmyk_hash(),
+        second.icc_cache().default_cmyk_hash()
+    );
+    // What one document's cache reports is that document's alone.
+    first.render_page(0, 72.0).unwrap();
+    assert_eq!(content_warnings(&first).len(), 1);
+    assert!(content_warnings(&second).is_empty());
+}

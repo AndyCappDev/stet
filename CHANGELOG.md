@@ -58,6 +58,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   end to end; the pages come out byte for byte the same. This is the PDF
   reader only — the PostScript interpreter's Type 42 path was not
   affected.
+- **Opening a second PDF no longer pays for the system CMYK profile
+  again.** `PdfDocument::from_bytes` and `from_owned` searched for the
+  profile, read it and built its transforms on every call: about 30 ms,
+  which was most of the cost of opening a small document. That is done
+  once per process and each document takes its own copy. Opening after
+  the first went from 32 ms to 0.6 ms on a typical file. A document's
+  cache is still its own — nothing one registers reaches another — and a
+  profile installed while the process runs is not noticed; pass a cache
+  to a `_with_icc` constructor for that.
 
 ## [0.8.5] — 2026-10-09
 

@@ -95,6 +95,13 @@ let doc = match PdfDocument::from_owned(Arc::clone(&bytes)) {
 the three `from_bytes` constructors. They take `impl Into<PdfBytes>`,
 which a `Vec<u8>`, a `Box<[u8]>` and an `Arc<[u8]>` all are.
 
+The constructors that take no colour cache — `from_bytes` and
+`from_owned` — start from the system's CMYK profile when there is one.
+It is found and prepared once per process (about 30 ms) and each document
+takes its own copy, so opening a second document costs only its own
+parsing. A profile installed while the process runs is not picked up;
+build an `IccCache` and use a `_with_icc` constructor for that.
+
 ### Display lists and resolution
 
 `render_page(page, dpi)` returns a display list in device space at `dpi`,

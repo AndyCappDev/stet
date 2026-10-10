@@ -251,6 +251,27 @@ use stet_graphics::display_list::DisplayList;
 use stet_graphics::document_structure::OutputIntentRecord;
 use stet_graphics::icc::IccCache;
 
+/// The colour cache a document opened without one starts from: default
+/// options, with the system's CMYK profile if it has one.
+///
+/// Finding and preparing that profile takes about 30 ms, which used to be
+/// paid by every `from_bytes` and `from_owned` and was most of the cost of
+/// opening a small document. It is done once per process and each document
+/// takes a copy, which is its own from then on: nothing one document
+/// registers or converts reaches another. A profile installed or replaced
+/// while the process runs is not noticed; a caller that needs that builds
+/// its own cache and passes it to a `_with_icc` constructor.
+fn default_icc_cache() -> IccCache {
+    static TEMPLATE: std::sync::OnceLock<IccCache> = std::sync::OnceLock::new();
+    TEMPLATE
+        .get_or_init(|| {
+            let mut cache = IccCache::new();
+            cache.search_system_cmyk_profile();
+            cache
+        })
+        .clone()
+}
+
 /// The most messages from a document's colour cache held between two
 /// readings of them. They are read at the end of every page, so this is
 /// reached only by a page with that many distinct failures.
@@ -383,9 +404,11 @@ impl PdfDocument<'static> {
     /// Everything else is as [`from_bytes`](Self::from_bytes), including
     /// the search for a system CMYK profile.
     pub fn from_owned(data: impl Into<PdfBytes>) -> Result<Self, PdfError> {
-        let mut icc_cache = IccCache::new();
-        icc_cache.search_system_cmyk_profile();
-        Self::open(resolver::Source::Owned(data.into()), icc_cache, b"")
+        Self::open(
+            resolver::Source::Owned(data.into()),
+            default_icc_cache(),
+            b"",
+        )
     }
 
     /// [`from_owned`](Self::from_owned) with a pre-loaded ICC cache, as
@@ -411,9 +434,7 @@ impl PdfDocument<'static> {
 impl<'a> PdfDocument<'a> {
     /// Parse a PDF from bytes.
     pub fn from_bytes(data: &'a [u8]) -> Result<Self, PdfError> {
-        let mut icc_cache = IccCache::new();
-        icc_cache.search_system_cmyk_profile();
-        Self::from_bytes_inner(data, icc_cache, b"")
+        Self::from_bytes_inner(data, default_icc_cache(), b"")
     }
 
     /// Parse a PDF from bytes, using a pre-loaded ICC cache.
