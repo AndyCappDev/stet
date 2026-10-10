@@ -6486,6 +6486,10 @@ fn bilinear_prescale(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> 
     dst
 }
 
+/// The most tiles one pattern fill draws; a fill asking for more is not
+/// painted.
+const MAX_PATTERN_TILES: i64 = 10000;
+
 fn render_pattern_fill(
     pixmap: &mut Pixmap,
     band_state: &mut BandState,
@@ -6605,13 +6609,42 @@ fn render_pattern_fill(
         tv_max = tv_max.max(tv);
     }
 
-    let tile_x_start = tu_min.floor() as i32 - 1;
-    let tile_x_end = tu_max.ceil() as i32 + 1;
-    let tile_y_start = tv_min.floor() as i32 - 1;
-    let tile_y_end = tv_max.ceil() as i32 + 1;
+    // Every tile whose cell reaches the area, not only those whose origin is
+    // within a step of it. A cell need not sit at its tile's origin — a
+    // `/BBox` of [144 472 429 540] with a 68-unit step is seven steps from
+    // it — and one larger than the step reaches over its neighbours; taking
+    // tiles by their origins left such fills partly or wholly unpainted. In
+    // steps, a cell runs from `cell_min` to `cell_max` past its tile's
+    // origin; one within a step of the origin gives the range used before.
+    let cell_u = (params.bbox[0] / params.xstep, params.bbox[2] / params.xstep);
+    let cell_v = (params.bbox[1] / params.ystep, params.bbox[3] / params.ystep);
+    let reach = |cell: (f64, f64)| {
+        let (lo, hi) = (cell.0.min(cell.1), cell.0.max(cell.1));
+        if lo.is_finite() && hi.is_finite() {
+            (lo.min(0.0), hi.max(1.0))
+        } else {
+            (0.0, 1.0)
+        }
+    };
+    let (cell_u_min, cell_u_max) = reach(cell_u);
+    let (cell_v_min, cell_v_max) = reach(cell_v);
+    let mut tile_x_start = (tu_min - cell_u_max).floor() as i32;
+    let mut tile_x_end = (tu_max - cell_u_min).ceil() as i32 + 1;
+    let mut tile_y_start = (tv_min - cell_v_max).floor() as i32;
+    let mut tile_y_end = (tv_max - cell_v_min).ceil() as i32 + 1;
+    // A cell many steps across would ask for more tiles than are drawn at
+    // all (below); for those, the tiles a step either side, as before.
+    if (tile_x_end as i64 - tile_x_start as i64) * (tile_y_end as i64 - tile_y_start as i64)
+        > MAX_PATTERN_TILES
+    {
+        tile_x_start = tu_min.floor() as i32 - 1;
+        tile_x_end = tu_max.ceil() as i32 + 1;
+        tile_y_start = tv_min.floor() as i32 - 1;
+        tile_y_end = tv_max.ceil() as i32 + 1;
+    }
 
     let tile_count = (tile_x_end - tile_x_start) as i64 * (tile_y_end - tile_y_start) as i64;
-    if tile_count > 10000 {
+    if tile_count > MAX_PATTERN_TILES {
         return;
     }
 

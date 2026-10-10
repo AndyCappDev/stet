@@ -65,6 +65,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A tiling pattern whose cell is not at its tile's origin is painted.**
+  The renderer drew the tiles whose origins lay within a step of the shape
+  being filled. A pattern's cell is its `/BBox`, which can sit anywhere: a
+  chart whose fills used a `/BBox` of `[144 472 429 540]` with a 68-unit
+  step has its cell seven steps from the origin, and those fills came out
+  blank. Every tile whose cell reaches the shape is now drawn, which also
+  covers cells larger than the step.
 - **Bands no longer wait on each other to build paths.** The renderer
   grew each path it built a few points at a time, and with every band
   doing that for every glyph the threads spent their time queued in the
