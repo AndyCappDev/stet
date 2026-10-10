@@ -1439,11 +1439,14 @@ impl IccCache {
     }
 
     /// Search system paths for a CMYK ICC profile and register it.
+    ///
+    /// Says nothing either way: a library opening a document has no
+    /// business on the application's stderr. Whether one was found is
+    /// [`default_cmyk_hash`](Self::default_cmyk_hash) being `Some`.
     pub fn search_system_cmyk_profile(&mut self) {
         if let Some(bytes) = find_system_cmyk_profile()
             && let Some(hash) = self.register_profile(&bytes)
         {
-            eprintln!("[ICC] Loaded system CMYK profile");
             self.system_cmyk_bytes = Some(Arc::new(bytes));
             self.default_cmyk_hash = Some(hash);
         }

@@ -1551,6 +1551,9 @@ fn build_icc_cache(icc_cfg: &IccCliConfig) -> stet_graphics::icc::IccCache {
         source_cmyk_profile: None,
     });
     cache.search_system_cmyk_profile();
+    if cache.default_cmyk_hash().is_some() {
+        eprintln!("[ICC] Loaded system CMYK profile");
+    }
     cache
 }
 

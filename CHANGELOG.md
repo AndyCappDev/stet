@@ -24,6 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drawing a page can now be stopped. See `docs/PDF-READER-API.md`,
   "Giving up on a page".
 
+### Changed
+
+- **Opening a PDF prints nothing.** `IccCache::search_system_cmyk_profile`
+  — which `PdfDocument::from_bytes` and `from_owned` call — wrote
+  `[ICC] Loaded system CMYK profile` to stderr every time it found one,
+  so an application embedding the reader had that line on its stderr for
+  every document it opened. The library no longer says it; the `stet`
+  command does, as before. Whether a profile was found is
+  `IccCache::default_cmyk_hash` being `Some`.
+
 ## [0.8.5] — 2026-10-09
 
 ### Added
