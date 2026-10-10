@@ -58,6 +58,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   end to end; the pages come out byte for byte the same. This is the PDF
   reader only — the PostScript interpreter's Type 42 path was not
   affected.
+- **Text is faster to read: a glyph's outline is drawn once per page.**
+  The PDF reader asked the font for an outline — a hinting program or a
+  charstring to run — every time a glyph was shown, and a page of prose
+  shows a few dozen glyphs thousands of times. It now keeps each font's
+  outlines for the rest of the page. Building the display list for the
+  first page of six office documents went from 11–19 ms to 6–12 ms; the
+  lists are the same.
 - **Opening a second PDF no longer pays for the system CMYK profile
   again.** `PdfDocument::from_bytes` and `from_owned` searched for the
   profile, read it and built its transforms on every call: about 30 ms,

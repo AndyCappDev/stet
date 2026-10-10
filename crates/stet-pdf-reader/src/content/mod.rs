@@ -512,6 +512,9 @@ pub struct ContentInterpreter<'a> {
     d1_color_suppressed: bool,
     font_cache: FontCache,
     current_font: Option<Arc<PdfFont>>,
+    /// The glyph outlines this page has drawn so far, by font: see
+    /// [`Self::glyph_outline`].
+    glyph_outlines: std::collections::HashMap<*const PdfFont, FontOutlines>,
     /// CTM at the start of the current content stream (page or form).
     /// PDF pattern Matrix maps to the "default (initial) coordinate system
     /// of the parent content stream" — for patterns inside Form XObjects,
@@ -636,7 +639,66 @@ pub struct ContentInterpreter<'a> {
         std::collections::HashMap<Vec<u8>, Arc<stet_graphics::device::TintLookupTable>>,
 }
 
+/// Which of a font's outlines is wanted: the three ways the text operators
+/// ask a font for one.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum GlyphKey {
+    /// [`PdfFont::glyph_path`], by character code.
+    Code(u8),
+    /// [`PdfFont::glyph_path_cid`], by CID.
+    Cid(u16),
+    /// [`PdfFont::glyph_path_unicode`], by Unicode value.
+    Unicode(u16),
+}
+
+/// One font's outlines as drawn so far on a page, in glyph space.
+struct FontOutlines {
+    /// Keeps the font alive, and so at the address it is filed under.
+    _font: Arc<PdfFont>,
+    /// `None` for a glyph the font has no outline for.
+    paths: std::collections::HashMap<GlyphKey, Option<Arc<PsPath>>>,
+}
+
 impl<'a> ContentInterpreter<'a> {
+    /// The outline `font` gives for `key`, in glyph space.
+    ///
+    /// Asking a font for an outline is the dear part of showing text: a
+    /// TrueType glyph is run through its hinting program, a Type 1 or CFF
+    /// one through its charstring, each time. A page of prose shows a few
+    /// dozen glyphs thousands of times, so the outlines of the current font
+    /// are kept for the rest of the page. They are in glyph space, before
+    /// the font size and the text and current matrices, so one outline
+    /// serves every size and place the glyph is shown at.
+    fn glyph_outline(&mut self, font: &PdfFont, key: GlyphKey) -> Option<Arc<PsPath>> {
+        let draw = |font: &PdfFont| {
+            match key {
+                GlyphKey::Code(code) => font.glyph_path(code),
+                GlyphKey::Cid(cid) => font.glyph_path_cid(cid),
+                GlyphKey::Unicode(unicode) => font.glyph_path_unicode(unicode),
+            }
+            .map(Arc::new)
+        };
+        // Only the current font is kept: it is the one this holds an `Arc`
+        // of, which is what makes its address a safe name for it.
+        let Some(current) = self
+            .current_font
+            .as_ref()
+            .filter(|current| std::ptr::eq(Arc::as_ptr(current), font))
+        else {
+            return draw(font);
+        };
+        self.glyph_outlines
+            .entry(Arc::as_ptr(current))
+            .or_insert_with(|| FontOutlines {
+                _font: Arc::clone(current),
+                paths: std::collections::HashMap::new(),
+            })
+            .paths
+            .entry(key)
+            .or_insert_with(|| draw(font))
+            .clone()
+    }
+
     /// Create a new interpreter.
     pub fn new(
         resolver: &'a Resolver<'a>,
@@ -670,6 +732,7 @@ impl<'a> ContentInterpreter<'a> {
             nested_mask_flush_count: 0,
             font_cache: FontCache::new(),
             current_font: None,
+            glyph_outlines: std::collections::HashMap::new(),
             icc_cache: icc_cache.clone(),
             soft_mask_scope: None,
             font_provider,
@@ -3858,7 +3921,7 @@ impl<'a> ContentInterpreter<'a> {
         } else {
             // Simple font: 1-byte character codes
             for &byte in text {
-                if let Some(glyph_path) = font.glyph_path(byte) {
+                if let Some(glyph_path) = self.glyph_outline(&font, GlyphKey::Code(byte)) {
                     let text_state_matrix =
                         Matrix::new(font_size * th, 0.0, 0.0, font_size, 0.0, text_rise);
                     let trm = self
@@ -3905,7 +3968,7 @@ impl<'a> ContentInterpreter<'a> {
             render_mode,
         } = text;
         let vertical = font.wmode() == 1;
-        if let Some(glyph_path) = font.glyph_path_cid(cid) {
+        if let Some(glyph_path) = self.glyph_outline(font, GlyphKey::Cid(cid)) {
             let text_state_matrix = if vertical {
                 // Vertical mode: use per-CID metrics (w1, v_x, v_y) from W2/DW2.
                 // v_x/v_y define the position vector from horizontal to vertical origin.
@@ -3969,7 +4032,7 @@ impl<'a> ContentInterpreter<'a> {
         } = text;
         let vertical = font.wmode() == 1;
         // Try to render the glyph shape via Unicode mapping in the substitute font
-        if let Some(glyph_path) = font.glyph_path_unicode(unicode as u16) {
+        if let Some(glyph_path) = self.glyph_outline(font, GlyphKey::Unicode(unicode as u16)) {
             let text_state_matrix = if vertical {
                 let [_w1, v_x, v_y] = font.vertical_metrics_cid(cid);
                 Matrix::new(
@@ -4021,10 +4084,9 @@ impl<'a> ContentInterpreter<'a> {
             render_mode,
         } = text;
         let unicode = font::winansi_byte_to_unicode(byte);
-        if let Some(glyph_path) = self
-            .current_font
-            .as_ref()
-            .and_then(|f| f.glyph_path_unicode(unicode))
+        let current = self.current_font.clone();
+        if let Some(glyph_path) =
+            current.and_then(|font| self.glyph_outline(&font, GlyphKey::Unicode(unicode)))
         {
             let text_state_matrix =
                 Matrix::new(font_size * th, 0.0, 0.0, font_size, 0.0, text_rise);
