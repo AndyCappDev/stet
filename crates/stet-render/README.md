@@ -13,7 +13,7 @@ Built on
 [`stet-tiny-skia`](https://crates.io/crates/stet-tiny-skia), a modified
 fork of [tiny-skia](https://github.com/RazrFalcon/tiny-skia) with
 higher-quality analytical antialiasing for PostScript-grade hairlines.
-Rendering is multi-threaded and banded (sized to fit L2 cache), with
+Rendering is multi-threaded and banded (128 rows to a band), with
 mask caching, clip fast paths, and ICC-aware CMYK handling.
 
 Because `DisplayList` is the neutral meeting point between stet's PS

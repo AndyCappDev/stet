@@ -1031,38 +1031,32 @@ struct ClipEpoch {
     has_erase_page: bool,
 }
 
-/// Choose band height so that band pixmap + 2 clip masks fit in ~2 MB (L2 cache).
-/// Returns `page_h` when banding is not worthwhile (≤2 bands).
+/// Rows in a band of a page that is rendered in bands.
+///
+/// One height for every page, whatever its width and whatever the number of
+/// threads. A page's pixels are not quite independent of where its bands
+/// fall — anti-aliasing at a seam, a row of a fine pattern, the edge of a
+/// shading can each come out differently — so a height that followed the
+/// machine would make the same page render differently on another one.
+///
+/// 128 rows was measured twice. At 2400 dpi, where smaller bands replay the
+/// display list too often (16 rows: 31.3 s, 64: 22.5 s, 128: 21.8 s,
+/// 256: 22.1 s). And at 72 and 144 dpi, where bands used to be sized to fill
+/// 2 MB — 256 rows at 144 dpi, the whole page at 72 — which left a Letter
+/// page with seven bands or one, and most threads with nothing to do: over
+/// 41 first pages, 128 rows took the median render from 9.6 ms to about 5 ms
+/// at 72 dpi (on 8 threads or 24) and from 8.2 ms to 6.0 ms at 144 dpi on 24
+/// threads, made no difference at 144 dpi on 8, and added about 2% on one. A band and its two clip masks stay under 2 MB up to
+/// 2730 pixels wide.
+const BAND_ROWS: u32 = 128;
+
+/// The height of the bands a `w` × `h` page is rendered in: [`BAND_ROWS`],
+/// or `h` — one band — when the page is no taller than two of them.
 fn select_band_height(w: u32, h: u32) -> u32 {
-    if w == 0 || h == 0 {
+    if w == 0 || h.div_ceil(BAND_ROWS) <= 2 {
         return h;
     }
-    // Per-row cost: w*4 (RGBA) + w*1 (clip mask) + w*1 (spare mask) = w*6
-    let per_row = w as u64 * 6;
-    let budget = 2 * 1024 * 1024u64; // 2 MB (L2)
-    let max_rows = budget / per_row;
-
-    // Floor to power of 2, clamp to [16, h]
-    let band = if max_rows >= h as u64 {
-        h
-    } else {
-        let mut p = 1u32;
-        while (p as u64) * 2 <= max_rows {
-            p *= 2;
-        }
-        // Minimum 128 rows per band. At very high DPI the L2 budget yields
-        // tiny bands (16 rows at 2400 DPI = 1650 bands) where display list
-        // replay overhead dominates. 128-row minimum balances L3 cache fit
-        // (~15 MB working set at 2400 DPI) against per-band overhead (207 bands).
-        // Benchmarked: 16→31.3s, 64→22.5s, 128→21.8s, 256→22.1s.
-        p.clamp(128, h)
-    };
-
-    // Skip banding if ≤2 bands
-    if h.div_ceil(band) <= 2 {
-        return h;
-    }
-    band
+    BAND_ROWS
 }
 
 /// True if this display list contains any `Clip`/`InitClip` op, recursively
@@ -11658,8 +11652,8 @@ fn render_region_prepared_inner(
 
 /// Compute the number of bands and band height for viewport banding.
 ///
-/// Returns `(num_bands, band_height)` using the same L2-cache-budget logic
-/// as the full-page banded renderer.
+/// Returns `(num_bands, band_height)`, the bands being the height the
+/// full-page banded renderer uses.
 pub fn viewport_band_count(pixel_w: u32, pixel_h: u32) -> (u32, u32) {
     let band_h = select_band_height(pixel_w, pixel_h);
     let num_bands = if band_h >= pixel_h {
@@ -12569,7 +12563,7 @@ impl<'a> RegionRender<'a> {
 /// Render a full-page display list to RGBA pixels using the banded parallel renderer.
 ///
 /// This is the preferred way to render a complete page — it uses rayon parallelism
-/// (when the `parallel` feature is enabled) and L2-cache-friendly band sizing.
+/// (when the `parallel` feature is enabled), a band being 128 rows.
 /// For sub-region / zoomed viewport rendering, use `render_region` instead.
 ///
 /// Returns RGBA pixel data of size `pixel_w × pixel_h × 4`, composited onto white.

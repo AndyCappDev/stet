@@ -667,8 +667,10 @@ re-interpreting or re-preparing.
 
 ### Banded Rendering
 
-For large pages, the rasterizer splits the output into horizontal bands
-sized to fit in L2 cache. Each band is rendered independently, enabling:
+The rasterizer splits a page taller than 256 pixels into horizontal bands
+of 128 rows — the same height on every machine, whatever its thread count,
+because a page's pixels are not quite independent of where its bands fall.
+Each band is rendered independently, enabling:
 
 - **Memory efficiency**: Only one band's pixel buffer is live at a time
 - **Parallelism**: Bands are rendered in parallel via rayon (when the

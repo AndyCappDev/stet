@@ -48,6 +48,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cache the renderer builds for itself from a display list has no sink, so
   a failure met only there is no longer printed.
 
+- **Pages are rendered in bands of 128 rows at every resolution.** Bands
+  used to be sized to fill 2 MB, which below about 160 dpi meant few of
+  them or one: a Letter page had seven at 144 dpi and was not banded at
+  all at 72, so most threads had nothing to do at the resolutions a
+  viewer draws at. Over the first pages of 41 documents the median render
+  went from 9.6 ms to about 5 ms at 72 dpi, and from 8.2 ms to 6.0 ms at
+  144 dpi on 24 threads; at 144 dpi on 8 threads it is unchanged, and on
+  one thread about 2% slower. Pages wider than 1365 pixels — Letter
+  above 160 dpi — already used 128 rows and are untouched. **Pixels change**: a page is not quite
+  independent of where its bands fall, so about half of those pages
+  differ from before, most by one or two levels in a handful of pixels
+  and a few by more in single pixels of a fine pattern or along the edge
+  of a shading. The height does not depend on the number of threads, so a
+  page still renders the same on every machine.
+
 ### Fixed
 
 - **Bands no longer wait on each other to build paths.** The renderer
