@@ -441,7 +441,21 @@ fn u8_to_blend_mode(mode: u8) -> BlendMode {
 const MAX_PATH_COORD: f32 = 1e6;
 
 fn build_skia_path(path: &PsPath) -> Option<stet_tiny_skia::Path> {
-    let mut pb = PathBuilder::new();
+    // Sized up front, so that the builder never has to grow. A page of text
+    // makes one of these per glyph per band, and growing each one a few
+    // points at a time kept every band's thread waiting on the allocator.
+    let points: usize = path
+        .segments
+        .iter()
+        .map(|seg| match seg {
+            PathSegment::MoveTo(..) | PathSegment::LineTo(..) => 1,
+            PathSegment::CurveTo { .. } => 3,
+            PathSegment::ClosePath => 0,
+        })
+        .sum();
+    // A segment drawn without a `MoveTo` before it has one put in for it,
+    // which the room for one more of each allows for a path's first.
+    let mut pb = PathBuilder::with_capacity(path.segments.len() + 1, points + 1);
 
     for seg in &path.segments {
         match seg {

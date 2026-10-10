@@ -50,6 +50,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Bands no longer wait on each other to build paths.** The renderer
+  grew each path it built a few points at a time, and with every band
+  doing that for every glyph the threads spent their time queued in the
+  allocator: on a page of text in 25 bands, 31 s of system time against
+  16 s of work over 200 renders, and 0.3 s once each path is sized before
+  it is filled. That was what made more, smaller bands slower instead of
+  faster. Pages render byte for byte as before.
 - **Pages set in embedded TrueType fonts are several times faster to
   read.** Every glyph outline set up the font's hinting afresh, which
   runs the font's `fpgm` and `prep` programs: far more work than drawing
