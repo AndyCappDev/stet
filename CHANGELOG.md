@@ -86,6 +86,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that buffer, a pattern fill can differ from before by a level or two
   along its edges, and occasionally by a row or pixel of the tile's own
   detail.
+- **A font is resolved once for a document, not once for every page.**
+  Each page read the font program and built the encoding, widths and
+  character maps of every font it used, however many pages before it had
+  done the same. `PdfDocument` now keeps resolved fonts, up to 64 MB of
+  font data with the least recently used going first, and
+  `set_font_provider` discards them. Over 607 pages of 131 documents,
+  reading every page a second time took 17% less; a ten-page document
+  whose time was nearly all fonts went from 117 ms to 6 ms. Display
+  lists, pixels and warnings are unchanged: a page that takes a font an
+  earlier page resolved reports the warnings resolving it raised as its
+  own, and a font that failed to resolve is tried again by each page.
 - **Bands no longer wait on each other to build paths.** The renderer
   grew each path it built a few points at a time, and with every band
   doing that for every glyph the threads spent their time queued in the

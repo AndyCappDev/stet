@@ -102,6 +102,17 @@ takes its own copy, so opening a second document costs only its own
 parsing. A profile installed while the process runs is not picked up;
 build an `IccCache` and use a `_with_icc` constructor for that.
 
+A document keeps the fonts its pages use. A font is resolved — its
+program read, its encoding, widths and character maps built — the first
+time a page shows text in it, and later pages, or the same page read
+again at another size, take it as it is. A page that takes a font another
+page resolved still reports the warnings resolving it raised, as its own.
+The fonts kept are bounded at 64 MB of font data, the least recently used
+going first, so a long document whose every page embeds fonts of its own
+does not hold them all; `set_font_provider` discards them, since what a
+font resolves to depends on the provider. A font that failed to resolve is
+not kept, and each page that uses it says so.
+
 ### Display lists and resolution
 
 `render_page(page, dpi)` returns a display list in device space at `dpi`,

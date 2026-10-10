@@ -3334,6 +3334,36 @@ impl<'a> ContentInterpreter<'a> {
         Ok(())
     }
 
+    /// Resolve the font `font_ref` names, taking it from the document's
+    /// fonts when an earlier page — or an earlier reading of this one —
+    /// resolved the same object, and keeping it there otherwise.
+    ///
+    /// Only a font that resolved is kept: one that failed is resolved again
+    /// by each page that asks, so that each reports the failure.
+    fn resolve_document_font(&mut self, font_ref: &PdfObj) -> Result<Arc<PdfFont>, PdfError> {
+        let PdfObj::Ref(num, generation) = *font_ref else {
+            return font::resolve_font(self.resolver, font_ref, self.font_provider.as_ref())
+                .map(Arc::new);
+        };
+        let key = (num, generation);
+        let kept = self.resolver.fonts.borrow_mut().get(key);
+        if let Some((font, warnings)) = kept {
+            for (severity, message) in warnings {
+                self.resolver.warn_content(severity, message);
+            }
+            return Ok(font);
+        }
+        let (font, warnings) = self.resolver.capturing_content_warnings(|| {
+            font::resolve_font(self.resolver, font_ref, self.font_provider.as_ref())
+        });
+        let font = Arc::new(font?);
+        self.resolver
+            .fonts
+            .borrow_mut()
+            .insert(key, Arc::clone(&font), warnings);
+        Ok(font)
+    }
+
     /// Resolve the current font by name from the font cache or resources.
     fn resolve_current_font(&mut self, name: &[u8]) {
         // Check cache by name first (fast path for the common case where the
@@ -3393,9 +3423,8 @@ impl<'a> ContentInterpreter<'a> {
             }
         }
 
-        match font::resolve_font(self.resolver, &font_ref, self.font_provider.as_ref()) {
-            Ok(font) => {
-                let arc = Arc::new(font);
+        match self.resolve_document_font(&font_ref) {
+            Ok(arc) => {
                 self.register_font_text(&arc, &font_ref, true);
                 // Cache under both the name and object number keys
                 if let PdfObj::Ref(obj_num, _) = &font_ref {
@@ -7293,9 +7322,8 @@ impl<'a> ContentInterpreter<'a> {
             if let Some(cached) = self.font_cache.get(&cache_key) {
                 self.current_font = Some(Arc::clone(cached));
             } else {
-                match font::resolve_font(self.resolver, font_ref, self.font_provider.as_ref()) {
-                    Ok(font) => {
-                        let arc = Arc::new(font);
+                match self.resolve_document_font(font_ref) {
+                    Ok(arc) => {
                         self.register_font_text(&arc, font_ref, true);
                         self.font_cache.insert(cache_key, Arc::clone(&arc));
                         self.current_font = Some(arc);

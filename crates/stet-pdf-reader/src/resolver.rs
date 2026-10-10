@@ -62,6 +62,12 @@ pub struct Resolver<'a> {
     /// Most samples an image may have and still be decoded: the
     /// application's ceiling, or the built-in one.
     max_image_pixels: std::cell::Cell<u64>,
+    /// The fonts resolved so far, kept from one page to the next.
+    pub(crate) fonts: RefCell<crate::content::font::DocumentFonts>,
+    /// The content warnings raised while
+    /// [`capturing_content_warnings`](Self::capturing_content_warnings) is
+    /// running, innermost last.
+    content_capture: RefCell<Vec<Vec<(crate::diagnostics::Severity, String)>>>,
 }
 
 /// Most distinct content warnings kept for one page.
@@ -168,7 +174,29 @@ impl<'a> Resolver<'a> {
         severity: crate::diagnostics::Severity,
         message: impl Into<String>,
     ) {
-        self.warn_content_on(self.content_page.get(), severity, message.into());
+        let message = message.into();
+        if let Some(captured) = self.content_capture.borrow_mut().last_mut() {
+            captured.push((severity, message.clone()));
+        }
+        self.warn_content_on(self.content_page.get(), severity, message);
+    }
+
+    /// Run `work`, and return with its result the content warnings it
+    /// raised. They are recorded as usual as well; this is for work whose
+    /// result is kept and used again where the work is not redone, so that
+    /// the warnings can be raised again there.
+    pub(crate) fn capturing_content_warnings<T>(
+        &self,
+        work: impl FnOnce() -> T,
+    ) -> (T, Vec<(crate::diagnostics::Severity, String)>) {
+        self.content_capture.borrow_mut().push(Vec::new());
+        let result = work();
+        let captured = self.content_capture.borrow_mut().pop().unwrap_or_default();
+        // What an inner capture saw, the one around it saw too.
+        if let Some(outer) = self.content_capture.borrow_mut().last_mut() {
+            outer.extend(captured.iter().cloned());
+        }
+        (result, captured)
     }
 
     /// [`warn_content`](Self::warn_content) for a named page, for content
@@ -269,6 +297,8 @@ impl<'a> Resolver<'a> {
             warnings: crate::diagnostics::WarningSink::new(),
             content_page: std::cell::Cell::new(None),
             content_seen: RefCell::new((None, HashSet::new())),
+            fonts: RefCell::default(),
+            content_capture: RefCell::default(),
             max_image_pixels: std::cell::Cell::new(stet_graphics::image_limits::MAX_IMAGE_PIXELS),
         }
     }
@@ -302,6 +332,8 @@ impl<'a> Resolver<'a> {
             warnings: crate::diagnostics::WarningSink::new(),
             content_page: std::cell::Cell::new(None),
             content_seen: RefCell::new((None, HashSet::new())),
+            fonts: RefCell::default(),
+            content_capture: RefCell::default(),
             max_image_pixels: std::cell::Cell::new(stet_graphics::image_limits::MAX_IMAGE_PIXELS),
         }
     }

@@ -184,6 +184,156 @@ pub struct Type3PdfFont {
 /// Font cache: font resource name → resolved font.
 pub type FontCache = HashMap<Vec<u8>, Arc<PdfFont>>;
 
+/// Most bytes of fonts a document keeps between pages; see
+/// [`DocumentFonts`].
+const DOCUMENT_FONT_BYTES: usize = 64 * 1024 * 1024;
+
+/// The fonts a document has resolved, kept from one page to the next.
+///
+/// A font is an indirect object used by many pages, and resolving it —
+/// reading the font program, building its encoding, widths and character
+/// maps — was done again for every page that used it. Each is kept here
+/// under its object number, with the warnings resolving it raised, so that
+/// a page taking a font from here reports what it would have reported.
+///
+/// Bounded: the fonts used least recently are let go once those kept come
+/// to more than [`DOCUMENT_FONT_BYTES`], so a long document whose every
+/// page embeds fonts of its own does not keep them all. A font still in
+/// use by a page being read is kept alive by that page.
+#[derive(Default)]
+pub(crate) struct DocumentFonts {
+    entries: HashMap<(u32, u16), KeptFont>,
+    bytes: usize,
+    clock: u64,
+}
+
+/// The content warnings resolving a font raised.
+pub(crate) type FontWarnings = Vec<(crate::diagnostics::Severity, String)>;
+
+struct KeptFont {
+    font: Arc<PdfFont>,
+    warnings: FontWarnings,
+    bytes: usize,
+    used: u64,
+}
+
+impl DocumentFonts {
+    /// The font kept for object `key`, and the warnings resolving it raised.
+    pub(crate) fn get(&mut self, key: (u32, u16)) -> Option<(Arc<PdfFont>, FontWarnings)> {
+        self.clock += 1;
+        let kept = self.entries.get_mut(&key)?;
+        kept.used = self.clock;
+        Some((Arc::clone(&kept.font), kept.warnings.clone()))
+    }
+
+    /// Keep `font` for object `key`.
+    pub(crate) fn insert(&mut self, key: (u32, u16), font: Arc<PdfFont>, warnings: FontWarnings) {
+        let bytes = font.approx_bytes();
+        if bytes > DOCUMENT_FONT_BYTES {
+            return;
+        }
+        self.clock += 1;
+        let kept = KeptFont {
+            font,
+            warnings,
+            bytes,
+            used: self.clock,
+        };
+        if let Some(old) = self.entries.insert(key, kept) {
+            self.bytes -= old.bytes;
+        }
+        self.bytes += bytes;
+        while self.bytes > DOCUMENT_FONT_BYTES {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .filter(|(k, _)| **k != key)
+                .min_by_key(|(_, kept)| kept.used)
+                .map(|(k, _)| *k)
+            else {
+                break;
+            };
+            if let Some(old) = self.entries.remove(&oldest) {
+                self.bytes -= old.bytes;
+            }
+        }
+    }
+
+    /// Forget every font: what a font resolves to depends on the document's
+    /// font provider, so a new provider starts afresh.
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+        self.bytes = 0;
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+impl PdfFont {
+    /// Roughly the memory this font holds, for [`DocumentFonts`]' budget:
+    /// its font program and the tables that grow with the number of glyphs.
+    /// The fixed-size parts are left out.
+    fn approx_bytes(&self) -> usize {
+        fn cff(font: &CffFont) -> usize {
+            let strings = |v: &Vec<Vec<u8>>| v.iter().map(|s| s.len() + 24).sum::<usize>();
+            strings(&font.char_strings)
+                + strings(&font.local_subrs)
+                + strings(&font.global_subrs)
+                + font.charset.iter().map(|n| n.len() + 24).sum::<usize>()
+                + font.fd_select.len()
+                + font
+                    .fd_array
+                    .iter()
+                    .map(|fd| strings(&fd.local_subrs))
+                    .sum::<usize>()
+        }
+        match self {
+            PdfFont::Type1(f) => {
+                f.font
+                    .charstrings
+                    .iter()
+                    .map(|(name, cs)| name.len() + cs.len() + 48)
+                    .sum::<usize>()
+                    + f.font.subrs.iter().map(|s| s.len() + 24).sum::<usize>()
+            }
+            PdfFont::TrueType(f) => {
+                f.data.len()
+                    + f.cmap.len() * 8
+                    + f.to_unicode.len() * 8
+                    + f.post_name_to_gid
+                        .keys()
+                        .map(|name| name.len() + 32)
+                        .sum::<usize>()
+            }
+            PdfFont::Cff(f) => cff(&f.font),
+            PdfFont::CidTrueType(f) => {
+                f.data.len()
+                    + f.cid_widths.len() * 16
+                    + f.cmap.len() * 8
+                    + f.cid_to_gid_map.as_ref().map_or(0, |m| m.len() * 2)
+                    + f.to_unicode.len() * 8
+                    + f.code_to_cid.len() * 8
+                    + f.w2.len() * 32
+            }
+            PdfFont::CidCff(f) => {
+                cff(&f.font)
+                    + f.cid_widths.len() * 16
+                    + f.cmap.as_ref().map_or(0, |m| m.len() * 8)
+                    + f.pdf_cid_to_gid.as_ref().map_or(0, |m| m.len() * 2)
+                    + f.code_to_cid.len() * 8
+                    + f.w2.len() * 32
+                    + f.type1_paths.as_ref().map_or(0, |paths| {
+                        paths.values().map(|p| p.segments.len() * 56 + 32).sum()
+                    })
+            }
+            PdfFont::Type3(f) => f.char_procs.values().map(|p| p.len() + 32).sum(),
+        }
+    }
+}
+
 /// Resolve a PDF font dict into a PdfFont ready for rendering.
 pub fn resolve_font(
     resolver: &Resolver,
@@ -4704,5 +4854,215 @@ fn skrifa_glyph_path(
         None
     } else {
         Some(pen.path)
+    }
+}
+
+#[cfg(test)]
+mod document_fonts_tests {
+    use super::*;
+    use crate::PdfDocument;
+    use crate::diagnostics::{LocationHint, ParsePhase, Severity};
+
+    fn pdf_from(objects: &[String]) -> Vec<u8> {
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, body) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref = pdf.len();
+        pdf.extend(format!("xref\n0 {}\n0000000000 65535 f\r\n", objects.len() + 1).as_bytes());
+        for off in offsets {
+            pdf.extend(format!("{off:010} 00000 n\r\n").as_bytes());
+        }
+        pdf.extend(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
+
+    fn stream(body: &str) -> String {
+        format!("<< /Length {} >>\nstream\n{body}\nendstream", body.len())
+    }
+
+    /// The object number of the font [`two_pages`] shows its text in.
+    const FONT: (u32, u16) = (6, 0);
+
+    /// Two pages showing text in one font, a Type 3 font so that nothing
+    /// about it depends on the fonts the machine has.
+    fn two_pages() -> Vec<u8> {
+        let page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 5 0 R \
+                    /Resources << /Font << /F1 6 0 R >> >> >>";
+        pdf_from(&[
+            "<< /Type /Catalog /Pages 2 0 R >>".into(),
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".into(),
+            page.into(),
+            page.into(),
+            stream("BT /F1 12 Tf 10 50 Td (a) Tj ET"),
+            "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 10 10] /FontMatrix [0.1 0 0 0.1 0 0] \
+             /CharProcs << /a 7 0 R >> /Encoding << /Type /Encoding /Differences [97 /a] >> \
+             /FirstChar 97 /LastChar 97 /Widths [10] >>"
+                .into(),
+            stream("10 0 d0 0 0 10 10 re f"),
+        ])
+    }
+
+    fn kept(doc: &PdfDocument<'_>) -> Option<Arc<PdfFont>> {
+        let mut fonts = doc.resolver().fonts.borrow_mut();
+        fonts.get(FONT).map(|(font, _)| font)
+    }
+
+    #[test]
+    fn a_font_two_pages_share_is_resolved_once() {
+        let pdf = two_pages();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        assert!(kept(&doc).is_none());
+
+        let first = doc.render_page(0, 72.0).unwrap();
+        let font = kept(&doc).expect("the page's font is kept");
+        assert_eq!(doc.resolver().fonts.borrow().len(), 1);
+
+        let second = doc.render_page(1, 72.0).unwrap();
+        let again = doc.render_page(0, 72.0).unwrap();
+        assert!(Arc::ptr_eq(&font, &kept(&doc).unwrap()));
+        assert_eq!(doc.resolver().fonts.borrow().len(), 1);
+
+        // The same content, read the same whether its font was resolved
+        // for it or taken from an earlier page.
+        assert!(!first.elements().is_empty());
+        assert_eq!(format!("{second:?}"), format!("{first:?}"));
+        assert_eq!(format!("{again:?}"), format!("{first:?}"));
+        assert!(
+            doc.parse_warnings().is_empty(),
+            "{:?}",
+            doc.parse_warnings()
+        );
+    }
+
+    #[test]
+    fn a_new_font_provider_resolves_the_fonts_again() {
+        let pdf = two_pages();
+        let mut doc = PdfDocument::from_bytes(&pdf).unwrap();
+        doc.render_page(0, 72.0).unwrap();
+        let before = kept(&doc).unwrap();
+
+        doc.set_font_provider(Arc::new(|_| None));
+        assert!(kept(&doc).is_none());
+        doc.render_page(0, 72.0).unwrap();
+        assert!(!Arc::ptr_eq(&before, &kept(&doc).unwrap()));
+    }
+
+    /// What resolving a font reported is reported again by each page that
+    /// takes the kept font, as its own.
+    #[test]
+    fn a_page_taking_a_kept_font_reports_what_resolving_it_found() {
+        let pdf = two_pages();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        doc.render_page(0, 72.0).unwrap();
+        let font = kept(&doc).unwrap();
+        doc.resolver().fonts.borrow_mut().insert(
+            FONT,
+            font,
+            vec![(Severity::Warning, "something about the font".into())],
+        );
+
+        doc.render_page(1, 72.0).unwrap();
+        doc.render_page(0, 72.0).unwrap();
+        let pages: Vec<_> = doc
+            .parse_warnings()
+            .iter()
+            .filter(|w| w.phase == ParsePhase::Content && w.message == "something about the font")
+            .map(|w| w.location.clone())
+            .collect();
+        assert_eq!(
+            pages,
+            [Some(LocationHint::Page(1)), Some(LocationHint::Page(0))]
+        );
+    }
+
+    #[test]
+    fn warnings_raised_while_capturing_are_returned_and_still_recorded() {
+        let pdf = two_pages();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        let resolver = doc.resolver();
+        let (value, captured) = resolver.capturing_content_warnings(|| {
+            resolver.warn_content(Severity::Warning, "outer");
+            let (_, inner) = resolver.capturing_content_warnings(|| {
+                resolver.warn_content(Severity::Info, "inner");
+            });
+            assert_eq!(inner, [(Severity::Info, "inner".to_string())]);
+            7
+        });
+        assert_eq!(value, 7);
+        assert_eq!(
+            captured,
+            [
+                (Severity::Warning, "outer".to_string()),
+                (Severity::Info, "inner".to_string())
+            ]
+        );
+        resolver.warn_content(Severity::Warning, "afterwards");
+        assert_eq!(doc.parse_warnings().len(), 3);
+    }
+
+    /// Keeping fonts must not cost the document its ability to move to
+    /// another thread, which a server reading documents on a pool needs.
+    #[test]
+    fn a_document_can_still_be_sent_to_another_thread() {
+        fn sendable<T: Send>() {}
+        sendable::<PdfDocument<'static>>();
+    }
+
+    /// A Type 3 font holding `bytes` of glyph procedure.
+    fn font_of(bytes: usize) -> Arc<PdfFont> {
+        Arc::new(PdfFont::Type3(Type3PdfFont {
+            char_procs: HashMap::from([(b'a', vec![0u8; bytes])]),
+            resources: PdfDict::new(),
+            widths: [0.0; 256],
+            font_matrix: Matrix::identity(),
+            font_bbox: [0.0; 4],
+        }))
+    }
+
+    #[test]
+    fn the_fonts_used_least_recently_go_when_the_budget_is_spent() {
+        let third = DOCUMENT_FONT_BYTES / 3;
+        let mut fonts = DocumentFonts::default();
+        for n in 1..=3 {
+            fonts.insert((n, 0), font_of(third - 1024), Vec::new());
+        }
+        assert_eq!(fonts.len(), 3);
+
+        // Using the first leaves the second as the one used longest ago.
+        assert!(fonts.get((1, 0)).is_some());
+        fonts.insert((4, 0), font_of(third - 1024), Vec::new());
+        assert_eq!(fonts.len(), 3);
+        assert!(fonts.get((2, 0)).is_none());
+        for n in [1, 3, 4] {
+            assert!(fonts.get((n, 0)).is_some(), "font {n}");
+        }
+
+        // One font larger than everything allowed is not kept, and costs
+        // the others nothing.
+        fonts.insert((5, 0), font_of(DOCUMENT_FONT_BYTES + 1), Vec::new());
+        assert!(fonts.get((5, 0)).is_none());
+        assert_eq!(fonts.len(), 3);
+
+        // Resolving the same object again replaces what was kept for it.
+        fonts.insert((1, 0), font_of(16), Vec::new());
+        assert_eq!(fonts.len(), 3);
+        fonts.clear();
+        assert_eq!(fonts.len(), 0);
+        fonts.insert((6, 0), font_of(third * 2), Vec::new());
+        fonts.insert((7, 0), font_of(third * 2), Vec::new());
+        assert_eq!(
+            fonts.len(),
+            1,
+            "the count of bytes started again from nothing"
+        );
     }
 }

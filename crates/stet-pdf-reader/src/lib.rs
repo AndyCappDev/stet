@@ -812,6 +812,8 @@ impl<'a> PdfDocument<'a> {
     /// Set a font data provider for environments without filesystem access.
     pub fn set_font_provider(&mut self, provider: FontProvider) {
         self.font_provider = Some(provider);
+        // What a font resolves to depends on the provider.
+        self.resolver.fonts.borrow_mut().clear();
     }
 
     /// Number of pages in the document.
