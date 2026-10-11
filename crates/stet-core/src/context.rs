@@ -13,7 +13,7 @@ use crate::dual_array_store::DualArrayStore;
 use crate::dual_dict_store::DualDictStore;
 use crate::dual_string_store::DualStringStore;
 use crate::error::PsError;
-use crate::file_store::FileStore;
+use crate::file_store::{FileStore, FilterKind};
 use crate::graphics_state::{GraphicsState, Matrix, PathSegment, PatternData, PsPath};
 use crate::name::NameTable;
 use crate::object::{EntityId, NameId, ObjFlags, PsObject, PsValue, SaveLevel};
@@ -653,6 +653,27 @@ pub struct OcgRecord {
     pub default_visible: bool,
 }
 
+/// The end-of-data mark of a filter that decodes text, for
+/// [`Context::drain_proc_source`].
+#[derive(Clone, Copy)]
+enum TextEnd {
+    /// `>`, which ends `ASCIIHexDecode` data.
+    Hex,
+    /// `~>`, which ends `ASCII85Decode` data.
+    Ascii85,
+}
+
+impl TextEnd {
+    /// Whether the mark is in `data` at or after `from`.
+    fn is_in(self, data: &[u8], from: usize) -> bool {
+        let tail = &data[from.min(data.len())..];
+        match self {
+            TextEnd::Hex => tail.contains(&b'>'),
+            TextEnd::Ascii85 => tail.windows(2).any(|pair| pair == b"~>"),
+        }
+    }
+}
+
 /// Does `data` contain a complete zlib/deflate stream?
 ///
 /// Used to stop draining a procedure data source that feeds `FlateDecode` and
@@ -878,7 +899,12 @@ impl Context {
         // counter, so this costs one integer compare on the overwhelmingly
         // common path where no procedure source exists at all.
         while let Some((src, proc, flate_above)) = self.files.pending_proc_source(entity) {
-            let data = self.drain_proc_source(proc, flate_above)?;
+            let text_end = match self.files.filter_reading(entity, src) {
+                Some(FilterKind::ASCIIHexDecode) => Some(TextEnd::Hex),
+                Some(FilterKind::ASCII85Decode { .. }) => Some(TextEnd::Ascii85),
+                _ => None,
+            };
+            let data = self.drain_proc_source(proc, flate_above, text_end)?;
             self.files.install_proc_data(src, data);
         }
         Ok(())
@@ -890,6 +916,15 @@ impl Context {
     /// means end of data. `flate_above` additionally stops once the collected
     /// bytes form a complete deflate stream: a procedure feeding `FlateDecode`
     /// may cycle indefinitely rather than ever returning the empty string.
+    ///
+    /// `text_end` stops it once the collected bytes hold the end-of-data
+    /// mark of the `ASCIIHexDecode` or `ASCII85Decode` filter reading them.
+    /// The filter reads no further than its mark, so a procedure run on
+    /// demand would not be called again; one that reads the program's own
+    /// file a line at a time — Illustrator's `rdcmntline`, which feeds a
+    /// gradient mesh from comment lines — never returns the empty string
+    /// before the end of the file, and draining it took the rest of the
+    /// program as data: everything after the first mesh was not run.
     ///
     /// KNOWN LIMITATION: not every procedure signals end of data at all.
     /// `pdftops` emits paging readers of the form
@@ -909,6 +944,7 @@ impl Context {
         &mut self,
         procedure: PsObject,
         flate_above: bool,
+        text_end: Option<TextEnd>,
     ) -> Result<Vec<u8>, PsError> {
         /// Cap on what one procedure data source may produce (64 MB).
         const MAX_PROC_BYTES: usize = 64 * 1024 * 1024;
@@ -929,8 +965,14 @@ impl Context {
                     if bytes.is_empty() {
                         break; // end of data per PLRM
                     }
+                    // The mark may straddle two strings, so look from a
+                    // little before where this one starts.
+                    let from = data.len().saturating_sub(1);
                     data.extend_from_slice(&bytes);
                     if flate_above && is_flate_stream_complete(&data) {
+                        break;
+                    }
+                    if text_end.is_some_and(|end| end.is_in(&data, from)) {
                         break;
                     }
                     if data.len() >= MAX_PROC_BYTES {

@@ -580,6 +580,26 @@ impl FileStore {
         None
     }
 
+    /// The filter that reads straight from `source`, found by following the
+    /// chain of filters down from `entity`; `None` when `source` is `entity`
+    /// itself or is not under it.
+    ///
+    /// For a procedure data source, this is the filter whose end-of-data
+    /// mark says when the procedure has been asked for enough.
+    pub fn filter_reading(&self, entity: EntityId, source: EntityId) -> Option<&FilterKind> {
+        let mut cur = entity;
+        for _ in 0..256 {
+            match self.files.get(cur.raw_index()).map(|e| &e.handle) {
+                Some(FileHandle::Filter(state)) if state.source == source => {
+                    return Some(&state.kind);
+                }
+                Some(FileHandle::Filter(state)) => cur = state.source,
+                _ => return None,
+            }
+        }
+        None
+    }
+
     /// Close a not-yet-run procedure data source whose procedure did not
     /// survive a `restore`.
     ///

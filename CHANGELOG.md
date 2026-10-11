@@ -72,6 +72,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `readline` that is an empty first line. PLRM 3.2.2 makes the pair one
   newline. Fixed in the scanner for files, the one for filtered files,
   and `token` on a string, which now leaves what follows the pair.
+- **The program goes on after a mesh whose data a procedure reads from
+  comment lines.** Illustrator stores a gradient mesh's data in `%` lines
+  after the shading, read a line at a time by a procedure behind
+  `ASCII85Decode`. With CR LF line endings the empty line above ended
+  the data at once and every mesh painted nothing, without an error. And
+  with any line endings, stet called the procedure until it returned an
+  empty string, which such a procedure does only at the end of the file:
+  the rest of the program was taken as data and nothing after the first
+  mesh was run. A procedure feeding `ASCIIHexDecode` or `ASCII85Decode`
+  is now asked for data only up to the filter's end-of-data mark.
 - **A tiling pattern whose cell is not at its tile's origin is painted.**
   The renderer drew the tiles whose origins lay within a step of the shape
   being filled. A pattern's cell is its `/BBox`, which can sit anywhere: a
