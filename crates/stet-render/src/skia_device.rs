@@ -15,6 +15,7 @@ use stet_tiny_skia::{
     Mask, Paint, PathBuilder, Pixmap, Stroke, StrokeDash, Transform,
 };
 
+use crate::clip_neighbours::ClipNeighbours;
 #[cfg(feature = "ps-device")]
 use stet_core::device::OutputDevice;
 use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
@@ -1284,6 +1285,11 @@ struct RenderContext<'a> {
     /// OCG visibility overrides. Empty (every layer at its
     /// `default_visible`) when the caller didn't supply one.
     layer_set: &'a LayerSet,
+    /// Which edges of the page's clip paths have another clip against
+    /// them, for the list being rendered and the lists nested in it.
+    /// `None` where there is no such table — a pattern tile, the
+    /// PostScript device painting as it goes — and every clip is hard.
+    clip_neighbours: Option<&'a ClipNeighbours>,
     /// True when nothing painted here is fully opaque, so no transfer
     /// function applies (ISO 32000-1 §11.7.5.2): inside a soft mask's mask
     /// or content, or inside a group drawn with alpha below 1 or a blend
@@ -5405,6 +5411,7 @@ fn render_group(
         parent_group_isolated: params.isolated,
         alpha_extraction_pass: ctx.alpha_extraction_pass,
         layer_set: ctx.layer_set,
+        clip_neighbours: ctx.clip_neighbours,
         transfer_suppressed: group_suppresses_transfer(ctx.transfer_suppressed, params),
     };
 
@@ -5963,6 +5970,7 @@ fn render_knockout_group(
         parent_group_isolated: true,
         alpha_extraction_pass: false,
         layer_set: ctx.layer_set,
+        clip_neighbours: ctx.clip_neighbours,
         transfer_suppressed: group_suppresses_transfer(ctx.transfer_suppressed, params),
     };
 
@@ -6346,6 +6354,7 @@ fn render_soft_masked(
         // backdrop preloading regardless of the outer extraction context.
         alpha_extraction_pass: false,
         layer_set: ctx.layer_set,
+        clip_neighbours: ctx.clip_neighbours,
         transfer_suppressed: true,
     };
 
@@ -6422,6 +6431,7 @@ fn render_soft_masked(
                 ctx.scale_x,
                 ctx.scale_y,
                 ctx.layer_set,
+                ctx.clip_neighbours,
                 mask_images,
                 mask_preprocessed,
             );
@@ -6841,6 +6851,7 @@ fn rasterize_mask(
     scale_x: f32,
     scale_y: f32,
     layer_set: &LayerSet,
+    clip_neighbours: Option<&ClipNeighbours>,
     image_cache: Option<&[CacheEntry<Vec<u8>>]>,
     preprocessed: Option<&[CacheEntry<PreprocessedImage>]>,
 ) -> Option<stet_graphics::display_list::MaskRaster> {
@@ -6903,6 +6914,7 @@ fn rasterize_mask(
         parent_group_isolated: false,
         alpha_extraction_pass: false,
         layer_set,
+        clip_neighbours,
         transfer_suppressed: true,
     };
 
@@ -7545,6 +7557,8 @@ fn paint_pattern_fill(
                     parent_group_isolated: ctx.parent_group_isolated,
                     alpha_extraction_pass: ctx.alpha_extraction_pass,
                     layer_set: ctx.layer_set,
+                    // A tile is a list of its own, in a space of its own.
+                    clip_neighbours: None,
                     transfer_suppressed: ctx.transfer_suppressed,
                 };
 
@@ -7625,6 +7639,8 @@ fn paint_pattern_fill(
                 parent_group_isolated: ctx.parent_group_isolated,
                 alpha_extraction_pass: ctx.alpha_extraction_pass,
                 layer_set: ctx.layer_set,
+                // A tile is a list of its own, in a space of its own.
+                clip_neighbours: None,
                 transfer_suppressed: ctx.transfer_suppressed,
             };
             let mut tile_bs = BandState {
@@ -8568,6 +8584,7 @@ impl OutputDevice for SkiaDevice {
                 parent_group_isolated: false,
                 alpha_extraction_pass: false,
                 layer_set: &self.layer_set,
+                clip_neighbours: None,
                 transfer_suppressed: false,
             };
             render_pattern_fill(&mut self.pixmap, &mut band_state, params, &ctx);
@@ -11189,6 +11206,7 @@ fn render_banded_to_sink(
 
     // Pre-populate clip_mask_seen so repeated clip paths get cached from first band
     let clip_seen = precompute_clip_seen(list);
+    let clip_neighbours = ClipNeighbours::build(list);
 
     let needs_cmyk_buffer = page_needs_cmyk_buffer(list);
 
@@ -11291,6 +11309,7 @@ fn render_banded_to_sink(
                     parent_group_isolated: false,
                     alpha_extraction_pass: false,
                     layer_set,
+                    clip_neighbours: Some(&clip_neighbours),
                     transfer_suppressed: false,
                 };
                 render_element(&mut band_pixmap, &mut band_state, &elements[i], &ctx);
@@ -11997,6 +12016,7 @@ pub struct PreparedDisplayList {
     bboxes: Vec<Option<BBox2D>>,
     epochs: Vec<ViewportEpoch>,
     clip_seen: HashSet<u64>,
+    clip_neighbours: ClipNeighbours,
 }
 
 /// Precompute display list metadata for fast viewport rendering.
@@ -12007,10 +12027,12 @@ pub fn prepare_display_list(list: &DisplayList) -> PreparedDisplayList {
     let bboxes = precompute_full_bboxes(list, 72.0);
     let epochs = build_viewport_epochs(list, &bboxes);
     let clip_seen = precompute_clip_seen(list);
+    let clip_neighbours = ClipNeighbours::build(list);
     PreparedDisplayList {
         bboxes,
         epochs,
         clip_seen,
+        clip_neighbours,
     }
 }
 
@@ -12732,6 +12754,7 @@ fn render_region_prepared_inner(
                 parent_group_isolated: false,
                 alpha_extraction_pass: false,
                 layer_set,
+                clip_neighbours: Some(&prepared.clip_neighbours),
                 transfer_suppressed: false,
             };
             render_element(&mut pixmap, &mut state, &elements[i], &ctx);
@@ -12905,6 +12928,7 @@ fn render_region_single_band_inner(
                 parent_group_isolated: false,
                 alpha_extraction_pass: false,
                 layer_set,
+                clip_neighbours: Some(&prepared.clip_neighbours),
                 transfer_suppressed: false,
             };
             render_element(&mut pixmap, &mut state, &elements[i], &ctx);
@@ -14062,6 +14086,7 @@ pub fn render_region(
     let bboxes = precompute_full_bboxes(list, effective_dpi);
     let epochs = build_viewport_epochs(list, &bboxes);
     let clip_seen = precompute_clip_seen(list);
+    let clip_neighbours = ClipNeighbours::build(list);
 
     // OVERLAP padding to match `render_banded_to_sink`. See the comment in
     // `render_region_prepared` for why this is required for tiny-skia
@@ -14151,6 +14176,7 @@ pub fn render_region(
                 parent_group_isolated: false,
                 alpha_extraction_pass: false,
                 layer_set: &layer_set,
+                clip_neighbours: Some(&clip_neighbours),
                 transfer_suppressed: false,
             };
             render_element(&mut pixmap, &mut state, &elements[i], &ctx);
@@ -16961,6 +16987,7 @@ mod tests {
             1.0,
             1.0,
             &LayerSet::new(),
+            None,
             None,
             None,
         )

@@ -34,6 +34,7 @@
 //! Most users should use the [`stet`](https://crates.io/crates/stet)
 //! facade crate rather than depending on `stet-render` directly.
 
+mod clip_neighbours;
 mod png_sink;
 mod skia_device;
 
