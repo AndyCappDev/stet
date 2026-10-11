@@ -112,6 +112,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clip path rasterised a second time already was. The same Keynote slide,
   the same viewport: 1.2 s to 0.27 s on one thread. Output is unchanged.
 
+- **A band of a viewport converts and resamples only the part of an
+  image that it shows.** A viewer draws a view in bands, and every band
+  an image crossed converted the whole image to RGB and scaled the whole
+  of it, to draw a strip: the work of the page once per band. That is
+  every image inside a transparency group or under a soft mask, which the
+  viewport image cache leaves out, and the scaling of every image that
+  is in it. A band now works out which rows and columns of the image fall
+  on it — a few rows of an upright image, a few columns of one on its
+  side — and converts and resamples those alone, into an image of the
+  same size and place so that it is drawn exactly as the whole would be.
+  An InDesign page of photographs under soft masks, drawn in thirteen
+  bands at 150 dpi on one thread, went from 2.3 s to 0.73 s, and a
+  zoomed-in part of it from 2.3 s to 0.28 s; across 175 sample files the
+  banded viewport time halved. Output is unchanged.
+
 - **Opening a PDF prints nothing.** `IccCache::search_system_cmyk_profile`
   — which `PdfDocument::from_bytes` and `from_owned` call — wrote
   `[ICC] Loaded system CMYK profile` to stderr every time it found one,

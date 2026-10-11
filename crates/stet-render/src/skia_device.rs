@@ -1898,15 +1898,125 @@ fn viewport_transform(t: Transform, vp_x: f32, vp_y: f32, scale_x: f32, scale_y:
 ///
 /// [`BoxResampler`] runs the same two passes a source row at a time, for a
 /// caller that does not have the whole source in memory.
+#[cfg(test)]
 fn box_resample(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+    box_resample_part(src, sw, sh, dw, dh, &ImagePart::whole(dw, dh))
+}
+
+/// [`box_resample`] for `part` of the output alone: the rest is left
+/// transparent, and the source pixels it would have been made from are
+/// not read.
+fn box_resample_part(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32, part: &ImagePart) -> Vec<u8> {
     if dw == 0 || dh == 0 {
         return Vec::new();
     }
-    let mut resampler = BoxResampler::new(sw, sh, dw, dh);
-    for row in src.chunks_exact(sw as usize * 4).take(sh as usize) {
-        resampler.push_row(row);
+    let mut resampler = BoxResampler::for_part(sw, sh, dw, dh, part);
+    let stride = sw as usize * 4;
+    for sy in resampler.source_part().rows {
+        resampler.push_row(&src[sy * stride..][..stride]);
     }
     resampler.finish()
+}
+
+/// A part of an image: some of its rows, and some of the columns of those.
+#[derive(Clone, Debug, PartialEq)]
+struct ImagePart {
+    rows: std::ops::Range<usize>,
+    cols: std::ops::Range<usize>,
+}
+
+impl ImagePart {
+    /// All of a `w × h` image.
+    fn whole(w: u32, h: u32) -> Self {
+        ImagePart {
+            rows: 0..h as usize,
+            cols: 0..w as usize,
+        }
+    }
+
+    /// No part of an image.
+    fn none() -> Self {
+        ImagePart {
+            rows: 0..0,
+            cols: 0..0,
+        }
+    }
+
+    /// The part that lies within a `w × h` image; if that is nothing, both
+    /// ranges are empty.
+    fn within(&self, w: usize, h: usize) -> Self {
+        let rows = self.rows.start.min(h)..self.rows.end.min(h);
+        let cols = self.cols.start.min(w)..self.cols.end.min(w);
+        if rows.is_empty() || cols.is_empty() {
+            ImagePart::none()
+        } else {
+            ImagePart { rows, cols }
+        }
+    }
+}
+
+/// The part of an image that drawing it can read.
+///
+/// A viewport is rendered in bands, and each band draws the images that
+/// cross it. A band reads only the part of an image that falls on it — a
+/// few rows of one that is upright, a few columns of one on its side — so
+/// converting and resampling the whole image for every band did the work
+/// of the page once per band. An image made for a band has its full size
+/// and its place on the page, so that it is drawn exactly as the whole
+/// would be, but only the part the band reads is filled in.
+#[derive(Clone, Copy)]
+enum Drawn {
+    /// All of it: the image is being made to be kept.
+    All,
+    /// The part that falls on a surface of this size.
+    Onto { width: u32, height: u32 },
+}
+
+impl Drawn {
+    /// Pixels either side of those that fall on the surface that sampling
+    /// may reach: a bicubic filter reads two beyond the pixel a centre
+    /// lands in, and one is for rounding.
+    const MARGIN: f64 = 3.0;
+
+    /// The part of a `w × h` image, drawn through `transform`, that the
+    /// draw can read.
+    fn of(self, transform: Transform, w: u32, h: u32) -> ImagePart {
+        let whole = ImagePart::whole(w, h);
+        let Drawn::Onto { width, height } = self else {
+            return whole;
+        };
+        // The image column and row a point of the surface comes from.
+        let (sx, kx, ky, sy) = (
+            transform.sx as f64,
+            transform.kx as f64,
+            transform.ky as f64,
+            transform.sy as f64,
+        );
+        let (tx, ty) = (transform.tx as f64, transform.ty as f64);
+        let det = sx * sy - kx * ky;
+        let col_at = |x: f64, y: f64| (sy * (x - tx) - kx * (y - ty)) / det;
+        let row_at = |x: f64, y: f64| (sx * (y - ty) - ky * (x - tx)) / det;
+        let (sw, sh) = (width as f64, height as f64);
+        let corners = [(0.0, 0.0), (sw, 0.0), (0.0, sh), (sw, sh)];
+        // The range of a coordinate over the surface, widened and held to
+        // the image; `None` if it is not made of numbers.
+        let range = |at: &dyn Fn(f64, f64) -> f64, size: u32| {
+            let values = corners.map(|(x, y)| at(x, y));
+            let low = values.iter().copied().fold(f64::INFINITY, f64::min);
+            let high = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            if !(low.is_finite() && high.is_finite()) {
+                return None;
+            }
+            // A cast from float saturates, so a far-off pixel lands on an edge.
+            let first = ((low.floor() - Self::MARGIN).max(0.0) as usize).min(size as usize);
+            let end = ((high.ceil() + Self::MARGIN).max(0.0) as usize).min(size as usize);
+            Some(first..end.max(first))
+        };
+        match (range(&row_at, h), range(&col_at, w)) {
+            (Some(rows), Some(cols)) => ImagePart { rows, cols }.within(w as usize, h as usize),
+            _ => whole,
+        }
+    }
 }
 
 /// The source rows one output row of the box filter's vertical pass covers.
@@ -1960,7 +2070,6 @@ struct BoxColumnSpan {
 struct BoxResampler {
     sh: usize,
     dw: usize,
-    dh: usize,
     ratio_y: f32,
     /// The source pixels each output column of the horizontal pass covers.
     columns: Vec<BoxColumnSpan>,
@@ -1970,10 +2079,16 @@ struct BoxResampler {
     /// `sy % ring_rows`.
     ring: Vec<f32>,
     ring_rows: usize,
-    /// Source rows pushed so far.
+    /// The source row the next push is.
     pushed: usize,
-    /// Output rows written so far.
+    /// The output row to write next.
     emitted: usize,
+    /// One past the last output row to write.
+    last: usize,
+    /// One past the last source row those output rows are made from.
+    last_source: usize,
+    /// The output columns to write.
+    cols: std::ops::Range<usize>,
     /// Scratch: the (source row, weight) pairs of the row being written.
     weights: Vec<(usize, f32)>,
     /// Scratch: the weighted sums of the row being written, `dw * 4`.
@@ -1982,9 +2097,14 @@ struct BoxResampler {
 }
 
 impl BoxResampler {
-    /// A resampler from `sw × sh` to `dw × dh`, all non-zero.
-    fn new(sw: u32, sh: u32, dw: u32, dh: u32) -> Self {
+    /// A resampler from `sw × sh` to `dw × dh`, all non-zero, that writes
+    /// `part` of the output alone and leaves the rest transparent. It is
+    /// fed the rows of [`Self::source_part`], in order and whole, and reads
+    /// the columns of that part of them.
+    fn for_part(sw: u32, sh: u32, dw: u32, dh: u32, part: &ImagePart) -> Self {
         let (sw, sh, dw, dh) = (sw as usize, sh as usize, dw as usize, dh as usize);
+        let ImagePart { rows, cols } = part.within(dw, dh);
+        let (first, last) = (rows.start, rows.end);
         let ratio_y = sh as f32 / dh as f32;
         // The ring holds as many rows as the output row that covers the
         // most source rows.
@@ -2021,24 +2141,51 @@ impl BoxResampler {
         Self {
             sh,
             dw,
-            dh,
             ratio_y,
             columns,
             column_weights,
             ring: vec![0.0; ring_rows * dw * 4],
             ring_rows,
-            pushed: 0,
-            emitted: 0,
+            pushed: if first < last {
+                BoxRowSpan::of(first, ratio_y, sh).top
+            } else {
+                0
+            },
+            emitted: first,
+            last,
+            last_source: if first < last {
+                BoxRowSpan::of(last - 1, ratio_y, sh).bottom
+            } else {
+                0
+            },
+            cols,
             weights: Vec::new(),
             sums: vec![0.0; dw * 4],
             out: vec![0u8; dw * dh * 4],
         }
     }
 
+    /// The part of the source the output is made from: the rows to feed,
+    /// and the columns of them that are read.
+    fn source_part(&self) -> ImagePart {
+        let rows = self.pushed.min(self.last_source)..self.last_source;
+        if rows.is_empty() || self.cols.is_empty() {
+            return ImagePart::none();
+        }
+        let (first, last) = (
+            &self.columns[self.cols.start],
+            &self.columns[self.cols.end - 1],
+        );
+        ImagePart {
+            rows,
+            cols: first.left..last.left + last.len,
+        }
+    }
+
     /// Feed the next source row, `sw * 4` bytes of RGBA. Rows past the
-    /// source height are ignored.
+    /// last one needed are ignored.
     fn push_row(&mut self, src_row: &[u8]) {
-        if self.pushed >= self.sh {
+        if self.pushed >= self.last_source {
             return;
         }
         // Horizontal pass (sw → dw) with fractional edge weights. Each
@@ -2048,8 +2195,9 @@ impl BoxResampler {
         // worked out once, in `new`.
         let dw = self.dw;
         let slot = (self.pushed % self.ring_rows) * dw * 4;
-        let dst = &mut self.ring[slot..slot + dw * 4];
-        for (span, out) in self.columns.iter().zip(dst.as_chunks_mut::<4>().0) {
+        let dst = &mut self.ring[slot + self.cols.start * 4..slot + self.cols.end * 4];
+        let columns = &self.columns[self.cols.clone()];
+        for (span, out) in columns.iter().zip(dst.as_chunks_mut::<4>().0) {
             let weights = &self.column_weights[span.first_weight..][..span.len];
             let pixels = src_row[span.left * 4..][..span.len * 4].as_chunks::<4>().0;
             let mut sum = [0.0f32; 4];
@@ -2068,7 +2216,7 @@ impl BoxResampler {
 
         // Vertical pass (sh → dh) for every output row whose source rows
         // are now all in the ring.
-        while self.emitted < self.dh {
+        while self.emitted < self.last {
             let span = BoxRowSpan::of(self.emitted, self.ratio_y, self.sh);
             if span.bottom > self.pushed {
                 break;
@@ -2090,15 +2238,17 @@ impl BoxResampler {
         }));
         // Sum a source row at a time: each pixel still adds its rows in
         // order, so the sums are the ones a pixel-at-a-time loop gives.
-        self.sums.fill(0.0);
+        let cols = self.cols.start * 4..self.cols.end * 4;
+        let sums = &mut self.sums[cols.clone()];
+        sums.fill(0.0);
         for &(sy, w) in &self.weights {
-            let row = &self.ring[(sy % self.ring_rows) * dw * 4..][..dw * 4];
-            for (sum, &v) in self.sums.iter_mut().zip(row) {
+            let row = &self.ring[(sy % self.ring_rows) * dw * 4..][cols.clone()];
+            for (sum, &v) in sums.iter_mut().zip(row) {
                 *sum += v * w;
             }
         }
-        let dst = &mut self.out[self.emitted * dw * 4..][..dw * 4];
-        for (out, &sum) in dst.iter_mut().zip(&self.sums) {
+        let dst = &mut self.out[self.emitted * dw * 4..][cols];
+        for (out, &sum) in dst.iter_mut().zip(sums.iter()) {
             *out = (sum * inv_area + 0.5).clamp(0.0, 255.0) as u8;
         }
         self.emitted += 1;
@@ -2117,45 +2267,58 @@ struct IntegerBoxResampler {
     sw: usize,
     factor: usize,
     nw: usize,
-    nh: usize,
     /// Channel sums of the output row being accumulated, `nw * 4`.
     sums: Vec<u32>,
-    /// Source rows pushed so far.
+    /// The source row the next push is.
     pushed: usize,
+    /// One past the last source row the output is made from.
+    last_source: usize,
+    /// The output columns to write.
+    cols: std::ops::Range<usize>,
     out: Vec<u8>,
 }
 
 impl IntegerBoxResampler {
     /// A resampler from a source `sw` wide to `nw × nh`, where
-    /// `nw * factor <= sw`.
-    fn new(sw: u32, factor: u32, nw: u32, nh: u32) -> Self {
+    /// `nw * factor <= sw`, that writes `part` of the output alone and
+    /// leaves the rest transparent. It is fed the rows of
+    /// [`Self::source_part`], in order and whole, and reads the columns of
+    /// that part of them.
+    fn for_part(sw: u32, factor: u32, nw: u32, nh: u32, part: &ImagePart) -> Self {
         let (nw, nh) = (nw as usize, nh as usize);
+        let ImagePart { rows, cols } = part.within(nw, nh);
         Self {
             sw: sw as usize,
             factor: factor as usize,
             nw,
-            nh,
             sums: vec![0; nw * 4],
-            pushed: 0,
+            pushed: rows.start * factor as usize,
+            last_source: rows.end * factor as usize,
+            cols,
             out: vec![0u8; nw * nh * 4],
         }
     }
 
-    /// The number of source rows the output is made from; the rest are not
-    /// needed.
-    fn rows_needed(&self) -> usize {
-        self.nh * self.factor
+    /// The part of the source the output is made from: the rows to feed,
+    /// and the columns of them that are read. The rest is not needed.
+    fn source_part(&self) -> ImagePart {
+        ImagePart {
+            rows: self.pushed..self.last_source,
+            cols: self.cols.start * self.factor..self.cols.end * self.factor,
+        }
     }
 
     /// Feed the next source row, `sw * 4` bytes of RGBA. Rows past
-    /// [`Self::rows_needed`] are ignored.
+    /// [`Self::source_part`] are ignored.
     fn push_row(&mut self, src_row: &[u8]) {
-        if self.pushed >= self.rows_needed() {
+        if self.pushed >= self.last_source {
             return;
         }
         debug_assert!(src_row.len() >= self.sw * 4);
         let factor = self.factor;
-        for (dx, sum) in self.sums.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let cols = self.cols.clone();
+        let sums = &mut self.sums.as_chunks_mut::<4>().0[cols.clone()];
+        for (dx, sum) in cols.clone().zip(sums.iter_mut()) {
             let block = &src_row[dx * factor * 4..(dx + 1) * factor * 4];
             for px in block.as_chunks::<4>().0 {
                 for (acc, &v) in sum.iter_mut().zip(px) {
@@ -2168,8 +2331,9 @@ impl IntegerBoxResampler {
             let area = (factor * factor) as u32;
             let half = area / 2;
             let dy = self.pushed / factor - 1;
-            let dst = &mut self.out[dy * self.nw * 4..(dy + 1) * self.nw * 4];
-            for (d, sum) in dst.iter_mut().zip(&mut self.sums) {
+            let dst = &mut self.out[dy * self.nw * 4..][cols.start * 4..cols.end * 4];
+            let sums = &mut self.sums[cols.start * 4..cols.end * 4];
+            for (d, sum) in dst.iter_mut().zip(sums) {
                 *d = ((*sum + half) / area) as u8;
                 *sum = 0;
             }
@@ -2188,21 +2352,69 @@ impl IntegerBoxResampler {
 /// Pass 2: vertical resample (sh → dh) and quantize to u8.
 ///
 /// Separable approach: O(dw×sh + dw×dh) × 4 taps instead of O(dw×dh) × 16 taps.
+#[cfg(test)]
 fn bicubic_resample(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+    bicubic_resample_part(src, sw, sh, dw, dh, &ImagePart::whole(dw, dh))
+}
+
+/// The source pixels along one axis that the bicubic filter makes the
+/// output pixels `wanted` from, for a source `source` long and an output
+/// `output` long. `wanted` lies within the output.
+fn bicubic_source_range(
+    source: usize,
+    output: usize,
+    wanted: &std::ops::Range<usize>,
+) -> std::ops::Range<usize> {
+    if wanted.is_empty() || source == 0 {
+        return 0..0;
+    }
+    let ratio = source as f32 / output as f32;
+    // The pixel a tap `offset` from the one output pixel `at` centres on
+    // is read from.
+    let tap = |at: usize, offset: i32| {
+        let centre = (at as f32 + 0.5) * ratio - 0.5;
+        (centre.floor() as i32 + offset).clamp(0, source as i32 - 1) as usize
+    };
+    tap(wanted.start, -1)..tap(wanted.end - 1, 2) + 1
+}
+
+/// The part of a `sw × sh` source that the bicubic filter makes `part` of
+/// a `dw × dh` output from.
+fn bicubic_source_part(sw: u32, sh: u32, dw: u32, dh: u32, part: &ImagePart) -> ImagePart {
+    let part = part.within(dw as usize, dh as usize);
+    ImagePart {
+        rows: bicubic_source_range(sh as usize, dh as usize, &part.rows),
+        cols: bicubic_source_range(sw as usize, dw as usize, &part.cols),
+    }
+}
+
+/// [`bicubic_resample`] for `part` of the output alone: the rest is left
+/// transparent, and the source pixels it would have been made from are
+/// not read.
+fn bicubic_resample_part(
+    src: &[u8],
+    sw: u32,
+    sh: u32,
+    dw: u32,
+    dh: u32,
+    part: &ImagePart,
+) -> Vec<u8> {
     if dw == 0 || dh == 0 {
         return Vec::new();
     }
+    let source = bicubic_source_part(sw, sh, dw, dh, part).rows;
+    let ImagePart { rows, cols } = part.within(dw as usize, dh as usize);
 
     let (sw, sh, dw, dh) = (sw as usize, sh as usize, dw as usize, dh as usize);
     let ratio_x = sw as f32 / dw as f32;
     let ratio_y = sh as f32 / dh as f32;
 
-    // Pass 1: horizontal (sw → dw), keep sh rows, store as f32.
-    let mut tmp = vec![0.0f32; dw * sh * 4];
-    for y in 0..sh {
+    // Pass 1: horizontal (sw → dw), keep the source rows, store as f32.
+    let mut tmp = vec![0.0f32; dw * source.len() * 4];
+    for y in source.clone() {
         let src_row = y * sw * 4;
-        let dst_row = y * dw * 4;
-        for dx in 0..dw {
+        let dst_row = (y - source.start) * dw * 4;
+        for dx in cols.clone() {
             let sx = (dx as f32 + 0.5) * ratio_x - 0.5;
             let sx_floor = sx.floor() as i32;
             let fx = sx - sx_floor as f32;
@@ -2237,7 +2449,7 @@ fn bicubic_resample(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
     let mut out = vec![0u8; dw * dh * 4];
     let tmp_stride = dw * 4;
     let out_stride = dw * 4;
-    for dy in 0..dh {
+    for dy in rows {
         let sy = (dy as f32 + 0.5) * ratio_y - 0.5;
         let sy_floor = sy.floor() as i32;
         let fy = sy - sy_floor as f32;
@@ -2245,12 +2457,13 @@ fn bicubic_resample(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
         let w1 = catmull_rom(fy);
         let w2 = catmull_rom(1.0 - fy);
         let w3 = catmull_rom(2.0 - fy);
-        let py0 = (sy_floor - 1).clamp(0, sh as i32 - 1) as usize * tmp_stride;
-        let py1 = sy_floor.clamp(0, sh as i32 - 1) as usize * tmp_stride;
-        let py2 = (sy_floor + 1).clamp(0, sh as i32 - 1) as usize * tmp_stride;
-        let py3 = (sy_floor + 2).clamp(0, sh as i32 - 1) as usize * tmp_stride;
+        let kept = |row: i32| (row.clamp(0, sh as i32 - 1) as usize - source.start) * tmp_stride;
+        let py0 = kept(sy_floor - 1);
+        let py1 = kept(sy_floor);
+        let py2 = kept(sy_floor + 1);
+        let py3 = kept(sy_floor + 2);
         let dst_row = dy * out_stride;
-        for dx in 0..dw {
+        for dx in cols.clone() {
             let col = dx * 4;
             let r = tmp[py0 + col] * w0
                 + tmp[py1 + col] * w1
@@ -3185,12 +3398,30 @@ fn prescale_image(
     transform: Transform,
     interpolate: bool,
 ) -> Option<(Vec<u8>, u32, u32, Transform)> {
+    prescale_image_part(rgba_data, w, h, transform, interpolate, Drawn::All)
+}
+
+/// [`prescale_image`] for the part a draw reads: the result has the size
+/// and the transform of the whole, with the rest left transparent. Of
+/// `rgba_data`, only [`prescale_source_part`] is read.
+fn prescale_image_part(
+    rgba_data: &[u8],
+    w: u32,
+    h: u32,
+    transform: Transform,
+    interpolate: bool,
+    drawn: Drawn,
+) -> Option<(Vec<u8>, u32, u32, Transform)> {
     match plan_prescale(w, h, transform, interpolate)? {
         Prescale::Bicubic { dw, dh, adjusted } => {
-            Some((bicubic_resample(rgba_data, w, h, dw, dh), dw, dh, adjusted))
+            let part = drawn.of(adjusted, dw, dh);
+            let data = bicubic_resample_part(rgba_data, w, h, dw, dh, &part);
+            Some((data, dw, dh, adjusted))
         }
         Prescale::Box { dw, dh, adjusted } => {
-            Some((box_resample(rgba_data, w, h, dw, dh), dw, dh, adjusted))
+            let part = drawn.of(adjusted, dw, dh);
+            let data = box_resample_part(rgba_data, w, h, dw, dh, &part);
+            Some((data, dw, dh, adjusted))
         }
         Prescale::IntegerBox {
             factor,
@@ -3198,15 +3429,162 @@ fn prescale_image(
             nh,
             adjusted,
         } => {
-            let mut resampler = IntegerBoxResampler::new(w, factor, nw, nh);
-            for row in rgba_data
-                .chunks_exact(w as usize * 4)
-                .take(resampler.rows_needed())
-            {
-                resampler.push_row(row);
+            let part = drawn.of(adjusted, nw, nh);
+            let mut resampler = IntegerBoxResampler::for_part(w, factor, nw, nh, &part);
+            let stride = w as usize * 4;
+            for sy in resampler.source_part().rows {
+                resampler.push_row(&rgba_data[sy * stride..][..stride]);
             }
             Some((resampler.finish(), nw, nh, adjusted))
         }
+    }
+}
+
+/// The part of a `w × h` image that drawing it through `transform` reads,
+/// whether it is prescaled first or drawn as it is: what
+/// [`prescale_image_part`] reads of the image it is given.
+fn prescale_source_part(
+    w: u32,
+    h: u32,
+    transform: Transform,
+    interpolate: bool,
+    drawn: Drawn,
+) -> ImagePart {
+    match plan_prescale(w, h, transform, interpolate) {
+        None => drawn.of(transform, w, h),
+        Some(Prescale::Bicubic { dw, dh, adjusted }) => {
+            bicubic_source_part(w, h, dw, dh, &drawn.of(adjusted, dw, dh))
+        }
+        Some(Prescale::Box { dw, dh, adjusted }) => {
+            BoxResampler::for_part(w, h, dw, dh, &drawn.of(adjusted, dw, dh)).source_part()
+        }
+        Some(Prescale::IntegerBox {
+            factor,
+            nw,
+            nh,
+            adjusted,
+        }) => IntegerBoxResampler::for_part(w, factor, nw, nh, &drawn.of(adjusted, nw, nh))
+            .source_part(),
+    }
+}
+
+/// An image's samples converted to premultiplied RGBA, as [`image_to_rgba`]
+/// gives them, for `part` of the image alone: the result has the size of
+/// the whole, with the rest left transparent and its samples not
+/// converted.
+///
+/// Converts the whole image where [`convert_prescaled`] would not convert
+/// it by rows either: a colour space not read row by row, or short data.
+fn image_part_to_rgba(
+    sample_data: &[u8],
+    params: &ImageParams,
+    icc: Option<&IccCache>,
+    opm_zero_transparent: bool,
+    transfer: Option<&TransferState>,
+    part: &ImagePart,
+) -> Vec<u8> {
+    let (w, h) = (params.width as usize, params.height as usize);
+    let whole = || image_to_rgba(sample_data, params, icc, opm_zero_transparent, transfer);
+    if *part == ImagePart::whole(params.width, params.height) {
+        return whole();
+    }
+    let Some(row_bytes) = sample_row_bytes(params) else {
+        return whole();
+    };
+    if row_bytes == 0 || sample_data.len() / row_bytes < h {
+        return whole();
+    }
+    let mut rgba = vec![0u8; w * h * 4];
+    let part = part.within(w, h);
+    let mut at = part.rows.start;
+    convert_sample_part(
+        sample_data,
+        params,
+        row_bytes,
+        &part,
+        icc,
+        opm_zero_transparent,
+        transfer,
+        &mut |row| {
+            rgba[at * w * 4..][..w * 4].copy_from_slice(row);
+            at += 1;
+        },
+    );
+    rgba
+}
+
+/// The number of bytes one pixel of an image's samples takes, where every
+/// pixel takes the same whole number of them, so that a run of columns can
+/// be lifted out of a row.
+fn sample_pixel_bytes(params: &ImageParams, row_bytes: usize) -> Option<usize> {
+    let w = params.width as usize;
+    let whole_bytes = !matches!(params.color_space, ImageColorSpace::Mask { .. });
+    (whole_bytes && w > 0 && row_bytes.is_multiple_of(w)).then(|| row_bytes / w)
+}
+
+/// Convert `part` of an image's samples to premultiplied RGBA, a strip of
+/// rows at a time, handing each row of the part to `push` as a row of the
+/// whole image's width in which the columns outside the part are
+/// transparent. The samples must be all there, `row_bytes` to a row, and
+/// the part within the image.
+///
+/// Each pixel is converted by itself, so the pixels of a part come out as
+/// they do when the whole image is converted.
+#[expect(clippy::too_many_arguments)]
+fn convert_sample_part(
+    sample_data: &[u8],
+    params: &ImageParams,
+    row_bytes: usize,
+    part: &ImagePart,
+    icc: Option<&IccCache>,
+    opm_zero_transparent: bool,
+    transfer: Option<&TransferState>,
+    push: &mut dyn FnMut(&[u8]),
+) {
+    let w = params.width as usize;
+    let rows = part.rows.clone();
+    // The columns to lift out of each row, and the bytes of a pixel, if
+    // there are columns to leave out and they can be.
+    let lifted = (part.cols != (0..w))
+        .then(|| sample_pixel_bytes(params, row_bytes))
+        .flatten()
+        .filter(|_| !part.cols.is_empty());
+    let cols = if lifted.is_some() {
+        part.cols.clone()
+    } else {
+        0..w
+    };
+    let strip_rows = (CONVERT_STRIP_PIXELS / cols.len().max(1)).max(1);
+    let mut strip_params = params.clone();
+    strip_params.width = cols.len() as u32;
+    let mut lifted_samples = Vec::new();
+    let mut wide_row = vec![0u8; if lifted.is_some() { w * 4 } else { 0 }];
+    let mut start = rows.start;
+    while start < rows.end {
+        let n = strip_rows.min(rows.end - start);
+        strip_params.height = n as u32;
+        let strip = &sample_data[start * row_bytes..(start + n) * row_bytes];
+        let samples = match lifted {
+            Some(pixel_bytes) => {
+                lifted_samples.clear();
+                for row in strip.chunks_exact(row_bytes) {
+                    lifted_samples
+                        .extend_from_slice(&row[cols.start * pixel_bytes..cols.end * pixel_bytes]);
+                }
+                lifted_samples.as_slice()
+            }
+            None => strip,
+        };
+        let rgba = image_to_rgba(samples, &strip_params, icc, opm_zero_transparent, transfer);
+        for row in rgba.chunks_exact(cols.len() * 4) {
+            if lifted.is_some() {
+                wide_row[cols.start * 4..cols.end * 4].copy_from_slice(row);
+                push(&wide_row);
+            } else {
+                push(row);
+            }
+        }
+        start += n;
     }
 }
 
@@ -3276,6 +3654,7 @@ fn convert_prescaled(
     opm_zero_transparent: bool,
     transfer: Option<&TransferState>,
     transform: Transform,
+    drawn: Drawn,
 ) -> Option<(Vec<u8>, u32, u32, Transform)> {
     let (w, h) = (params.width, params.height);
     let plan = match plan_prescale(w, h, transform, params.interpolate)? {
@@ -3287,33 +3666,24 @@ fn convert_prescaled(
         return None;
     }
 
-    // Convert `rows` rows from the top, a strip at a time, handing each
-    // RGBA row to `push`.
-    let convert_rows = |rows: usize, push: &mut dyn FnMut(&[u8])| {
-        let strip_rows = (CONVERT_STRIP_PIXELS / w as usize).max(1);
-        let mut strip_params = params.clone();
-        let mut start = 0;
-        while start < rows {
-            let n = strip_rows.min(rows - start);
-            strip_params.height = n as u32;
-            let rgba = image_to_rgba(
-                &sample_data[start * row_bytes..(start + n) * row_bytes],
-                &strip_params,
-                icc,
-                opm_zero_transparent,
-                transfer,
-            );
-            for row in rgba.chunks_exact(w as usize * 4) {
-                push(row);
-            }
-            start += n;
-        }
+    let convert = |part: ImagePart, push: &mut dyn FnMut(&[u8])| {
+        convert_sample_part(
+            sample_data,
+            params,
+            row_bytes,
+            &part,
+            icc,
+            opm_zero_transparent,
+            transfer,
+            push,
+        );
     };
 
     match plan {
         Prescale::Box { dw, dh, adjusted } => {
-            let mut resampler = BoxResampler::new(w, h, dw, dh);
-            convert_rows(h as usize, &mut |row| resampler.push_row(row));
+            let part = drawn.of(adjusted, dw, dh);
+            let mut resampler = BoxResampler::for_part(w, h, dw, dh, &part);
+            convert(resampler.source_part(), &mut |row| resampler.push_row(row));
             Some((resampler.finish(), dw, dh, adjusted))
         }
         Prescale::IntegerBox {
@@ -3322,8 +3692,9 @@ fn convert_prescaled(
             nh,
             adjusted,
         } => {
-            let mut resampler = IntegerBoxResampler::new(w, factor, nw, nh);
-            convert_rows(resampler.rows_needed(), &mut |row| resampler.push_row(row));
+            let part = drawn.of(adjusted, nw, nh);
+            let mut resampler = IntegerBoxResampler::for_part(w, factor, nw, nh, &part);
+            convert(resampler.source_part(), &mut |row| resampler.push_row(row));
             Some((resampler.finish(), nw, nh, adjusted))
         }
         Prescale::Bicubic { .. } => None,
@@ -4081,6 +4452,13 @@ fn render_element(
                 // Without it, an image drawn small is converted and
                 // prescaled in one pass, never held at full size.
                 let cached = cached_image(ctx.image_cache, ctx.elem_idx);
+                // Only the part of the image that falls on this surface
+                // is converted and resampled: a band of a viewport is a
+                // strip of the page, and an image crosses many bands.
+                let drawn = Drawn::Onto {
+                    width: ctx.out_w,
+                    height: ctx.out_h,
+                };
                 let transfer = paint_transfer(
                     &params.transfer,
                     params.alpha,
@@ -4095,6 +4473,7 @@ fn render_element(
                         ctx.opm_zero_transparent,
                         transfer,
                         raw_transform,
+                        drawn,
                     )
                 } else {
                     None
@@ -4107,12 +4486,19 @@ fn render_element(
                     let rgba_data: &[u8] = match cached {
                         Some(cached) => cached,
                         None => {
-                            owned_rgba = image_to_rgba(
+                            owned_rgba = image_part_to_rgba(
                                 sample_data,
                                 params,
                                 ctx.icc,
                                 ctx.opm_zero_transparent,
                                 transfer,
+                                &prescale_source_part(
+                                    iw,
+                                    ih,
+                                    raw_transform,
+                                    params.interpolate,
+                                    drawn,
+                                ),
                             );
                             &owned_rgba
                         }
@@ -4126,8 +4512,14 @@ fn render_element(
                     // shrinking — "no interpolation" means don't smooth when
                     // *upscaling*, but downscaling without averaging produces
                     // aliased garbage.
-                    prescaled =
-                        prescale_image(rgba_data, iw, ih, raw_transform, params.interpolate);
+                    prescaled = prescale_image_part(
+                        rgba_data,
+                        iw,
+                        ih,
+                        raw_transform,
+                        params.interpolate,
+                        drawn,
+                    );
                     match &prescaled {
                         Some((data, w, h, t)) => (data.as_slice(), *w, *h, *t),
                         None => (rgba_data, iw, ih, raw_transform),
@@ -12156,17 +12548,25 @@ fn preprocess_images(
                 // An image drawn small is converted and prescaled in one
                 // pass; any other is converted whole and prescaled if it
                 // needs it.
-                convert_prescaled(sample_data, params, icc, false, transfer, base_transform)
-                    .map(|(data, ..)| data)
-                    .unwrap_or_else(|| {
-                        // The whole image at full size: within the budget.
-                        let _share = budget.take(iw as usize * ih as usize * 4);
-                        let rgba = image_to_rgba(sample_data, params, icc, false, transfer);
-                        match prescale_image(&rgba, iw, ih, base_transform, params.interpolate) {
-                            Some((prescaled, ..)) => prescaled,
-                            None => rgba,
-                        }
-                    })
+                convert_prescaled(
+                    sample_data,
+                    params,
+                    icc,
+                    false,
+                    transfer,
+                    base_transform,
+                    Drawn::All,
+                )
+                .map(|(data, ..)| data)
+                .unwrap_or_else(|| {
+                    // The whole image at full size: within the budget.
+                    let _share = budget.take(iw as usize * ih as usize * 4);
+                    let rgba = image_to_rgba(sample_data, params, icc, false, transfer);
+                    match prescale_image(&rgba, iw, ih, base_transform, params.interpolate) {
+                        Some((prescaled, ..)) => prescaled,
+                        None => rgba,
+                    }
+                })
             });
 
             let quality = image_filter_quality(adj_t, params.interpolate);
@@ -17061,6 +17461,277 @@ mod tests {
         }
     }
 
+    /// Whether `got` is `whole` inside `part` and transparent outside it,
+    /// for images `w` wide.
+    fn assert_part_of(what: &str, got: &[u8], whole: &[u8], w: usize, part: &ImagePart) {
+        assert_eq!(got.len(), whole.len(), "{what}");
+        for (at, (got, whole)) in got
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(whole.as_chunks::<4>().0)
+            .enumerate()
+        {
+            let (x, y) = (at % w, at / w);
+            if part.rows.contains(&y) && part.cols.contains(&x) {
+                assert_eq!(got, whole, "{what}: ({x}, {y}), inside {part:?}");
+            } else {
+                assert_eq!(got, &[0; 4], "{what}: ({x}, {y}), outside {part:?}");
+            }
+        }
+    }
+
+    /// Parts of a `w × h` image: all of it, none of it, bands across it,
+    /// strips down it, one pixel, and one that runs off the edge.
+    fn test_parts(w: usize, h: usize) -> Vec<ImagePart> {
+        let part = |rows, cols| ImagePart { rows, cols };
+        vec![
+            part(0..h, 0..w),
+            part(0..0, 0..0),
+            part(0..h / 3, 0..w),
+            part(h / 3..h / 2 + 1, 0..w),
+            part(h - 1..h, 0..w),
+            part(0..h, w / 4..w / 2),
+            part(h / 5..h - 2, w - 3..w),
+            part(h / 2..h / 2 + 1, w / 2..w / 2 + 1),
+            part(h / 2..h + 9, w / 3..w + 9),
+        ]
+    }
+
+    /// Each filter, asked for part of its output, gives that part of what
+    /// it gives when asked for all of it, and leaves the rest transparent.
+    #[test]
+    fn a_part_of_a_resampled_image_is_that_part_of_the_whole() {
+        let mut bytes = TestBytes(11);
+        for (sw, sh, dw, dh) in [
+            (97u32, 83u32, 31u32, 29u32),
+            (64, 64, 16, 8),
+            (50, 40, 49, 39),
+        ] {
+            let src = bytes.take((sw * sh * 4) as usize);
+            let whole = box_resample(&src, sw, sh, dw, dh);
+            for part in test_parts(dw as usize, dh as usize) {
+                let got = box_resample_part(&src, sw, sh, dw, dh, &part);
+                let within = part.within(dw as usize, dh as usize);
+                assert_part_of("box", &got, &whole, dw as usize, &within);
+            }
+        }
+        for (sw, sh, dw, dh) in [(20u32, 17u32, 61u32, 50u32), (9, 30, 40, 31), (2, 2, 7, 5)] {
+            let src = bytes.take((sw * sh * 4) as usize);
+            let whole = bicubic_resample(&src, sw, sh, dw, dh);
+            for part in test_parts(dw as usize, dh as usize) {
+                let got = bicubic_resample_part(&src, sw, sh, dw, dh, &part);
+                let within = part.within(dw as usize, dh as usize);
+                assert_part_of("bicubic", &got, &whole, dw as usize, &within);
+            }
+        }
+        for (sw, sh, factor) in [(97u32, 83u32, 3u32), (64, 40, 2), (33, 70, 5)] {
+            let (nw, nh) = (sw / factor, sh / factor);
+            let src = bytes.take((sw * sh * 4) as usize);
+            let all = |part: &ImagePart| {
+                let mut resampler = IntegerBoxResampler::for_part(sw, factor, nw, nh, part);
+                for sy in resampler.source_part().rows {
+                    resampler.push_row(&src[sy * sw as usize * 4..][..sw as usize * 4]);
+                }
+                resampler.finish()
+            };
+            let whole = all(&ImagePart::whole(nw, nh));
+            for part in test_parts(nw as usize, nh as usize) {
+                let within = part.within(nw as usize, nh as usize);
+                assert_part_of("integer box", &all(&part), &whole, nw as usize, &within);
+            }
+        }
+    }
+
+    /// Converting part of an image's samples gives that part of what
+    /// converting all of them gives, in every colour space, with a transfer
+    /// function and a colour key, and leaves the rest transparent.
+    #[test]
+    fn a_part_of_a_converted_image_is_that_part_of_the_whole() {
+        let mut bytes = TestBytes(5);
+        let (w, h) = (53u32, 41u32);
+        let invert = TransferState {
+            gray: Some(Arc::new((0..256).map(|i| 1.0 - i as f64 / 255.0).collect())),
+            color: None,
+        };
+        for (name, space, bpc, pixel_bytes) in streamed_test_spaces() {
+            let row_bytes = pixel_bytes.map_or(w.div_ceil(8) as usize, |n| w as usize * n);
+            let samples = bytes.take(row_bytes * h as usize);
+            let mut params = streamed_test_params(space, bpc, w, h);
+            for keyed in [false, true] {
+                if keyed {
+                    if !matches!(params.color_space, ImageColorSpace::DeviceRGB) || bpc != 8 {
+                        continue;
+                    }
+                    params.mask_color = Some(vec![0, 128, 0, 255, 0, 255]);
+                }
+                for transfer in [None, Some(&invert)] {
+                    let whole = image_to_rgba(&samples, &params, None, false, transfer);
+                    for part in test_parts(w as usize, h as usize) {
+                        let got =
+                            image_part_to_rgba(&samples, &params, None, false, transfer, &part);
+                        let what = format!("{name}, keyed {keyed}");
+                        // A space that is not lifted out by columns gives
+                        // whole rows, which is more than was asked for.
+                        let lifted = pixel_bytes.is_some();
+                        let mut within = part.within(w as usize, h as usize);
+                        if !lifted && !within.rows.is_empty() {
+                            within.cols = 0..w as usize;
+                        }
+                        assert_part_of(&what, &got, &whole, w as usize, &within);
+                    }
+                }
+            }
+        }
+    }
+
+    /// An image put on a `width × height` surface as `render_element` puts
+    /// one there, made in full or only in the part the surface shows, and
+    /// whether any of it was left out.
+    fn image_drawn(
+        samples: &[u8],
+        params: &ImageParams,
+        transform: Transform,
+        (width, height): (u32, u32),
+        drawn: Drawn,
+        streamed: bool,
+    ) -> (Vec<u8>, bool) {
+        let (iw, ih) = (params.width, params.height);
+        let mut left_out = false;
+        let stream = if streamed {
+            convert_prescaled(samples, params, None, false, None, transform, drawn)
+        } else {
+            None
+        };
+        let owned;
+        let prescaled;
+        let (data, dw, dh, through) = if let Some((data, dw, dh, through)) = &stream {
+            left_out |= data.as_chunks::<4>().0.iter().any(|px| px[3] == 0);
+            (data.as_slice(), *dw, *dh, *through)
+        } else {
+            let part = prescale_source_part(iw, ih, transform, params.interpolate, drawn);
+            left_out |= part != ImagePart::whole(iw, ih);
+            owned = image_part_to_rgba(samples, params, None, false, None, &part);
+            prescaled = prescale_image_part(&owned, iw, ih, transform, params.interpolate, drawn);
+            match &prescaled {
+                Some((data, dw, dh, through)) => (data.as_slice(), *dw, *dh, *through),
+                None => (owned.as_slice(), iw, ih, transform),
+            }
+        };
+        let mut surface = Pixmap::new(width, height).unwrap();
+        surface.fill(Color::from_rgba8(40, 90, 200, 255));
+        let paint = stet_tiny_skia::PixmapPaint {
+            quality: image_filter_quality(through, params.interpolate),
+            opacity: 1.0,
+            blend_mode: stet_tiny_skia::BlendMode::SourceOver,
+        };
+        let image = stet_tiny_skia::PixmapRef::from_bytes(data, dw, dh).unwrap();
+        surface.draw_pixmap(0, 0, image, &paint, through, None);
+        (surface.data().to_vec(), left_out)
+    }
+
+    /// A band shows what the whole image would have shown there: making
+    /// only the part of an image that falls on a surface draws the pixels
+    /// that making all of it draws — upright, on its side, turned, flipped
+    /// and sheared, scaled down and up, smoothed and not, converted as it
+    /// is resampled or before, for bands down the page and strips across
+    /// it.
+    #[test]
+    fn an_image_made_for_a_band_draws_as_the_whole_image_does() {
+        let mut bytes = TestBytes(21);
+        let (iw, ih) = (96u32, 70u32);
+        let turned = |scale: f32, degrees: f32| {
+            let (sin, cos) = degrees.to_radians().sin_cos();
+            (scale * cos, scale * sin, -scale * sin, scale * cos)
+        };
+        let shapes = [
+            (0.31, 0.0, 0.0, 0.31),
+            (0.5, 0.0, 0.0, 0.61),
+            (-0.5, 0.0, 0.0, 0.93),
+            (0.45, 0.0, 0.0, -0.4),
+            (0.97, 0.0, 0.0, 1.0),
+            (1.0, 0.0, 0.0, 1.0),
+            (1.7, 0.0, 0.0, 2.2),
+            turned(0.48, 90.0),
+            turned(0.3, 30.0),
+            turned(0.9, 200.0),
+            turned(1.6, 270.0),
+            (0.2, 0.05, 0.1, 0.25),
+        ];
+        let surface = (40u32, 16u32);
+        let (mut draws, mut partial) = (0, 0);
+        for (name, space, bpc, pixel_bytes) in streamed_test_spaces() {
+            let row_bytes = pixel_bytes.map_or(iw.div_ceil(8) as usize, |n| iw as usize * n);
+            let samples = bytes.take(row_bytes * ih as usize);
+            let mut params = streamed_test_params(space, bpc, iw, ih);
+            for interpolate in [false, true] {
+                params.interpolate = interpolate;
+                for (sx, ky, kx, sy) in shapes {
+                    // Where the image lands with nothing added, so that the
+                    // surface can be stepped across it.
+                    let xs = [
+                        0.0,
+                        sx * iw as f32,
+                        kx * ih as f32,
+                        sx * iw as f32 + kx * ih as f32,
+                    ];
+                    let ys = [
+                        0.0,
+                        ky * iw as f32,
+                        sy * ih as f32,
+                        ky * iw as f32 + sy * ih as f32,
+                    ];
+                    let left = xs.iter().copied().fold(f32::INFINITY, f32::min);
+                    let top = ys.iter().copied().fold(f32::INFINITY, f32::min);
+                    for (step_x, step_y) in [(0, 0), (1, 0), (0, 1), (1, 2), (2, 5), (3, 1)] {
+                        let transform = Transform::from_row(
+                            sx,
+                            ky,
+                            kx,
+                            sy,
+                            3.3 - left - step_x as f32 * 37.0,
+                            2.6 - top - step_y as f32 * surface.1 as f32,
+                        );
+                        for streamed in [false, true] {
+                            let what = format!(
+                                "{name}, interpolate {interpolate}, {transform:?}, \
+                                 streamed {streamed}"
+                            );
+                            let (whole, _) = image_drawn(
+                                &samples,
+                                &params,
+                                transform,
+                                surface,
+                                Drawn::All,
+                                streamed,
+                            );
+                            let (band, left_out) = image_drawn(
+                                &samples,
+                                &params,
+                                transform,
+                                surface,
+                                Drawn::Onto {
+                                    width: surface.0,
+                                    height: surface.1,
+                                },
+                                streamed,
+                            );
+                            assert!(band == whole, "{what}");
+                            draws += 1;
+                            partial += left_out as u32;
+                        }
+                    }
+                }
+            }
+        }
+        // Most of the images were made in part, so the test tested
+        // something.
+        assert!(
+            partial * 2 > draws,
+            "{partial} of {draws} draws made part of the image"
+        );
+    }
+
     /// The row-at-a-time box filter gives the bytes of the whole-image one
     /// it replaced, across sizes that make the ring one row deep, many rows
     /// deep, and uneven from one output row to the next.
@@ -17241,7 +17912,7 @@ mod tests {
         for (i, t) in prescale_test_transforms().into_iter().enumerate() {
             let what = format!("{what}, transform {i}");
             let want = reference_prescale_image(&whole, w, h, t, params.interpolate);
-            let got = convert_prescaled(samples, params, None, false, transfer, t);
+            let got = convert_prescaled(samples, params, None, false, transfer, t, Drawn::All);
             let Some(got) = got else {
                 let down = matches!(
                     plan_prescale(w, h, t, params.interpolate),
