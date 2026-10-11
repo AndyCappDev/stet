@@ -191,7 +191,7 @@ fn resolve_color_space_obj_depth(
             let first = resolver.deref(&arr[0])?;
             let cs_name = first
                 .as_name()
-                .ok_or(PdfError::Other("color space array[0] is not a name".into()))?;
+                .ok_or_else(|| PdfError::Other("color space array[0] is not a name".into()))?;
             match cs_name {
                 b"DeviceGray" => Ok(ResolvedColorSpace::DeviceGray),
                 b"DeviceRGB" => Ok(ResolvedColorSpace::DeviceRGB),
@@ -225,12 +225,12 @@ fn resolve_icc_based(
         return Err(PdfError::Other("ICCBased missing stream ref".into()));
     }
     let stream_obj = resolver.deref(&args[0])?;
-    let dict = stream_obj.as_dict().ok_or(PdfError::Other(
-        "ICCBased stream is not a dict/stream".into(),
-    ))?;
+    let dict = stream_obj
+        .as_dict()
+        .ok_or_else(|| PdfError::Other("ICCBased stream is not a dict/stream".into()))?;
     let n = dict
         .get_int(b"N")
-        .ok_or(PdfError::Other("ICCBased missing /N".into()))? as u32;
+        .ok_or_else(|| PdfError::Other("ICCBased missing /N".into()))? as u32;
 
     // The profile's bytes and their hash, which every later colour conversion
     // is keyed by. A profile held in an indirect object is read once for the
@@ -304,7 +304,7 @@ fn resolve_indexed(
     let base = resolve_color_space_obj_depth(&args[0], resolver, depth)?;
     let hival = args[1]
         .as_int()
-        .ok_or(PdfError::Other("Indexed hival not int".into()))? as u32;
+        .ok_or_else(|| PdfError::Other("Indexed hival not int".into()))? as u32;
 
     let lookup_obj = resolver.deref(&args[2])?;
     let lookup = match &lookup_obj {
@@ -342,7 +342,7 @@ fn resolve_separation(
     }
     let name = args[0]
         .as_name()
-        .ok_or(PdfError::Other("Separation name not a name".into()))?
+        .ok_or_else(|| PdfError::Other("Separation name not a name".into()))?
         .to_vec();
     let alt = resolve_color_space_obj_depth(&args[1], resolver, depth)
         .or_else(|_| fallback_alternate(args, resolver))?;

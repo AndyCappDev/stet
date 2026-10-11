@@ -102,7 +102,7 @@ pub(crate) fn handle_shading_cached(
 ) -> Result<(), PdfError> {
     let shading_type =
         dict.get_int(b"ShadingType")
-            .ok_or(PdfError::Other("shading missing ShadingType".into()))? as i32;
+            .ok_or_else(|| PdfError::Other("shading missing ShadingType".into()))? as i32;
 
     let bbox = parse_bbox(dict);
     let extend = parse_extend(dict);
@@ -303,7 +303,7 @@ fn handle_axial(
 ) -> Result<(), PdfError> {
     let coords = dict
         .get_array(b"Coords")
-        .ok_or(PdfError::Other("axial shading missing Coords".into()))?;
+        .ok_or_else(|| PdfError::Other("axial shading missing Coords".into()))?;
     let vals: Vec<f64> = coords.iter().filter_map(|o| o.as_f64()).collect();
     if vals.len() < 4 {
         return Err(PdfError::Other("axial Coords needs 4 values".into()));
@@ -367,7 +367,7 @@ fn handle_radial(
 ) -> Result<(), PdfError> {
     let coords = dict
         .get_array(b"Coords")
-        .ok_or(PdfError::Other("radial shading missing Coords".into()))?;
+        .ok_or_else(|| PdfError::Other("radial shading missing Coords".into()))?;
     let vals: Vec<f64> = coords.iter().filter_map(|o| o.as_f64()).collect();
     if vals.len() < 6 {
         return Err(PdfError::Other("radial Coords needs 6 values".into()));
@@ -820,7 +820,7 @@ fn handle_patches(
 fn parse_shading_function(dict: &PdfDict, resolver: &Resolver) -> Result<PdfFunction, PdfError> {
     let fn_obj = dict
         .get(b"Function")
-        .ok_or(PdfError::Other("shading missing Function".into()))?;
+        .ok_or_else(|| PdfError::Other("shading missing Function".into()))?;
     let fn_obj = resolver.deref(fn_obj)?;
     // Handle /Function null (invalid but seen in the wild)
     if matches!(fn_obj, PdfObj::Null) {

@@ -343,7 +343,7 @@ pub fn resolve_font(
     let font_obj = resolver.deref(font_ref)?;
     let font_dict = font_obj
         .as_dict()
-        .ok_or(PdfError::Other("Font is not a dict".into()))?;
+        .ok_or_else(|| PdfError::Other("Font is not a dict".into()))?;
 
     let subtype = font_dict.get_name(b"Subtype").unwrap_or(b"Type1");
     // Handle Type 0 composite fonts (CID fonts)
@@ -1303,13 +1303,13 @@ fn create_cid_cff_from_otf(
 
     // Extract CFF table from OpenType font
     let cff_data = table_data(otf_data, b"CFF ")
-        .ok_or(PdfError::Other("OpenType font has no CFF table".into()))?;
+        .ok_or_else(|| PdfError::Other("OpenType font has no CFF table".into()))?;
     let fonts =
         parse_cff(cff_data).map_err(|e| PdfError::Other(format!("CFF parse error: {e}")))?;
     let font = fonts
         .into_iter()
         .next()
-        .ok_or(PdfError::Other("CFF contains no fonts".into()))?;
+        .ok_or_else(|| PdfError::Other("CFF contains no fonts".into()))?;
     let fm = font.font_matrix;
     let font_matrix = Matrix::new(fm[0], fm[1], fm[2], fm[3], fm[4], fm[5]);
 
@@ -1367,7 +1367,7 @@ fn create_cid_cff_from_raw(
     let font = fonts
         .into_iter()
         .next()
-        .ok_or(PdfError::Other("CFF contains no fonts".into()))?;
+        .ok_or_else(|| PdfError::Other("CFF contains no fonts".into()))?;
     let fm = font.font_matrix;
     let font_matrix = Matrix::new(fm[0], fm[1], fm[2], fm[3], fm[4], fm[5]);
 
@@ -1478,7 +1478,7 @@ fn create_cid_from_ps_cidfont(font_data: &[u8], metrics: CidMetrics) -> Result<P
         let pos = font_data
             .windows(sd_marker.len())
             .position(|w| w == sd_marker)
-            .ok_or(PdfError::Other("PS CIDFont: no StartData found".into()))?;
+            .ok_or_else(|| PdfError::Other("PS CIDFont: no StartData found".into()))?;
         let after = &font_data[pos + sd_marker.len()..];
         // Skip only ASCII whitespace (space, tab, CR, LF) — NOT null bytes
         let skip = after
@@ -2356,7 +2356,7 @@ fn resolve_type1(
     } = enc;
     let desc = descriptor
         .as_ref()
-        .ok_or(PdfError::Other("Type1 font missing FontDescriptor".into()))?;
+        .ok_or_else(|| PdfError::Other("Type1 font missing FontDescriptor".into()))?;
     // Check FontFile first (traditional Type 1), then FontFile3 (CFF or Type1C)
     if let Some(ff3_ref) = desc.get(b"FontFile3") {
         // FontFile3 may contain CFF (Type1C) data — handle via CFF parser
@@ -2368,7 +2368,7 @@ fn resolve_type1(
             // If data starts with "OTTO" it's an OpenType container — extract CFF table
             let font_data = if raw_data.starts_with(b"OTTO") {
                 stet_fonts::truetype::table_data(&raw_data, b"CFF ")
-                    .ok_or(PdfError::Other("OpenType font has no CFF table".into()))?
+                    .ok_or_else(|| PdfError::Other("OpenType font has no CFF table".into()))?
                     .to_vec()
             } else {
                 raw_data
@@ -2378,7 +2378,7 @@ fn resolve_type1(
             let font = fonts
                 .into_iter()
                 .next()
-                .ok_or(PdfError::Other("CFF contains no fonts".into()))?;
+                .ok_or_else(|| PdfError::Other("CFF contains no fonts".into()))?;
 
             let fm = font.font_matrix;
             let font_matrix = Matrix::new(fm[0], fm[1], fm[2], fm[3], fm[4], fm[5]);
@@ -2395,7 +2395,7 @@ fn resolve_type1(
     let ff_ref = desc
         .get(b"FontFile")
         .or_else(|| desc.get(b"FontFile3"))
-        .ok_or(PdfError::Other("Type1 font missing FontFile".into()))?;
+        .ok_or_else(|| PdfError::Other("Type1 font missing FontFile".into()))?;
     let font_data = resolver.stream_data_from_obj(ff_ref)?;
 
     // Strip PFB (Printer Font Binary) headers if present
@@ -2604,12 +2604,12 @@ fn resolve_truetype(
     widths: [f64; 256],
     font_dict: &PdfDict,
 ) -> Result<PdfFont, PdfError> {
-    let desc = descriptor.as_ref().ok_or(PdfError::Other(
-        "TrueType font missing FontDescriptor".into(),
-    ))?;
+    let desc = descriptor
+        .as_ref()
+        .ok_or_else(|| PdfError::Other("TrueType font missing FontDescriptor".into()))?;
     let ff_ref = desc
         .get(b"FontFile2")
-        .ok_or(PdfError::Other("TrueType font missing FontFile2".into()))?;
+        .ok_or_else(|| PdfError::Other("TrueType font missing FontFile2".into()))?;
     let data = resolver.stream_data_from_obj(ff_ref)?;
 
     // Some fonts have corrupt zlib headers (CINFO < 7) that cause the zlib
@@ -2729,10 +2729,10 @@ fn resolve_cff(
     } = enc;
     let desc = descriptor
         .as_ref()
-        .ok_or(PdfError::Other("CFF font missing FontDescriptor".into()))?;
+        .ok_or_else(|| PdfError::Other("CFF font missing FontDescriptor".into()))?;
     let ff_ref = desc
         .get(b"FontFile3")
-        .ok_or(PdfError::Other("CFF font missing FontFile3".into()))?;
+        .ok_or_else(|| PdfError::Other("CFF font missing FontFile3".into()))?;
     let raw_data = resolver.stream_data_from_obj(ff_ref)?;
     build_cff_font(
         raw_data,
@@ -2758,7 +2758,7 @@ fn build_cff_font(
     // If data starts with "OTTO" it's an OpenType container — extract CFF table
     let font_data = if raw_data.starts_with(b"OTTO") {
         stet_fonts::truetype::table_data(&raw_data, b"CFF ")
-            .ok_or(PdfError::Other("OpenType font has no CFF table".into()))?
+            .ok_or_else(|| PdfError::Other("OpenType font has no CFF table".into()))?
             .to_vec()
     } else {
         raw_data
@@ -2769,7 +2769,7 @@ fn build_cff_font(
     let font = fonts
         .into_iter()
         .next()
-        .ok_or(PdfError::Other("CFF contains no fonts".into()))?;
+        .ok_or_else(|| PdfError::Other("CFF contains no fonts".into()))?;
 
     // PDF spec 9.6.6.1: encoding base depends on whether the font is embedded.
     // When the /Encoding dict has no /BaseEncoding, the base for embedded fonts
@@ -2935,18 +2935,18 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
     // May be a direct array or an indirect reference to one.
     let descendants_obj = font_dict
         .get(b"DescendantFonts")
-        .ok_or(PdfError::Other("Type0 font missing DescendantFonts".into()))?;
+        .ok_or_else(|| PdfError::Other("Type0 font missing DescendantFonts".into()))?;
     let descendants_resolved = resolver.deref(descendants_obj)?;
     let descendants = descendants_resolved
         .as_array()
-        .ok_or(PdfError::Other("DescendantFonts is not an array".into()))?;
+        .ok_or_else(|| PdfError::Other("DescendantFonts is not an array".into()))?;
     let cid_font_ref = descendants
         .first()
-        .ok_or(PdfError::Other("DescendantFonts is empty".into()))?;
+        .ok_or_else(|| PdfError::Other("DescendantFonts is empty".into()))?;
     let cid_font_obj = resolver.deref(cid_font_ref)?;
     let cid_font_dict = cid_font_obj
         .as_dict()
-        .ok_or(PdfError::Other("CIDFont is not a dict".into()))?;
+        .ok_or_else(|| PdfError::Other("CIDFont is not a dict".into()))?;
 
     let cid_subtype = cid_font_dict.get_name(b"Subtype").unwrap_or(b"");
 
@@ -2954,7 +2954,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
     let descriptor = get_font_descriptor(cid_font_dict, resolver)?;
     let desc = descriptor
         .as_ref()
-        .ok_or(PdfError::Other("CIDFont missing FontDescriptor".into()))?;
+        .ok_or_else(|| PdfError::Other("CIDFont missing FontDescriptor".into()))?;
 
     // Parse /DW (default width) — may be int or real
     let default_width = cid_font_dict.get_f64(b"DW").unwrap_or(1000.0) / 1000.0;
@@ -3423,7 +3423,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                 let font = fonts
                     .into_iter()
                     .next()
-                    .ok_or(PdfError::Other("CFF contains no fonts".into()))?;
+                    .ok_or_else(|| PdfError::Other("CFF contains no fonts".into()))?;
                 // Detect tiny CFF subsets for CJK fonts. Some PDFs embed a
                 // minimal "ghost" CFF (3-4 glyphs) to satisfy spec requirements
                 // while expecting the viewer to use the system CJK font (which

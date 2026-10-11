@@ -51,6 +51,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   preparing a page whose images are larger than they are printed. Output
   is unchanged in both cases.
 
+- **A PDF content stream is read about a third faster.** Reading a page
+  allocated for nearly every token. An operator was copied out of the
+  stream to be looked up; it is now looked up where it stands. A number
+  was checked as UTF-8 and handed to the general parser; an integer of up
+  to 18 digits or a real of up to 15 is now read directly, to the same
+  value. An operator with a fixed number of operands gathered them into a
+  vector; and each operand that was a number built, and threw away, the
+  error message it would have needed had it not been one. A colour set in
+  a named colour space resolved that space from the PDF's objects every
+  time; it is now resolved once per resource dictionary. On a 278 MB
+  content stream of 4.4 million strokes, reading went from 5.3 s to
+  3.4 s. Output is unchanged.
+
 - **Opening a PDF prints nothing.** `IccCache::search_system_cmyk_profile`
   — which `PdfDocument::from_bytes` and `from_owned` call — wrote
   `[ICC] Loaded system CMYK profile` to stderr every time it found one,

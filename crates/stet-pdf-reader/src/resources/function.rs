@@ -177,11 +177,12 @@ impl PdfFunction {
         let resolved = resolver.deref(obj)?;
         let dict = resolved
             .as_dict()
-            .ok_or(PdfError::Other("function is not a dict/stream".into()))?;
+            .ok_or_else(|| PdfError::Other("function is not a dict/stream".into()))?;
 
-        let fn_type =
-            dict.get_int(b"FunctionType")
-                .ok_or(PdfError::Other("function missing FunctionType".into()))? as i32;
+        let fn_type = dict
+            .get_int(b"FunctionType")
+            .ok_or_else(|| PdfError::Other("function missing FunctionType".into()))?
+            as i32;
 
         let domain = parse_domain_range(dict, b"Domain")?;
         let range = parse_domain_range(dict, b"Range").unwrap_or_default();
@@ -377,14 +378,14 @@ impl PdfFunction {
         // slice of the table they describe.
         let mut size: Vec<u32> = dict
             .get_array(b"Size")
-            .ok_or(PdfError::Other("sampled function missing Size".into()))?
+            .ok_or_else(|| PdfError::Other("sampled function missing Size".into()))?
             .iter()
             .filter_map(|o| o.as_int())
             .map(|n| u32::try_from(n).ok().filter(|n| *n > 0))
             .collect::<Option<_>>()
-            .ok_or(PdfError::Other(
-                "sampled function Size entry is not a positive integer".into(),
-            ))?;
+            .ok_or_else(|| {
+                PdfError::Other("sampled function Size entry is not a positive integer".into())
+            })?;
         if size.len() < n_inputs {
             return Err(PdfError::Other(format!(
                 "sampled function Size has {} entries for {n_inputs} inputs",
@@ -476,7 +477,7 @@ impl PdfFunction {
     ) -> Result<Self, PdfError> {
         let n = dict
             .get_f64(b"N")
-            .ok_or(PdfError::Other("exponential function missing N".into()))?;
+            .ok_or_else(|| PdfError::Other("exponential function missing N".into()))?;
 
         let n_outputs = if !range.is_empty() { range.len() } else { 1 };
 

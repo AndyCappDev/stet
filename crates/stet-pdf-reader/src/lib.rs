@@ -509,7 +509,7 @@ impl<'a> PdfDocument<'a> {
                 let encrypt_obj = temp_resolver.deref(encrypt_ref)?;
                 let encrypt_dict = encrypt_obj
                     .as_dict()
-                    .ok_or(PdfError::Other("Encrypt is not a dict".into()))?;
+                    .ok_or_else(|| PdfError::Other("Encrypt is not a dict".into()))?;
 
                 let file_id = xref
                     .trailer

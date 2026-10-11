@@ -619,6 +619,11 @@ pub struct ContentInterpreter<'a> {
     /// HashMap index of the current resource dict's ColorSpace sub-dict.
     /// Built lazily on first sc/scn access to avoid O(n) PdfDict scans.
     cs_index: Option<std::collections::HashMap<Vec<u8>, PdfObj>>,
+    /// The colour spaces of `cs_index` resolved so far, by name. A stream
+    /// that sets a colour for every stroke asks for the same space each
+    /// time, and resolving it reads the PDF objects again. It is saved and
+    /// restored with `cs_index`, which it is derived from.
+    cs_resolved: std::collections::HashMap<Vec<u8>, ResolvedColorSpace>,
     /// Visible Y range in form coordinates for early culling of offscreen content.
     /// Set when entering a Form XObject whose BBox is much larger than the clip area.
     /// BT/ET blocks whose Y position falls outside this range are skipped.
@@ -755,6 +760,7 @@ impl<'a> ContentInterpreter<'a> {
             ocg_off: ocg_off.clone(),
             mc_stack: Vec::new(),
             cs_index: None,
+            cs_resolved: std::collections::HashMap::new(),
             form_cull_y: None,
             bt_culled: false,
             image_cache: std::collections::HashMap::new(),
@@ -990,7 +996,7 @@ impl<'a> ContentInterpreter<'a> {
         let annot_obj = self.resolver.resolve(obj_num, gen_num)?;
         let annot_dict = annot_obj
             .as_dict()
-            .ok_or(PdfError::Other("annotation not a dict".into()))?;
+            .ok_or_else(|| PdfError::Other("annotation not a dict".into()))?;
 
         let subtype = annot_dict.get_name(b"Subtype").unwrap_or(b"");
 
@@ -1025,7 +1031,7 @@ impl<'a> ContentInterpreter<'a> {
                     None
                 }
             })
-            .ok_or(PdfError::Other("annotation missing Rect".into()))?;
+            .ok_or_else(|| PdfError::Other("annotation missing Rect".into()))?;
 
         // Get /AP dict → /N (normal appearance).
         // If no AP, synthesize appearance from annotation properties.
@@ -1040,7 +1046,9 @@ impl<'a> ContentInterpreter<'a> {
             _ => return Err(PdfError::Other("AP not a dict".into())),
         };
 
-        let n_ref = ap_dict.get(b"N").ok_or(PdfError::Other("no AP/N".into()))?;
+        let n_ref = ap_dict
+            .get(b"N")
+            .ok_or_else(|| PdfError::Other("no AP/N".into()))?;
 
         // Resolve to get the Form XObject dict + stream.
         // AP/N may be a stream (single appearance) or a dict mapping state
@@ -1074,7 +1082,7 @@ impl<'a> ContentInterpreter<'a> {
                 let state_obj = self.resolver.deref(state_ref)?;
                 let state_dict = state_obj
                     .as_dict()
-                    .ok_or(PdfError::Other("AP/N state not a stream".into()))?;
+                    .ok_or_else(|| PdfError::Other("AP/N state not a stream".into()))?;
                 (state_ref.clone(), state_dict.clone())
             }
         } else {
@@ -1713,6 +1721,47 @@ impl<'a> ContentInterpreter<'a> {
             let glued_to_prev_number = prev_token_was_glued_number
                 && pos_before < data.len()
                 && !is_whitespace_byte(data[pos_before]);
+            // An operator is taken as the bytes of the stream: most tokens
+            // of a content stream are operators, and a token owns a copy.
+            if let Some(kw) = lexer.next_keyword() {
+                prev_token_was_glued_number = false;
+                // Check for operator suffixes:
+                // * suffix: f*, B*, b*, W*, T*
+                // digit suffix: d0, d1 (Type 3 glyph operators)
+                let p = lexer.pos();
+                let suffixed = match kw {
+                    b"f" | b"B" | b"b" | b"W" | b"T" => data.get(p) == Some(&b'*'),
+                    b"d" => matches!(data.get(p), Some(b'0' | b'1')),
+                    _ => false,
+                };
+                let op = if suffixed {
+                    lexer.set_pos(p + 1);
+                    &data[p - kw.len()..p + 1]
+                } else {
+                    kw
+                };
+
+                if op == b"BI" {
+                    self.handle_inline_image(&mut lexer)?;
+                } else {
+                    self.nested_failure_reported = false;
+                    let result = self.dispatch_operator(op, glued_to_prev_number);
+                    // The operator is skipped and the stream goes on;
+                    // say so, or what it would have drawn is missing
+                    // with nothing to explain why. Unless the error is
+                    // a nested stream's, which has said so itself.
+                    if let Err(e) = result
+                        && !self.nested_failure_reported
+                    {
+                        self.resolver.warn_content(
+                            Severity::Warning,
+                            format!("operator {}: {e}", String::from_utf8_lossy(op)),
+                        );
+                    }
+                }
+                self.operand_stack.clear();
+                continue;
+            }
             let tok = match lexer.next_token() {
                 Ok(t) => t,
                 Err(_) => {
@@ -1748,54 +1797,9 @@ impl<'a> ContentInterpreter<'a> {
                     let dict = crate::lexer::parse_dict_body(&mut lexer)?;
                     self.operand_stack.push(Operand::Dict(dict));
                 }
-                Token::Keyword(kw) => {
-                    // Check for operator suffixes:
-                    // * suffix: f*, B*, b*, W*, T*
-                    // digit suffix: d0, d1 (Type 3 glyph operators)
-                    let op = if matches!(kw.as_slice(), b"f" | b"B" | b"b" | b"W" | b"T") {
-                        let p = lexer.pos();
-                        if p < data.len() && data[p] == b'*' {
-                            lexer.set_pos(p + 1);
-                            let mut combined = kw;
-                            combined.push(b'*');
-                            combined
-                        } else {
-                            kw
-                        }
-                    } else if kw == b"d" {
-                        let p = lexer.pos();
-                        if p < data.len() && (data[p] == b'0' || data[p] == b'1') {
-                            lexer.set_pos(p + 1);
-                            let mut combined = kw;
-                            combined.push(data[p]);
-                            combined
-                        } else {
-                            kw
-                        }
-                    } else {
-                        kw
-                    };
-
-                    if op == b"BI" {
-                        self.handle_inline_image(&mut lexer)?;
-                    } else {
-                        self.nested_failure_reported = false;
-                        let result = self.dispatch_operator(&op, glued_to_prev_number);
-                        // The operator is skipped and the stream goes on;
-                        // say so, or what it would have drawn is missing
-                        // with nothing to explain why. Unless the error is
-                        // a nested stream's, which has said so itself.
-                        if let Err(e) = result
-                            && !self.nested_failure_reported
-                        {
-                            self.resolver.warn_content(
-                                Severity::Warning,
-                                format!("operator {}: {e}", String::from_utf8_lossy(&op)),
-                            );
-                        }
-                    }
-                    self.operand_stack.clear();
-                }
+                // Operators were taken above; `true` and `false` come back
+                // as `Bool`.
+                Token::Keyword(_) => {}
                 Token::DictEnd | Token::ArrayEnd => {
                     // Stray delimiters — ignore
                 }
@@ -2098,10 +2102,26 @@ impl<'a> ContentInterpreter<'a> {
         self.operand_stack
             .last()
             .and_then(|o| o.as_f64())
-            .ok_or(PdfError::Other("expected number on operand stack".into()))
+            .ok_or_else(|| PdfError::Other("expected number on operand stack".into()))
     }
 
     /// Get N numbers from the end of the operand stack.
+    /// The top `N` operands as numbers, where the count is fixed by the
+    /// operator: [`get_numbers`](Self::get_numbers) without the allocation.
+    fn get_number_array<const N: usize>(&self) -> Result<[f64; N], PdfError> {
+        let len = self.operand_stack.len();
+        if len < N {
+            return Err(PdfError::Other(format!("need {N} operands, have {len}")));
+        }
+        let mut nums = [0.0; N];
+        for (num, operand) in nums.iter_mut().zip(&self.operand_stack[len - N..]) {
+            *num = operand
+                .as_f64()
+                .ok_or_else(|| PdfError::Other("expected number".into()))?;
+        }
+        Ok(nums)
+    }
+
     fn get_numbers(&self, n: usize) -> Result<Vec<f64>, PdfError> {
         let len = self.operand_stack.len();
         if len < n {
@@ -2112,7 +2132,7 @@ impl<'a> ContentInterpreter<'a> {
             nums.push(
                 self.operand_stack[i]
                     .as_f64()
-                    .ok_or(PdfError::Other("expected number".into()))?,
+                    .ok_or_else(|| PdfError::Other("expected number".into()))?,
             );
         }
         Ok(nums)
@@ -2242,7 +2262,7 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     fn op_cm(&mut self) -> Result<(), PdfError> {
-        let n = self.get_numbers(6)?;
+        let n = self.get_number_array::<6>()?;
         let m = Matrix::new(n[0], n[1], n[2], n[3], n[4], n[5]);
         // PDF cm: CTM = CTM × M (pre-multiply, same as PS concat)
         self.gstate.ctm = self.gstate.ctm.concat(&m);
@@ -2377,7 +2397,7 @@ impl<'a> ContentInterpreter<'a> {
             .operand_stack
             .last()
             .and_then(|o| o.as_name())
-            .ok_or(PdfError::Other("gs: expected name".into()))?
+            .ok_or_else(|| PdfError::Other("gs: expected name".into()))?
             .to_vec();
         self.apply_ext_gstate(&name)
     }
@@ -2385,7 +2405,7 @@ impl<'a> ContentInterpreter<'a> {
     // === Path construction operators ===
 
     fn op_m(&mut self) -> Result<(), PdfError> {
-        let n = self.get_numbers(2)?;
+        let n = self.get_number_array::<2>()?;
         let (dx, dy) = self.transform(n[0], n[1]);
         self.current_path.segments.push(PathSegment::MoveTo(dx, dy));
         self.current_point = Some((dx, dy));
@@ -2394,7 +2414,7 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     fn op_l(&mut self) -> Result<(), PdfError> {
-        let n = self.get_numbers(2)?;
+        let n = self.get_number_array::<2>()?;
         let (dx, dy) = self.transform(n[0], n[1]);
         self.current_path.segments.push(PathSegment::LineTo(dx, dy));
         self.current_point = Some((dx, dy));
@@ -2402,7 +2422,7 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     fn op_c(&mut self) -> Result<(), PdfError> {
-        let n = self.get_numbers(6)?;
+        let n = self.get_number_array::<6>()?;
         let (x1, y1) = self.transform(n[0], n[1]);
         let (x2, y2) = self.transform(n[2], n[3]);
         let (x3, y3) = self.transform(n[4], n[5]);
@@ -2419,7 +2439,7 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     fn op_v(&mut self) -> Result<(), PdfError> {
-        let n = self.get_numbers(4)?;
+        let n = self.get_number_array::<4>()?;
         let (x1, y1) = self.current_point.unwrap_or((0.0, 0.0));
         let (x2, y2) = self.transform(n[0], n[1]);
         let (x3, y3) = self.transform(n[2], n[3]);
@@ -2436,7 +2456,7 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     fn op_y(&mut self) -> Result<(), PdfError> {
-        let n = self.get_numbers(4)?;
+        let n = self.get_number_array::<4>()?;
         let (x1, y1) = self.transform(n[0], n[1]);
         let (x3, y3) = self.transform(n[2], n[3]);
         self.current_path.segments.push(PathSegment::CurveTo {
@@ -2460,7 +2480,7 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     fn op_re(&mut self) -> Result<(), PdfError> {
-        let n = self.get_numbers(4)?;
+        let n = self.get_number_array::<4>()?;
         let (x, y, w, h) = (n[0], n[1], n[2], n[3]);
         // re builds: m x y, l x+w y, l x+w y+h, l x y+h, h
         let p0 = self.transform(x, y);
@@ -2929,7 +2949,7 @@ impl<'a> ContentInterpreter<'a> {
 
     fn op_big_rg(&mut self) -> Result<(), PdfError> {
         // RG r g b: set stroke color to RGB
-        let n = self.get_numbers(3)?;
+        let n = self.get_number_array::<3>()?;
         let (r, g, b) = self.cmyk_group_rgb(n[0], n[1], n[2]);
         self.gstate.stroke_color = DeviceColor::from_rgb(r, g, b);
         self.gstate.stroke_color_space = ColorSpaceRef::DeviceRGB;
@@ -2946,7 +2966,7 @@ impl<'a> ContentInterpreter<'a> {
 
     fn op_small_rg(&mut self) -> Result<(), PdfError> {
         // rg r g b: set fill color to RGB
-        let n = self.get_numbers(3)?;
+        let n = self.get_number_array::<3>()?;
         let (r, g, b) = self.cmyk_group_rgb(n[0], n[1], n[2]);
         self.gstate.fill_color = DeviceColor::from_rgb(r, g, b);
         self.gstate.fill_color_space = ColorSpaceRef::DeviceRGB;
@@ -3137,7 +3157,7 @@ impl<'a> ContentInterpreter<'a> {
 
     fn op_big_k(&mut self) -> Result<(), PdfError> {
         // K c m y k: set stroke color to CMYK
-        let n = self.get_numbers(4)?;
+        let n = self.get_number_array::<4>()?;
         let (color, source) = self.device_cmyk_paint([n[0], n[1], n[2], n[3]]);
         self.gstate.stroke_color = color;
         self.gstate.stroke_color_space = ColorSpaceRef::DeviceCMYK;
@@ -3154,7 +3174,7 @@ impl<'a> ContentInterpreter<'a> {
 
     fn op_small_k(&mut self) -> Result<(), PdfError> {
         // k c m y k: set fill color to CMYK
-        let n = self.get_numbers(4)?;
+        let n = self.get_number_array::<4>()?;
         let (color, source) = self.device_cmyk_paint([n[0], n[1], n[2], n[3]]);
         self.gstate.fill_color = color;
         self.gstate.fill_color_space = ColorSpaceRef::DeviceCMYK;
@@ -3177,7 +3197,7 @@ impl<'a> ContentInterpreter<'a> {
             .operand_stack
             .last()
             .and_then(|o| o.as_name())
-            .ok_or(PdfError::Other("CS: expected name".into()))?
+            .ok_or_else(|| PdfError::Other("CS: expected name".into()))?
             .to_vec();
         self.gstate.stroke_color_space = name_to_cs_ref(&name);
         self.gstate.stroke_color_source = None;
@@ -3190,7 +3210,7 @@ impl<'a> ContentInterpreter<'a> {
             .operand_stack
             .last()
             .and_then(|o| o.as_name())
-            .ok_or(PdfError::Other("cs: expected name".into()))?
+            .ok_or_else(|| PdfError::Other("cs: expected name".into()))?
             .to_vec();
         self.gstate.fill_color_space = name_to_cs_ref(&name);
         self.gstate.fill_color_source = None;
@@ -3223,9 +3243,13 @@ impl<'a> ContentInterpreter<'a> {
                 }
                 self.cs_index = Some(index);
             }
+            if let Some(cs) = self.cs_resolved.get(name.as_slice()) {
+                return Ok(cs.clone());
+            }
             if let Some(cs_obj) = self.cs_index.as_ref().unwrap().get(name.as_slice()) {
-                let cs_obj = cs_obj.clone();
-                resolve_color_space_obj(&cs_obj, self.resolver)
+                let cs = resolve_color_space_obj(cs_obj, self.resolver)?;
+                self.cs_resolved.insert(name.clone(), cs.clone());
+                Ok(cs)
             } else {
                 // Name not in cached ColorSpace dict — fall back to full resolution
                 // (handles resources without a ColorSpace sub-dict, or names that
@@ -3249,7 +3273,15 @@ impl<'a> ContentInterpreter<'a> {
         if matches!(self.operand_stack.last(), Some(Operand::Name(_))) {
             return self.handle_pattern_stroke();
         }
-        let cs = self.resolve_cs_cached(&self.gstate.stroke_color_space.clone())?;
+        // Lent out for the call rather than copied: it is a name, and this
+        // runs for every colour the stream sets.
+        let cs_ref = std::mem::replace(
+            &mut self.gstate.stroke_color_space,
+            ColorSpaceRef::DeviceGray,
+        );
+        let cs = self.resolve_cs_cached(&cs_ref);
+        self.gstate.stroke_color_space = cs_ref;
+        let cs = cs?;
         if matches!(cs, ResolvedColorSpace::Pattern) {
             return self.handle_pattern_stroke();
         }
@@ -3295,7 +3327,13 @@ impl<'a> ContentInterpreter<'a> {
         if matches!(self.operand_stack.last(), Some(Operand::Name(_))) {
             return self.handle_pattern_fill();
         }
-        let cs = self.resolve_cs_cached(&self.gstate.fill_color_space.clone())?;
+        // Lent out for the call rather than copied: it is a name, and this
+        // runs for every colour the stream sets.
+        let cs_ref =
+            std::mem::replace(&mut self.gstate.fill_color_space, ColorSpaceRef::DeviceGray);
+        let cs = self.resolve_cs_cached(&cs_ref);
+        self.gstate.fill_color_space = cs_ref;
+        let cs = cs?;
         if matches!(cs, ResolvedColorSpace::Pattern) {
             return self.handle_pattern_fill();
         }
@@ -3488,7 +3526,7 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     fn op_td(&mut self) -> Result<(), PdfError> {
-        let n = self.get_numbers(2)?;
+        let n = self.get_number_array::<2>()?;
         let m = Matrix::translate(n[0], n[1]);
         self.gstate.text_line_matrix = self.gstate.text_line_matrix.concat(&m);
         self.gstate.text_matrix = self.gstate.text_line_matrix;
@@ -3497,7 +3535,7 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     fn op_big_td(&mut self) -> Result<(), PdfError> {
-        let n = self.get_numbers(2)?;
+        let n = self.get_number_array::<2>()?;
         self.gstate.text_leading = -n[1];
         let m = Matrix::translate(n[0], n[1]);
         self.gstate.text_line_matrix = self.gstate.text_line_matrix.concat(&m);
@@ -3507,7 +3545,7 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     fn op_tm(&mut self) -> Result<(), PdfError> {
-        let n = self.get_numbers(6)?;
+        let n = self.get_number_array::<6>()?;
         let m = Matrix::new(n[0], n[1], n[2], n[3], n[4], n[5]);
         self.gstate.text_matrix = m;
         self.gstate.text_line_matrix = m;
@@ -4638,13 +4676,13 @@ impl<'a> ContentInterpreter<'a> {
             .operand_stack
             .last()
             .and_then(|o| o.as_name())
-            .ok_or(PdfError::Other("Do: expected name".into()))?
+            .ok_or_else(|| PdfError::Other("Do: expected name".into()))?
             .to_vec();
 
         // Look up XObject in resources (may be an indirect reference)
         let xobj_ref = &self
             .resource_entry(b"XObject", &name)
-            .ok_or(PdfError::Other("no XObject resources".into()))?
+            .ok_or_else(|| PdfError::Other("no XObject resources".into()))?
             .ok_or_else(|| {
                 PdfError::Other(format!(
                     "XObject /{} not found",
@@ -4656,7 +4694,7 @@ impl<'a> ContentInterpreter<'a> {
         let xobj = self.resolver.deref(xobj_ref)?;
         let dict = xobj
             .as_dict()
-            .ok_or(PdfError::Other("XObject is not a stream".into()))?;
+            .ok_or_else(|| PdfError::Other("XObject is not a stream".into()))?;
 
         // Check Optional Content visibility on the XObject itself.
         // Instead of suppressing content, wrap it in an OcgGroup so visibility
@@ -5041,12 +5079,12 @@ impl<'a> ContentInterpreter<'a> {
         // unchecked file integer both truncates (`/Width 4294967297` becomes
         // 1) and lets `width * height` wrap.
         let width = validate_image_dimension(self.resolve_dict_int(dict, b"Width"))
-            .ok_or(PdfError::Other("image has missing or invalid Width".into()))?;
+            .ok_or_else(|| PdfError::Other("image has missing or invalid Width".into()))?;
         let height = validate_image_dimension(self.resolve_dict_int(dict, b"Height")).ok_or(
             PdfError::Other("image has missing or invalid Height".into()),
         )?;
         validate_image_size(width, height)
-            .ok_or(PdfError::Other("image dimensions too large".into()))?;
+            .ok_or_else(|| PdfError::Other("image dimensions too large".into()))?;
 
         // Check for image mask (1-bit stencil painted with current fill color)
         let is_image_mask = dict
@@ -5061,7 +5099,7 @@ impl<'a> ContentInterpreter<'a> {
             1
         } else {
             validate_bits_per_component(dict.get_int(b"BitsPerComponent"))
-                .ok_or(PdfError::Other("image has invalid BitsPerComponent".into()))?
+                .ok_or_else(|| PdfError::Other("image has invalid BitsPerComponent".into()))?
         };
 
         // Per ISO 32000 §11.3.4 a per-image `/Intent` overrides the gstate
@@ -6409,6 +6447,7 @@ impl<'a> ContentInterpreter<'a> {
         let saved_font_cache = std::mem::take(&mut self.font_cache);
         let saved_current_font = self.current_font.take();
         let saved_cs_index = self.cs_index.take(); // invalidate — form has its own resources
+        let saved_cs_resolved = std::mem::take(&mut self.cs_resolved);
         let saved_content_stream_ctm = self.content_stream_ctm;
         let saved_mc_stack = std::mem::take(&mut self.mc_stack);
         let in_actual_text = self.actual_text.is_some();
@@ -6546,6 +6585,7 @@ impl<'a> ContentInterpreter<'a> {
         self.font_cache = saved_font_cache;
         self.current_font = saved_current_font;
         self.cs_index = saved_cs_index;
+        self.cs_resolved = saved_cs_resolved;
         self.content_stream_ctm = saved_content_stream_ctm;
         self.current_path = saved_path;
         self.current_point = saved_point;
@@ -7192,7 +7232,7 @@ impl<'a> ContentInterpreter<'a> {
     fn apply_ext_gstate(&mut self, name: &[u8]) -> Result<(), PdfError> {
         let gs_ref = &self
             .resource_entry(b"ExtGState", name)
-            .ok_or(PdfError::Other("no ExtGState resources".into()))?
+            .ok_or_else(|| PdfError::Other("no ExtGState resources".into()))?
             .ok_or_else(|| {
                 PdfError::Other(format!(
                     "ExtGState /{} not found",
@@ -7202,7 +7242,7 @@ impl<'a> ContentInterpreter<'a> {
         let gs_obj = self.resolver.deref(gs_ref)?;
         let gs_dict = gs_obj
             .as_dict()
-            .ok_or(PdfError::Other("ExtGState is not a dict".into()))?;
+            .ok_or_else(|| PdfError::Other("ExtGState is not a dict".into()))?;
 
         // Apply known keys
         if let Some(lw) = gs_dict.get_f64(b"LW") {
@@ -7684,6 +7724,7 @@ impl<'a> ContentInterpreter<'a> {
         let saved_font_cache = std::mem::take(&mut self.font_cache);
         let saved_current_font2 = self.current_font.take();
         let saved_cs_index2 = self.cs_index.take();
+        let saved_cs_resolved2 = std::mem::take(&mut self.cs_resolved);
         let saved_display_list = std::mem::replace(&mut self.display_list, DisplayList::new());
         let saved_scope = self.soft_mask_scope.take();
         let saved_content_stream_ctm = self.content_stream_ctm;
@@ -7754,6 +7795,7 @@ impl<'a> ContentInterpreter<'a> {
         self.font_cache = saved_font_cache;
         self.current_font = saved_current_font2;
         self.cs_index = saved_cs_index2;
+        self.cs_resolved = saved_cs_resolved2;
         self.mc_stack = saved_mc_stack;
         self.end_nested_actual_text(in_actual_text);
         if let Some(saved) = self.gstate_stack.pop() {
@@ -7923,12 +7965,12 @@ impl<'a> ContentInterpreter<'a> {
             .operand_stack
             .last()
             .and_then(|o| o.as_name())
-            .ok_or(PdfError::Other("sh: expected name".into()))?
+            .ok_or_else(|| PdfError::Other("sh: expected name".into()))?
             .to_vec();
 
         let sh_ref = &self
             .resource_entry(b"Shading", &name)
-            .ok_or(PdfError::Other("no Shading resources".into()))?
+            .ok_or_else(|| PdfError::Other("no Shading resources".into()))?
             .ok_or_else(|| {
                 PdfError::Other(format!(
                     "Shading /{} not found",
@@ -7939,7 +7981,7 @@ impl<'a> ContentInterpreter<'a> {
         let sh_obj = self.resolver.deref(sh_ref)?;
         let sh_dict = sh_obj
             .as_dict()
-            .ok_or(PdfError::Other("Shading is not a dict".into()))?;
+            .ok_or_else(|| PdfError::Other("Shading is not a dict".into()))?;
 
         crate::resources::shading::handle_shading_cached(
             &sh_ref_clone,
@@ -7959,7 +8001,7 @@ impl<'a> ContentInterpreter<'a> {
             .operand_stack
             .last()
             .and_then(|o| o.as_name())
-            .ok_or(PdfError::Other("pattern: expected name".into()))?
+            .ok_or_else(|| PdfError::Other("pattern: expected name".into()))?
             .to_vec();
 
         // For uncolored patterns (PaintType 2), the scn operands include
@@ -7971,7 +8013,7 @@ impl<'a> ContentInterpreter<'a> {
         // Check PatternType before resolving — Type 2 (shading) needs different handling
         let pat_ref = &self
             .resource_entry(b"Pattern", &name)
-            .ok_or(PdfError::Other("no Pattern resources".into()))?
+            .ok_or_else(|| PdfError::Other("no Pattern resources".into()))?
             .ok_or_else(|| {
                 PdfError::Other(format!(
                     "Pattern /{} not found",
@@ -7981,7 +8023,7 @@ impl<'a> ContentInterpreter<'a> {
         let pat_obj = self.resolver.deref(pat_ref)?;
         let pat_dict = pat_obj
             .as_dict()
-            .ok_or(PdfError::Other("Pattern is not a dict".into()))?;
+            .ok_or_else(|| PdfError::Other("Pattern is not a dict".into()))?;
         let pattern_type = pat_dict.get_int(b"PatternType").unwrap_or(1) as i32;
 
         if pattern_type == 2 {
@@ -8006,7 +8048,7 @@ impl<'a> ContentInterpreter<'a> {
             .operand_stack
             .last()
             .and_then(|o| o.as_name())
-            .ok_or(PdfError::Other("pattern: expected name".into()))?
+            .ok_or_else(|| PdfError::Other("pattern: expected name".into()))?
             .to_vec();
 
         // Extract underlying color components for uncolored patterns
@@ -8016,7 +8058,7 @@ impl<'a> ContentInterpreter<'a> {
         // Check PatternType before resolving — Type 2 (shading) needs different handling
         let pat_ref = &self
             .resource_entry(b"Pattern", &name)
-            .ok_or(PdfError::Other("no Pattern resources".into()))?
+            .ok_or_else(|| PdfError::Other("no Pattern resources".into()))?
             .ok_or_else(|| {
                 PdfError::Other(format!(
                     "Pattern /{} not found",
@@ -8026,7 +8068,7 @@ impl<'a> ContentInterpreter<'a> {
         let pat_obj = self.resolver.deref(pat_ref)?;
         let pat_dict = pat_obj
             .as_dict()
-            .ok_or(PdfError::Other("Pattern is not a dict".into()))?;
+            .ok_or_else(|| PdfError::Other("Pattern is not a dict".into()))?;
         let pattern_type = pat_dict.get_int(b"PatternType").unwrap_or(1) as i32;
 
         if pattern_type == 2 {
@@ -8137,7 +8179,7 @@ impl<'a> ContentInterpreter<'a> {
     fn resolve_pattern(&mut self, name: &[u8]) -> Result<TilingPattern, PdfError> {
         let pat_ref = &self
             .resource_entry(b"Pattern", name)
-            .ok_or(PdfError::Other("no Pattern resources".into()))?
+            .ok_or_else(|| PdfError::Other("no Pattern resources".into()))?
             .ok_or_else(|| {
                 PdfError::Other(format!(
                     "Pattern /{} not found",
@@ -8158,7 +8200,7 @@ impl<'a> ContentInterpreter<'a> {
         let pat_obj = self.resolver.deref(pat_ref)?;
         let pat_dict = pat_obj
             .as_dict()
-            .ok_or(PdfError::Other("Pattern is not a dict".into()))?;
+            .ok_or_else(|| PdfError::Other("Pattern is not a dict".into()))?;
 
         let pattern_type = pat_dict.get_int(b"PatternType").unwrap_or(1) as i32;
 
@@ -8313,12 +8355,12 @@ impl<'a> ContentInterpreter<'a> {
     ) -> Result<DisplayList, PdfError> {
         let sh_ref = pat_dict
             .get(b"Shading")
-            .ok_or(PdfError::Other("shading pattern missing /Shading".into()))?;
+            .ok_or_else(|| PdfError::Other("shading pattern missing /Shading".into()))?;
         let sh_ref_clone = sh_ref.clone();
         let sh_obj = self.resolver.deref(sh_ref)?;
         let sh_dict = sh_obj
             .as_dict()
-            .ok_or(PdfError::Other("Shading is not a dict".into()))?;
+            .ok_or_else(|| PdfError::Other("Shading is not a dict".into()))?;
 
         let pattern_matrix = deref_num_array(self.resolver, pat_dict, b"Matrix")
             .map(|v| {

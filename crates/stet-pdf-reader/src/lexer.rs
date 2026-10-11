@@ -121,6 +121,33 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// The next token if it is an operator keyword, as the bytes of the
+    /// input rather than a copy of them; `None`, with nothing consumed
+    /// beyond white space and comments, if it is anything else.
+    ///
+    /// A content stream is mostly operators, and [`next_token`](Self::next_token)
+    /// allocates for each one.
+    pub(crate) fn next_keyword(&mut self) -> Option<&'a [u8]> {
+        self.skip_whitespace_and_comments();
+        let data = self.data;
+        let start = self.pos;
+        let first = *data.get(start)?;
+        if first == b'\'' || first == b'"' {
+            self.pos += 1;
+            return Some(&data[start..start + 1]);
+        }
+        let len = data[start..]
+            .iter()
+            .take_while(|b| b.is_ascii_alphabetic())
+            .count();
+        let word = &data[start..start + len];
+        if len == 0 || word == b"true" || word == b"false" {
+            return None;
+        }
+        self.pos += len;
+        Some(word)
+    }
+
     /// Peek at the next token without advancing.
     pub fn peek_token(&mut self) -> Result<Token, PdfError> {
         let saved = self.pos;
@@ -202,6 +229,10 @@ impl<'a> Lexer<'a> {
             // behavior — some malformed PDFs use `--2.5` meaning `0 -2.5`, and
             // returning a keyword would desynchronize the operand stack.
             return Ok(Token::Int(0));
+        }
+
+        if !implicit_exp && let Some(tok) = parse_plain_number(s, has_dot) {
+            return Ok(tok);
         }
 
         if has_dot {
@@ -427,6 +458,56 @@ impl<'a> Lexer<'a> {
             _ => Ok(Token::Keyword(word.to_vec())),
         }
     }
+}
+
+/// Powers of ten a `f64` holds exactly.
+const EXACT_POW10: [f64; 23] = [
+    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
+    1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+];
+
+/// The number `s` spells — an optional sign, digits, and a decimal point if
+/// `has_dot` — when it can be had without the general parser: an integer of
+/// at most 18 digits, or a real of at most 15.
+///
+/// A real of 15 digits is an integer below 2^53 divided by a power of ten
+/// below 10^23. Both are exact in a `f64`, so the one division rounds
+/// correctly and the result is the value `str::parse` gives. Anything longer
+/// is left to it.
+fn parse_plain_number(s: &[u8], has_dot: bool) -> Option<Token> {
+    let (negative, digits) = match s.first()? {
+        b'-' => (true, &s[1..]),
+        b'+' => (false, &s[1..]),
+        _ => (false, s),
+    };
+    let mut mantissa: u64 = 0;
+    let mut count = 0usize;
+    let mut decimals = 0usize;
+    let mut seen_dot = false;
+    for &b in digits {
+        if b == b'.' {
+            seen_dot = true;
+            continue;
+        }
+        mantissa = mantissa * 10 + (b - b'0') as u64;
+        count += 1;
+        decimals += seen_dot as usize;
+        if count > 18 {
+            return None;
+        }
+    }
+    if count == 0 {
+        return None;
+    }
+    if !has_dot {
+        let n = mantissa as i64;
+        return Some(Token::Int(if negative { -n } else { n }));
+    }
+    if count > 15 {
+        return None;
+    }
+    let f = mantissa as f64 / EXACT_POW10[decimals];
+    Some(Token::Real(if negative { -f } else { f }))
 }
 
 /// Maximum nesting depth for arrays and dictionaries within a single object.
@@ -759,5 +840,158 @@ mod tests {
         // A lone integer should not be confused with a ref
         let obj = parse_object(&mut Lexer::new(b"42")).unwrap();
         assert_eq!(obj, PdfObj::Int(42));
+    }
+}
+
+#[cfg(test)]
+mod fast_path_tests {
+    use super::*;
+
+    fn number(text: &str) -> Token {
+        Lexer::new(text.as_bytes()).next_token().expect("a number")
+    }
+
+    /// What the general parser makes of `text`, which is what the lexer
+    /// gave before plain numbers were read directly.
+    fn reference(text: &str) -> Token {
+        if text.contains('.') {
+            Token::Real(text.parse().expect("a real"))
+        } else {
+            Token::Int(text.parse().expect("an integer"))
+        }
+    }
+
+    fn same(a: &Token, b: &Token) -> bool {
+        match (a, b) {
+            (Token::Int(x), Token::Int(y)) => x == y,
+            // Bit for bit: -0.0 and 0.0 are different answers.
+            (Token::Real(x), Token::Real(y)) => x.to_bits() == y.to_bits(),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn plain_numbers_are_what_the_general_parser_gives() {
+        for text in [
+            "0",
+            "-0",
+            "+7",
+            "12884",
+            "-1684",
+            "999999999999999999",
+            "-999999999999999999",
+            "1234567890123456789",
+            "0.0",
+            "-0.0",
+            "+0.5",
+            ".5",
+            "-.5",
+            "5.",
+            "-5.",
+            "0.12",
+            "0.049509",
+            "0.750000",
+            "1229.000",
+            "123456789.012345",
+            "0.000000000000001",
+            "999999999999999.",
+            ".999999999999999",
+            "0.1234567890123456",
+            "12345678.12345678",
+            "0.30000000000000004",
+            "179769313486231570000.0",
+            "0.1",
+            "0.2",
+            "0.3",
+            "0.7",
+            "1.1",
+            "2.675",
+            "1.005",
+            "8.41",
+            "595.276",
+            "841.89",
+            "0.00001",
+            "100000.00001",
+        ] {
+            assert!(
+                same(&number(text), &reference(text)),
+                "{text}: {:?} is not {:?}",
+                number(text),
+                reference(text)
+            );
+        }
+    }
+
+    /// Many reals of every length the direct reading accepts, and of the
+    /// lengths just past it.
+    #[test]
+    fn generated_reals_are_what_the_general_parser_gives() {
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..200_000 {
+            let digits = 1 + (next() % 18) as usize;
+            let dot = (next() % (digits as u64 + 1)) as usize;
+            let mut text = String::new();
+            match next() % 4 {
+                0 => text.push('-'),
+                1 => text.push('+'),
+                _ => {}
+            }
+            for i in 0..digits {
+                if i == dot {
+                    text.push('.');
+                }
+                text.push((b'0' + (next() % 10) as u8) as char);
+            }
+            if dot == digits {
+                text.push('.');
+            }
+            assert!(
+                same(&number(&text), &reference(text.trim_start_matches('+'))),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_number_ends_where_it_did_before() {
+        // A second point, a glued operator and an implicit exponent.
+        let mut lexer = Lexer::new(b"1.5.25 10re 0.00-50 --2");
+        assert!(same(&lexer.next_token().unwrap(), &Token::Real(1.5)));
+        assert!(same(&lexer.next_token().unwrap(), &Token::Real(0.25)));
+        assert!(same(&lexer.next_token().unwrap(), &Token::Int(10)));
+        assert_eq!(lexer.next_keyword(), Some(&b"re"[..]));
+        assert!(same(&lexer.next_token().unwrap(), &Token::Real(0.00e-50)));
+        assert!(same(&lexer.next_token().unwrap(), &Token::Int(0)));
+        assert!(same(&lexer.next_token().unwrap(), &Token::Int(-2)));
+    }
+
+    #[test]
+    fn a_keyword_is_taken_only_when_it_is_next() {
+        let mut lexer = Lexer::new(b"  % note\n q 1 0 0 1 5 5 cm true ' \" f* BT");
+        assert_eq!(lexer.next_keyword(), Some(&b"q"[..]));
+        // A number is not a keyword, and is still there afterwards.
+        assert_eq!(lexer.next_keyword(), None);
+        for _ in 0..6 {
+            assert!(matches!(lexer.next_token(), Ok(Token::Int(_))));
+        }
+        assert_eq!(lexer.next_keyword(), Some(&b"cm"[..]));
+        // `true` and `false` are values.
+        assert_eq!(lexer.next_keyword(), None);
+        assert!(matches!(lexer.next_token(), Ok(Token::Bool(true))));
+        assert_eq!(lexer.next_keyword(), Some(&b"'"[..]));
+        assert_eq!(lexer.next_keyword(), Some(&b"\""[..]));
+        // The suffix is the caller's to join on.
+        assert_eq!(lexer.next_keyword(), Some(&b"f"[..]));
+        assert_eq!(lexer.data()[lexer.pos()], b'*');
+        lexer.set_pos(lexer.pos() + 1);
+        assert_eq!(lexer.next_keyword(), Some(&b"BT"[..]));
+        assert_eq!(lexer.next_keyword(), None);
+        assert!(matches!(lexer.next_token(), Ok(Token::Eof)));
     }
 }

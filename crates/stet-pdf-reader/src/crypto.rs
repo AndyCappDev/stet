@@ -84,12 +84,12 @@ impl EncryptionState {
         let o_value = encrypt_dict
             .get(b"O")
             .and_then(|o| o.as_str())
-            .ok_or(PdfError::Other("Encrypt missing /O".into()))?
+            .ok_or_else(|| PdfError::Other("Encrypt missing /O".into()))?
             .to_vec();
         let u_value = encrypt_dict
             .get(b"U")
             .and_then(|o| o.as_str())
-            .ok_or(PdfError::Other("Encrypt missing /U".into()))?
+            .ok_or_else(|| PdfError::Other("Encrypt missing /U".into()))?
             .to_vec();
         let p_value = encrypt_dict.get_int(b"P").unwrap_or(0) as i32;
 
@@ -262,7 +262,7 @@ impl EncryptionState {
         let oe = encrypt_dict
             .get(b"OE")
             .and_then(|o| o.as_str())
-            .ok_or(PdfError::Other("Encrypt missing /OE".into()))?;
+            .ok_or_else(|| PdfError::Other("Encrypt missing /OE".into()))?;
         if oe.len() < 32 {
             return Err(PdfError::Other("AES-256: /OE too short".into()));
         }
@@ -307,7 +307,7 @@ impl EncryptionState {
         let ue = encrypt_dict
             .get(b"UE")
             .and_then(|o| o.as_str())
-            .ok_or(PdfError::Other("Encrypt missing /UE".into()))?;
+            .ok_or_else(|| PdfError::Other("Encrypt missing /UE".into()))?;
 
         if ue.len() < 32 {
             return Err(PdfError::Other("AES-256: /UE too short".into()));
