@@ -176,7 +176,12 @@ impl ColorSpaceRef {
 }
 
 /// PDF graphics state — self-contained, no VM/Context dependencies.
-#[derive(Clone, Debug)]
+///
+/// `clone_from` copies into the buffers the destination already owns — the
+/// clip paths, the dash array, the colour-space and font names, the
+/// colour components — where `clone` allocates each of them. The
+/// interpreter saves the state for every `q`, into a state a `Q` gave back.
+#[derive(Debug)]
 pub struct PdfGraphicsState {
     pub ctm: Matrix,
     pub fill_color: DeviceColor,
@@ -281,6 +286,284 @@ pub struct PdfGraphicsState {
     /// Generation counter: incremented each time a new SMask is set via gs.
     /// Used by the Q handler to detect SMask changes within a q/Q block.
     pub smask_gen: u64,
+}
+
+impl Clone for PdfGraphicsState {
+    fn clone(&self) -> Self {
+        // Every field is named, here and in `clone_from`, so that adding
+        // one without deciding how it is copied does not compile.
+        let Self {
+            ctm,
+            fill_color,
+            stroke_color,
+            line_width,
+            line_cap,
+            line_join,
+            miter_limit,
+            dash_pattern,
+            rendering_intent,
+            stroke_adjust,
+            overprint,
+            overprint_stroke,
+            overprint_mode,
+            opm_paired,
+            fill_painted_channels,
+            fill_is_device_cmyk,
+            stroke_painted_channels,
+            stroke_is_device_cmyk,
+            flatness,
+            fill_color_space,
+            stroke_color_space,
+            pending_clip,
+            clip_path,
+            clip_stack,
+            clip_path_version,
+            fill_alpha,
+            stroke_alpha,
+            fill_spot_color,
+            stroke_spot_color,
+            fill_icc_color,
+            stroke_icc_color,
+            fill_color_source,
+            stroke_color_source,
+            fill_is_none,
+            stroke_is_none,
+            blend_mode,
+            alpha_is_shape,
+            text_knockout,
+            text_matrix,
+            text_line_matrix,
+            font_size,
+            char_spacing,
+            word_spacing,
+            text_leading,
+            text_rise,
+            horizontal_scaling,
+            text_rendering_mode,
+            text_font_name,
+            fill_pattern,
+            fill_shading_pattern,
+            stroke_pattern,
+            stroke_shading_pattern,
+            next_pattern_id,
+            transfer,
+            soft_mask,
+            smask_gen,
+        } = self;
+        Self {
+            ctm: *ctm,
+            fill_color: fill_color.clone(),
+            stroke_color: stroke_color.clone(),
+            line_width: *line_width,
+            line_cap: *line_cap,
+            line_join: *line_join,
+            miter_limit: *miter_limit,
+            dash_pattern: dash_pattern.clone(),
+            rendering_intent: *rendering_intent,
+            stroke_adjust: *stroke_adjust,
+            overprint: *overprint,
+            overprint_stroke: *overprint_stroke,
+            overprint_mode: *overprint_mode,
+            opm_paired: *opm_paired,
+            fill_painted_channels: *fill_painted_channels,
+            fill_is_device_cmyk: *fill_is_device_cmyk,
+            stroke_painted_channels: *stroke_painted_channels,
+            stroke_is_device_cmyk: *stroke_is_device_cmyk,
+            flatness: *flatness,
+            fill_color_space: fill_color_space.clone(),
+            stroke_color_space: stroke_color_space.clone(),
+            pending_clip: pending_clip.clone(),
+            clip_path: clip_path.clone(),
+            clip_stack: clip_stack.clone(),
+            clip_path_version: *clip_path_version,
+            fill_alpha: *fill_alpha,
+            stroke_alpha: *stroke_alpha,
+            fill_spot_color: fill_spot_color.clone(),
+            stroke_spot_color: stroke_spot_color.clone(),
+            fill_icc_color: fill_icc_color.clone(),
+            stroke_icc_color: stroke_icc_color.clone(),
+            fill_color_source: fill_color_source.clone(),
+            stroke_color_source: stroke_color_source.clone(),
+            fill_is_none: *fill_is_none,
+            stroke_is_none: *stroke_is_none,
+            blend_mode: *blend_mode,
+            alpha_is_shape: *alpha_is_shape,
+            text_knockout: *text_knockout,
+            text_matrix: *text_matrix,
+            text_line_matrix: *text_line_matrix,
+            font_size: *font_size,
+            char_spacing: *char_spacing,
+            word_spacing: *word_spacing,
+            text_leading: *text_leading,
+            text_rise: *text_rise,
+            horizontal_scaling: *horizontal_scaling,
+            text_rendering_mode: *text_rendering_mode,
+            text_font_name: text_font_name.clone(),
+            fill_pattern: fill_pattern.clone(),
+            fill_shading_pattern: fill_shading_pattern.clone(),
+            stroke_pattern: stroke_pattern.clone(),
+            stroke_shading_pattern: stroke_shading_pattern.clone(),
+            next_pattern_id: *next_pattern_id,
+            transfer: transfer.clone(),
+            soft_mask: soft_mask.clone(),
+            smask_gen: *smask_gen,
+        }
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        let Self {
+            ctm,
+            fill_color,
+            stroke_color,
+            line_width,
+            line_cap,
+            line_join,
+            miter_limit,
+            dash_pattern,
+            rendering_intent,
+            stroke_adjust,
+            overprint,
+            overprint_stroke,
+            overprint_mode,
+            opm_paired,
+            fill_painted_channels,
+            fill_is_device_cmyk,
+            stroke_painted_channels,
+            stroke_is_device_cmyk,
+            flatness,
+            fill_color_space,
+            stroke_color_space,
+            pending_clip,
+            clip_path,
+            clip_stack,
+            clip_path_version,
+            fill_alpha,
+            stroke_alpha,
+            fill_spot_color,
+            stroke_spot_color,
+            fill_icc_color,
+            stroke_icc_color,
+            fill_color_source,
+            stroke_color_source,
+            fill_is_none,
+            stroke_is_none,
+            blend_mode,
+            alpha_is_shape,
+            text_knockout,
+            text_matrix,
+            text_line_matrix,
+            font_size,
+            char_spacing,
+            word_spacing,
+            text_leading,
+            text_rise,
+            horizontal_scaling,
+            text_rendering_mode,
+            text_font_name,
+            fill_pattern,
+            fill_shading_pattern,
+            stroke_pattern,
+            stroke_shading_pattern,
+            next_pattern_id,
+            transfer,
+            soft_mask,
+            smask_gen,
+        } = source;
+        self.ctm = *ctm;
+        self.fill_color.clone_from(fill_color);
+        self.stroke_color.clone_from(stroke_color);
+        self.line_width = *line_width;
+        self.line_cap = *line_cap;
+        self.line_join = *line_join;
+        self.miter_limit = *miter_limit;
+        self.dash_pattern.array.clone_from(&dash_pattern.array);
+        self.dash_pattern.offset = dash_pattern.offset;
+        self.rendering_intent = *rendering_intent;
+        self.stroke_adjust = *stroke_adjust;
+        self.overprint = *overprint;
+        self.overprint_stroke = *overprint_stroke;
+        self.overprint_mode = *overprint_mode;
+        self.opm_paired = *opm_paired;
+        self.fill_painted_channels = *fill_painted_channels;
+        self.fill_is_device_cmyk = *fill_is_device_cmyk;
+        self.stroke_painted_channels = *stroke_painted_channels;
+        self.stroke_is_device_cmyk = *stroke_is_device_cmyk;
+        self.flatness = *flatness;
+        clone_color_space_ref(&mut self.fill_color_space, fill_color_space);
+        clone_color_space_ref(&mut self.stroke_color_space, stroke_color_space);
+        match (&mut self.pending_clip, pending_clip) {
+            (Some((to, to_rule)), Some((from, from_rule))) => {
+                to.segments.clone_from(&from.segments);
+                *to_rule = *from_rule;
+            }
+            (to, from) => *to = from.clone(),
+        }
+        match (&mut self.clip_path, clip_path) {
+            (Some(to), Some(from)) => to.segments.clone_from(&from.segments),
+            (to, from) => *to = from.clone(),
+        }
+        self.clip_stack.truncate(clip_stack.len());
+        let shared = self.clip_stack.len();
+        for ((to, to_rule), (from, from_rule)) in self.clip_stack.iter_mut().zip(clip_stack) {
+            to.segments.clone_from(&from.segments);
+            *to_rule = *from_rule;
+        }
+        self.clip_stack.extend_from_slice(&clip_stack[shared..]);
+        self.clip_path_version = *clip_path_version;
+        self.fill_alpha = *fill_alpha;
+        self.stroke_alpha = *stroke_alpha;
+        self.fill_spot_color.clone_from(fill_spot_color);
+        self.stroke_spot_color.clone_from(stroke_spot_color);
+        clone_icc_color(&mut self.fill_icc_color, fill_icc_color);
+        clone_icc_color(&mut self.stroke_icc_color, stroke_icc_color);
+        self.fill_color_source.clone_from(fill_color_source);
+        self.stroke_color_source.clone_from(stroke_color_source);
+        self.fill_is_none = *fill_is_none;
+        self.stroke_is_none = *stroke_is_none;
+        self.blend_mode = *blend_mode;
+        self.alpha_is_shape = *alpha_is_shape;
+        self.text_knockout = *text_knockout;
+        self.text_matrix = *text_matrix;
+        self.text_line_matrix = *text_line_matrix;
+        self.font_size = *font_size;
+        self.char_spacing = *char_spacing;
+        self.word_spacing = *word_spacing;
+        self.text_leading = *text_leading;
+        self.text_rise = *text_rise;
+        self.horizontal_scaling = *horizontal_scaling;
+        self.text_rendering_mode = *text_rendering_mode;
+        self.text_font_name.clone_from(text_font_name);
+        self.fill_pattern.clone_from(fill_pattern);
+        self.fill_shading_pattern.clone_from(fill_shading_pattern);
+        self.stroke_pattern.clone_from(stroke_pattern);
+        self.stroke_shading_pattern
+            .clone_from(stroke_shading_pattern);
+        self.next_pattern_id = *next_pattern_id;
+        self.transfer.clone_from(transfer);
+        self.soft_mask.clone_from(soft_mask);
+        self.smask_gen = *smask_gen;
+    }
+}
+
+/// `to.clone_from(from)` for a colour-space reference, keeping the buffer of
+/// a name when both are names.
+fn clone_color_space_ref(to: &mut ColorSpaceRef, from: &ColorSpaceRef) {
+    match (to, from) {
+        (ColorSpaceRef::Named(to), ColorSpaceRef::Named(from)) => to.clone_from(from),
+        (to, from) => *to = from.clone(),
+    }
+}
+
+/// `to.clone_from(from)` for an ICC colour, keeping the buffer of the
+/// components when both have one.
+fn clone_icc_color(to: &mut Option<IccColor>, from: &Option<IccColor>) {
+    match (to, from) {
+        (Some(to), Some(from)) => {
+            to.components.clone_from(&from.components);
+            to.color_space.clone_from(&from.color_space);
+        }
+        (to, from) => *to = from.clone(),
+    }
 }
 
 impl PdfGraphicsState {
@@ -453,5 +736,90 @@ impl PdfGraphicsState {
     /// CTM scale factor: sqrt(a^2 + b^2).
     pub fn ctm_scale_factor(&self) -> f64 {
         (self.ctm.a * self.ctm.a + self.ctm.b * self.ctm.b).sqrt()
+    }
+}
+
+#[cfg(test)]
+mod clone_from_tests {
+    use super::*;
+    use stet_fonts::geometry::PathSegment;
+
+    fn path(points: usize) -> PsPath {
+        PsPath {
+            segments: (0..points)
+                .map(|i| PathSegment::LineTo(i as f64, 2.0 * i as f64))
+                .collect(),
+        }
+    }
+
+    fn icc(components: &[f64], n: u32) -> IccColor {
+        IccColor {
+            components: components.to_vec(),
+            color_space: stet_graphics::device::IccColorSpace {
+                n,
+                profile_data: Arc::new(vec![n as u8; 8]),
+                profile_hash: [n as u8; 32],
+            },
+        }
+    }
+
+    /// A state with nothing in the fields `clone_from` copies by hand.
+    fn bare() -> PdfGraphicsState {
+        PdfGraphicsState::new(Matrix::identity())
+    }
+
+    /// A state with something in each of them.
+    fn busy(size: usize) -> PdfGraphicsState {
+        let mut state = bare();
+        state.ctm = Matrix::new(2.0, 0.0, 0.0, 3.0, size as f64, 7.0);
+        state.line_width = 4.5;
+        state.dash_pattern = DashPattern {
+            array: vec![1.0; size],
+            offset: 0.25,
+        };
+        state.fill_color_space = ColorSpaceRef::Named(vec![b'C'; size]);
+        state.stroke_color_space = ColorSpaceRef::Named(vec![b'S'; size + 1]);
+        state.pending_clip = Some((path(size), FillRule::EvenOdd));
+        state.clip_path = Some(path(size + 2));
+        state.clip_stack = (0..size)
+            .map(|i| (path(i + 1), FillRule::NonZeroWinding))
+            .collect();
+        state.clip_path_version = 9;
+        state.fill_icc_color = Some(icc(&vec![0.5; size], 3));
+        state.stroke_icc_color = Some(icc(&vec![0.25; size], 4));
+        state.text_font_name = vec![b'F'; size];
+        state.smask_gen = 11;
+        state
+    }
+
+    /// `clone_from` leaves the state `clone` gives, whatever was there
+    /// before: nothing, less, more, or something of another shape.
+    #[test]
+    fn clone_from_gives_what_clone_gives() {
+        let mut device_spaces = busy(2);
+        device_spaces.fill_color_space = ColorSpaceRef::DeviceCMYK;
+        device_spaces.stroke_color_space = ColorSpaceRef::DeviceGray;
+        let states = [bare(), busy(1), busy(3), busy(6), device_spaces];
+        for from in &states {
+            for before in &states {
+                let mut to = before.clone();
+                to.clone_from(from);
+                assert_eq!(format!("{to:?}"), format!("{:?}", from.clone()));
+            }
+        }
+    }
+
+    /// The buffers are the destination's own: a later change to the source
+    /// does not reach the copy.
+    #[test]
+    fn the_copy_is_independent() {
+        let mut from = busy(3);
+        let mut to = busy(6);
+        to.clone_from(&from);
+        let expected = format!("{:?}", from.clone());
+        from.clip_stack.clear();
+        from.text_font_name.push(b'!');
+        from.dash_pattern.array[0] = 99.0;
+        assert_eq!(format!("{to:?}"), expected);
     }
 }

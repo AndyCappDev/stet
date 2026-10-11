@@ -475,7 +475,21 @@ struct SoftMaskScope {
 pub struct ContentInterpreter<'a> {
     resolver: &'a Resolver<'a>,
     resources: PdfDict,
-    gstate_stack: Vec<PdfGraphicsState>,
+    /// The states saved by `q`. Boxed, as the spares are, because a state
+    /// goes from one list to the other on every `q` and `Q`, and it is well
+    /// over a kilobyte to move.
+    #[expect(
+        clippy::vec_box,
+        reason = "a state moves between two lists on every q and Q"
+    )]
+    gstate_stack: Vec<Box<PdfGraphicsState>>,
+    /// States a `Q` has finished with, for the next `q` to save into: they
+    /// keep the buffers a saved state needs, so saving allocates nothing.
+    #[expect(
+        clippy::vec_box,
+        reason = "a state moves between two lists on every q and Q"
+    )]
+    gstate_spare: Vec<Box<PdfGraphicsState>>,
     gstate: PdfGraphicsState,
     current_path: PsPath,
     current_point: Option<(f64, f64)>,
@@ -718,6 +732,7 @@ impl<'a> ContentInterpreter<'a> {
             resolver,
             resources,
             gstate_stack: Vec::new(),
+            gstate_spare: Vec::new(),
             gstate: PdfGraphicsState::new(initial_ctm),
             current_path: PsPath::new(),
             current_point: None,
@@ -975,7 +990,7 @@ impl<'a> ContentInterpreter<'a> {
     pub fn unwind_gstate_stack(&mut self) {
         while let Some(saved) = self.gstate_stack.pop() {
             let old_clip_version = self.gstate.clip_path_version;
-            self.gstate = saved;
+            self.gstate = *saved;
             if self.gstate.clip_path_version != old_clip_version {
                 self.restore_clip_from_stack();
             }
@@ -2212,12 +2227,42 @@ impl<'a> ContentInterpreter<'a> {
     // === Graphics state operators ===
 
     fn op_q(&mut self) -> Result<(), PdfError> {
-        self.gstate_stack.push(self.gstate.clone());
+        self.save_gstate();
         Ok(())
     }
 
+    /// Push a copy of the graphics state, as `q` does.
+    fn save_gstate(&mut self) {
+        let saved = match self.gstate_spare.pop() {
+            Some(mut spare) => {
+                (*spare).clone_from(&self.gstate);
+                spare
+            }
+            None => Box::new(self.gstate.clone()),
+        };
+        self.gstate_stack.push(saved);
+    }
+
+    /// Keep a state that is done with for [`save_gstate`](Self::save_gstate)
+    /// to reuse, without what it draws with: a pattern's tile or a soft
+    /// mask's group is not held on for the sake of a buffer.
+    fn recycle_gstate(&mut self, mut done: Box<PdfGraphicsState>) {
+        const SPARE_STATES: usize = 32;
+        if self.gstate_spare.len() >= SPARE_STATES {
+            return;
+        }
+        done.fill_pattern = None;
+        done.stroke_pattern = None;
+        done.fill_shading_pattern = None;
+        done.stroke_shading_pattern = None;
+        done.soft_mask = None;
+        done.fill_color_source = None;
+        done.stroke_color_source = None;
+        self.gstate_spare.push(done);
+    }
+
     fn op_big_q(&mut self) -> Result<(), PdfError> {
-        if let Some(saved) = self.gstate_stack.pop() {
+        if let Some(mut saved) = self.gstate_stack.pop() {
             // Flush soft mask scope if the SMask changed during this q/Q block.
             // Compare the smask_gen counter: if it changed, a new SMask was set
             // inside this block and the scope should be flushed. This correctly
@@ -2228,20 +2273,29 @@ impl<'a> ContentInterpreter<'a> {
                 self.nested_mask_flush_count += 1;
             }
 
-            let old_clip_version = self.gstate.clip_path_version;
-            let old_font_name = std::mem::take(&mut self.gstate.text_font_name);
-            self.gstate = saved;
+            // The two change places, so the state being left is not
+            // dropped: `q` saves into it next time.
+            std::mem::swap(&mut self.gstate, &mut *saved);
+            let left = saved;
             // If clip changed during the q/Q block, restore it by
             // replaying the full clip stack (not just the last clip).
-            if self.gstate.clip_path_version != old_clip_version {
+            if self.gstate.clip_path_version != left.clip_path_version {
                 self.restore_clip_from_stack();
             }
-            // Re-resolve current_font if the restored font name differs
-            if self.gstate.text_font_name != old_font_name && !self.gstate.text_font_name.is_empty()
+            // Re-resolve current_font if the restored font name differs.
+            // The empty name is ruled out first, and not only because it is
+            // the cheaper test: comparing two empty names hands the C
+            // library the dangling pointers of two empty vectors, and its
+            // masked load from an unmapped address takes a fault the
+            // processor has to suppress — several hundred cycles, for
+            // every `Q` of a stream that sets no font.
+            if !self.gstate.text_font_name.is_empty()
+                && self.gstate.text_font_name != left.text_font_name
             {
                 let name = self.gstate.text_font_name.clone();
                 self.resolve_current_font(&name);
             }
+            self.recycle_gstate(left);
         }
         Ok(())
     }
@@ -4228,7 +4282,7 @@ impl<'a> ContentInterpreter<'a> {
         // Interpret the CharProc stream with TRM as the CTM.
         // Save current state and swap in a fresh display list.
         let stack_depth_before = self.gstate_stack.len();
-        self.gstate_stack.push(self.gstate.clone());
+        self.save_gstate();
         // Merge the Type 3 font's resources with the page resources: the font's
         // own entries take priority (e.g. XObjects for emoji glyphs), but missing
         // categories fall back to the page resources (e.g. fonts referenced by
@@ -4283,7 +4337,7 @@ impl<'a> ContentInterpreter<'a> {
         // unmatched q/Q inside the CharProc (e.g., if the EI parser consumed Q).
         self.gstate_stack.truncate(stack_depth_before + 1);
         if let Some(saved) = self.gstate_stack.pop() {
-            self.gstate = saved;
+            self.gstate = *saved;
         }
 
         // Append all glyph elements to the main display list
@@ -6441,7 +6495,7 @@ impl<'a> ContentInterpreter<'a> {
 
         // Save state (including font cache — form XObjects may have different
         // font resources with different encodings for the same resource name)
-        self.gstate_stack.push(self.gstate.clone());
+        self.save_gstate();
         let saved_stack_depth = self.gstate_stack.len();
         let saved_resources = std::mem::replace(&mut self.resources, form_resources);
         let saved_font_cache = std::mem::take(&mut self.font_cache);
@@ -6594,7 +6648,7 @@ impl<'a> ContentInterpreter<'a> {
         self.end_nested_actual_text(in_actual_text);
         if let Some(saved) = self.gstate_stack.pop() {
             let old_clip_version = self.gstate.clip_path_version;
-            self.gstate = saved;
+            self.gstate = *saved;
             // For non-group forms, restore clip if it changed
             if !is_transparency_group && self.gstate.clip_path_version != old_clip_version {
                 self.restore_clip_from_stack();
@@ -7719,7 +7773,7 @@ impl<'a> ContentInterpreter<'a> {
 
         // Save state and render (clear font cache — the mask form may have
         // different font resources with the same resource names as the parent)
-        self.gstate_stack.push(self.gstate.clone());
+        self.save_gstate();
         let saved_resources = std::mem::replace(&mut self.resources, form_resources);
         let saved_font_cache = std::mem::take(&mut self.font_cache);
         let saved_current_font2 = self.current_font.take();
@@ -7799,7 +7853,7 @@ impl<'a> ContentInterpreter<'a> {
         self.mc_stack = saved_mc_stack;
         self.end_nested_actual_text(in_actual_text);
         if let Some(saved) = self.gstate_stack.pop() {
-            self.gstate = saved;
+            self.gstate = *saved;
         }
 
         // Parse /BC (backdrop color) — may be inline array or indirect reference.
@@ -8273,7 +8327,7 @@ impl<'a> ContentInterpreter<'a> {
         // elements in pattern space.  The combined_matrix is stored in the
         // TilingPattern and applied per-element by the renderer (same approach
         // as PostScript op_makepattern).
-        self.gstate_stack.push(self.gstate.clone());
+        self.save_gstate();
         let saved_resources = std::mem::replace(&mut self.resources, pattern_resources);
         let saved_display_list = std::mem::take(&mut self.display_list);
         let saved_content_stream_ctm = self.content_stream_ctm;
@@ -8324,7 +8378,7 @@ impl<'a> ContentInterpreter<'a> {
         self.mc_stack = saved_mc_stack;
         self.end_nested_actual_text(in_actual_text);
         if let Some(saved) = self.gstate_stack.pop() {
-            self.gstate = saved;
+            self.gstate = *saved;
         }
 
         Ok(TilingPattern {

@@ -60,9 +60,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   vector; and each operand that was a number built, and threw away, the
   error message it would have needed had it not been one. A colour set in
   a named colour space resolved that space from the PDF's objects every
-  time; it is now resolved once per resource dictionary. On a 278 MB
-  content stream of 4.4 million strokes, reading went from 5.3 s to
-  3.4 s. Output is unchanged.
+  time; it is now resolved once per resource dictionary. Saving the
+  graphics state for `q` allocated a copy of each clip path, name and
+  colour it holds, and `Q` freed them; a `q` now saves into a state a `Q`
+  has finished with, reusing its buffers. And every `Q` compared the font
+  name before and after even when no font was set, which for two empty
+  names is far slower than it sounds: the C library's comparison reads
+  through the dangling pointer of an empty vector, and the processor has
+  to suppress the fault. On a 278 MB content stream of 4.4 million
+  strokes, reading went from 5.3 s to 2.5 s. Output is unchanged.
 
 - **Opening a PDF prints nothing.** `IccCache::search_system_cmyk_profile`
   — which `PdfDocument::from_bytes` and `from_owned` call — wrote
