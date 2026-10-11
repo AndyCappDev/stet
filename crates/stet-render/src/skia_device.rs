@@ -6549,6 +6549,7 @@ fn render_soft_masked(
     let parent_data = pixmap.data_mut();
     let parent_stride = ctx.out_w as usize * 4;
     let content_stride = eff_w as usize * 4;
+    let clip_data = clip_ref.map(|m| m.data());
 
     for y in 0..eff_h as usize {
         let py = crop_y as usize + y;
@@ -6566,9 +6567,8 @@ fn render_soft_masked(
             }
 
             // Check clip mask (in parent coordinates)
-            if let Some(clip) = clip_ref
-                && clip.data()[py * ctx.out_w as usize + px] == 0
-            {
+            let cov = clip_coverage(clip_data, py * ctx.out_w as usize + px);
+            if cov == 0 {
                 continue;
             }
 
@@ -6587,6 +6587,13 @@ fn render_soft_masked(
                 }
             } else {
                 fallback_mask
+            };
+            // The clip lets the masked content through as far as it covers
+            // the pixel.
+            let m = if cov == 255 {
+                m
+            } else {
+                (m * i32::from(cov) + 127) / 255
             };
             if m == 0 {
                 continue;
@@ -10157,6 +10164,25 @@ fn update_cmyk_buffer_for_stroke(
     }
 }
 
+/// How much of pixel `(bx, by)` a clip lets an overprinting image through,
+/// the clip being taken a pixel wider than it is: as far as it lets through
+/// that pixel or any of the eight touching it.
+///
+/// The widening covers the anti-aliased edge of a path painted under the
+/// image, which reaches a pixel beyond a clip of the same outline.
+fn widened_clip_coverage(clip: &[u8], width: usize, height: usize, bx: usize, by: usize) -> u8 {
+    let mut cov = clip[by * width + bx];
+    if cov == 255 {
+        return cov;
+    }
+    for ny in by.saturating_sub(1)..(by + 2).min(height) {
+        for nx in bx.saturating_sub(1)..(bx + 2).min(width) {
+            cov = cov.max(clip[ny * width + nx]);
+        }
+    }
+    cov
+}
+
 /// Render an overprint image with viewport params.
 #[expect(clippy::too_many_arguments)]
 fn render_overprint_image(
@@ -10239,22 +10265,12 @@ fn render_overprint_image(
             {
                 continue;
             }
-            if let Some(clip) = clip_data {
-                let ci_clip = by * stride + bx;
-                if clip[ci_clip] == 0 {
-                    let bh = out_h as usize;
-                    let has_neighbor = (bx > 0 && clip[ci_clip - 1] != 0)
-                        || (bx + 1 < stride && clip[ci_clip + 1] != 0)
-                        || (by > 0 && clip[ci_clip - stride] != 0)
-                        || (by + 1 < bh && clip[ci_clip + stride] != 0)
-                        || (bx > 0 && by > 0 && clip[ci_clip - stride - 1] != 0)
-                        || (bx + 1 < stride && by > 0 && clip[ci_clip - stride + 1] != 0)
-                        || (bx > 0 && by + 1 < bh && clip[ci_clip + stride - 1] != 0)
-                        || (bx + 1 < stride && by + 1 < bh && clip[ci_clip + stride + 1] != 0);
-                    if !has_neighbor {
-                        continue;
-                    }
-                }
+            let cov = match clip_data {
+                None => 255,
+                Some(clip) => widened_clip_coverage(clip, stride, out_h as usize, bx, by),
+            };
+            if cov == 0 {
+                continue;
             }
 
             // Map output pixel to device space, then to image space
@@ -10296,6 +10312,14 @@ fn render_overprint_image(
             let mi = by * stride + bx;
             let ci = mi * 4;
             let pi = mi * 4;
+            // Painted once below, then blended with this where the clip
+            // covers the pixel in part.
+            let was = [
+                px_data[pi],
+                px_data[pi + 1],
+                px_data[pi + 2],
+                px_data[pi + 3],
+            ];
 
             // Spot-tint images (Separation / DeviceN with CMYK alt and at
             // least one non-process colorant): per PDF spec 11.7.4.5 the
@@ -10396,6 +10420,7 @@ fn render_overprint_image(
                 px_data[pi + 1] = (g * 255.0).round() as u8;
                 px_data[pi + 2] = (b * 255.0).round() as u8;
                 px_data[pi + 3] = 255;
+                settle_covered(&mut px_data[pi..pi + 4], was, cov);
                 continue;
             }
 
@@ -10545,6 +10570,7 @@ fn render_overprint_image(
             px_data[pi + 1] = (g * 255.0).round() as u8;
             px_data[pi + 2] = (b * 255.0).round() as u8;
             px_data[pi + 3] = 255;
+            settle_covered(&mut px_data[pi..pi + 4], was, cov);
         }
     }
 }
@@ -10677,6 +10703,8 @@ fn update_cmyk_buffer_for_image(
             {
                 continue;
             }
+            // The record of inks takes any pixel the clip lets through at
+            // all, as a fill's does (`update_cmyk_buffer_for_fill`).
             if let Some(clip) = clip_data
                 && clip[by * stride + bx] == 0
             {
@@ -14219,6 +14247,85 @@ fn mask_row_span(mask: &[u8], width: usize, py: u32, x0: u32, x1: u32) -> Option
     Some((x0 + first as u32, x0 + last as u32 + 1))
 }
 
+/// How much of a pixel a clip lets through: 0 for none of it, 255 for all.
+///
+/// The painters that write pixels themselves, rather than handing
+/// tiny-skia a path and the mask, read the clip here and blend what they
+/// paint by it ([`settle_covered`]), so the edge they leave is as smooth as
+/// the mask's. Through a mask that holds only 0 and 255 that is the pixel
+/// skipped or the pixel written, as testing the mask for zero gave.
+#[inline]
+fn clip_coverage(mask: Option<&[u8]>, index: usize) -> u8 {
+    mask.map_or(255, |m| m[index])
+}
+
+/// Leave a pixel that has just been painted as the blend its coverage
+/// calls for: `cov` parts of what was painted to `255 - cov` of `was`, what
+/// it held before. `px` is as many channels as were painted.
+///
+/// Pixels are premultiplied, so blending the channels alike is painting
+/// over at that coverage. At a coverage of 255 nothing changes.
+#[inline]
+fn settle_covered(px: &mut [u8], was: [u8; 4], cov: u8) {
+    if cov == 255 {
+        return;
+    }
+    let (new, old) = (u32::from(cov), 255 - u32::from(cov));
+    for (p, w) in px.iter_mut().zip(was) {
+        *p = ((u32::from(*p) * new + u32::from(w) * old + 127) / 255) as u8;
+    }
+}
+
+/// What the pixels along the edge of a clip held before a shading began to
+/// paint them.
+///
+/// A shading may write a pixel more than once: two triangles of a mesh
+/// share the pixel on their common edge, a folded patch covers itself, and
+/// an overprinting axial shading goes over its own work to recompose it
+/// from the inks. Each of those is a whole pixel replacing the last, and
+/// has to stay so where the clip covers the pixel only in part: the blend
+/// is of the latest colour with what was there before the shading, not
+/// with the shading's own earlier attempt. Only pixels of partial coverage
+/// are remembered, so a hard-edged clip remembers none.
+#[derive(Default)]
+struct ClipEdgePixels(HashMap<usize, [u8; 4]>);
+
+impl ClipEdgePixels {
+    /// What the pixel at `offset` held before the shading, noting it if
+    /// this is the first time the shading has come to it.
+    #[inline]
+    fn before(&mut self, data: &[u8], offset: usize) -> [u8; 4] {
+        *self.0.entry(offset).or_insert_with(|| {
+            [
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]
+        })
+    }
+
+    /// Note every pixel of the given rows and columns that `mask` covers
+    /// in part, ahead of a painter that does not come through here.
+    fn note_edges(
+        &mut self,
+        data: &[u8],
+        mask: &[u8],
+        width: usize,
+        rows: std::ops::Range<usize>,
+        cols: std::ops::Range<usize>,
+    ) {
+        for y in rows {
+            let row = y * width;
+            for x in cols.clone() {
+                if !matches!(mask[row + x], 0 | 255) {
+                    self.before(data, (row + x) * 4);
+                }
+            }
+        }
+    }
+}
+
 /// A colour component in 0..=1 scaled to a byte, exactly as
 /// `(v * 255.0).round().clamp(0.0, 255.0) as u8` gives it, without the call
 /// into libm that `round` is on a baseline x86-64 target. A gradient table
@@ -14314,6 +14421,23 @@ fn render_axial_shading(
     // the BBox is not axis-aligned in device space and needs proper polygon clipping.
     let bbox_is_rotated =
         params.bbox.is_some() && (params.ctm.b.abs() > 1e-10 || params.ctm.c.abs() > 1e-10);
+
+    // An overprinting shading goes over its pixels a second time, below, to
+    // recompose them from the inks. Where the clip covers a pixel in part,
+    // that second colour is blended with what the pixel held before either.
+    let mut edge_pixels = ClipEdgePixels::default();
+    if cmyk_buf.is_some()
+        && params.overprint
+        && let Some(mask) = clip_mask
+    {
+        edge_pixels.note_edges(
+            pixmap.data(),
+            mask.data(),
+            pw as usize,
+            ry_min.floor() as usize..(ry_max.ceil() as usize).min(ph as usize),
+            rx_min.floor() as usize..(rx_max.ceil() as usize).min(pw as usize),
+        );
+    }
 
     if needs_perpendicular_clip {
         // Diagonal gradient with non-extended side — fall back to tiny-skia
@@ -14531,10 +14655,8 @@ fn render_axial_shading(
             };
 
             for px in row_min..row_max {
-                // Check clip mask
-                if let Some(md) = mask_data
-                    && md[py as usize * pw as usize + px as usize] == 0
-                {
+                let cov = clip_coverage(mask_data, py as usize * pw as usize + px as usize);
+                if cov == 0 {
                     continue;
                 }
 
@@ -14553,14 +14675,19 @@ fn render_axial_shading(
                 let [r, g, b, _] = lut[idx.min(lut_size - 1)];
 
                 let offset = row_offset + px as usize * 4;
-                if alpha >= 255 {
+                // The shading's opacity, less what the clip keeps back.
+                let a = if cov == 255 {
+                    alpha
+                } else {
+                    (alpha * u16::from(cov) + 127) / 255
+                };
+                if a >= 255 {
                     data[offset] = r;
                     data[offset + 1] = g;
                     data[offset + 2] = b;
                     data[offset + 3] = 255;
                 } else {
                     // Alpha blend: premultiply and composite over existing pixel
-                    let a = alpha;
                     let inv_a = 255 - a;
                     data[offset] = ((r as u16 * a + data[offset] as u16 * inv_a + 127) / 255) as u8;
                     data[offset + 1] =
@@ -14616,11 +14743,12 @@ fn render_axial_shading(
                 }
                 let clamped = t.clamp(0.0, 1.0);
 
-                if let Some(mask) = clip_mask {
-                    let mi = py as usize * pw as usize + px as usize;
-                    if mask.data()[mi] == 0 {
-                        continue;
-                    }
+                let cov = clip_coverage(
+                    clip_mask.map(|m| m.data()),
+                    py as usize * pw as usize + px as usize,
+                );
+                if cov == 0 {
+                    continue;
                 }
 
                 let color = interpolate_color_stops(&params.color_stops, clamped);
@@ -14727,6 +14855,10 @@ fn render_axial_shading(
                             data[offset] = (rv * 255.0).round().clamp(0.0, 255.0) as u8;
                             data[offset + 1] = (gv * 255.0).round().clamp(0.0, 255.0) as u8;
                             data[offset + 2] = (bv * 255.0).round().clamp(0.0, 255.0) as u8;
+                            if cov != 255 {
+                                let was = edge_pixels.before(data, offset);
+                                settle_covered(&mut data[offset..offset + 3], was, cov);
+                            }
                         }
                     } else if params.overprint
                         && params.painted_channels != stet_graphics::device::CMYK_ALL
@@ -14762,6 +14894,10 @@ fn render_axial_shading(
                         data[offset] = (rv * 255.0).round().clamp(0.0, 255.0) as u8;
                         data[offset + 1] = (gv * 255.0).round().clamp(0.0, 255.0) as u8;
                         data[offset + 2] = (bv * 255.0).round().clamp(0.0, 255.0) as u8;
+                        if cov != 255 {
+                            let was = edge_pixels.before(data, offset);
+                            settle_covered(&mut data[offset..offset + 3], was, cov);
+                        }
                     } else {
                         // Non-overprint axial shading: write the source CMYK
                         // to the buffer for any consumer that needs it (e.g.
@@ -14882,9 +15018,11 @@ fn render_radial_shading(
             None => (px_min, px_max),
         };
         for px in row_min..row_max {
-            if clip_mask
-                .is_some_and(|mask| mask.data()[py as usize * pw as usize + px as usize] == 0)
-            {
+            let cov = clip_coverage(
+                clip_mask.map(|m| m.data()),
+                py as usize * pw as usize + px as usize,
+            );
+            if cov == 0 {
                 continue;
             }
             let dev_x = px as f64 * inv_sx + vp_x as f64;
@@ -14979,6 +15117,14 @@ fn render_radial_shading(
                 }
 
                 let offset = py as usize * stride + px as usize * 4;
+                // Each pixel is painted once; one the clip covers in part is
+                // then blended with what it held.
+                let was = [
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                ];
                 if use_multiplicative {
                     // Ink-stack the per-stop CMYK onto the pixmap RGB. Only
                     // channels named by painted_channels contribute; others
@@ -15060,6 +15206,7 @@ fn render_radial_shading(
                         }
                     }
                 }
+                settle_covered(&mut data[offset..offset + 4], was, cov);
             }
         }
     }
@@ -15156,6 +15303,9 @@ fn render_mesh_shading(
     let stride = pw * 4;
 
     let lut = params.color_lut.as_deref();
+    let clip_data = clip_mask.map(|m| m.data());
+    // Triangles share the pixels along their common edges.
+    let mut edge_pixels = ClipEdgePixels::default();
 
     for tri in &params.triangles {
         let (dx0, dy0) = params.ctm.transform_point(tri.v0.x, tri.v0.y);
@@ -15218,7 +15368,8 @@ fn render_mesh_shading(
                     continue;
                 }
 
-                let clipped = clip_mask.is_some_and(|mask| mask.data()[py * pw + px] == 0);
+                let cov = clip_coverage(clip_data, py * pw + px);
+                let clipped = cov == 0;
 
                 let w0c = w0.max(0.0);
                 let w1c = w1.max(0.0);
@@ -15306,10 +15457,14 @@ fn render_mesh_shading(
                 // applies to the colour painted.
                 let (r, g, b) = transfer_rgb(transfer, (r, g, b));
                 let offset = py * stride + px * 4;
+                let was = (cov != 255).then(|| edge_pixels.before(data, offset));
                 data[offset] = (r * 255.0).round().clamp(0.0, 255.0) as u8;
                 data[offset + 1] = (g * 255.0).round().clamp(0.0, 255.0) as u8;
                 data[offset + 2] = (b * 255.0).round().clamp(0.0, 255.0) as u8;
                 data[offset + 3] = 255;
+                if let Some(was) = was {
+                    settle_covered(&mut data[offset..offset + 4], was, cov);
+                }
             }
         }
     }
@@ -19153,5 +19308,250 @@ mod clip_shortcut_tests {
             10,
             10
         ));
+    }
+}
+
+#[cfg(test)]
+mod clip_coverage_tests {
+    use super::*;
+    use stet_graphics::device::ColorStop;
+
+    const WHITE: [u8; 4] = [255, 255, 255, 255];
+    const BLACK: [u8; 4] = [0, 0, 0, 255];
+    /// Black over white through a clip that lets 128 of 255 through.
+    const HALF: [u8; 4] = [127, 127, 127, 255];
+
+    /// A white surface three pixels square, and a clip whose columns let
+    /// through nothing, about half, and everything.
+    fn surface_and_clip() -> (Pixmap, Mask) {
+        let mut surface = Pixmap::new(3, 3).unwrap();
+        surface.fill(stet_tiny_skia::Color::WHITE);
+        let mut clip = Mask::new(3, 3).unwrap();
+        for row in clip.data_mut().as_chunks_mut::<3>().0 {
+            *row = [0, 128, 255];
+        }
+        (surface, clip)
+    }
+
+    /// Every row reads: untouched, half painted, painted.
+    fn assert_blended(surface: &Pixmap) {
+        for row in surface.data().as_chunks::<12>().0 {
+            assert_eq!(row[0..4], WHITE, "outside the clip");
+            assert_eq!(row[4..8], HALF, "on its edge");
+            assert_eq!(row[8..12], BLACK, "inside it");
+        }
+    }
+
+    fn black_stops() -> Vec<ColorStop> {
+        [0.0, 1.0]
+            .into_iter()
+            .map(|position| ColorStop {
+                position,
+                color: DeviceColor::from_gray(0.0),
+                raw_components: vec![0.0],
+                source_components: Vec::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn full_coverage_keeps_what_was_painted_and_none_what_was_there() {
+        let was = [10, 20, 30, 40];
+        let mut px = [200, 100, 50, 255];
+        settle_covered(&mut px, was, 255);
+        assert_eq!(px, [200, 100, 50, 255]);
+        settle_covered(&mut px, was, 0);
+        assert_eq!(px, was);
+        let mut px = [0, 0, 0, 255];
+        settle_covered(&mut px, WHITE, 128);
+        assert_eq!(px, HALF);
+        // Fewer channels painted, fewer blended.
+        let mut px = [0, 0, 0, 77];
+        settle_covered(&mut px[..3], WHITE, 128);
+        assert_eq!(px, [127, 127, 127, 77]);
+    }
+
+    /// The second colour written to an edge pixel replaces the first, as it
+    /// would on a pixel wholly inside: it is not laid over it.
+    #[test]
+    fn a_pixel_painted_twice_blends_with_what_it_first_held() {
+        let mut data = WHITE.to_vec();
+        let mut edges = ClipEdgePixels::default();
+        for colour in [[255, 0, 0, 255], BLACK] {
+            let was = edges.before(&data, 0);
+            data.copy_from_slice(&colour);
+            settle_covered(&mut data, was, 128);
+        }
+        assert_eq!(data, HALF);
+    }
+
+    #[test]
+    fn only_pixels_covered_in_part_are_noted() {
+        let (surface, clip) = surface_and_clip();
+        let mut edges = ClipEdgePixels::default();
+        edges.note_edges(surface.data(), clip.data(), 3, 0..3, 0..3);
+        let mut noted: Vec<usize> = edges.0.keys().copied().collect();
+        noted.sort_unstable();
+        assert_eq!(noted, [4, 16, 28]);
+    }
+
+    /// For a clip of 0 and 255 the widened clip is the old rule: a pixel
+    /// is painted if the clip lets it through or lets a neighbour through.
+    #[test]
+    fn a_widened_clip_reaches_one_pixel_further() {
+        let (w, h): (usize, usize) = (5, 4);
+        #[rustfmt::skip]
+        let clip = [
+            0,   0, 0,   0, 0,
+            0, 255, 0,   0, 0,
+            0,   0, 0,   0, 0,
+            0,   0, 0,   0, 90,
+        ];
+        for by in 0..h {
+            for bx in 0..w {
+                let near = |x: usize, y: usize| bx.abs_diff(x) <= 1 && by.abs_diff(y) <= 1;
+                let want = if near(1, 1) {
+                    255
+                } else if near(4, 3) {
+                    90
+                } else {
+                    0
+                };
+                assert_eq!(
+                    widened_clip_coverage(&clip, w, h, bx, by),
+                    want,
+                    "({bx}, {by})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_axial_shading_blends_by_the_clip() {
+        let (mut surface, clip) = surface_and_clip();
+        let params = AxialShadingParams {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 3.0,
+            y1: 0.0,
+            color_stops: black_stops(),
+            extend_start: true,
+            extend_end: true,
+            ctm: Matrix::default(),
+            bbox: None,
+            color_space: ShadingColorSpace::DeviceGray,
+            overprint: false,
+            overprint_mode: 0,
+            painted_channels: stet_graphics::device::CMYK_ALL,
+            alpha: 1.0,
+            blend_mode: 0,
+            alpha_is_shape: false,
+            spot_tint_blend: false,
+            rendering_intent: 0,
+            transfer: TransferState::default(),
+        };
+        render_axial_shading(
+            &mut surface,
+            &params,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            Some(&clip),
+            false,
+            None,
+            None,
+            None,
+        );
+        assert_blended(&surface);
+    }
+
+    #[test]
+    fn a_radial_shading_blends_by_the_clip() {
+        let (mut surface, clip) = surface_and_clip();
+        let params = RadialShadingParams {
+            x0: 1.5,
+            y0: 1.5,
+            r0: 0.0,
+            x1: 1.5,
+            y1: 1.5,
+            r1: 10.0,
+            color_stops: black_stops(),
+            extend_start: true,
+            extend_end: true,
+            ctm: Matrix::default(),
+            bbox: None,
+            color_space: ShadingColorSpace::DeviceGray,
+            overprint: false,
+            overprint_mode: 0,
+            painted_channels: stet_graphics::device::CMYK_ALL,
+            alpha: 1.0,
+            blend_mode: 0,
+            alpha_is_shape: false,
+            spot_tint_blend: false,
+            rendering_intent: 0,
+            transfer: TransferState::default(),
+        };
+        render_radial_shading(
+            &mut surface,
+            &params,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            Some(&clip),
+            false,
+            None,
+            None,
+            None,
+        );
+        assert_blended(&surface);
+    }
+
+    /// Two triangles, the second over the first: the edge pixels are
+    /// written twice and still come out as one layer of paint.
+    #[test]
+    fn a_mesh_shading_blends_by_the_clip_however_often_it_paints_a_pixel() {
+        let (mut surface, clip) = surface_and_clip();
+        let vertex = |x: f64, y: f64, gray: f64| ShadingVertex {
+            x,
+            y,
+            color: DeviceColor::from_gray(gray),
+            raw_components: vec![gray],
+        };
+        let covering = |gray: f64| stet_graphics::device::ShadingTriangle {
+            v0: vertex(-10.0, -10.0, gray),
+            v1: vertex(30.0, -10.0, gray),
+            v2: vertex(-10.0, 30.0, gray),
+        };
+        let params = MeshShadingParams {
+            triangles: vec![covering(0.5), covering(0.0)],
+            ctm: Matrix::default(),
+            bbox: None,
+            color_space: ShadingColorSpace::DeviceGray,
+            overprint: false,
+            overprint_mode: 0,
+            painted_channels: stet_graphics::device::CMYK_ALL,
+            color_lut: None,
+            color_lut_components: None,
+            alpha: 1.0,
+            blend_mode: 0,
+            alpha_is_shape: false,
+            rendering_intent: 0,
+            transfer: TransferState::default(),
+        };
+        render_mesh_shading(
+            &mut surface,
+            &params,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            Some(&clip),
+            None,
+            None,
+            None,
+        );
+        assert_blended(&surface);
     }
 }
