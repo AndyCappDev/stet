@@ -15,7 +15,7 @@ use stet_tiny_skia::{
     Mask, Paint, PathBuilder, Pixmap, Stroke, StrokeDash, Transform,
 };
 
-use crate::clip_neighbours::ClipNeighbours;
+use crate::clip_neighbours::{ClipEdgeState, ClipNeighbours, clip_key};
 #[cfg(feature = "ps-device")]
 use stet_core::device::OutputDevice;
 use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
@@ -225,8 +225,14 @@ impl ClipMask {
         self.bounds = kept;
     }
 
-    /// Intersect with `other`: each sample becomes its product with the
-    /// sample of `other` at the same place.
+    /// Intersect with `other`: each sample becomes the lesser of itself and
+    /// the sample of `other` at the same place.
+    ///
+    /// The lesser, not the product. For masks of 0 and 255 they are the
+    /// same. Where edges are soft, a pixel that both clips cover in part
+    /// is most often one edge met twice — the same path set again, a shape
+    /// inside the box that bounds it — and that pixel is covered as far as
+    /// either clip covers it, not that far squared.
     fn multiply_by(&mut self, other: &ClipMask) {
         self.key = ClipMask::product_key(self, other);
         self.zero_outside(&other.bounds);
@@ -236,7 +242,7 @@ impl ClipMask {
         for y in both.y0..both.y1 {
             let row = y as usize * stride;
             let span = row + both.x0 as usize..row + both.x1 as usize;
-            multiply_samples(&mut dst[span.clone()], &src[span]);
+            least_samples(&mut dst[span.clone()], &src[span]);
         }
     }
 
@@ -930,6 +936,7 @@ fn resolve_clip_mask<'a>(
 
 /// Hash a PsPath's segments for clip mask caching. Uses bit-exact f64 comparison
 /// since paths are already in device space.
+#[cfg(any(feature = "ps-device", test))]
 fn hash_clip_path(path: &PsPath, fill_rule: &FillRule) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     std::mem::discriminant(fill_rule).hash(&mut hasher);
@@ -996,6 +1003,103 @@ fn multiply_samples(dst: &mut [u8], src: &[u8]) {
     }
     for (d, &s) in dst_tail.iter_mut().zip(src_tail) {
         multiply(d, s);
+    }
+}
+
+/// What a clip's mask is remembered by within a band: everything the mask
+/// depends on. That is the path, its fill rule and the matrix that places
+/// it, and for a clip set by stroking, the stroke.
+fn clip_mask_key(path: &PsPath, params: &ClipParams) -> u64 {
+    let key = clip_key(path, params);
+    match &params.stroke_params {
+        None => key,
+        Some(stroke) => {
+            // Rare enough that its many fields are hashed as they print.
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            key.hash(&mut hasher);
+            format!("{stroke:?}").hash(&mut hasher);
+            hasher.finish()
+        }
+    }
+}
+
+/// Each sample of `dst` becomes the lesser of itself and the sample of
+/// `src` at the same place, eight at a time where `src` lets everything or
+/// nothing through.
+fn least_samples(dst: &mut [u8], src: &[u8]) {
+    let (dst_chunks, dst_tail) = dst.as_chunks_mut::<8>();
+    let (src_chunks, src_tail) = src.as_chunks::<8>();
+    for (d, s) in dst_chunks.iter_mut().zip(src_chunks) {
+        match u64::from_ne_bytes(*s) {
+            u64::MAX => {}
+            0 => *d = [0; 8],
+            _ => {
+                for (d, &s) in d.iter_mut().zip(s) {
+                    *d = (*d).min(s);
+                }
+            }
+        }
+    }
+    for (d, &s) in dst_tail.iter_mut().zip(src_tail) {
+        *d = (*d).min(s);
+    }
+}
+
+/// How far from a hard piece of a clip's edge, in output pixels, a pixel's
+/// centre may be and still take the hard mask's sample. It has to reach
+/// every pixel the edge covers in part, from either side of it and for a
+/// neighbour whose edge is a little way off.
+const HARD_EDGE_REACH: f32 = 1.5;
+
+/// Give `soft`, a clip path filled with anti-aliasing, the samples of
+/// `hard`, the same path filled without, along the pieces of its edge
+/// that another clip runs beside.
+///
+/// Both neighbours do this along the edge they share, so there each lets
+/// a pixel through wholly or not at all, as two hard clips do, and
+/// between them they let through every pixel once.
+fn harden_met_edges(
+    soft: &mut Mask,
+    hard: &Mask,
+    met: &[crate::clip_neighbours::MetPiece],
+    within: f32,
+    ctx: &RenderContext<'_>,
+) {
+    let (w, h) = (soft.width() as usize, soft.height() as usize);
+    let (dst, src) = (soft.data_mut(), hard.data());
+    let place = |p: [f32; 2]| {
+        (
+            (p[0] - ctx.vp_x) * ctx.scale_x,
+            (p[1] - ctx.vp_y) * ctx.scale_y,
+        )
+    };
+    let reach = HARD_EDGE_REACH;
+    for piece in met.iter().filter(|p| p.gap <= within) {
+        let (ax, ay) = place(piece.a);
+        let (bx, by) = place(piece.b);
+        // Pixel centres are at half-integers.
+        let x0 = (ax.min(bx) - reach - 0.5).ceil().max(0.0) as usize;
+        let y0 = (ay.min(by) - reach - 0.5).ceil().max(0.0) as usize;
+        let x1 = (((ax.max(bx) + reach - 0.5).floor() + 1.0).max(0.0) as usize).min(w);
+        let y1 = (((ay.max(by) + reach - 0.5).floor() + 1.0).max(0.0) as usize).min(h);
+        let (dx, dy) = (bx - ax, by - ay);
+        let length_sq = dx * dx + dy * dy;
+        for y in y0..y1 {
+            let cy = y as f32 + 0.5 - ay;
+            for x in x0..x1 {
+                let cx = x as f32 + 0.5 - ax;
+                // The nearest point of the piece to the pixel's centre.
+                let t = if length_sq > 0.0 {
+                    ((cx * dx + cy * dy) / length_sq).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let (ox, oy) = (cx - t * dx, cy - t * dy);
+                if ox * ox + oy * oy <= reach * reach {
+                    dst[y * w + x] = src[y * w + x];
+                }
+            }
+        }
     }
 }
 
@@ -1648,7 +1752,7 @@ fn precompute_clip_seen(list: &DisplayList) -> HashSet<u64> {
     let mut counts: HashMap<u64, u32> = HashMap::new();
     for elem in list.elements() {
         if let DisplayElement::Clip { path, params } = elem {
-            let hash = hash_clip_path(path, &params.fill_rule);
+            let hash = clip_mask_key(path, params);
             *counts.entry(hash).or_insert(0) += 1;
         }
     }
@@ -8156,7 +8260,7 @@ fn clip_path_unified(
 
     // General path: non-rectangular clip with cache + mask reuse
     let fill_rule = to_fill_rule(&params.fill_rule);
-    let path_hash = hash_clip_path(path, &params.fill_rule);
+    let path_hash = clip_mask_key(path, params);
 
     let prev_region = band_state.clip_region.take();
 
@@ -8199,7 +8303,30 @@ fn clip_path_unified(
             own.key = Some(path_hash);
         } else {
             let transform = ctx.transform(&params.ctm);
-            mask.fill_path(&skia_path, fill_rule, false, transform);
+            // An edge is smooth unless another clip runs along it from the
+            // other side; a clip the table does not know is hard throughout.
+            let edges = match ctx.clip_neighbours {
+                Some(neighbours) if !ctx.no_aa => {
+                    neighbours.edges(clip_key(path, params), ctx.scale_x.min(ctx.scale_y))
+                }
+                _ => ClipEdgeState::Hard,
+            };
+            match edges {
+                ClipEdgeState::Hard => mask.fill_path(&skia_path, fill_rule, false, transform),
+                ClipEdgeState::Smooth => mask.fill_path(&skia_path, fill_rule, true, transform),
+                ClipEdgeState::Mixed { met, within } => {
+                    mask.fill_path(&skia_path, fill_rule, true, transform);
+                    let mut hard = band_state.take_mask(ctx.out_w, ctx.out_h);
+                    let hard_own = Arc::get_mut(&mut hard)
+                        .expect("a mask from the pool is held by nothing else");
+                    hard_own
+                        .mask
+                        .fill_path(&skia_path, fill_rule, false, transform);
+                    harden_met_edges(mask, &hard_own.mask, met, within, ctx);
+                    hard_own.bounds = clip_path_bounds(path, &transform, ctx.out_w, ctx.out_h);
+                    band_state.recycle_mask(hard);
+                }
+            }
             own.bounds = clip_path_bounds(path, &transform, ctx.out_w, ctx.out_h);
             own.key = Some(path_hash);
         }

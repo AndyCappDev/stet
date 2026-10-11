@@ -40,8 +40,12 @@ const REACH: f64 = 1.5;
 const NEAR: f64 = 0.35;
 /// The sine of the widest angle between two pieces that run together.
 const PARALLEL: f64 = 0.2;
-/// How far to either side of a piece its path is asked "inside?".
-const SIDE: f64 = 0.25;
+/// How far to either side of a piece its path is asked "inside?". Close,
+/// so that a sliver of a path far thinner than a pixel still has two sides.
+const SIDE: f64 = 1.0 / 64.0;
+/// How far from an axis, as a sine, an edge may lean and still be taken to
+/// run along the pixel grid.
+const UPRIGHT: f64 = 1e-6;
 /// The side of a cell of the grid pieces are found by. A piece's
 /// neighbours are within [`REACH`] of it and at most a piece along, so
 /// they are in its cell or one touching it.
@@ -73,14 +77,13 @@ struct ClipEdges {
     pieces: u32,
     /// Those with a neighbour.
     met: Vec<MetPiece>,
-    /// An axis-aligned rectangle, which is cut hard along pixel edges
+    /// Nothing but edges along the axes, which are cut hard along pixel edges
     /// whatever is beside it.
     rect: bool,
 }
 
 /// How a clip path's edges are to be drawn.
 #[derive(Debug, PartialEq)]
-#[cfg_attr(not(test), expect(dead_code, reason = "no clip asks yet"))]
 pub(crate) enum ClipEdgeState<'a> {
     /// Every edge has a neighbour, or the path is one this table does not
     /// know: hard throughout, as clips have always been.
@@ -197,7 +200,11 @@ impl ClipNeighbours {
             if shapes[piece.shape as usize].rect {
                 return None;
             }
-            let gap = nearest_neighbour(piece, &pieces, &grid)?;
+            let gap = if piece.is_upright() {
+                0.0
+            } else {
+                nearest_neighbour(piece, &pieces, &grid)?
+            };
             Some((
                 piece.shape,
                 MetPiece {
@@ -223,7 +230,6 @@ impl ClipNeighbours {
 
     /// How the edges of the clip path known by `key` are to be drawn when
     /// a pixel of the display list comes out `scale` pixels across.
-    #[cfg_attr(not(test), expect(dead_code, reason = "no clip asks yet"))]
     pub(crate) fn edges(&self, key: u64, scale: f32) -> ClipEdgeState<'_> {
         let Some(edges) = self.clips.get(&key) else {
             return ClipEdgeState::Hard;
@@ -349,9 +355,10 @@ fn distance(a: Point, b: Point) -> f64 {
     ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt()
 }
 
-/// Four edges, each along an axis.
+/// Every edge along an axis: a rectangle, or any outline of upright and
+/// level edges.
 fn is_rect(edges: &[(Point, Point)]) -> bool {
-    edges.len() == 4 && edges.iter().all(|(a, b)| a.0 == b.0 || a.1 == b.1)
+    edges.iter().all(|(a, b)| a.0 == b.0 || a.1 == b.1)
 }
 
 /// The part of device space the table is concerned with.
@@ -501,6 +508,21 @@ struct Piece {
     /// Unit vector across it, pointing into the shape.
     inward: Point,
     shape: u32,
+}
+
+impl Piece {
+    /// Whether the piece runs along the pixel grid. Such an edge is kept
+    /// hard, as if it had a neighbour: it has no staircase to smooth, only
+    /// a position, and a hard edge puts it on the nearest pixel boundary
+    /// as a rectangle's is put.
+    ///
+    /// It matters most where it is least noticed. A table's rules are very
+    /// often drawn as a stroke clipped to its own outline, and a thin line
+    /// covered in part by the clip *and* in part by its own anti-aliasing
+    /// comes out at half its weight.
+    fn is_upright(&self) -> bool {
+        self.along.0.abs() < UPRIGHT || self.along.1.abs() < UPRIGHT
+    }
 }
 
 /// Cut the outline of `shape` into pieces. An edge with the shape on both
@@ -785,15 +807,15 @@ mod tests {
     /// A long edge against two short ones is hard along both.
     #[test]
     fn a_long_edge_meets_two_short_ones() {
-        let long = polygon(&[(10.0, 10.0), (50.0, 11.0), (50.0, 91.0), (10.0, 90.0)]);
-        let upper = polygon(&[(50.0, 11.0), (80.0, 10.0), (80.0, 50.0), (50.0, 51.0)]);
-        let lower = polygon(&[(50.0, 51.0), (80.0, 50.0), (80.0, 90.0), (50.0, 91.0)]);
+        let long = polygon(&[(10.0, 10.0), (50.0, 11.0), (52.0, 91.0), (8.0, 90.0)]);
+        let upper = polygon(&[(50.0, 11.0), (80.0, 10.0), (81.0, 50.0), (51.0, 51.0)]);
+        let lower = polygon(&[(51.0, 51.0), (81.0, 50.0), (82.0, 90.0), (52.0, 91.0)]);
         let t = table(&[long.clone(), upper, lower]);
         let length: f32 = hard(&t.edges(key(&long), 1.0))
             .iter()
-            .map(|p| (p.b[1] - p.a[1]).abs())
+            .map(|p| ((p.b[0] - p.a[0]).powi(2) + (p.b[1] - p.a[1]).powi(2)).sqrt())
             .sum();
-        assert!((length - 80.0).abs() < 0.01, "{length}");
+        assert!((length - 80.025).abs() < 0.01, "{length}");
     }
 
     /// One clip inside another, sharing an edge: both are on the same side
@@ -861,7 +883,7 @@ mod tests {
             PathSegment::MoveTo(40.0, 41.0),
             PathSegment::LineTo(160.0, 40.0),
             PathSegment::LineTo(161.0, 160.0),
-            PathSegment::LineTo(40.0, 160.0),
+            PathSegment::LineTo(39.0, 161.0),
             PathSegment::ClosePath,
             PathSegment::MoveTo(on(angle(0)).0, on(angle(0)).1),
         ];
@@ -919,6 +941,30 @@ mod tests {
         // Rectangles only: nothing to work out.
         let only = table(std::slice::from_ref(&rect));
         assert!(only.clips.is_empty());
+    }
+
+    /// An edge along the pixel grid is hard with nothing beside it; the
+    /// slanted edges of the same path are free.
+    #[test]
+    fn an_edge_along_the_grid_stays_hard() {
+        // A table rule with mitred ends, as a word processor clips it.
+        let rule = polygon(&[
+            (20.8, 40.7),
+            (20.0, 39.9),
+            (200.0, 39.9),
+            (200.8, 40.7),
+            (200.0, 41.5),
+            (20.0, 41.5),
+        ]);
+        let t = table(std::slice::from_ref(&rule));
+        let pieces = hard(&t.edges(key(&rule), 1.0));
+        assert!(!pieces.is_empty());
+        assert!(
+            pieces.iter().all(|p| p.a[1] == p.b[1]),
+            "only the level edges"
+        );
+        let length: f32 = pieces.iter().map(|p| (p.b[0] - p.a[0]).abs()).sum();
+        assert!((length - 360.0).abs() < 0.01, "{length}");
     }
 
     /// Clips in nested lists are found, and are neighbours of clips

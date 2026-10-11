@@ -26,6 +26,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The edge of a clipped shape is smooth.** A shape filled with a
+  gradient or an image is painted through a clip of its outline, and clips
+  were cut to whole pixels, so such shapes had stepped edges beside the
+  smooth ones of ordinary fills. A clip's edge is now anti-aliased unless
+  another clip runs along it from the other side: regions that are tiled
+  together — the pieces of a mesh, the strips of a blend — still meet
+  hard, with none of the page showing between them. Edges that run along
+  the pixel grid stay hard too, as a clipping rectangle's always were;
+  that keeps a table rule drawn through a clip of its own outline at its
+  full weight. Rendering with anti-aliasing off (`--no-aa`, `no_aa`) is
+  unchanged. Roughly one page in seven has such an edge and renders
+  differently.
+
 - **A PDF page with thousands of images is read in a fraction of the
   time and memory.** Two costs grew with the number of images on a page.
   Every image in an ICCBased colour space decoded its profile's stream,
