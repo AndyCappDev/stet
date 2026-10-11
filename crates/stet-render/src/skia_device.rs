@@ -756,11 +756,27 @@ fn hash_clip_path(path: &PsPath, fill_rule: &FillRule) -> u64 {
 }
 
 /// Pixel-multiply two masks: dst[i] = dst[i] * src[i] / 255.
+///
+/// A clip mask is nearly all 0 and 255, where the product is 0 or the
+/// other sample, so eight samples of `src` that are all one or all the
+/// other are dealt with at once; only a mixed eight is multiplied out.
 fn intersect_masks(dst: &mut Mask, src: &Mask) {
-    let dst_data = dst.data_mut();
-    let src_data = src.data();
-    for (d, s) in dst_data.iter_mut().zip(src_data.iter()) {
-        *d = ((*d as u16 * *s as u16 + 127) / 255) as u8;
+    let multiply = |d: &mut u8, s: u8| *d = ((*d as u16 * s as u16 + 127) / 255) as u8;
+    let (dst_chunks, dst_tail) = dst.data_mut().as_chunks_mut::<8>();
+    let (src_chunks, src_tail) = src.data().as_chunks::<8>();
+    for (d, s) in dst_chunks.iter_mut().zip(src_chunks) {
+        match u64::from_ne_bytes(*s) {
+            u64::MAX => {}
+            0 => *d = [0; 8],
+            _ => {
+                for (d, &s) in d.iter_mut().zip(s) {
+                    multiply(d, s);
+                }
+            }
+        }
+    }
+    for (d, &s) in dst_tail.iter_mut().zip(src_tail) {
+        multiply(d, s);
     }
 }
 
@@ -7252,6 +7268,65 @@ fn paint_pattern_fill(
     );
 }
 
+/// Intersect the clip with a rectangle of the pixmap.
+fn clip_to_rect(band_state: &mut BandState, rect: &ClipRect, width: u32, height: u32) {
+    match band_state.clip_region.take() {
+        None => {
+            band_state.clip_region = Some(ClipRegion::rect(*rect));
+        }
+        Some(ClipRegion::Rect(existing, _)) => {
+            band_state.clip_region = Some(ClipRegion::rect(existing.intersect(rect)));
+        }
+        Some(ClipRegion::Mask(mut mask)) => {
+            intersect_mask_with_rect(&mut mask, rect, width, height);
+            band_state.clip_region = Some(ClipRegion::Mask(mask));
+        }
+    }
+}
+
+/// Whether `path`, taken to pixels by `transform`, lies wholly outside a
+/// `width` × `height` pixmap, so that filling it marks no pixel.
+///
+/// The bound is the points of the path, control points included, which
+/// contain its curves; a pixel of margin is left for the rasteriser's
+/// rounding. A path with no points is not a miss: it is not a clip at all,
+/// and the caller leaves the clip as it was.
+fn clip_path_misses_output(path: &PsPath, transform: &Transform, width: u32, height: u32) -> bool {
+    let (mut x0, mut y0) = (f32::INFINITY, f32::INFINITY);
+    let (mut x1, mut y1) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+    let mut any = false;
+    let mut add = |x: f64, y: f64| {
+        let (x, y) = (x as f32, y as f32);
+        let px = transform.sx * x + transform.kx * y + transform.tx;
+        let py = transform.ky * x + transform.sy * y + transform.ty;
+        x0 = x0.min(px);
+        x1 = x1.max(px);
+        y0 = y0.min(py);
+        y1 = y1.max(py);
+        any = true;
+    };
+    for segment in &path.segments {
+        match *segment {
+            PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => add(x, y),
+            PathSegment::CurveTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x3,
+                y3,
+            } => {
+                add(x1, y1);
+                add(x2, y2);
+                add(x3, y3);
+            }
+            PathSegment::ClosePath => {}
+        }
+    }
+    // Written so that a bound that is not a number is not a miss.
+    any && (x1 <= -1.0 || y1 <= -1.0 || x0 >= width as f32 + 1.0 || y0 >= height as f32 + 1.0)
+}
+
 /// Unified clip path handling for both band and viewport rendering.
 ///
 /// For band rendering (scale=1.0), includes rect fast-path and Y-bbox early exit.
@@ -7309,25 +7384,43 @@ fn clip_path_unified(
             && let Some(dev_rect) = detect_rect(path, ctx.out_w, u32::MAX)
         {
             let new_rect = translate_clip_rect(&dev_rect, y_start, ctx.out_h);
-            match band_state.clip_region.take() {
-                None => {
-                    band_state.clip_region = Some(ClipRegion::rect(new_rect));
-                }
-                Some(ClipRegion::Rect(existing, _)) => {
-                    band_state.clip_region = Some(ClipRegion::rect(existing.intersect(&new_rect)));
-                }
-                Some(ClipRegion::Mask(mut mask)) => {
-                    intersect_mask_with_rect(&mut mask, &new_rect, ctx.out_w, ctx.out_h);
-                    band_state.clip_region = Some(ClipRegion::Mask(mask));
-                }
-            }
+            clip_to_rect(band_state, &new_rect, ctx.out_w, ctx.out_h);
             return;
         }
+    }
+
+    // Nothing is let through already: no further clip changes that, so the
+    // path need not be rasterised to find out.
+    if let Some(ClipRegion::Rect(rect, _)) = &band_state.clip_region
+        && rect.is_empty()
+    {
+        return;
+    }
+
+    // A clip path that lies wholly outside this pixmap lets nothing
+    // through. The band-mode test above says so for a page rendered at its
+    // own resolution; this says so at any scale and for any CTM, which is
+    // how a viewport is rendered. Without it every clip of the page was
+    // rasterised to an empty mask and intersected, for every band.
+    if params.stroke_params.is_none()
+        && clip_path_misses_output(path, &ctx.transform(&params.ctm), ctx.out_w, ctx.out_h)
+    {
+        if let Some(ClipRegion::Mask(mask)) = band_state.clip_region.take() {
+            band_state.recycle_mask(mask);
+        }
+        band_state.clip_region = Some(ClipRegion::rect(ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: 0,
+            y1: 0,
+        }));
+        return;
     }
 
     // General path: non-rectangular clip with cache + mask reuse
     let fill_rule = to_fill_rule(&params.fill_rule);
     let path_hash = hash_clip_path(path, &params.fill_rule);
+
     let prev_region = band_state.clip_region.take();
 
     let mut mask = band_state.take_mask(ctx.out_w, ctx.out_h);
@@ -17703,5 +17796,157 @@ mod image_pixel_span_tests {
             image_pixel_span(&m, (7, 5), (0.0, 0.0), (1.0, 1.0), (64, 48)),
             Some((0..48, 0..64))
         );
+    }
+}
+
+#[cfg(test)]
+mod clip_shortcut_tests {
+    use super::*;
+
+    fn rect_path(x0: f64, y0: f64, x1: f64, y1: f64) -> PsPath {
+        PsPath {
+            segments: vec![
+                PathSegment::MoveTo(x0, y0),
+                PathSegment::LineTo(x1, y0),
+                PathSegment::LineTo(x1, y1),
+                PathSegment::LineTo(x0, y1),
+                PathSegment::ClosePath,
+            ],
+        }
+    }
+
+    /// The mask `path` fills in a `w` × `h` pixmap under `transform`, as a
+    /// clip makes it.
+    fn filled(path: &PsPath, transform: Transform, w: u32, h: u32) -> Mask {
+        let mut mask = Mask::new(w, h).unwrap();
+        let skia_path = build_skia_path(path).unwrap();
+        mask.fill_path(
+            &skia_path,
+            stet_tiny_skia::FillRule::Winding,
+            false,
+            transform,
+        );
+        mask
+    }
+
+    /// A path said to miss the pixmap fills none of it — at a scale that is
+    /// not one, off the origin, flipped, and for curves, whose control
+    /// points lie outside the curve itself.
+    #[test]
+    fn a_path_that_misses_fills_nothing() {
+        let (w, h) = (64u32, 40u32);
+        let transforms = [
+            Transform::identity(),
+            Transform::from_row(0.7, 0.0, 0.0, 0.7, -13.3, 5.9),
+            Transform::from_row(1.9, 0.0, 0.0, -1.9, 20.0, 90.0),
+            Transform::from_row(0.6, 0.8, -0.8, 0.6, 30.0, -10.0),
+        ];
+        let mut misses = 0;
+        let mut hits = 0;
+        for transform in transforms {
+            for i in 0..40 {
+                for j in 0..40 {
+                    let (x, y) = (i as f64 * 9.0 - 150.0, j as f64 * 7.0 - 120.0);
+                    let mut path = rect_path(x, y, x + 11.5, y + 6.25);
+                    if (i + j) % 3 == 0 {
+                        path.segments.insert(
+                            2,
+                            PathSegment::CurveTo {
+                                x1: x + 30.0,
+                                y1: y - 20.0,
+                                x2: x + 30.0,
+                                y2: y + 20.0,
+                                x3: x + 11.5,
+                                y3: y + 3.0,
+                            },
+                        );
+                    }
+                    if clip_path_misses_output(&path, &transform, w, h) {
+                        misses += 1;
+                        let mask = filled(&path, transform, w, h);
+                        assert!(
+                            mask.data().iter().all(|&b| b == 0),
+                            "{path:?} {transform:?}"
+                        );
+                    } else {
+                        hits += 1;
+                    }
+                }
+            }
+        }
+        // Both answers were given, so the test tested something.
+        assert!(misses > 1000 && hits > 100, "{misses} misses, {hits} hits");
+    }
+
+    /// Intersecting masks eight samples at a time gives what multiplying
+    /// each sample out gives, for masks of 0 and 255 and for soft ones, and
+    /// for lengths that are not a multiple of eight.
+    #[test]
+    fn masks_intersect_as_sample_by_sample() {
+        let mut seed = 0x1234_5678_9ABC_DEF1u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for (w, h) in [(64u32, 3u32), (37, 5), (7, 1), (129, 2)] {
+            for binary in [true, false] {
+                let mut a = Mask::new(w, h).unwrap();
+                let mut b = Mask::new(w, h).unwrap();
+                for mask in [&mut a, &mut b] {
+                    let mut run = 0;
+                    let mut value = 0u8;
+                    for sample in mask.data_mut() {
+                        if run == 0 {
+                            run = 1 + next() % 23;
+                            value = match (binary, next() % 3) {
+                                (_, 0) => 0,
+                                (_, 1) => 255,
+                                (true, _) => 255,
+                                (false, _) => (next() % 256) as u8,
+                            };
+                        }
+                        run -= 1;
+                        *sample = value;
+                    }
+                }
+                let expected: Vec<u8> = a
+                    .data()
+                    .iter()
+                    .zip(b.data())
+                    .map(|(&d, &s)| ((d as u16 * s as u16 + 127) / 255) as u8)
+                    .collect();
+                intersect_masks(&mut a, &b);
+                assert_eq!(a.data(), expected.as_slice(), "{w}x{h} binary={binary}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_path_without_points_is_not_a_miss() {
+        let empty = PsPath { segments: vec![] };
+        assert!(!clip_path_misses_output(
+            &empty,
+            &Transform::identity(),
+            10,
+            10
+        ));
+        let closed = PsPath {
+            segments: vec![PathSegment::ClosePath],
+        };
+        assert!(!clip_path_misses_output(
+            &closed,
+            &Transform::identity(),
+            10,
+            10
+        ));
+        let nan = rect_path(f64::NAN, 0.0, 5.0, 5.0);
+        assert!(!clip_path_misses_output(
+            &nan,
+            &Transform::identity(),
+            10,
+            10
+        ));
     }
 }

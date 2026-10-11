@@ -85,6 +85,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   0.7 s, and its rasterising on one thread from 7.1 s to 0.2 s. Output
   is unchanged.
 
+- **A viewport of a page with thousands of clips is rendered three to
+  four times faster.** `render_region` and its relatives — what a viewer
+  calls to draw part of a page at a zoom — rasterised every clip path of
+  the page to a mask and intersected it with the clip so far, for every
+  band. Rendering a whole page at its own resolution had a shortcut for a
+  clip path outside the band; a viewport at any other zoom or offset did
+  not. A clip path that lies wholly outside the band is now seen to from
+  its bounds at any zoom, offset and CTM, nothing further is rasterised
+  once the clip lets nothing through, and two masks are intersected eight
+  samples at a time where they are all 0 or all 255, as a clip mask
+  nearly always is. On a Keynote slide with 19,479 clips, a full-page
+  viewport at 150 dpi went from 3.9 s to 1.2 s on one thread, which is
+  how the WebAssembly viewer renders. Output is unchanged.
+
 - **Opening a PDF prints nothing.** `IccCache::search_system_cmyk_profile`
   — which `PdfDocument::from_bytes` and `from_owned` call — wrote
   `[ICC] Loaded system CMYK profile` to stderr every time it found one,
