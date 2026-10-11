@@ -414,9 +414,9 @@ impl<'a> Tokenizer<'a> {
 
 // ─── Standalone helpers (shared by slice-based and streaming tokenizers) ─────
 
-/// Where input resumes after a number or executable name that ended at
-/// `pos` in `bytes`: past the one white-space character that ended it, if
-/// one did.
+/// Where input resumes after a number or a name — executable, literal or
+/// immediately evaluated — that ended at `pos` in `bytes`: past the one
+/// white-space character that ended it, if one did.
 ///
 /// A carriage return followed at once by a line feed is one newline (PLRM
 /// 3.2.2), so both go. Leaving the line feed behind gave a program reading
@@ -660,13 +660,19 @@ pub fn stream_next_token(
         b']' => Token::ArrayEnd,
         b'/' => match files.read_byte(entity).map_err(|_| PsError::IOError)? {
             Some(b'/') => {
-                let name = stream_read_name_bytes(files, entity)?;
+                let name = stream_read_name_bytes(files, entity, &mut newlines)?;
                 Token::ImmediateName(name)
             }
             Some(b) if !is_whitespace(b) && !is_delimiter(b) => {
                 files.putback_bytes(entity, &[b]);
-                let name = stream_read_name_bytes(files, entity)?;
+                let name = stream_read_name_bytes(files, entity, &mut newlines)?;
                 Token::LiteralName(name)
+            }
+            // `/` alone is the literal name with no characters, and ends
+            // as any other name does.
+            Some(b) if is_whitespace(b) => {
+                stream_take_terminator(files, entity, b, &mut newlines)?;
+                Token::LiteralName(Vec::new())
             }
             other => {
                 if let Some(b) = other {
@@ -685,19 +691,9 @@ pub fn stream_next_token(
                     None => break,
                     Some(b) if is_whitespace(b) => {
                         // PLRM: trailing whitespace consumed for numbers and
-                        // executable names.  Critical for `RD` followed by
-                        // binary charstring data.
-                        if b == b'\n' || b == b'\r' {
-                            newlines += 1;
-                        }
-                        // CR LF is one newline (PLRM 3.2.2), so the LF goes
-                        // with its CR; see `after_token_terminator`.
-                        if b == b'\r' {
-                            match files.read_byte(entity).map_err(|_| PsError::IOError)? {
-                                Some(b'\n') | None => {}
-                                Some(other) => files.putback_bytes(entity, &[other]),
-                            }
-                        }
+                        // names.  Critical for `RD` followed by binary
+                        // charstring data.
+                        stream_take_terminator(files, entity, b, &mut newlines)?;
                         break;
                     }
                     Some(b) if is_delimiter(b) => {
@@ -722,15 +718,49 @@ pub fn stream_next_token(
     Ok(Some((token, newlines)))
 }
 
-/// Read name bytes from a stream until whitespace or delimiter.
-/// Always puts back the terminating byte (literal/immediate names
-/// do NOT consume trailing whitespace per PLRM).
-fn stream_read_name_bytes(files: &mut FileStore, entity: EntityId) -> Result<Vec<u8>, PsError> {
+/// Take the white-space character `b`, just read, that ended a number or a
+/// name: it is consumed, and when it is a carriage return, so is a line
+/// feed straight after it — CR LF is one newline (PLRM 3.2.2); see
+/// [`after_token_terminator`].
+fn stream_take_terminator(
+    files: &mut FileStore,
+    entity: EntityId,
+    b: u8,
+    newlines: &mut u32,
+) -> Result<(), PsError> {
+    if b == b'\n' || b == b'\r' {
+        *newlines += 1;
+    }
+    if b == b'\r' {
+        match files.read_byte(entity).map_err(|_| PsError::IOError)? {
+            Some(b'\n') | None => {}
+            Some(other) => files.putback_bytes(entity, &[other]),
+        }
+    }
+    Ok(())
+}
+
+/// Read the characters of a literal or immediately evaluated name from a
+/// stream, up to white space or a delimiter.
+///
+/// White space that ends the name is consumed, as it is after an executable
+/// name: PLRM's `token` and `currentfile` both say "a name or a number"
+/// followed by white space, and a literal name is a name. A delimiter
+/// belongs to the next token and is put back.
+fn stream_read_name_bytes(
+    files: &mut FileStore,
+    entity: EntityId,
+    newlines: &mut u32,
+) -> Result<Vec<u8>, PsError> {
     let mut name = Vec::new();
     loop {
         match files.read_byte(entity).map_err(|_| PsError::IOError)? {
             None => break,
-            Some(b) if is_whitespace(b) || is_delimiter(b) || is_binary_token_byte(b) => {
+            Some(b) if is_whitespace(b) => {
+                stream_take_terminator(files, entity, b, newlines)?;
+                break;
+            }
+            Some(b) if is_delimiter(b) || is_binary_token_byte(b) => {
                 files.putback_bytes(entity, &[b]);
                 break;
             }

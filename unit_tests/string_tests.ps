@@ -164,7 +164,9 @@ userdict /$unittest known not {(unit_tests/unittest.ps) run} if
 (% comment) /token [false] assert
 
 % Multiple tokens in sequence  
-(/xyz 123 /def) /token [( 123 /def) /xyz true] assert
+% A literal name takes the white-space character that ends it, as a number
+% or an executable name does (PLRM `token`: "a name or a number").
+(/xyz 123 /def) /token [(123 /def) /xyz true] assert
 
 % Whitespace handling
 (   42   ) /token [(  ) 42 true] assert

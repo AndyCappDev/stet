@@ -636,9 +636,16 @@ fn scan_token_from_bytes(
         }
         Some(token) => {
             let is_immediate = matches!(token, Token::ImmediateName(_));
-            // Numbers and executable names: consume one trailing whitespace (PLRM)
-            let eats_whitespace =
-                matches!(token, Token::Int(_) | Token::Real(_) | Token::Name(_, _));
+            // A number or a name of any kind takes the white-space character
+            // that ends it (PLRM `token`, `currentfile`).
+            let eats_whitespace = matches!(
+                token,
+                Token::Int(_)
+                    | Token::Real(_)
+                    | Token::Name(_, _)
+                    | Token::LiteralName(_)
+                    | Token::ImmediateName(_)
+            );
             let tok_obj = if matches!(token, Token::ProcBegin) {
                 parse_procedure(ctx, &mut tokenizer)?
             } else {

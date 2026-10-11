@@ -980,8 +980,15 @@ fn token_from_string(
         Some(Token::Eof) => {
             ctx.o_stack.push(PsObject::bool(false))?;
         }
-        Some(token @ (Token::Int(_) | Token::Real(_) | Token::Name(_, _))) => {
-            // Numbers and executable names: consume one trailing whitespace
+        Some(
+            token @ (Token::Int(_)
+            | Token::Real(_)
+            | Token::Name(_, _)
+            | Token::LiteralName(_)
+            | Token::ImmediateName(_)),
+        ) => {
+            // A number or a name of any kind takes the white-space
+            // character that ends it (PLRM `token`).
             let obj = ctx.token_to_object(token)?;
             let pos = stet_core::tokenizer::after_token_terminator(bytes, tokenizer.position());
             let consumed = pos as u32;
@@ -989,13 +996,7 @@ fn token_from_string(
             ctx.o_stack.push(obj)?;
             ctx.o_stack.push(PsObject::bool(true))?;
         }
-        Some(
-            token @ (Token::LiteralName(_)
-            | Token::ImmediateName(_)
-            | Token::String(_)
-            | Token::DictEnd
-            | Token::ArrayEnd),
-        ) => {
+        Some(token @ (Token::String(_) | Token::DictEnd | Token::ArrayEnd)) => {
             let obj = ctx.token_to_object(token)?;
             let consumed = tokenizer.position() as u32;
             push_remainder_string(ctx, entity, start, bytes.len() as u32, consumed)?;

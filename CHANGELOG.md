@@ -72,6 +72,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `readline` that is an empty first line. PLRM 3.2.2 makes the pair one
   newline. Fixed in the scanner for files, the one for filtered files,
   and `token` on a string, which now leaves what follows the pair.
+- **A literal or immediately evaluated name takes the white space that
+  ends it**, as an executable name and a number do. PLRM says "a name or
+  a number" of both `token` and `currentfile`, and Ghostscript does it;
+  stet left the character behind after `/name` and `//name`. So
+  `(/ab X) token` left `( X)` and now leaves `(X)`, and after
+  `currentfile token` had read a literal name, `readline` returned an
+  empty line or one beginning with a space. A delimiter that ends a name
+  is still left for the token it begins.
 - **The program goes on after a mesh whose data a procedure reads from
   comment lines.** Illustrator stores a gradient mesh's data in `%` lines
   after the shading, read a line at a time by a procedure behind
