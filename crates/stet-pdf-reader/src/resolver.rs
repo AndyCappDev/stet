@@ -13,6 +13,9 @@ use crate::lexer::{Lexer, Token, parse_object};
 use crate::objects::{PdfDict, PdfObj};
 use crate::xref::{XrefEntry, XrefTable};
 
+/// A decoded ICC profile stream and its hash.
+pub(crate) type IccProfileStream = (std::sync::Arc<Vec<u8>>, stet_graphics::icc::ProfileHash);
+
 /// Cached decompressed ObjStm data + parsed header.
 struct ObjStmCache {
     data: Vec<u8>,
@@ -64,6 +67,12 @@ pub struct Resolver<'a> {
     max_image_pixels: std::cell::Cell<u64>,
     /// The fonts resolved so far, kept from one page to the next.
     pub(crate) fonts: RefCell<crate::content::font::DocumentFonts>,
+    /// The ICC profile streams read so far, by object: the decoded bytes and
+    /// their hash, or `None` for a stream that could not be read or was
+    /// empty. A document usually names one profile from every image and
+    /// colour space that uses it, so without this each of them decoded,
+    /// hashed and kept its own copy.
+    pub(crate) icc_profiles: RefCell<HashMap<(u32, u16), Option<IccProfileStream>>>,
     /// The content warnings raised while
     /// [`capturing_content_warnings`](Self::capturing_content_warnings) is
     /// running, innermost last.
@@ -298,6 +307,7 @@ impl<'a> Resolver<'a> {
             content_page: std::cell::Cell::new(None),
             content_seen: RefCell::new((None, HashSet::new())),
             fonts: RefCell::default(),
+            icc_profiles: RefCell::new(HashMap::new()),
             content_capture: RefCell::default(),
             max_image_pixels: std::cell::Cell::new(stet_graphics::image_limits::MAX_IMAGE_PIXELS),
         }
@@ -333,6 +343,7 @@ impl<'a> Resolver<'a> {
             content_page: std::cell::Cell::new(None),
             content_seen: RefCell::new((None, HashSet::new())),
             fonts: RefCell::default(),
+            icc_profiles: RefCell::new(HashMap::new()),
             content_capture: RefCell::default(),
             max_image_pixels: std::cell::Cell::new(stet_graphics::image_limits::MAX_IMAGE_PIXELS),
         }
@@ -394,6 +405,23 @@ impl<'a> Resolver<'a> {
         let obj = result?;
         self.cache.borrow_mut().insert(obj_num, obj.clone());
         Ok(obj)
+    }
+
+    /// The entry `key` of the dictionary (or stream dictionary) held in an
+    /// indirect object, copying only that entry: `None` when the object is
+    /// missing or not a dictionary, `Some(None)` when it has no such entry.
+    pub(crate) fn dict_entry(
+        &self,
+        obj_num: u32,
+        gen_num: u16,
+        key: &[u8],
+    ) -> Option<Option<PdfObj>> {
+        if let Some(obj) = self.cache.borrow().get(&obj_num) {
+            return Some(obj.as_dict()?.get(key).cloned());
+        }
+        // Not read yet: resolving it leaves it in the cache for next time.
+        let obj = self.resolve(obj_num, gen_num).ok()?;
+        Some(obj.as_dict()?.get(key).cloned())
     }
 
     fn resolve_uncached(&self, obj_num: u32, gen_num: u16) -> Result<PdfObj, PdfError> {

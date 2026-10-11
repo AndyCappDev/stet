@@ -830,8 +830,6 @@ impl<'a> ContentInterpreter<'a> {
         self.pdfx_cmyk_intent = true;
     }
 
-    /// Look up a sub-dictionary in the resources, resolving indirect references.
-    /// e.g., `resolve_resource_subdict(b"Font")` returns the /Font dict.
     /// Get an integer value from a dict, resolving indirect references.
     fn resolve_dict_int(&self, dict: &PdfDict, key: &[u8]) -> Option<i64> {
         let obj = dict.get(key)?;
@@ -843,6 +841,23 @@ impl<'a> ContentInterpreter<'a> {
         resolved.as_int()
     }
 
+    /// The entry `name` of the resource category `category` (`/XObject`,
+    /// `/Font`, …): `None` when the resources have no such category,
+    /// `Some(None)` when the category has no such entry.
+    ///
+    /// Only the entry is copied. A page can name thousands of XObjects, and
+    /// copying the category for each `Do` made reading it quadratic.
+    fn resource_entry(&self, category: &[u8], name: &[u8]) -> Option<Option<PdfObj>> {
+        match self.resources.get(category)? {
+            PdfObj::Ref(num, generation) => self.resolver.dict_entry(*num, *generation, name),
+            direct => Some(direct.as_dict()?.get(name).cloned()),
+        }
+    }
+
+    /// A whole resource category, resolving an indirect reference: e.g.
+    /// `resolve_resource_subdict(b"ColorSpace")` is a copy of the
+    /// `/ColorSpace` dictionary. For one entry use
+    /// [`resource_entry`](Self::resource_entry), which copies only that.
     fn resolve_resource_subdict(&self, key: &[u8]) -> Option<PdfDict> {
         let obj = self.resources.get(key)?;
         // If it's already a dict, return it
@@ -3372,9 +3387,7 @@ impl<'a> ContentInterpreter<'a> {
             // Verify the cached font still matches — different resource scopes
             // (page vs annotation vs form) may map the same name to different
             // font objects (e.g. /TT1 → obj 90 on page, /TT1 → obj 407 in annot).
-            let font_ref = self
-                .resolve_resource_subdict(b"Font")
-                .and_then(|fd| fd.get(name).cloned());
+            let font_ref = self.resource_entry(b"Font", name).flatten();
             if let Some(PdfObj::Ref(obj_num, _)) = &font_ref {
                 let obj_key = obj_num.to_le_bytes().to_vec();
                 if let Some(obj_cached) = self.font_cache.get(&obj_key) {
@@ -3394,9 +3407,7 @@ impl<'a> ContentInterpreter<'a> {
         }
 
         // Cache miss — look up in resources /Font dict
-        let font_ref = self
-            .resolve_resource_subdict(b"Font")
-            .and_then(|fd| fd.get(name).cloned());
+        let font_ref = self.resource_entry(b"Font", name).flatten();
         let font_ref = match font_ref {
             Some(r) => r,
             None => {
@@ -4451,10 +4462,9 @@ impl<'a> ContentInterpreter<'a> {
         // The properties operand is a name referencing /Properties in resources
         let mut pushed = false;
         if let Some(Operand::Name(prop_name)) = props
-            && let Some(props_dict) = self.resolve_resource_subdict(b"Properties")
-            && let Some(ocg_obj) = props_dict.get(&prop_name)
+            && let Some(Some(ocg_obj)) = self.resource_entry(b"Properties", &prop_name)
         {
-            let visibility = self.build_visibility(ocg_obj);
+            let visibility = self.build_visibility(&ocg_obj);
             let parent_list = std::mem::replace(&mut self.display_list, DisplayList::new());
             self.mc_stack.push(MarkedContentFrame::Ocg {
                 parent_list,
@@ -4487,9 +4497,9 @@ impl<'a> ContentInterpreter<'a> {
             Operand::Dict(dict) => dict,
             Operand::Name(name) => {
                 named = self
-                    .resolve_resource_subdict(b"Properties")?
-                    .get(name)
-                    .and_then(|obj| self.resolver.deref(obj).ok())?;
+                    .resource_entry(b"Properties", name)
+                    .flatten()
+                    .and_then(|obj| self.resolver.deref(&obj).ok())?;
                 named.as_dict()?
             }
             _ => return None,
@@ -4632,15 +4642,15 @@ impl<'a> ContentInterpreter<'a> {
             .to_vec();
 
         // Look up XObject in resources (may be an indirect reference)
-        let xobj_dict = self
-            .resolve_resource_subdict(b"XObject")
-            .ok_or(PdfError::Other("no XObject resources".into()))?;
-        let xobj_ref = xobj_dict.get(&name).ok_or_else(|| {
-            PdfError::Other(format!(
-                "XObject /{} not found",
-                String::from_utf8_lossy(&name)
-            ))
-        })?;
+        let xobj_ref = &self
+            .resource_entry(b"XObject", &name)
+            .ok_or(PdfError::Other("no XObject resources".into()))?
+            .ok_or_else(|| {
+                PdfError::Other(format!(
+                    "XObject /{} not found",
+                    String::from_utf8_lossy(&name)
+                ))
+            })?;
         // Keep the original ref for stream_data_from_obj (needed for encryption)
         let xobj_ref_clone = xobj_ref.clone();
         let xobj = self.resolver.deref(xobj_ref)?;
@@ -6852,10 +6862,8 @@ impl<'a> ContentInterpreter<'a> {
                     .cs_index
                     .as_ref()
                     .and_then(|idx| idx.get(name.as_slice()).cloned());
-                let res_obj = from_cache.or_else(|| {
-                    self.resolve_resource_subdict(b"ColorSpace")
-                        .and_then(|d| d.get(name).cloned())
-                });
+                let res_obj =
+                    from_cache.or_else(|| self.resource_entry(b"ColorSpace", name).flatten());
                 if let Some(ref obj) = res_obj {
                     resolve_color_space_obj(obj, self.resolver)
                 } else {
@@ -7182,15 +7190,15 @@ impl<'a> ContentInterpreter<'a> {
 
     /// Apply ExtGState dictionary entries.
     fn apply_ext_gstate(&mut self, name: &[u8]) -> Result<(), PdfError> {
-        let ext_dict = self
-            .resolve_resource_subdict(b"ExtGState")
-            .ok_or(PdfError::Other("no ExtGState resources".into()))?;
-        let gs_ref = ext_dict.get(name).ok_or_else(|| {
-            PdfError::Other(format!(
-                "ExtGState /{} not found",
-                String::from_utf8_lossy(name)
-            ))
-        })?;
+        let gs_ref = &self
+            .resource_entry(b"ExtGState", name)
+            .ok_or(PdfError::Other("no ExtGState resources".into()))?
+            .ok_or_else(|| {
+                PdfError::Other(format!(
+                    "ExtGState /{} not found",
+                    String::from_utf8_lossy(name)
+                ))
+            })?;
         let gs_obj = self.resolver.deref(gs_ref)?;
         let gs_dict = gs_obj
             .as_dict()
@@ -7918,15 +7926,15 @@ impl<'a> ContentInterpreter<'a> {
             .ok_or(PdfError::Other("sh: expected name".into()))?
             .to_vec();
 
-        let shading_dict = self
-            .resolve_resource_subdict(b"Shading")
-            .ok_or(PdfError::Other("no Shading resources".into()))?;
-        let sh_ref = shading_dict.get(&name).ok_or_else(|| {
-            PdfError::Other(format!(
-                "Shading /{} not found",
-                String::from_utf8_lossy(&name)
-            ))
-        })?;
+        let sh_ref = &self
+            .resource_entry(b"Shading", &name)
+            .ok_or(PdfError::Other("no Shading resources".into()))?
+            .ok_or_else(|| {
+                PdfError::Other(format!(
+                    "Shading /{} not found",
+                    String::from_utf8_lossy(&name)
+                ))
+            })?;
         let sh_ref_clone = sh_ref.clone();
         let sh_obj = self.resolver.deref(sh_ref)?;
         let sh_dict = sh_obj
@@ -7961,15 +7969,15 @@ impl<'a> ContentInterpreter<'a> {
         self.extract_pattern_underlying_color(false)?;
 
         // Check PatternType before resolving — Type 2 (shading) needs different handling
-        let pattern_dict = self
-            .resolve_resource_subdict(b"Pattern")
-            .ok_or(PdfError::Other("no Pattern resources".into()))?;
-        let pat_ref = pattern_dict.get(&name).ok_or_else(|| {
-            PdfError::Other(format!(
-                "Pattern /{} not found",
-                String::from_utf8_lossy(&name)
-            ))
-        })?;
+        let pat_ref = &self
+            .resource_entry(b"Pattern", &name)
+            .ok_or(PdfError::Other("no Pattern resources".into()))?
+            .ok_or_else(|| {
+                PdfError::Other(format!(
+                    "Pattern /{} not found",
+                    String::from_utf8_lossy(&name)
+                ))
+            })?;
         let pat_obj = self.resolver.deref(pat_ref)?;
         let pat_dict = pat_obj
             .as_dict()
@@ -8006,15 +8014,15 @@ impl<'a> ContentInterpreter<'a> {
         self.extract_pattern_underlying_color(true)?;
 
         // Check PatternType before resolving — Type 2 (shading) needs different handling
-        let pattern_dict = self
-            .resolve_resource_subdict(b"Pattern")
-            .ok_or(PdfError::Other("no Pattern resources".into()))?;
-        let pat_ref = pattern_dict.get(&name).ok_or_else(|| {
-            PdfError::Other(format!(
-                "Pattern /{} not found",
-                String::from_utf8_lossy(&name)
-            ))
-        })?;
+        let pat_ref = &self
+            .resource_entry(b"Pattern", &name)
+            .ok_or(PdfError::Other("no Pattern resources".into()))?
+            .ok_or_else(|| {
+                PdfError::Other(format!(
+                    "Pattern /{} not found",
+                    String::from_utf8_lossy(&name)
+                ))
+            })?;
         let pat_obj = self.resolver.deref(pat_ref)?;
         let pat_dict = pat_obj
             .as_dict()
@@ -8127,15 +8135,15 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     fn resolve_pattern(&mut self, name: &[u8]) -> Result<TilingPattern, PdfError> {
-        let pattern_dict = self
-            .resolve_resource_subdict(b"Pattern")
-            .ok_or(PdfError::Other("no Pattern resources".into()))?;
-        let pat_ref = pattern_dict.get(name).ok_or_else(|| {
-            PdfError::Other(format!(
-                "Pattern /{} not found",
-                String::from_utf8_lossy(name)
-            ))
-        })?;
+        let pat_ref = &self
+            .resource_entry(b"Pattern", name)
+            .ok_or(PdfError::Other("no Pattern resources".into()))?
+            .ok_or_else(|| {
+                PdfError::Other(format!(
+                    "Pattern /{} not found",
+                    String::from_utf8_lossy(name)
+                ))
+            })?;
 
         // Cache tiling patterns by indirect reference — ensures the same
         // pattern stream is interpreted only once (with the first caller's

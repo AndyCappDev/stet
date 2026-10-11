@@ -26,6 +26,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A PDF page with thousands of images is read in a fraction of the
+  time and memory.** Two costs grew with the number of images on a page.
+  Every image in an ICCBased colour space decoded its profile's stream,
+  hashed it and kept a copy of its own, though a document normally names
+  one profile object from all of them; the profile is now read once per
+  document and shared. And every `Do` copied the page's whole `/XObject`
+  dictionary to look up one name, so reading was quadratic in the number
+  of XObjects; it now copies the one entry (the same for `/Font`,
+  `/ExtGState`, `/Shading`, `/Pattern`, `/ColorSpace` and `/Properties`
+  lookups). On a one-page InDesign flyer with 5,224 images sharing a
+  650 KB CMYK profile, rendering at 150 dpi went from 5.6 s to 1.4 s and
+  peak memory from 3.3 GB to 270 MB. Output is unchanged.
+
 - **Opening a PDF prints nothing.** `IccCache::search_system_cmyk_profile`
   — which `PdfDocument::from_bytes` and `from_owned` call — wrote
   `[ICC] Loaded system CMYK profile` to stderr every time it found one,

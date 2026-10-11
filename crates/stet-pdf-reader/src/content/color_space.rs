@@ -232,12 +232,34 @@ fn resolve_icc_based(
         .get_int(b"N")
         .ok_or(PdfError::Other("ICCBased missing /N".into()))? as u32;
 
-    // Extract ICC profile bytes from the stream (use original ref for encryption)
-    let profile_data = resolver
-        .stream_data_from_obj(&args[0])
-        .ok()
-        .filter(|d| !d.is_empty())
-        .map(Arc::new);
+    // The profile's bytes and their hash, which every later colour conversion
+    // is keyed by. A profile held in an indirect object is read once for the
+    // document (the reference also carries the object number the stream is
+    // decrypted with).
+    let read = || {
+        let data = resolver
+            .stream_data_from_obj(&args[0])
+            .ok()
+            .filter(|d| !d.is_empty())?;
+        let hash = IccCache::hash_profile(&data);
+        Some((Arc::new(data), hash))
+    };
+    let profile = match &args[0] {
+        PdfObj::Ref(num, generation) => {
+            let key = (*num, *generation);
+            let known = resolver.icc_profiles.borrow().get(&key).cloned();
+            known.unwrap_or_else(|| {
+                let profile = read();
+                resolver
+                    .icc_profiles
+                    .borrow_mut()
+                    .insert(key, profile.clone());
+                profile
+            })
+        }
+        _ => read(),
+    };
+    let (profile_data, profile_hash) = profile.unzip();
 
     // Parse /Alternate color space (used as fallback when ICC transform fails)
     let alternate = dict
@@ -245,11 +267,6 @@ fn resolve_icc_based(
         .and_then(|obj| resolve_color_space_obj_depth(obj, resolver, depth).ok())
         .or_else(|| icc_alternate_from_header(profile_data.as_deref(), n))
         .map(Box::new);
-
-    // Pre-compute profile hash to avoid re-hashing per color conversion
-    let profile_hash = profile_data
-        .as_deref()
-        .map(|data| IccCache::hash_profile(data));
 
     Ok(ResolvedColorSpace::ICCBased {
         n,
@@ -905,8 +922,18 @@ pub fn register_icc_profile(
 ) -> Option<ProfileHash> {
     match cs {
         ResolvedColorSpace::ICCBased {
-            n, profile_data, ..
+            n,
+            profile_data,
+            profile_hash,
+            ..
         } => {
+            // Registering hashes the whole profile, so a profile the cache
+            // already holds is answered from the hash worked out with it.
+            if let Some(hash) = profile_hash
+                && icc_cache.has_profile(hash)
+            {
+                return Some(*hash);
+            }
             let data = profile_data.as_ref()?;
             icc_cache.register_profile_with_n(data, Some(*n))
         }
