@@ -99,6 +99,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   viewport at 150 dpi went from 3.9 s to 1.2 s on one thread, which is
   how the WebAssembly viewer renders. Output is unchanged.
 
+- **Setting a clip costs what the clip covers, not what the page does, and
+  a clip set before is not worked out again.** A rasterised clip was a
+  mask the size of the band, and each clip path copied one out of the
+  cache, cleared another and multiplied the two together sample by sample
+  — so a page that sets the same page and frame clips before each of
+  thousands of small things did the same band-sized intersection
+  thousands of times. A clip mask now records the rectangle outside which
+  it lets nothing through, and is cleared, copied and intersected only
+  within it; a mask in the cache is shared with the clip in force rather
+  than copied; and an intersection asked for a second time is kept, as a
+  clip path rasterised a second time already was. The same Keynote slide,
+  the same viewport: 1.2 s to 0.27 s on one thread. Output is unchanged.
+
 - **Opening a PDF prints nothing.** `IccCache::search_system_cmyk_profile`
   — which `PdfDocument::from_bytes` and `from_owned` call — wrote
   `[ICC] Loaded system CMYK profile` to stderr every time it found one,

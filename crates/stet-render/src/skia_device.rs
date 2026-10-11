@@ -39,6 +39,33 @@ struct ClipRect {
 }
 
 impl ClipRect {
+    /// The rectangle that holds no pixel.
+    const EMPTY: ClipRect = ClipRect {
+        x0: 0,
+        y0: 0,
+        x1: 0,
+        y1: 0,
+    };
+
+    /// The whole of a `w` x `h` surface.
+    fn whole(w: u32, h: u32) -> ClipRect {
+        ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: w,
+            y1: h,
+        }
+    }
+
+    /// How many pixels the rectangle holds.
+    fn area(&self) -> u64 {
+        if self.is_empty() {
+            0
+        } else {
+            (self.x1 - self.x0) as u64 * (self.y1 - self.y0) as u64
+        }
+    }
+
     /// Intersect two rectangles. Result may be empty.
     fn intersect(&self, other: &ClipRect) -> ClipRect {
         ClipRect {
@@ -78,13 +105,198 @@ impl ClipRect {
 /// Clip region: either a simple rectangle (fast) or a full rasterized mask.
 enum ClipRegion {
     Rect(ClipRect, RectMask),
-    Mask(Mask),
+    Mask(Arc<ClipMask>),
 }
 
 impl ClipRegion {
     /// A rectangular clip, with no mask made for it yet.
     fn rect(rect: ClipRect) -> Self {
         ClipRegion::Rect(rect, RectMask::default())
+    }
+
+    /// A clip that is the whole of `mask`, about which nothing is known.
+    #[cfg(feature = "ps-device")]
+    fn mask(mask: Mask) -> Self {
+        ClipRegion::Mask(Arc::new(ClipMask::whole(mask)))
+    }
+}
+
+/// A rasterised clip, and the rectangle outside which it lets nothing
+/// through.
+///
+/// A mask is a byte for every pixel of the surface, but a clip is usually a
+/// small part of it, and a page may set thousands of them. Copying,
+/// clearing and intersecting whole masks made the cost of each clip the
+/// size of the surface; knowing where a mask can be other than zero makes
+/// it the size of the clip. Painting sees an ordinary mask.
+///
+/// A mask is shared between the clip in force and the cache of masks
+/// already rasterised, so that a clip set a second time is not copied. One
+/// that is shared is never written to.
+struct ClipMask {
+    mask: Mask,
+    /// Every sample outside this is 0.
+    bounds: ClipRect,
+    /// What the mask was made from, if that is known: the hash of the clip
+    /// path rasterised into it, combined with that of each mask and
+    /// rectangle it has since been intersected with. Two masks of one
+    /// surface with the same key hold the same samples, which is what lets
+    /// an intersection made before be found again instead of made again.
+    key: Option<u64>,
+}
+
+/// The key of what two things with keys `a` and `b` make together.
+fn combine_clip_keys(a: u64, b: u64, kind: u8) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (kind, a, b).hash(&mut hasher);
+    hasher.finish()
+}
+
+/// The key of a mask with key `key` once nothing is let through outside
+/// `rect`.
+fn clip_key_within(key: Option<u64>, rect: &ClipRect) -> Option<u64> {
+    let corners = ((rect.x0 as u64) << 32 | rect.y0 as u64).rotate_left(17)
+        ^ ((rect.x1 as u64) << 32 | rect.y1 as u64);
+    key.map(|key| combine_clip_keys(key, corners, 1))
+}
+
+impl ClipMask {
+    /// A mask about whose contents nothing is known.
+    fn whole(mask: Mask) -> Self {
+        let bounds = ClipRect::whole(mask.width(), mask.height());
+        ClipMask {
+            mask,
+            bounds,
+            key: None,
+        }
+    }
+
+    /// A mask that lets nothing through.
+    fn blank(w: u32, h: u32) -> Self {
+        ClipMask {
+            mask: Mask::new(w, h).expect("Failed to create mask"),
+            bounds: ClipRect::EMPTY,
+            key: None,
+        }
+    }
+
+    /// The samples of the mask, a row of the surface after another.
+    fn data(&self) -> &[u8] {
+        self.mask.data()
+    }
+
+    /// Let nothing through.
+    fn clear(&mut self) {
+        self.zero_outside(&ClipRect::EMPTY);
+        self.key = None;
+    }
+
+    /// Let nothing through outside `rect`.
+    fn clip_to(&mut self, rect: &ClipRect) {
+        self.zero_outside(rect);
+        self.key = clip_key_within(self.key, rect);
+    }
+
+    /// Zero the samples outside `rect`, and draw the bounds in to it.
+    fn zero_outside(&mut self, rect: &ClipRect) {
+        let old = self.bounds;
+        let kept = old.intersect(rect);
+        let stride = self.mask.width() as usize;
+        let data = self.mask.data_mut();
+        let mut zero = |y: u32, x0: u32, x1: u32| {
+            let row = y as usize * stride;
+            data[row + x0 as usize..row + x1 as usize].fill(0);
+        };
+        if kept.is_empty() {
+            for y in old.y0..old.y1 {
+                zero(y, old.x0, old.x1);
+            }
+            self.bounds = ClipRect::EMPTY;
+            return;
+        }
+        for y in (old.y0..kept.y0).chain(kept.y1..old.y1) {
+            zero(y, old.x0, old.x1);
+        }
+        for y in kept.y0..kept.y1 {
+            zero(y, old.x0, kept.x0);
+            zero(y, kept.x1, old.x1);
+        }
+        self.bounds = kept;
+    }
+
+    /// Intersect with `other`: each sample becomes its product with the
+    /// sample of `other` at the same place.
+    fn multiply_by(&mut self, other: &ClipMask) {
+        self.key = ClipMask::product_key(self, other);
+        self.zero_outside(&other.bounds);
+        let both = self.bounds;
+        let stride = self.mask.width() as usize;
+        let (dst, src) = (self.mask.data_mut(), other.mask.data());
+        for y in both.y0..both.y1 {
+            let row = y as usize * stride;
+            let span = row + both.x0 as usize..row + both.x1 as usize;
+            multiply_samples(&mut dst[span.clone()], &src[span]);
+        }
+    }
+
+    /// Become the intersection of `a` and `b`. The mask must be letting
+    /// nothing through, as one fresh from the pool is.
+    fn set_product(&mut self, a: &ClipMask, b: &ClipMask) {
+        self.copy_part(a, &b.bounds);
+        self.key = a.key;
+        self.multiply_by(b);
+    }
+
+    /// The key of the intersection of two masks. A product is the same
+    /// either way round, so the key is too.
+    fn product_key(a: &ClipMask, b: &ClipMask) -> Option<u64> {
+        let (a, b) = (a.key?, b.key?);
+        Some(combine_clip_keys(a.min(b), a.max(b), 0))
+    }
+
+    /// Become `source` inside `rect` and nothing outside it. The mask must
+    /// be letting nothing through.
+    fn set_part(&mut self, source: &ClipMask, rect: &ClipRect) {
+        self.copy_part(source, rect);
+        self.key = clip_key_within(source.key, rect);
+    }
+
+    /// Copy the samples of `source` inside `rect` into a mask that is
+    /// letting nothing through.
+    fn copy_part(&mut self, source: &ClipMask, rect: &ClipRect) {
+        debug_assert!(self.bounds.is_empty());
+        let part = source.bounds.intersect(rect);
+        if part.is_empty() {
+            return;
+        }
+        let stride = self.mask.width() as usize;
+        let (dst, src) = (self.mask.data_mut(), source.mask.data());
+        for y in part.y0..part.y1 {
+            let row = y as usize * stride;
+            let span = row + part.x0 as usize..row + part.x1 as usize;
+            dst[span.clone()].copy_from_slice(&src[span]);
+        }
+        self.bounds = part;
+    }
+
+    /// Whether every sample outside the bounds is 0, as it must be. Looks
+    /// at every sample, so it is for assertions and tests.
+    fn is_zero_outside_bounds(&self) -> bool {
+        let stride = self.mask.width() as usize;
+        let b = self.bounds;
+        self.mask.data().iter().enumerate().all(|(i, &sample)| {
+            let (x, y) = ((i % stride) as u32, (i / stride) as u32);
+            sample == 0 || (x >= b.x0 && x < b.x1 && y >= b.y0 && y < b.y1)
+        })
+    }
+
+    /// The mask alone, copied only if something else still holds it.
+    #[cfg(feature = "ps-device")]
+    fn into_mask(shared: Arc<ClipMask>) -> Mask {
+        match Arc::try_unwrap(shared) {
+            Ok(own) => own.mask,
+            Err(shared) => shared.mask.clone(),
+        }
     }
 }
 
@@ -652,6 +864,7 @@ fn detect_rect(path: &PsPath, page_w: u32, page_h: u32) -> Option<ClipRect> {
 }
 
 /// Zero out mask pixels outside the given rectangle bounds.
+#[cfg(feature = "ps-device")]
 fn intersect_mask_with_rect(mask: &mut Mask, rect: &ClipRect, w: u32, h: u32) {
     let data = mask.data_mut();
     let stride = w as usize;
@@ -697,7 +910,7 @@ fn resolve_clip_mask<'a>(
 ) -> Option<Option<&'a Mask>> {
     match clip_region {
         None => Some(None),
-        Some(ClipRegion::Mask(m)) => Some(Some(m)),
+        Some(ClipRegion::Mask(m)) => Some(Some(&m.mask)),
         Some(ClipRegion::Rect(rect, kept)) => {
             if rect.is_empty() {
                 return None; // empty clip → skip painting
@@ -761,9 +974,14 @@ fn hash_clip_path(path: &PsPath, fill_rule: &FillRule) -> u64 {
 /// other sample, so eight samples of `src` that are all one or all the
 /// other are dealt with at once; only a mixed eight is multiplied out.
 fn intersect_masks(dst: &mut Mask, src: &Mask) {
+    multiply_samples(dst.data_mut(), src.data());
+}
+
+/// [`intersect_masks`] on two runs of samples of the same length.
+fn multiply_samples(dst: &mut [u8], src: &[u8]) {
     let multiply = |d: &mut u8, s: u8| *d = ((*d as u16 * s as u16 + 127) / 255) as u8;
-    let (dst_chunks, dst_tail) = dst.data_mut().as_chunks_mut::<8>();
-    let (src_chunks, src_tail) = src.data().as_chunks::<8>();
+    let (dst_chunks, dst_tail) = dst.as_chunks_mut::<8>();
+    let (src_chunks, src_tail) = src.as_chunks::<8>();
     for (d, s) in dst_chunks.iter_mut().zip(src_chunks) {
         match u64::from_ne_bytes(*s) {
             u64::MAX => {}
@@ -789,11 +1007,12 @@ struct BandState {
     clip_region: Option<ClipRegion>,
     spare_mask: Option<Mask>,
     /// Per-band cache (cleared each band since masks are band-sized).
-    clip_mask_cache: HashMap<u64, Mask>,
+    clip_mask_cache: HashMap<u64, Arc<ClipMask>>,
     /// Persists across bands for cache-on-second-sight.
     clip_mask_seen: HashSet<u64>,
     /// Pool of recycled masks to avoid alloc/dealloc (mmap/munmap) per band.
-    mask_pool: Vec<Mask>,
+    /// Nothing else holds a mask that is in the pool.
+    mask_pool: Vec<Arc<ClipMask>>,
     /// Per-pixel CMYK tracking buffer for overprint simulation.
     /// Only allocated when the display list contains overprint elements.
     /// Layout: [C, M, Y, K] as f32 per pixel, band_w * band_h * 4 entries.
@@ -850,27 +1069,100 @@ impl BandState {
     /// Empty the clip-mask cache, keeping a few of its masks in the pool for
     /// reuse and freeing the rest.
     fn recycle_cache(&mut self) {
-        for (_, mask) in self.clip_mask_cache.drain() {
-            if self.mask_pool.len() < MAX_POOL_MASKS {
-                self.mask_pool.push(mask);
-            }
-            // else: drop mask, returning memory to OS
+        let cached: Vec<_> = self.clip_mask_cache.drain().map(|(_, mask)| mask).collect();
+        for mask in cached {
+            self.recycle_mask(mask);
         }
     }
 
-    /// Return a mask to the pool if under capacity, otherwise drop it.
-    fn recycle_mask(&mut self, mask: Mask) {
-        if self.mask_pool.len() < MAX_POOL_MASKS {
+    /// Return a mask to the pool if under capacity and nothing else holds
+    /// it (the cache, or the clip in force), otherwise let go of it.
+    fn recycle_mask(&mut self, mask: Arc<ClipMask>) {
+        if self.mask_pool.len() < MAX_POOL_MASKS && Arc::strong_count(&mask) == 1 {
             self.mask_pool.push(mask);
         }
     }
 
-    /// Get a recycled mask or allocate a new one.
-    fn take_mask(&mut self, w: u32, h: u32) -> Mask {
-        self.spare_mask
-            .take()
-            .or_else(|| self.mask_pool.pop())
-            .unwrap_or_else(|| Mask::new(w, h).expect("Failed to create mask"))
+    /// A mask that lets nothing through and that nothing else holds:
+    /// a recycled one, cleared where it was not already, or a new one.
+    fn take_mask(&mut self, w: u32, h: u32) -> Arc<ClipMask> {
+        let mut mask = match self.spare_mask.take() {
+            Some(spare) => Arc::new(ClipMask::whole(spare)),
+            None => match self.mask_pool.pop() {
+                Some(pooled) => pooled,
+                None => return Arc::new(ClipMask::blank(w, h)),
+            },
+        };
+        Arc::get_mut(&mut mask)
+            .expect("a pooled mask is held by nothing else")
+            .clear();
+        mask
+    }
+
+    /// The intersection of two clip masks. Whichever of them nothing else
+    /// holds is written to, the one with less to go over for preference;
+    /// if both are shared the result is made in a mask from the pool.
+    ///
+    /// A page that clips to the same few paths in the same order before
+    /// each thing it draws asks for the same intersection each time, so one
+    /// asked for twice is kept, as a clip path rasterised twice is.
+    fn intersect_clip_masks(&mut self, a: Arc<ClipMask>, b: Arc<ClipMask>) -> Arc<ClipMask> {
+        let key = ClipMask::product_key(&a, &b);
+        if let Some(key) = key
+            && let Some(made) = self.clip_mask_cache.get(&key)
+        {
+            let made = Arc::clone(made);
+            self.recycle_mask(a);
+            self.recycle_mask(b);
+            return made;
+        }
+        let (mut small, mut large) = if a.bounds.area() <= b.bounds.area() {
+            (a, b)
+        } else {
+            (b, a)
+        };
+        let product = if let Some(own) = Arc::get_mut(&mut small) {
+            own.multiply_by(&large);
+            self.recycle_mask(large);
+            small
+        } else if let Some(own) = Arc::get_mut(&mut large) {
+            own.multiply_by(&small);
+            large
+        } else {
+            let mut product = self.take_mask(small.mask.width(), small.mask.height());
+            Arc::get_mut(&mut product)
+                .expect("a mask from the pool is held by nothing else")
+                .set_product(&small, &large);
+            product
+        };
+        if let Some(key) = key {
+            self.cache_on_second_sight(key, &product);
+        }
+        product
+    }
+
+    /// Keep `mask` under `key` if that key has been seen before, making
+    /// room first if the cache is full.
+    fn cache_on_second_sight(&mut self, key: u64, mask: &Arc<ClipMask>) {
+        if !self.clip_mask_seen.insert(key) {
+            if self.clip_mask_cache.len() >= clip_mask_cache_capacity(mask.data().len()) {
+                self.recycle_cache();
+            }
+            self.clip_mask_cache.insert(key, Arc::clone(mask));
+        }
+    }
+
+    /// A clip mask with nothing let through outside `rect`.
+    fn clip_mask_to_rect(&mut self, mut mask: Arc<ClipMask>, rect: &ClipRect) -> Arc<ClipMask> {
+        if let Some(own) = Arc::get_mut(&mut mask) {
+            own.clip_to(rect);
+            return mask;
+        }
+        let mut part = self.take_mask(mask.mask.width(), mask.mask.height());
+        Arc::get_mut(&mut part)
+            .expect("a mask from the pool is held by nothing else")
+            .set_part(&mask, rect);
+        part
     }
 
     /// Take (or lazily allocate) the overprint background snapshot and
@@ -3736,7 +4028,7 @@ fn render_element(
                 let mut temp_mask = None;
                 let mask_ref = match &band_state.clip_region {
                     None => None,
-                    Some(ClipRegion::Mask(m)) => Some(m as &Mask),
+                    Some(ClipRegion::Mask(m)) => Some(&m.mask),
                     Some(ClipRegion::Rect(rect, kept)) => {
                         if rect.is_empty() {
                             return;
@@ -3851,7 +4143,7 @@ fn render_element(
                 let mut temp_mask = None;
                 let mask_ref = match &band_state.clip_region {
                     None => None,
-                    Some(ClipRegion::Mask(m)) => Some(m as &Mask),
+                    Some(ClipRegion::Mask(m)) => Some(&m.mask),
                     Some(ClipRegion::Rect(rect, kept)) => {
                         if rect.is_empty() {
                             return;
@@ -7269,7 +7561,7 @@ fn paint_pattern_fill(
 }
 
 /// Intersect the clip with a rectangle of the pixmap.
-fn clip_to_rect(band_state: &mut BandState, rect: &ClipRect, width: u32, height: u32) {
+fn clip_to_rect(band_state: &mut BandState, rect: &ClipRect) {
     match band_state.clip_region.take() {
         None => {
             band_state.clip_region = Some(ClipRegion::rect(*rect));
@@ -7277,21 +7569,18 @@ fn clip_to_rect(band_state: &mut BandState, rect: &ClipRect, width: u32, height:
         Some(ClipRegion::Rect(existing, _)) => {
             band_state.clip_region = Some(ClipRegion::rect(existing.intersect(rect)));
         }
-        Some(ClipRegion::Mask(mut mask)) => {
-            intersect_mask_with_rect(&mut mask, rect, width, height);
+        Some(ClipRegion::Mask(mask)) => {
+            let mask = band_state.clip_mask_to_rect(mask, rect);
             band_state.clip_region = Some(ClipRegion::Mask(mask));
         }
     }
 }
 
-/// Whether `path`, taken to pixels by `transform`, lies wholly outside a
-/// `width` × `height` pixmap, so that filling it marks no pixel.
-///
-/// The bound is the points of the path, control points included, which
-/// contain its curves; a pixel of margin is left for the rasteriser's
-/// rounding. A path with no points is not a miss: it is not a clip at all,
-/// and the caller leaves the clip as it was.
-fn clip_path_misses_output(path: &PsPath, transform: &Transform, width: u32, height: u32) -> bool {
+/// The bounding box, in pixels, of the points of `path` as `transform`
+/// places them, control points included: `(x0, y0, x1, y1)`. A curve lies
+/// within its control points, so the path lies within the box. `None` for
+/// a path with no points.
+fn clip_path_point_box(path: &PsPath, transform: &Transform) -> Option<(f32, f32, f32, f32)> {
     let (mut x0, mut y0) = (f32::INFINITY, f32::INFINITY);
     let (mut x1, mut y1) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
     let mut any = false;
@@ -7323,8 +7612,41 @@ fn clip_path_misses_output(path: &PsPath, transform: &Transform, width: u32, hei
             PathSegment::ClosePath => {}
         }
     }
+    any.then_some((x0, y0, x1, y1))
+}
+
+/// Whether `path`, taken to pixels by `transform`, lies wholly outside a
+/// `width` × `height` pixmap, so that filling it marks no pixel.
+///
+/// A pixel of margin is left for the rasteriser's rounding. A path with no
+/// points is not a miss: it is not a clip at all, and the caller leaves the
+/// clip as it was.
+fn clip_path_misses_output(path: &PsPath, transform: &Transform, width: u32, height: u32) -> bool {
     // Written so that a bound that is not a number is not a miss.
-    any && (x1 <= -1.0 || y1 <= -1.0 || x0 >= width as f32 + 1.0 || y0 >= height as f32 + 1.0)
+    clip_path_point_box(path, transform).is_some_and(|(x0, y0, x1, y1)| {
+        x1 <= -1.0 || y1 <= -1.0 || x0 >= width as f32 + 1.0 || y0 >= height as f32 + 1.0
+    })
+}
+
+/// The pixels of a `width` × `height` pixmap that filling `path` can mark:
+/// the box of its points, a pixel wider on every side for the rasteriser's
+/// rounding. The whole pixmap if the box is not made of numbers.
+fn clip_path_bounds(path: &PsPath, transform: &Transform, width: u32, height: u32) -> ClipRect {
+    let Some((x0, y0, x1, y1)) = clip_path_point_box(path, transform) else {
+        return ClipRect::EMPTY;
+    };
+    if !(x0.is_finite() && y0.is_finite() && x1.is_finite() && y1.is_finite()) {
+        return ClipRect::whole(width, height);
+    }
+    // A cast from float saturates, so a far-off bound lands on an edge.
+    let low = |v: f32, limit: u32| ((v.floor() - 1.0).max(0.0) as u32).min(limit);
+    let high = |v: f32, limit: u32| ((v.ceil() + 1.0).max(0.0) as u32).min(limit);
+    ClipRect {
+        x0: low(x0, width),
+        y0: low(y0, height),
+        x1: high(x1, width),
+        y1: high(y1, height),
+    }
 }
 
 /// Unified clip path handling for both band and viewport rendering.
@@ -7384,7 +7706,7 @@ fn clip_path_unified(
             && let Some(dev_rect) = detect_rect(path, ctx.out_w, u32::MAX)
         {
             let new_rect = translate_clip_rect(&dev_rect, y_start, ctx.out_h);
-            clip_to_rect(band_state, &new_rect, ctx.out_w, ctx.out_h);
+            clip_to_rect(band_state, &new_rect);
             return;
         }
     }
@@ -7423,18 +7745,16 @@ fn clip_path_unified(
 
     let prev_region = band_state.clip_region.take();
 
-    let mut mask = band_state.take_mask(ctx.out_w, ctx.out_h);
-
     let path_mask = if let Some(cached) = band_state.clip_mask_cache.get(&path_hash) {
-        mask.data_mut().copy_from_slice(cached.data());
-        mask
+        Arc::clone(cached)
     } else {
         let Some(skia_path) = build_skia_path(path) else {
-            band_state.recycle_mask(mask);
             band_state.clip_region = prev_region;
             return;
         };
-        mask.data_mut().fill(0);
+        let mut shared = band_state.take_mask(ctx.out_w, ctx.out_h);
+        let own = Arc::get_mut(&mut shared).expect("a mask from the pool is held by nothing else");
+        let mask = &mut own.mask;
         if let Some(ref sp) = params.stroke_params {
             // Stroke-based clip: expand centerline to stroke outline.
             // Apply dash pattern first (Path::stroke doesn't handle dashing).
@@ -7459,17 +7779,21 @@ fn clip_path_unified(
                     transform,
                 );
             }
+            // A stroke reaches beyond the points of its centre line.
+            own.bounds = ClipRect::whole(ctx.out_w, ctx.out_h);
+            own.key = Some(path_hash);
         } else {
             let transform = ctx.transform(&params.ctm);
             mask.fill_path(&skia_path, fill_rule, false, transform);
+            own.bounds = clip_path_bounds(path, &transform, ctx.out_w, ctx.out_h);
+            own.key = Some(path_hash);
         }
-        if !band_state.clip_mask_seen.insert(path_hash) {
-            if band_state.clip_mask_cache.len() >= clip_mask_cache_capacity(mask.data().len()) {
-                band_state.recycle_cache();
-            }
-            band_state.clip_mask_cache.insert(path_hash, mask.clone());
-        }
-        mask
+        debug_assert!(
+            own.is_zero_outside_bounds(),
+            "a clip path marked a pixel outside the box of its points"
+        );
+        band_state.cache_on_second_sight(path_hash, &shared);
+        shared
     };
 
     match prev_region {
@@ -7483,15 +7807,13 @@ fn clip_path_unified(
                 // Without this, clip_region stays None (= no clip = paint everything).
                 band_state.clip_region = Some(ClipRegion::rect(rect));
             } else {
-                let mut mask = path_mask;
-                intersect_mask_with_rect(&mut mask, &rect, ctx.out_w, ctx.out_h);
+                let mask = band_state.clip_mask_to_rect(path_mask, &rect);
                 band_state.clip_region = Some(ClipRegion::Mask(mask));
             }
         }
-        Some(ClipRegion::Mask(mut existing)) => {
-            intersect_masks(&mut existing, &path_mask);
-            band_state.recycle_mask(path_mask);
-            band_state.clip_region = Some(ClipRegion::Mask(existing));
+        Some(ClipRegion::Mask(existing)) => {
+            let mask = band_state.intersect_clip_masks(existing, path_mask);
+            band_state.clip_region = Some(ClipRegion::Mask(mask));
         }
     }
 }
@@ -7574,10 +7896,11 @@ impl OutputDevice for SkiaDevice {
                     // O(1) rect-rect intersection
                     self.clip_region = Some(ClipRegion::rect(existing.intersect(&new_rect)));
                 }
-                Some(ClipRegion::Mask(mut mask)) => {
+                Some(ClipRegion::Mask(mask)) => {
                     // Zero mask pixels outside rect
+                    let mut mask = ClipMask::into_mask(mask);
                     intersect_mask_with_rect(&mut mask, &new_rect, w, h);
-                    self.clip_region = Some(ClipRegion::Mask(mask));
+                    self.clip_region = Some(ClipRegion::mask(mask));
                 }
             }
             return;
@@ -7626,7 +7949,7 @@ impl OutputDevice for SkiaDevice {
 
         match prev_region {
             None => {
-                self.clip_region = Some(ClipRegion::Mask(path_mask));
+                self.clip_region = Some(ClipRegion::mask(path_mask));
             }
             Some(ClipRegion::Rect(rect, _)) => {
                 if rect.is_empty() {
@@ -7634,20 +7957,21 @@ impl OutputDevice for SkiaDevice {
                 } else {
                     let mut mask = path_mask;
                     intersect_mask_with_rect(&mut mask, &rect, w, h);
-                    self.clip_region = Some(ClipRegion::Mask(mask));
+                    self.clip_region = Some(ClipRegion::mask(mask));
                 }
             }
-            Some(ClipRegion::Mask(mut existing)) => {
+            Some(ClipRegion::Mask(existing)) => {
+                let mut existing = ClipMask::into_mask(existing);
                 intersect_masks(&mut existing, &path_mask);
                 self.spare_mask = Some(path_mask); // recycle the copy
-                self.clip_region = Some(ClipRegion::Mask(existing));
+                self.clip_region = Some(ClipRegion::mask(existing));
             }
         }
     }
 
     fn init_clip(&mut self) {
         if let Some(ClipRegion::Mask(mask)) = self.clip_region.take() {
-            self.spare_mask = Some(mask);
+            self.spare_mask = Some(ClipMask::into_mask(mask));
         }
         self.clip_region = None;
     }
@@ -7659,7 +7983,7 @@ impl OutputDevice for SkiaDevice {
         // `show_page` puts it on paper.
         self.pixmap.fill(Color::TRANSPARENT);
         if let Some(ClipRegion::Mask(mask)) = self.clip_region.take() {
-            self.spare_mask = Some(mask);
+            self.spare_mask = Some(ClipMask::into_mask(mask));
         }
         self.clip_region = None;
     }
@@ -17919,6 +18243,216 @@ mod clip_shortcut_tests {
                     .collect();
                 intersect_masks(&mut a, &b);
                 assert_eq!(a.data(), expected.as_slice(), "{w}x{h} binary={binary}");
+            }
+        }
+    }
+
+    /// A path marks no pixel outside the bounds worked out for it, which is
+    /// what a clip mask's bounds promise.
+    #[test]
+    fn a_path_marks_nothing_outside_its_bounds() {
+        let (w, h) = (64u32, 40u32);
+        let transforms = [
+            Transform::identity(),
+            Transform::from_row(0.7, 0.0, 0.0, 0.7, -13.3, 5.9),
+            Transform::from_row(1.9, 0.0, 0.0, -1.9, 20.0, 90.0),
+            Transform::from_row(0.6, 0.8, -0.8, 0.6, 30.0, -10.0),
+        ];
+        let mut marked = 0;
+        for transform in transforms {
+            for i in 0..40 {
+                for j in 0..40 {
+                    let (x, y) = (i as f64 * 4.5 - 60.0, j as f64 * 3.5 - 50.0);
+                    let mut path = rect_path(x, y, x + 11.5, y + 6.25);
+                    if (i + j) % 3 == 0 {
+                        path.segments.insert(
+                            2,
+                            PathSegment::CurveTo {
+                                x1: x + 30.0,
+                                y1: y - 20.0,
+                                x2: x + 30.0,
+                                y2: y + 20.0,
+                                x3: x + 11.5,
+                                y3: y + 3.0,
+                            },
+                        );
+                    }
+                    let mask = ClipMask {
+                        mask: filled(&path, transform, w, h),
+                        bounds: clip_path_bounds(&path, &transform, w, h),
+                        key: None,
+                    };
+                    assert!(mask.is_zero_outside_bounds(), "{path:?} {transform:?}");
+                    marked += mask.data().iter().any(|&b| b != 0) as u32;
+                }
+            }
+        }
+        assert!(marked > 1000, "{marked} paths marked something");
+    }
+
+    fn band_state() -> BandState {
+        BandState {
+            clip_region: None,
+            spare_mask: None,
+            clip_mask_cache: HashMap::new(),
+            clip_mask_seen: HashSet::new(),
+            mask_pool: Vec::new(),
+            cmyk_buffer: None,
+            op_bg_snapshot: None,
+            op_touched: None,
+            spot_mask: None,
+        }
+    }
+
+    const SURFACE: (u32, u32) = (64, 40);
+
+    /// The clips the tests intersect: two that cover the surface, as a page
+    /// and a frame on it do, and smaller ones that overlap, touch and miss
+    /// each other.
+    fn clip_paths() -> Vec<PsPath> {
+        let mut curved = rect_path(20.0, 8.0, 50.0, 30.0);
+        curved.segments.insert(
+            2,
+            PathSegment::CurveTo {
+                x1: 70.0,
+                y1: 0.0,
+                x2: 70.0,
+                y2: 40.0,
+                x3: 50.0,
+                y3: 30.0,
+            },
+        );
+        vec![
+            rect_path(-5.0, -5.0, 100.0, 100.0),
+            rect_path(0.0, 0.0, 64.0, 40.0),
+            rect_path(3.2, 4.7, 30.1, 20.6),
+            rect_path(25.0, 10.0, 60.0, 38.0),
+            rect_path(40.0, 1.0, 44.0, 39.0),
+            rect_path(1.0, 30.0, 10.0, 39.0),
+            curved,
+        ]
+    }
+
+    /// The mask of the `index`th clip path, as `clip_path_unified` makes it.
+    fn clip_mask(index: usize) -> ClipMask {
+        let (w, h) = SURFACE;
+        let path = &clip_paths()[index];
+        ClipMask {
+            mask: filled(path, Transform::identity(), w, h),
+            bounds: clip_path_bounds(path, &Transform::identity(), w, h),
+            key: Some(hash_clip_path(path, &FillRule::NonZeroWinding)),
+        }
+    }
+
+    /// Intersecting clip masks within their bounds gives the samples that
+    /// multiplying whole masks gives — whichever of the two is shared, in
+    /// whichever order, and when the same intersection is asked for again
+    /// and is found rather than made.
+    #[test]
+    fn bounded_intersections_are_whole_mask_intersections() {
+        let (w, h) = SURFACE;
+        let count = clip_paths().len();
+        let mut state = band_state();
+        let mut found = 0;
+        for round in 0..3 {
+            for i in 0..count {
+                for j in 0..count {
+                    for sharing in 0..4 {
+                        let (a, b) = (Arc::new(clip_mask(i)), Arc::new(clip_mask(j)));
+                        let mut expected = filled(&clip_paths()[i], Transform::identity(), w, h);
+                        intersect_masks(&mut expected, &b.mask);
+                        // Something else holding a mask is what makes it shared.
+                        let _held_a = (sharing & 1 != 0).then(|| Arc::clone(&a));
+                        let _held_b = (sharing & 2 != 0).then(|| Arc::clone(&b));
+                        let before = state.clip_mask_cache.len();
+                        let cached = ClipMask::product_key(&a, &b)
+                            .is_some_and(|key| state.clip_mask_cache.contains_key(&key));
+                        found += cached as u32;
+                        let product = state.intersect_clip_masks(a, b);
+                        let what = format!("round {round}: {i} x {j}, sharing {sharing}");
+                        assert_eq!(product.data(), expected.data(), "{what}");
+                        assert!(product.is_zero_outside_bounds(), "{what}");
+                        assert!(state.clip_mask_cache.len() >= before, "{what}");
+                        // A third clip on top, which is how a chain goes on.
+                        let third = Arc::new(clip_mask((i + j) % count));
+                        intersect_masks(&mut expected, &third.mask);
+                        let chain = state.intersect_clip_masks(product, third);
+                        assert_eq!(chain.data(), expected.data(), "{what}, then a third");
+                        assert!(chain.is_zero_outside_bounds(), "{what}, then a third");
+                        state.recycle_mask(chain);
+                    }
+                }
+            }
+        }
+        assert!(found > 100, "{found} intersections were found already made");
+    }
+
+    /// A mask from the pool lets nothing through, whatever it held when it
+    /// was put there.
+    #[test]
+    fn a_recycled_mask_comes_back_blank() {
+        let (w, h) = SURFACE;
+        let mut state = band_state();
+        for index in 0..clip_paths().len() {
+            state.recycle_mask(Arc::new(clip_mask(index)));
+            let mask = state.take_mask(w, h);
+            assert!(mask.data().iter().all(|&b| b == 0), "clip {index}");
+            assert!(mask.bounds.is_empty() && mask.key.is_none());
+            state.recycle_mask(mask);
+        }
+        // A spare mask handed over by the PostScript device says nothing of
+        // what it holds.
+        state.spare_mask = Some(filled(&clip_paths()[3], Transform::identity(), w, h));
+        let mask = state.take_mask(w, h);
+        assert!(mask.data().iter().all(|&b| b == 0));
+    }
+
+    /// Clipping a mask to a rectangle zeroes what lies outside it and
+    /// nothing else, whether the mask is written to or, being shared,
+    /// copied.
+    #[test]
+    fn a_mask_clipped_to_a_rectangle_is_zero_outside_it() {
+        let (w, h) = SURFACE;
+        let rects = [
+            ClipRect::whole(w, h),
+            ClipRect::EMPTY,
+            ClipRect {
+                x0: 10,
+                y0: 5,
+                x1: 45,
+                y1: 33,
+            },
+            ClipRect {
+                x0: 50,
+                y0: 0,
+                x1: 64,
+                y1: 12,
+            },
+        ];
+        let mut state = band_state();
+        for index in 0..clip_paths().len() {
+            for rect in rects {
+                for shared in [false, true] {
+                    let mask = Arc::new(clip_mask(index));
+                    let held = shared.then(|| Arc::clone(&mask));
+                    let expected: Vec<u8> = mask
+                        .data()
+                        .iter()
+                        .enumerate()
+                        .map(|(at, &sample)| {
+                            let (x, y) = (at as u32 % w, at as u32 / w);
+                            let inside = x >= rect.x0 && x < rect.x1 && y >= rect.y0 && y < rect.y1;
+                            if inside { sample } else { 0 }
+                        })
+                        .collect();
+                    let clipped = state.clip_mask_to_rect(mask, &rect);
+                    assert_eq!(clipped.data(), expected.as_slice(), "clip {index}");
+                    assert!(clipped.is_zero_outside_bounds(), "clip {index}");
+                    if let Some(held) = held {
+                        assert_eq!(held.data(), clip_mask(index).data(), "the shared mask");
+                    }
+                    state.recycle_mask(clipped);
+                }
             }
         }
     }
