@@ -43,7 +43,8 @@ pub enum ExecWarningKind {
     /// produced nothing at all. When it is non-zero, earlier pages came out
     /// fine and only the trailing one was lost.
     DroppedFinalPage {
-        /// How many display-list objects were on the discarded page.
+        /// How many objects that paint were on the discarded page: fills,
+        /// strokes, images, shadings and the like, not clip changes.
         objects: usize,
         /// How many pages the program did successfully emit before ending.
         pages_emitted: i32,
@@ -102,7 +103,13 @@ impl std::fmt::Display for ExecWarning {
 /// Returns `None` when the program ended cleanly with nothing pending, which
 /// is the overwhelmingly common case.
 pub fn dropped_final_page(ctx: &Context) -> Option<ExecWarning> {
-    if ctx.display_list.is_empty() {
+    // What is left must have put marks on the page. `restore`, `grestore`
+    // and `initclip` each record the clip they leave behind, so a program
+    // ending `showpage restore` — as most do — leaves the list holding that
+    // record and nothing else; counting it reported a page as dropped that
+    // had been output a moment before.
+    let objects = marks(ctx.display_list.elements());
+    if objects == 0 {
         return None;
     }
     // A program that installed `nulldevice` asked for no output, so marks it
@@ -114,10 +121,29 @@ pub fn dropped_final_page(ctx: &Context) -> Option<ExecWarning> {
     }
     Some(ExecWarning {
         kind: ExecWarningKind::DroppedFinalPage {
-            objects: ctx.display_list.len(),
+            objects,
             pages_emitted: ctx.page_count,
         },
     })
+}
+
+/// How many of `elements` put marks on a page, those inside a group, a
+/// soft-masked group or a layer counted one by one.
+///
+/// Clip changes, `erasepage` and recorded text positions mark nothing. An
+/// element of a kind added since this was written is taken to mark: a
+/// warning too many is better than a page lost without one.
+fn marks(elements: &[stet_graphics::display_list::DisplayElement]) -> usize {
+    use stet_graphics::display_list::DisplayElement as E;
+    elements
+        .iter()
+        .map(|element| match element {
+            E::Clip { .. } | E::InitClip | E::ErasePage | E::Text { .. } | E::TextRun { .. } => 0,
+            E::Group { elements, .. } | E::OcgGroup { elements, .. } => marks(elements.elements()),
+            E::SoftMasked { content, .. } => marks(content.elements()),
+            _ => 1,
+        })
+        .sum()
 }
 
 #[cfg(test)]

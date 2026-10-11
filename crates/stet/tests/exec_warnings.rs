@@ -182,3 +182,62 @@ fn pdf_output_warns_on_a_dropped_page() {
         "the PDF path drops the final page the same way the raster path does"
     );
 }
+
+/// What a program does after its last `showpage` without painting is not a
+/// page. `restore`, `grestore` and `initclip` each record a clip, and that
+/// record used to be counted as a painted object: a program ending
+/// `showpage restore`, as most do, was told its last page had been dropped.
+#[test]
+fn tidying_up_after_the_last_showpage_is_not_a_dropped_page() {
+    for ending in [
+        "save 20 20 100 100 rectfill showpage restore",
+        "gsave 20 20 100 100 rectfill showpage grestore",
+        "gsave 5 5 translate 20 20 100 100 rectfill showpage grestore",
+        "20 20 100 100 rectfill showpage initclip",
+        "20 20 100 100 rectfill showpage erasepage",
+        "20 20 100 100 rectfill showpage 0 0 50 50 rectclip newpath",
+    ] {
+        let mut interp = Interpreter::new();
+        let program = format!("%!PS-Adobe-3.0\n{ending}\n");
+        let pages = interp
+            .render_to_display_list(program.as_bytes(), 72.0)
+            .unwrap();
+        assert_eq!(pages.len(), 1, "{ending}");
+        assert!(
+            interp.warnings().is_empty(),
+            "{ending}: {:?}",
+            interp.warnings()
+        );
+    }
+}
+
+/// The count is of what was painted, not of everything recorded on the way.
+#[test]
+fn the_warning_counts_what_was_painted() {
+    let mut interp = Interpreter::new();
+    let program = b"%!PS-Adobe-3.0\n20 20 100 100 rectfill showpage\n\
+        gsave 0 0 300 300 rectclip 20 20 100 100 rectfill 30 30 10 10 rectfill grestore\n";
+    let pages = interp.render_to_display_list(program, 72.0).unwrap();
+    assert_eq!(pages.len(), 1);
+    assert_eq!(dropped(&interp), Some((2, 1)));
+}
+
+/// An EPS that ends its own page is wrapped like any other, and the
+/// `grestore` that follows its `showpage` is no page either.
+#[test]
+fn an_eps_that_calls_showpage_does_not_warn() {
+    for origin in [0, 10] {
+        let mut interp = Interpreter::new();
+        let eps = format!(
+            "%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: {origin} {origin} 200 200\n\
+             0 0 1 setrgbcolor 20 20 100 100 rectfill\nshowpage\n"
+        );
+        let pages = interp.render_to_display_list(eps.as_bytes(), 72.0).unwrap();
+        assert_eq!(pages.len(), 1, "origin {origin}");
+        assert!(
+            interp.warnings().is_empty(),
+            "origin {origin}: {:?}",
+            interp.warnings()
+        );
+    }
+}

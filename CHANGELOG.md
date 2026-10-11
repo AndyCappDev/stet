@@ -65,6 +65,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A program ending `showpage restore` is no longer told its last page
+  was dropped.** The warning for marks painted after the last `showpage`
+  counted everything recorded since it, and `restore`, `grestore` and
+  `initclip` each record the clip they leave. So the commonest ending in
+  PostScript — and every EPS that calls `showpage` itself, rendered
+  through the library — reported "painted 1 object(s) and then ended
+  without a matching `showpage`, so that page was dropped" for a page
+  that had just been output. The warning now counts what was painted,
+  and `ExecWarningKind::DroppedFinalPage::objects` is that count.
 - **A number or name ended by CR LF takes both characters** (issue #7).
   The scanner took the carriage return and left the line feed in the
   file, so a program that then read from `currentfile` — `readline`,
