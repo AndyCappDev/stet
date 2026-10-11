@@ -39,6 +39,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   650 KB CMYK profile, rendering at 150 dpi went from 5.6 s to 1.4 s and
   peak memory from 3.3 GB to 270 MB. Output is unchanged.
 
+- **Pages of many small images, and images that are scaled down, are
+  rasterised faster.** On a page that tracks CMYK for overprint, each
+  image looked at every pixel of the band to find the ones it covered,
+  so a page of thousands of small images spent nearly all its time
+  there; an image now visits only the pixels it can reach. The same page
+  as above went from 0.46 s to 0.08 s of rasterising at 150 dpi. And the
+  filter that scales an image down to the output resolution worked out
+  each output column's span and weights again for every row; it now
+  works them out once per image, which more than halves the time spent
+  preparing a page whose images are larger than they are printed. Output
+  is unchanged in both cases.
+
 - **Opening a PDF prints nothing.** `IccCache::search_system_cmyk_profile`
   — which `PdfDocument::from_bytes` and `from_owned` call — wrote
   `[ICC] Loaded system CMYK profile` to stderr every time it found one,

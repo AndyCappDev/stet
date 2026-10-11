@@ -1626,6 +1626,19 @@ impl BoxRowSpan {
     }
 }
 
+/// The source pixels one output column of the box filter's horizontal pass
+/// covers.
+struct BoxColumnSpan {
+    /// First source pixel.
+    left: usize,
+    /// How many source pixels.
+    len: usize,
+    /// Where their weights start in `BoxResampler::column_weights`.
+    first_weight: usize,
+    /// One over the column's width in source pixels.
+    inv_area: f32,
+}
+
 /// The area-average box filter of [`box_resample`], fed one RGBA source row
 /// at a time.
 ///
@@ -1637,12 +1650,14 @@ impl BoxRowSpan {
 /// source row. The arithmetic and its order are those of the whole-image
 /// filter: the two give the same bytes.
 struct BoxResampler {
-    sw: usize,
     sh: usize,
     dw: usize,
     dh: usize,
-    ratio_x: f32,
     ratio_y: f32,
+    /// The source pixels each output column of the horizontal pass covers.
+    columns: Vec<BoxColumnSpan>,
+    /// The weights of those source pixels, column after column.
+    column_weights: Vec<f32>,
     /// `ring_rows` float rows of `dw * 4`; source row `sy` is in slot
     /// `sy % ring_rows`.
     ring: Vec<f32>,
@@ -1653,6 +1668,8 @@ struct BoxResampler {
     emitted: usize,
     /// Scratch: the (source row, weight) pairs of the row being written.
     weights: Vec<(usize, f32)>,
+    /// Scratch: the weighted sums of the row being written, `dw * 4`.
+    sums: Vec<f32>,
     out: Vec<u8>,
 }
 
@@ -1671,18 +1688,41 @@ impl BoxResampler {
             .max()
             .unwrap_or(0)
             .max(1);
+        let ratio_x = sw as f32 / dw as f32;
+        let mut columns = Vec::with_capacity(dw);
+        let mut column_weights = Vec::new();
+        for dx in 0..dw {
+            let left_f = dx as f32 * ratio_x;
+            let right_f = (dx + 1) as f32 * ratio_x;
+            let left = (left_f as usize).min(sw - 1);
+            let right = (right_f.ceil() as usize).min(sw);
+            let first_weight = column_weights.len();
+            // Weight: fraction of this source pixel covered by the output pixel
+            column_weights.extend((left..right).map(|sx| {
+                let pixel_left = sx as f32;
+                let pixel_right = (sx + 1) as f32;
+                pixel_right.min(right_f) - pixel_left.max(left_f)
+            }));
+            columns.push(BoxColumnSpan {
+                left,
+                len: right.saturating_sub(left),
+                first_weight,
+                inv_area: 1.0 / (right_f - left_f),
+            });
+        }
         Self {
-            sw,
             sh,
             dw,
             dh,
-            ratio_x: sw as f32 / dw as f32,
             ratio_y,
+            columns,
+            column_weights,
             ring: vec![0.0; ring_rows * dw * 4],
             ring_rows,
             pushed: 0,
             emitted: 0,
             weights: Vec::new(),
+            sums: vec![0.0; dw * 4],
             out: vec![0u8; dw * dh * 4],
         }
     }
@@ -1696,32 +1736,25 @@ impl BoxResampler {
         // Horizontal pass (sw → dw) with fractional edge weights. Each
         // output pixel covers [left_f, right_f] in source space. Edge source
         // pixels get proportional weight; interior pixels get weight 1.0.
-        let (sw, dw, ratio_x) = (self.sw, self.dw, self.ratio_x);
+        // The spans and weights are the same for every row, so they are
+        // worked out once, in `new`.
+        let dw = self.dw;
         let slot = (self.pushed % self.ring_rows) * dw * 4;
         let dst = &mut self.ring[slot..slot + dw * 4];
-        for dx in 0..dw {
-            let left_f = dx as f32 * ratio_x;
-            let right_f = (dx + 1) as f32 * ratio_x;
-            let left = (left_f as usize).min(sw - 1);
-            let right = (right_f.ceil() as usize).min(sw);
-            let inv_area = 1.0 / (right_f - left_f);
-            let (mut r, mut g, mut b, mut a) = (0.0f32, 0.0, 0.0, 0.0);
-            for sx in left..right {
-                // Weight: fraction of this source pixel covered by the output pixel
-                let pixel_left = sx as f32;
-                let pixel_right = (sx + 1) as f32;
-                let w = pixel_right.min(right_f) - pixel_left.max(left_f);
-                let i = sx * 4;
-                r += src_row[i] as f32 * w;
-                g += src_row[i + 1] as f32 * w;
-                b += src_row[i + 2] as f32 * w;
-                a += src_row[i + 3] as f32 * w;
+        for (span, out) in self.columns.iter().zip(dst.as_chunks_mut::<4>().0) {
+            let weights = &self.column_weights[span.first_weight..][..span.len];
+            let pixels = src_row[span.left * 4..][..span.len * 4].as_chunks::<4>().0;
+            let mut sum = [0.0f32; 4];
+            for (px, &w) in pixels.iter().zip(weights) {
+                sum[0] += px[0] as f32 * w;
+                sum[1] += px[1] as f32 * w;
+                sum[2] += px[2] as f32 * w;
+                sum[3] += px[3] as f32 * w;
             }
-            let di = dx * 4;
-            dst[di] = r * inv_area;
-            dst[di + 1] = g * inv_area;
-            dst[di + 2] = b * inv_area;
-            dst[di + 3] = a * inv_area;
+            out[0] = sum[0] * span.inv_area;
+            out[1] = sum[1] * span.inv_area;
+            out[2] = sum[2] * span.inv_area;
+            out[3] = sum[3] * span.inv_area;
         }
         self.pushed += 1;
 
@@ -1747,22 +1780,18 @@ impl BoxResampler {
             let w = pixel_bottom.min(span.bottom_f) - pixel_top.max(span.top_f);
             (sy, w)
         }));
-        let dst_row = self.emitted * dw * 4;
-        for dx in 0..dw {
-            let col = dx * 4;
-            let (mut r, mut g, mut b, mut a) = (0.0f32, 0.0, 0.0, 0.0);
-            for &(sy, w) in &self.weights {
-                let i = (sy % self.ring_rows) * dw * 4 + col;
-                r += self.ring[i] * w;
-                g += self.ring[i + 1] * w;
-                b += self.ring[i + 2] * w;
-                a += self.ring[i + 3] * w;
+        // Sum a source row at a time: each pixel still adds its rows in
+        // order, so the sums are the ones a pixel-at-a-time loop gives.
+        self.sums.fill(0.0);
+        for &(sy, w) in &self.weights {
+            let row = &self.ring[(sy % self.ring_rows) * dw * 4..][..dw * 4];
+            for (sum, &v) in self.sums.iter_mut().zip(row) {
+                *sum += v * w;
             }
-            let di = dst_row + col;
-            self.out[di] = (r * inv_area + 0.5).clamp(0.0, 255.0) as u8;
-            self.out[di + 1] = (g * inv_area + 0.5).clamp(0.0, 255.0) as u8;
-            self.out[di + 2] = (b * inv_area + 0.5).clamp(0.0, 255.0) as u8;
-            self.out[di + 3] = (a * inv_area + 0.5).clamp(0.0, 255.0) as u8;
+        }
+        let dst = &mut self.out[self.emitted * dw * 4..][..dw * 4];
+        for (out, &sum) in dst.iter_mut().zip(&self.sums) {
+            *out = (sum * inv_area + 0.5).clamp(0.0, 255.0) as u8;
         }
         self.emitted += 1;
     }
@@ -9359,8 +9388,19 @@ fn render_overprint_image(
         None
     };
 
-    for by in 0..out_h as usize {
-        for bx in 0..out_w as usize {
+    // Only the pixels the image lands on are visited.
+    let Some((rows, cols)) = image_pixel_span(
+        &combined,
+        (params.width, params.height),
+        (vp_x as f64, vp_y as f64),
+        (scale_x as f64, scale_y as f64),
+        (out_w, out_h),
+    ) else {
+        return;
+    };
+
+    for by in rows {
+        for bx in cols.clone() {
             if let Some(ref r) = clip_rect
                 && ((by as u32) < r.y0
                     || (by as u32) >= r.y1
@@ -9679,6 +9719,46 @@ fn render_overprint_image(
     }
 }
 
+/// The rows and columns of an `out` pixmap that an image `size` pixels
+/// across can reach, where `image_to_device` takes image pixels to device
+/// space and pixel `(bx, by)` has its centre at
+/// `((bx + 0.5) / scale + vp)`. `None` when it reaches none of them.
+///
+/// It is a bound, two pixels generous each way: whether a pixel takes a
+/// sample is still decided by taking its centre back to the image, and the
+/// two transforms need not agree to the last bit about a pixel on the edge.
+fn image_pixel_span(
+    image_to_device: &Matrix,
+    size: (u32, u32),
+    vp: (f64, f64),
+    scale: (f64, f64),
+    out: (u32, u32),
+) -> Option<(std::ops::Range<usize>, std::ops::Range<usize>)> {
+    let m = image_to_device;
+    let (w, h) = (size.0 as f64, size.1 as f64);
+    let (mut x0, mut y0) = (f64::INFINITY, f64::INFINITY);
+    let (mut x1, mut y1) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for (ix, iy) in [(0.0, 0.0), (w, 0.0), (0.0, h), (w, h)] {
+        let bx = (m.a * ix + m.c * iy + m.tx - vp.0) * scale.0 - 0.5;
+        let by = (m.b * ix + m.d * iy + m.ty - vp.1) * scale.1 - 0.5;
+        if !bx.is_finite() || !by.is_finite() {
+            // No bound to be had: every pixel is tested, as before.
+            return Some((0..out.1 as usize, 0..out.0 as usize));
+        }
+        x0 = x0.min(bx);
+        x1 = x1.max(bx);
+        y0 = y0.min(by);
+        y1 = y1.max(by);
+    }
+    const SLACK: f64 = 2.0;
+    let span = |lo: f64, hi: f64, len: u32| {
+        let first = (lo.floor() - SLACK).clamp(0.0, len as f64) as usize;
+        let end = (hi.ceil() + SLACK + 1.0).clamp(0.0, len as f64) as usize;
+        (first < end).then_some(first..end)
+    };
+    Some((span(y0, y1, out.1)?, span(x0, x1, out.0)?))
+}
+
 /// Update CMYK buffer for a non-overprint image.
 ///
 /// For native-CMYK image color spaces (DeviceCMYK / ICCBased(4) / Separation
@@ -9744,8 +9824,21 @@ fn update_cmyk_buffer_for_image(
         _ => None,
     };
 
-    for by in 0..out_h as usize {
-        for bx in 0..out_w as usize {
+    // Only the pixels the image lands on are visited. A page can paint
+    // thousands of small images, and looking at every pixel of the band for
+    // each of them cost far more than painting them did.
+    let Some((rows, cols)) = image_pixel_span(
+        &combined,
+        (params.width, params.height),
+        (vp_x as f64, vp_y as f64),
+        (scale_x as f64, scale_y as f64),
+        (out_w, out_h),
+    ) else {
+        return;
+    };
+
+    for by in rows {
+        for bx in cols.clone() {
             if let Some(ref r) = clip_rect
                 && ((by as u32) < r.y0
                     || (by as u32) >= r.y1
@@ -17442,5 +17535,144 @@ mod clip_span_tests {
         assert_eq!(clip_mask_cache_capacity(CLIP_MASK_CACHE_BYTES), 4);
         assert_eq!(clip_mask_cache_capacity(usize::MAX), 4);
         assert_eq!(clip_mask_cache_capacity(0), CLIP_MASK_CACHE_BYTES);
+    }
+}
+
+#[cfg(test)]
+mod image_pixel_span_tests {
+    use super::*;
+
+    /// Every pixel whose centre lands in the image is inside the span, for
+    /// images placed upright, flipped, rotated and sheared, at several
+    /// viewports and scales.
+    #[test]
+    fn the_span_holds_every_pixel_the_image_covers() {
+        let (w, h) = (7u32, 5u32);
+        let placements = [
+            Matrix {
+                a: 3.0,
+                b: 0.0,
+                c: 0.0,
+                d: 3.0,
+                tx: 10.2,
+                ty: 4.7,
+            },
+            Matrix {
+                a: 3.0,
+                b: 0.0,
+                c: 0.0,
+                d: -3.0,
+                tx: 10.0,
+                ty: 30.0,
+            },
+            Matrix {
+                a: 0.0,
+                b: 2.5,
+                c: -2.5,
+                d: 0.0,
+                tx: 40.0,
+                ty: 3.0,
+            },
+            Matrix {
+                a: 2.0,
+                b: 1.0,
+                c: -1.0,
+                d: 2.0,
+                tx: 25.5,
+                ty: 8.25,
+            },
+            Matrix {
+                a: 0.01,
+                b: 0.0,
+                c: 0.0,
+                d: 0.01,
+                tx: 12.5,
+                ty: 12.5,
+            },
+            Matrix {
+                a: 40.0,
+                b: 0.0,
+                c: 0.0,
+                d: 40.0,
+                tx: -100.0,
+                ty: -80.0,
+            },
+            Matrix {
+                a: 3.0,
+                b: 0.0,
+                c: 0.0,
+                d: 3.0,
+                tx: 500.0,
+                ty: 500.0,
+            },
+        ];
+        let (out_w, out_h) = (64u32, 48u32);
+        for m in placements {
+            let inv = m.invert().expect("placement inverts");
+            for (vp, scale) in [
+                ((0.0, 0.0), (1.0, 1.0)),
+                ((3.0, 20.0), (1.0, 1.0)),
+                ((-5.5, 2.25), (1.5, 0.75)),
+            ] {
+                let span = image_pixel_span(&m, (w, h), vp, scale, (out_w, out_h));
+                let mut covered = 0;
+                for by in 0..out_h as usize {
+                    for bx in 0..out_w as usize {
+                        let dx = (bx as f64 + 0.5) / scale.0 + vp.0;
+                        let dy = (by as f64 + 0.5) / scale.1 + vp.1;
+                        let ix = (inv.a * dx + inv.c * dy + inv.tx).floor();
+                        let iy = (inv.b * dx + inv.d * dy + inv.ty).floor();
+                        if ix < 0.0 || ix >= w as f64 || iy < 0.0 || iy >= h as f64 {
+                            continue;
+                        }
+                        covered += 1;
+                        let (rows, cols) = span.clone().expect("a covered pixel means a span");
+                        assert!(
+                            rows.contains(&by) && cols.contains(&bx),
+                            "pixel ({bx}, {by}) outside {cols:?} × {rows:?} for {m:?}"
+                        );
+                    }
+                }
+                if let Some((rows, cols)) = &span {
+                    assert!(rows.end <= out_h as usize && cols.end <= out_w as usize);
+                    // The bound is tight to within its slack: a small image
+                    // does not get the whole pixmap.
+                    if covered > 0 && covered < 200 {
+                        assert!(rows.len() * cols.len() < (out_w * out_h) as usize);
+                    }
+                }
+            }
+        }
+    }
+
+    /// An image wholly off the pixmap reaches no pixel.
+    #[test]
+    fn an_image_off_the_pixmap_has_no_span() {
+        let m = Matrix {
+            a: 3.0,
+            b: 0.0,
+            c: 0.0,
+            d: 3.0,
+            tx: 500.0,
+            ty: 500.0,
+        };
+        assert!(image_pixel_span(&m, (7, 5), (0.0, 0.0), (1.0, 1.0), (64, 48)).is_none());
+    }
+
+    /// A placement with no finite bound falls back to every pixel.
+    #[test]
+    fn a_placement_without_a_bound_is_tested_everywhere() {
+        let m = Matrix {
+            a: f64::NAN,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            tx: 0.0,
+            ty: 0.0,
+        };
+        assert_eq!(
+            image_pixel_span(&m, (7, 5), (0.0, 0.0), (1.0, 1.0), (64, 48)),
+            Some((0..48, 0..64))
+        );
     }
 }
