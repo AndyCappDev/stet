@@ -65,6 +65,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A number or name ended by CR LF takes both characters** (issue #7).
+  The scanner took the carriage return and left the line feed in the
+  file, so a program that then read from `currentfile` — `readline`,
+  `readstring`, in-line image data — started one character early; with
+  `readline` that is an empty first line. PLRM 3.2.2 makes the pair one
+  newline. Fixed in the scanner for files, the one for filtered files,
+  and `token` on a string, which now leaves what follows the pair.
 - **A tiling pattern whose cell is not at its tile's origin is painted.**
   The renderer drew the tiles whose origins lay within a step of the shape
   being filled. A pattern's cell is its `/BBox`, which can sit anywhere: a

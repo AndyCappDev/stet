@@ -414,6 +414,22 @@ impl<'a> Tokenizer<'a> {
 
 // ─── Standalone helpers (shared by slice-based and streaming tokenizers) ─────
 
+/// Where input resumes after a number or executable name that ended at
+/// `pos` in `bytes`: past the one white-space character that ended it, if
+/// one did.
+///
+/// A carriage return followed at once by a line feed is one newline (PLRM
+/// 3.2.2), so both go. Leaving the line feed behind gave a program reading
+/// from `currentfile` an empty first line — which, to a procedure data
+/// source, is the end of the data.
+pub fn after_token_terminator(bytes: &[u8], pos: usize) -> usize {
+    match bytes.get(pos) {
+        Some(b'\r') if bytes.get(pos + 1) == Some(&b'\n') => pos + 2,
+        Some(b'\0' | b'\t' | b'\n' | 0x0C | b'\r' | b' ') => pos + 1,
+        _ => pos,
+    }
+}
+
 /// PostScript whitespace: all bytes ≤ 0x20.
 fn is_whitespace(b: u8) -> bool {
     b <= b' '
@@ -673,6 +689,14 @@ pub fn stream_next_token(
                         // binary charstring data.
                         if b == b'\n' || b == b'\r' {
                             newlines += 1;
+                        }
+                        // CR LF is one newline (PLRM 3.2.2), so the LF goes
+                        // with its CR; see `after_token_terminator`.
+                        if b == b'\r' {
+                            match files.read_byte(entity).map_err(|_| PsError::IOError)? {
+                                Some(b'\n') | None => {}
+                                Some(other) => files.putback_bytes(entity, &[other]),
+                            }
                         }
                         break;
                     }

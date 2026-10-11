@@ -983,10 +983,7 @@ fn token_from_string(
         Some(token @ (Token::Int(_) | Token::Real(_) | Token::Name(_, _))) => {
             // Numbers and executable names: consume one trailing whitespace
             let obj = ctx.token_to_object(token)?;
-            let mut pos = tokenizer.position();
-            if pos < bytes.len() && is_ps_whitespace(bytes[pos]) {
-                pos += 1;
-            }
+            let pos = stet_core::tokenizer::after_token_terminator(bytes, tokenizer.position());
             let consumed = pos as u32;
             push_remainder_string(ctx, entity, start, bytes.len() as u32, consumed)?;
             ctx.o_stack.push(obj)?;
@@ -1091,10 +1088,6 @@ pub fn op_eexec(ctx: &mut Context) -> Result<(), PsError> {
         flags: ObjFlags::executable_composite(),
     })?;
     Ok(())
-}
-
-fn is_ps_whitespace(b: u8) -> bool {
-    matches!(b, b'\0' | b'\t' | b'\n' | 0x0C | b'\r' | b' ')
 }
 
 /// Parse a complete `{ ... }` procedure from tokenizer (used by string `token`).

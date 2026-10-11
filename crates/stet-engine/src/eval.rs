@@ -645,18 +645,13 @@ fn scan_token_from_bytes(
                 token_to_object(ctx, token)?
             };
             let mut consumed = tokenizer.position();
-            if eats_whitespace && consumed < bytes.len() && is_ps_whitespace(bytes[consumed]) {
-                consumed += 1;
+            if eats_whitespace {
+                consumed = stet_core::tokenizer::after_token_terminator(bytes, consumed);
             }
             Ok(Some((tok_obj, consumed, is_immediate, false)))
         }
         None => Ok(None),
     }
-}
-
-/// PostScript whitespace check for trailing-whitespace consumption.
-fn is_ps_whitespace(b: u8) -> bool {
-    matches!(b, b'\0' | b'\t' | b'\n' | 0x0C | b'\r' | b' ')
 }
 
 /// Dispatch a freshly-scanned token to the appropriate stack.
