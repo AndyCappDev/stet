@@ -72,7 +72,7 @@ remote.
 
 ```bash
 cd web && ./build.sh           # Build WASM module
-python3 serve.py               # Serve at localhost:8000
+python3 serve.py               # Serve at localhost:8080
 ```
 
 ## Visual-regression testing
