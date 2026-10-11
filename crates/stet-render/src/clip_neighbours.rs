@@ -203,7 +203,7 @@ impl ClipNeighbours {
             let gap = if piece.is_upright() {
                 0.0
             } else {
-                nearest_neighbour(piece, &pieces, &grid)?
+                nearest_neighbour(piece, &grid)?
             };
             Some((
                 piece.shape,
@@ -446,8 +446,15 @@ impl Area {
 /// Answers "is this point inside the path?" for points within an [`Area`].
 struct Sides<'a> {
     edges: &'a [(Point, Point)],
-    /// For each band of rows of the area, the edges that cross it.
-    bands: Vec<Vec<u32>>,
+    /// The edges that cross each band of rows the path reaches, one band
+    /// after another.
+    crossing: Vec<u32>,
+    /// Where each band's edges start in `crossing`, and one past the last.
+    starts: Vec<u32>,
+    /// The band of the area the first of those is.
+    first: usize,
+    /// How many bands the area has.
+    count: usize,
     top: f64,
     even_odd: bool,
 }
@@ -455,45 +462,141 @@ struct Sides<'a> {
 impl<'a> Sides<'a> {
     fn new(edges: &'a [(Point, Point)], even_odd: bool, area: &Area) -> Self {
         let count = (((area.y1 - area.y0) / BAND).ceil().max(1.0)) as usize;
-        let mut bands = vec![Vec::new(); count];
-        for (i, (a, b)) in edges.iter().enumerate() {
+        // The bands an edge crosses, if it is in the area at all.
+        let reach = |(a, b): &(Point, Point)| {
             let (lo, hi) = (a.1.min(b.1), a.1.max(b.1));
             if hi < area.y0 || lo > area.y1 {
-                continue;
+                return None;
             }
             let first = (((lo - area.y0) / BAND).floor().max(0.0)) as usize;
             let last = ((((hi - area.y0) / BAND).floor()).max(0.0) as usize).min(count - 1);
-            for band in &mut bands[first.min(last)..=last] {
-                band.push(i as u32);
+            Some((first.min(last), last))
+        };
+        let (mut first, mut last) = (usize::MAX, 0);
+        for (from, to) in edges.iter().filter_map(reach) {
+            first = first.min(from);
+            last = last.max(to);
+        }
+        if first == usize::MAX {
+            (first, last) = (0, 0);
+        }
+        // Count each band's edges, then put each edge in its place.
+        let mut starts = vec![0u32; last - first + 2];
+        for (from, to) in edges.iter().filter_map(reach) {
+            for n in &mut starts[from - first + 1..=to - first + 1] {
+                *n += 1;
+            }
+        }
+        for band in 1..starts.len() {
+            starts[band] += starts[band - 1];
+        }
+        let mut next = starts.clone();
+        let mut crossing = vec![0u32; *starts.last().expect("at least two") as usize];
+        for (i, edge) in edges.iter().enumerate() {
+            if let Some((from, to)) = reach(edge) {
+                for at in &mut next[from - first..=to - first] {
+                    crossing[*at as usize] = i as u32;
+                    *at += 1;
+                }
+            }
+        }
+        // Furthest right first: an edge wholly left of a point adds nothing
+        // to the winding there, and neither does any after it.
+        let right = |&i: &u32| {
+            let (a, b) = edges[i as usize];
+            a.0.max(b.0)
+        };
+        for band in starts.windows(2) {
+            let band = &mut crossing[band[0] as usize..band[1] as usize];
+            if band.len() > 8 {
+                band.sort_unstable_by(|i, j| right(j).total_cmp(&right(i)));
             }
         }
         Self {
             edges,
-            bands,
+            crossing,
+            starts,
+            first,
+            count,
             top: area.y0,
             even_odd,
         }
     }
 
-    fn inside(&self, p: Point) -> bool {
-        let band = ((p.1 - self.top) / BAND).floor();
-        if !(band >= 0.0 && (band as usize) < self.bands.len()) {
-            return false;
+    /// The edges that might cross the row `y` is in, or `None` if `y` is
+    /// outside the area.
+    fn band(&self, y: f64) -> Option<&[u32]> {
+        let band = ((y - self.top) / BAND).floor();
+        if !(band >= 0.0 && (band as usize) < self.count) {
+            return None;
         }
-        let mut winding = 0i32;
-        for &i in &self.bands[band as usize] {
-            let (a, b) = self.edges[i as usize];
-            if (a.1 <= p.1) != (b.1 <= p.1) {
-                let x = a.0 + (p.1 - a.1) / (b.1 - a.1) * (b.0 - a.0);
-                if x > p.0 {
-                    winding += if b.1 > a.1 { 1 } else { -1 };
-                }
+        // A band the path does not reach has no edge of it to cross.
+        let reached = (band as usize)
+            .checked_sub(self.first)
+            .filter(|band| band + 1 < self.starts.len());
+        Some(match reached {
+            Some(band) => {
+                &self.crossing[self.starts[band] as usize..self.starts[band + 1] as usize]
+            }
+            None => &[],
+        })
+    }
+
+    /// What the edge from `a` to `b` adds to the winding number at `p`.
+    #[inline]
+    fn turn((a, b): (Point, Point), p: Point) -> i32 {
+        if (a.1 <= p.1) != (b.1 <= p.1) {
+            let x = a.0 + (p.1 - a.1) / (b.1 - a.1) * (b.0 - a.0);
+            if x > p.0 {
+                return if b.1 > a.1 { 1 } else { -1 };
             }
         }
+        0
+    }
+
+    /// The winding numbers at `p` and at `q`, from the edges of one band.
+    fn windings(&self, band: &[u32], p: Point, q: Point) -> (i32, i32) {
+        // Bands of more than a few edges are in order of their reach to
+        // the right, and can be left as soon as one falls short of both.
+        let sorted = band.len() > 8;
+        let left = p.0.min(q.0);
+        let (mut wp, mut wq) = (0i32, 0i32);
+        for &i in band {
+            let edge = self.edges[i as usize];
+            if sorted && edge.0.0.max(edge.1.0) <= left {
+                break;
+            }
+            wp += Self::turn(edge, p);
+            wq += Self::turn(edge, q);
+        }
+        (wp, wq)
+    }
+
+    fn is_inside(&self, winding: i32) -> bool {
         if self.even_odd {
             winding & 1 != 0
         } else {
             winding != 0
+        }
+    }
+
+    fn inside(&self, p: Point) -> bool {
+        let Some(band) = self.band(p.1) else {
+            return false;
+        };
+        self.is_inside(self.windings(band, p, p).0)
+    }
+
+    /// Whether each of two points is inside, going over the edges once
+    /// where the points are in the same band of rows, as two points either
+    /// side of an edge most often are.
+    fn inside_both(&self, p: Point, q: Point) -> (bool, bool) {
+        match (self.band(p.1), self.band(q.1)) {
+            (Some(at_p), Some(at_q)) if std::ptr::eq(at_p, at_q) => {
+                let (wp, wq) = self.windings(at_p, p, q);
+                (self.is_inside(wp), self.is_inside(wq))
+            }
+            _ => (self.inside(p), self.inside(q)),
         }
     }
 }
@@ -567,8 +670,10 @@ fn cut_edges(
             let from = t0 + (t1 - t0) * k as f64 / count as f64;
             let to = t0 + (t1 - t0) * (k + 1) as f64 / count as f64;
             let mid = at((from + to) / 2.0);
-            let left = sides.inside((mid.0 + SIDE * across.0, mid.1 + SIDE * across.1));
-            let right = sides.inside((mid.0 - SIDE * across.0, mid.1 - SIDE * across.1));
+            let (left, right) = sides.inside_both(
+                (mid.0 + SIDE * across.0, mid.1 + SIDE * across.1),
+                (mid.0 - SIDE * across.0, mid.1 - SIDE * across.1),
+            );
             let inward = match (left, right) {
                 (true, false) => across,
                 (false, true) => (-across.0, -across.1),
@@ -586,13 +691,24 @@ fn cut_edges(
     }
 }
 
+/// What of a piece decides whether it runs beside another.
+#[derive(Clone, Copy)]
+struct Near {
+    mid: Point,
+    along: Point,
+    inward: Point,
+    shape: u32,
+}
+
 /// Pieces sorted by the cell of the area their middle falls in, a row of
 /// cells at a time, so that the pieces of a run of cells in one row are a
-/// run of this list.
+/// run of this list, and looking through them is reading memory in order.
 struct Grid {
-    /// `(column, piece)`, by row and then by column.
-    cells: Vec<(u32, u32)>,
-    /// Where each row starts in `cells`, and one past the last.
+    /// The column of each piece, by row and then by column.
+    cols: Vec<u32>,
+    /// The pieces, in the same order.
+    near: Vec<Near>,
+    /// Where each row starts in those, and one past the last.
     rows: Vec<u32>,
     x0: f64,
     y0: f64,
@@ -601,29 +717,52 @@ struct Grid {
 impl Grid {
     fn new(pieces: &[Piece], area: &Area) -> Self {
         let mut grid = Grid {
-            cells: Vec::new(),
+            cols: Vec::new(),
+            near: Vec::new(),
             rows: Vec::new(),
             x0: area.x0,
             y0: area.y0,
         };
         let count = (((area.y1 - area.y0) / CELL).floor().max(0.0)) as usize + 1;
-        let mut keyed: Vec<(u32, u32, u32)> = pieces
-            .iter()
-            .enumerate()
-            .map(|(i, p)| {
-                let (col, row) = grid.cell(p.mid);
-                (row.min(count as u32 - 1), col, i as u32)
-            })
-            .collect();
-        keyed.sort_unstable();
-        grid.rows = vec![0; count + 1];
-        for &(row, _, _) in &keyed {
-            grid.rows[row as usize + 1] += 1;
+        let cell = |p: &Piece| {
+            let (col, row) = grid.cell(p.mid);
+            (col, (row as usize).min(count - 1))
+        };
+        // Sorted by counting: how many pieces each row has, and so where
+        // each row starts; then each piece into the next place of its row.
+        let mut rows = vec![0u32; count + 1];
+        for p in pieces {
+            rows[cell(p).1 + 1] += 1;
         }
         for r in 0..count {
-            grid.rows[r + 1] += grid.rows[r];
+            rows[r + 1] += rows[r];
         }
-        grid.cells = keyed.into_iter().map(|(_, col, i)| (col, i)).collect();
+        let mut next = rows.clone();
+        let mut order = vec![(0u32, 0u32); pieces.len()];
+        for (i, p) in pieces.iter().enumerate() {
+            let (col, row) = cell(p);
+            order[next[row] as usize] = (col, i as u32);
+            next[row] += 1;
+        }
+        // And within a row by column. Pieces of one column keep the order
+        // they were cut in.
+        for row in rows.windows(2) {
+            order[row[0] as usize..row[1] as usize].sort_unstable();
+        }
+        grid.cols = order.iter().map(|&(col, _)| col).collect();
+        grid.near = order
+            .iter()
+            .map(|&(_, i)| {
+                let p = &pieces[i as usize];
+                Near {
+                    mid: p.mid,
+                    along: p.along,
+                    inward: p.inward,
+                    shape: p.shape,
+                }
+            })
+            .collect();
+        grid.rows = rows;
         grid
     }
 
@@ -636,31 +775,38 @@ impl Grid {
         )
     }
 
-    /// Every piece in the cell `p` is in and the eight around it.
-    fn around(&self, p: Point) -> impl Iterator<Item = u32> + '_ {
-        let (col, row) = self.cell(p);
+    /// Every piece whose middle may be within `WINDOW` of `p` along both
+    /// axes: those of the cells such a square touches.
+    fn around(&self, p: Point) -> impl Iterator<Item = &Near> + '_ {
+        let (col0, row0) = self.cell((p.0 - WINDOW, p.1 - WINDOW));
+        let (col1, row1) = self.cell((p.0 + WINDOW, p.1 + WINDOW));
         let last = self.rows.len().saturating_sub(2) as u32;
-        (row.saturating_sub(1)..=(row + 1).min(last)).flat_map(move |r| {
-            let run =
-                &self.cells[self.rows[r as usize] as usize..self.rows[r as usize + 1] as usize];
-            let from = run.partition_point(|&(c, _)| c + 1 < col);
-            run[from..]
-                .iter()
-                .take_while(move |&&(c, _)| c <= col + 1)
-                .map(|&(_, i)| i)
+        (row0..=row1.min(last)).flat_map(move |r| {
+            let (start, end) = (
+                self.rows[r as usize] as usize,
+                self.rows[r as usize + 1] as usize,
+            );
+            let cols = &self.cols[start..end];
+            let from = cols.partition_point(|&c| c < col0);
+            let to = from + cols[from..].partition_point(|&c| c <= col1);
+            self.near[start + from..start + to].iter()
         })
     }
 }
+
+/// How far apart along either axis the middles of two pieces that run
+/// together can be: [`REACH`] along the one and [`REACH`] off it, so the
+/// diagonal of a square of that side, and a little for rounding.
+const WINDOW: f64 = REACH * std::f64::consts::SQRT_2 + 1e-6;
 
 /// How far off the nearest piece of another shape is that runs along
 /// `piece` with its interior on the other side, if one is within reach.
 ///
 /// The test reads the same from either piece, so two neighbours always
 /// agree that they are neighbours, and on how far apart.
-fn nearest_neighbour(piece: &Piece, pieces: &[Piece], grid: &Grid) -> Option<f64> {
+fn nearest_neighbour(piece: &Piece, grid: &Grid) -> Option<f64> {
     let mut nearest: Option<f64> = None;
-    for j in grid.around(piece.mid) {
-        let other = &pieces[j as usize];
+    for other in grid.around(piece.mid) {
         if other.shape == piece.shape {
             continue;
         }

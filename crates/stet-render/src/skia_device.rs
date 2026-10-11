@@ -8326,8 +8326,12 @@ fn clip_path_unified(
                 _ => ClipEdgeState::Hard,
             };
             match edges {
-                ClipEdgeState::Hard => mask.fill_path(&skia_path, fill_rule, false, transform),
-                ClipEdgeState::Smooth => mask.fill_path(&skia_path, fill_rule, true, transform),
+                ClipEdgeState::Hard => {
+                    mask.fill_path(&skia_path, fill_rule, false, transform);
+                }
+                ClipEdgeState::Smooth => {
+                    mask.fill_path(&skia_path, fill_rule, true, transform);
+                }
                 ClipEdgeState::Mixed { met, within } => {
                     mask.fill_path(&skia_path, fill_rule, true, transform);
                     let mut hard = band_state.take_mask(ctx.out_w, ctx.out_h);
@@ -14462,7 +14466,44 @@ fn settle_covered(px: &mut [u8], was: [u8; 4], cov: u8) {
 /// with the shading's own earlier attempt. Only pixels of partial coverage
 /// are remembered, so a hard-edged clip remembers none.
 #[derive(Default)]
-struct ClipEdgePixels(HashMap<usize, [u8; 4]>);
+struct ClipEdgePixels(HashMap<usize, [u8; 4], PixelHash>);
+
+/// Hashes the place of a pixel in a pixmap. Such keys are small whole
+/// numbers that come a row at a time, so one multiplication spreads them
+/// well enough, and the maps keyed by them are filled and read in the
+/// loops that paint a shading, where the standard hasher costs more than
+/// the painting.
+#[derive(Default, Clone, Copy)]
+struct PixelHasher(u64);
+
+impl Hasher for PixelHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.write_u64(u64::from(byte));
+        }
+    }
+
+    #[inline]
+    fn write_u64(&mut self, n: u64) {
+        // The high bits of the product depend on every bit of `n`; fold
+        // them down to where a table takes its index from.
+        let mixed = (self.0 ^ n).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        self.0 = mixed ^ (mixed >> 32);
+    }
+
+    #[inline]
+    fn write_usize(&mut self, n: usize) {
+        self.write_u64(n as u64);
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+type PixelHash = std::hash::BuildHasherDefault<PixelHasher>;
 
 impl ClipEdgePixels {
     /// What the pixel at `offset` held before the shading, noting it if
@@ -15465,7 +15506,7 @@ fn render_mesh_shading(
     scale_y: f32,
     clip_mask: Option<&Mask>,
     enclosing: Option<EnclosingClip<'_>>,
-    mut cmyk_buf: Option<&mut [f32]>,
+    cmyk_buf: Option<&mut [f32]>,
     icc: Option<&IccCache>,
     transfer: Option<&TransferState>,
 ) {
@@ -15479,8 +15520,6 @@ fn render_mesh_shading(
 
     let lut = params.color_lut.as_deref();
     let clip_data = clip_mask.map(|m| m.data());
-    // Triangles share the pixels along their common edges.
-    let mut edge_pixels = ClipEdgePixels::default();
 
     // A triangle colours the pixels whose centres it holds, and a clip's
     // smooth edge covers pixels whose centres lie outside the shape. Where
@@ -15490,129 +15529,68 @@ fn render_mesh_shading(
     // clip's edge that lie within `MESH_REACH` of it, each from the
     // nearest point of the nearest triangle. Away from a smooth clip edge
     // the mesh ends where it always did.
-    let reach = usize::from(clip_data.is_some() || enclosing.is_some());
     let edge_coverage = |px: usize, py: usize| {
         let own = clip_coverage(clip_data, py * pw + px);
         enclosing.map_or(own, |outer| own.min(outer.coverage(px, py)))
     };
+    // Where a triangle's corners fall in the pixmap, and the box of pixels
+    // it may paint if it reaches `reach` beyond itself.
+    let corners = |tri: &stet_graphics::device::ShadingTriangle| {
+        let at = |v: &ShadingVertex| {
+            let (dx, dy) = params.ctm.transform_point(v.x, v.y);
+            ((dx as f32 - vp_x) * scale_x, (dy as f32 - vp_y) * scale_y)
+        };
+        [at(&tri.v0), at(&tri.v1), at(&tri.v2)]
+    };
+    let pixel_box = |[a, b, c]: [(f32, f32); 3], reach: f32| {
+        // `as usize` takes a negative to zero, so a triangle a pixel off
+        // the top or left still reaches in.
+        (
+            ((a.0.min(b.0).min(c.0).floor() - reach).max(0.0)) as usize,
+            ((a.1.min(b.1).min(c.1).floor() - reach).max(0.0)) as usize,
+            ((a.0.max(b.0).max(c.0).ceil() + reach) as usize).min(pw),
+            ((a.1.max(b.1).max(c.1).ceil() + reach) as usize).min(ph),
+        )
+    };
+    // The blocks of pixels in which a clip covers some pixel in part,
+    // looked into as triangles come to them. A triangle that reaches none
+    // is nowhere near a smooth edge and is painted as it always was; most
+    // of a mesh is such triangles.
+    let mut soft_blocks = (clip_data.is_some() || enclosing.is_some()).then(|| {
+        let mut masks = Vec::with_capacity(2);
+        masks.extend(clip_data.map(|own| (own, pw, (0, 0))));
+        masks.extend(enclosing.map(|outer| (outer.mask, outer.width, (outer.x, outer.y))));
+        SoftBlocks::new(pw, ph, masks)
+    });
     // Edge pixels a triangle holds, and the nearest triangle to those none
     // has been found to hold.
-    let mut held: HashSet<usize> = HashSet::new();
-    let mut beyond: HashMap<usize, MeshReach> = HashMap::new();
+    let mut held: HashSet<usize, PixelHash> = HashSet::default();
+    let mut beyond: HashMap<usize, MeshReach, PixelHash> = HashMap::default();
 
-    let mut paint = |px: usize,
-                     py: usize,
-                     v0: &ShadingVertex,
-                     v1_ref: &ShadingVertex,
-                     v2_ref: &ShadingVertex,
-                     [w0n, w1n, w2n]: [f64; 3]| {
-        let cov = clip_coverage(clip_data, py * pw + px);
-        let clipped = cov == 0;
-
-        // Per-pixel color: either LUT lookup (for function-based meshes)
-        // or direct Gouraud interpolation of vertex DeviceColors.
-        let (r, g, b) = if let Some(lut) = lut {
-            // Interpolate raw function input values per-pixel
-            let raw = w0n * v0.raw_components[0]
-                + w1n * v1_ref.raw_components[0]
-                + w2n * v2_ref.raw_components[0];
-            let raw = raw.clamp(0.0, 1.0);
-            // Linear interpolation in the LUT
-            let fi = raw * (lut.len() - 1) as f64;
-            let i0 = (fi as usize).min(lut.len().saturating_sub(2));
-            let frac = fi - i0 as f64;
-            let c0 = &lut[i0];
-            let c1 = &lut[i0 + 1];
-            (
-                c0.r + frac * (c1.r - c0.r),
-                c0.g + frac * (c1.g - c0.g),
-                c0.b + frac * (c1.b - c0.b),
-            )
-        } else {
-            (
-                w0n * v0.color.r + w1n * v1_ref.color.r + w2n * v2_ref.color.r,
-                w0n * v0.color.g + w1n * v1_ref.color.g + w2n * v2_ref.color.g,
-                w0n * v0.color.b + w1n * v1_ref.color.b + w2n * v2_ref.color.b,
-            )
-        };
-
-        // Write CMYK buffer
-        if let Some(ref mut buf) = cmyk_buf {
-            let ci = (py * pw + px) * 4;
-            if ci + 3 < buf.len() {
-                let cmyk = interpolate_cmyk_from_vertices(
-                    v0,
-                    v1_ref,
-                    v2_ref,
-                    w0n,
-                    w1n,
-                    w2n,
-                    &params.color_space,
-                    r,
-                    g,
-                    b,
-                    icc,
-                );
-                if params.overprint && params.painted_channels != stet_graphics::device::CMYK_ALL {
-                    if !clipped {
-                        if params.painted_channels & stet_graphics::device::CMYK_C != 0 {
-                            buf[ci] = cmyk.0 as f32;
-                        }
-                        if params.painted_channels & stet_graphics::device::CMYK_M != 0 {
-                            buf[ci + 1] = cmyk.1 as f32;
-                        }
-                        if params.painted_channels & stet_graphics::device::CMYK_Y != 0 {
-                            buf[ci + 2] = cmyk.2 as f32;
-                        }
-                        if params.painted_channels & stet_graphics::device::CMYK_K != 0 {
-                            buf[ci + 3] = cmyk.3 as f32;
-                        }
-                    }
-                } else {
-                    buf[ci] = cmyk.0 as f32;
-                    buf[ci + 1] = cmyk.1 as f32;
-                    buf[ci + 2] = cmyk.2 as f32;
-                    buf[ci + 3] = cmyk.3 as f32;
-                }
-            }
-        }
-
-        if clipped {
-            return;
-        }
-
-        // The CMYK buffer above took the ink; the transfer function
-        // applies to the colour painted.
-        let (r, g, b) = transfer_rgb(transfer, (r, g, b));
-        let offset = py * stride + px * 4;
-        let was = (cov != 255).then(|| edge_pixels.before(data, offset));
-        data[offset] = (r * 255.0).round().clamp(0.0, 255.0) as u8;
-        data[offset + 1] = (g * 255.0).round().clamp(0.0, 255.0) as u8;
-        data[offset + 2] = (b * 255.0).round().clamp(0.0, 255.0) as u8;
-        data[offset + 3] = 255;
-        if let Some(was) = was {
-            settle_covered(&mut data[offset..offset + 4], was, cov);
-        }
+    let mut painter = MeshPainter {
+        data,
+        cmyk_buf,
+        clip_data,
+        lut: lut.map(|v| v.as_slice()),
+        params,
+        icc,
+        transfer,
+        edge_pixels: ClipEdgePixels::default(),
+        pw,
+        stride,
     };
 
     for (index, tri) in params.triangles.iter().enumerate() {
-        let (dx0, dy0) = params.ctm.transform_point(tri.v0.x, tri.v0.y);
-        let (dx1, dy1) = params.ctm.transform_point(tri.v1.x, tri.v1.y);
-        let (dx2, dy2) = params.ctm.transform_point(tri.v2.x, tri.v2.y);
-
-        let x0 = (dx0 as f32 - vp_x) * scale_x;
-        let y0 = (dy0 as f32 - vp_y) * scale_y;
-        let x1 = (dx1 as f32 - vp_x) * scale_x;
-        let y1 = (dy1 as f32 - vp_y) * scale_y;
-        let x2 = (dx2 as f32 - vp_x) * scale_x;
-        let y2 = (dy2 as f32 - vp_y) * scale_y;
-
-        // `as usize` takes a negative to zero, so a triangle a pixel off
-        // the top or left still reaches in by `reach`.
-        let min_x = ((x0.min(x1).min(x2).floor() - reach as f32).max(0.0)) as usize;
-        let max_x = ((x0.max(x1).max(x2).ceil() + reach as f32) as usize).min(pw);
-        let min_y = ((y0.min(y1).min(y2).floor() - reach as f32).max(0.0)) as usize;
-        let max_y = ((y0.max(y1).max(y2).ceil() + reach as f32) as usize).min(ph);
+        let placed = corners(tri);
+        let [(x0, y0), (x1, y1), (x2, y2)] = placed;
+        // The pixels the triangle can hold, and those it may paint.
+        let own = pixel_box(placed, 0.0);
+        let reached = soft_blocks.as_mut().and_then(|blocks| {
+            let reached = pixel_box(placed, 1.0);
+            blocks.any_in(reached).then_some(reached)
+        });
+        let reach = reached.is_some();
+        let (min_x, min_y, max_x, max_y) = reached.unwrap_or(own);
 
         if min_x >= max_x || min_y >= max_y {
             continue;
@@ -15648,6 +15626,14 @@ fn render_mesh_shading(
 
         for py in min_y..max_y {
             for px in min_x..max_x {
+                // A pixel only the reach brings in is outside the
+                // triangle, and of no interest unless on a clip's edge.
+                if reach
+                    && (px < own.0 || px >= own.2 || py < own.1 || py >= own.3)
+                    && matches!(edge_coverage(px, py), 0 | 255)
+                {
+                    continue;
+                }
                 let pxf = px as f64 + 0.5;
                 let pyf = py as f64 + 0.5;
 
@@ -15656,7 +15642,7 @@ fn render_mesh_shading(
                 let w2 = 1.0 - w0 - w1;
 
                 if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
-                    if reach == 0 || matches!(edge_coverage(px, py), 0 | 255) {
+                    if !reach || matches!(edge_coverage(px, py), 0 | 255) {
                         continue;
                     }
                     let (weights, distance) =
@@ -15681,7 +15667,7 @@ fn render_mesh_shading(
                     continue;
                 }
 
-                if reach != 0 && !matches!(edge_coverage(px, py), 0 | 255) {
+                if reach && !matches!(edge_coverage(px, py), 0 | 255) {
                     held.insert(py * pw + px);
                 }
 
@@ -15689,7 +15675,7 @@ fn render_mesh_shading(
                 let w1c = w1.max(0.0);
                 let w2c = w2.max(0.0);
                 let wsum = w0c + w1c + w2c;
-                paint(
+                painter.paint(
                     px,
                     py,
                     &tri.v0,
@@ -15711,7 +15697,127 @@ fn render_mesh_shading(
         } else {
             (&tri.v1, &tri.v2)
         };
-        paint(at % pw, at / pw, &tri.v0, v1_ref, v2_ref, nearest.weights);
+        painter.paint(at % pw, at / pw, &tri.v0, v1_ref, v2_ref, nearest.weights);
+    }
+}
+
+/// Paints the pixels of a mesh, one at a time.
+struct MeshPainter<'a> {
+    data: &'a mut [u8],
+    cmyk_buf: Option<&'a mut [f32]>,
+    clip_data: Option<&'a [u8]>,
+    lut: Option<&'a [DeviceColor]>,
+    params: &'a MeshShadingParams,
+    icc: Option<&'a IccCache>,
+    transfer: Option<&'a TransferState>,
+    /// Triangles share the pixels along their common edges.
+    edge_pixels: ClipEdgePixels,
+    pw: usize,
+    stride: usize,
+}
+
+impl MeshPainter<'_> {
+    /// Paint the pixel at `px`, `py` with the colour the three vertices
+    /// give at these weights.
+    #[inline(always)]
+    fn paint(
+        &mut self,
+        px: usize,
+        py: usize,
+        v0: &ShadingVertex,
+        v1_ref: &ShadingVertex,
+        v2_ref: &ShadingVertex,
+        [w0n, w1n, w2n]: [f64; 3],
+    ) {
+        let cov = clip_coverage(self.clip_data, py * self.pw + px);
+        let clipped = cov == 0;
+
+        // Per-pixel color: either LUT lookup (for function-based meshes)
+        // or direct Gouraud interpolation of vertex DeviceColors.
+        let (r, g, b) = if let Some(lut) = self.lut {
+            // Interpolate raw function input values per-pixel
+            let raw = w0n * v0.raw_components[0]
+                + w1n * v1_ref.raw_components[0]
+                + w2n * v2_ref.raw_components[0];
+            let raw = raw.clamp(0.0, 1.0);
+            // Linear interpolation in the LUT
+            let fi = raw * (lut.len() - 1) as f64;
+            let i0 = (fi as usize).min(lut.len().saturating_sub(2));
+            let frac = fi - i0 as f64;
+            let c0 = &lut[i0];
+            let c1 = &lut[i0 + 1];
+            (
+                c0.r + frac * (c1.r - c0.r),
+                c0.g + frac * (c1.g - c0.g),
+                c0.b + frac * (c1.b - c0.b),
+            )
+        } else {
+            (
+                w0n * v0.color.r + w1n * v1_ref.color.r + w2n * v2_ref.color.r,
+                w0n * v0.color.g + w1n * v1_ref.color.g + w2n * v2_ref.color.g,
+                w0n * v0.color.b + w1n * v1_ref.color.b + w2n * v2_ref.color.b,
+            )
+        };
+
+        // Write CMYK buffer
+        if let Some(buf) = self.cmyk_buf.as_deref_mut() {
+            let ci = (py * self.pw + px) * 4;
+            if ci + 3 < buf.len() {
+                let cmyk = interpolate_cmyk_from_vertices(
+                    v0,
+                    v1_ref,
+                    v2_ref,
+                    w0n,
+                    w1n,
+                    w2n,
+                    &self.params.color_space,
+                    r,
+                    g,
+                    b,
+                    self.icc,
+                );
+                if self.params.overprint
+                    && self.params.painted_channels != stet_graphics::device::CMYK_ALL
+                {
+                    if !clipped {
+                        if self.params.painted_channels & stet_graphics::device::CMYK_C != 0 {
+                            buf[ci] = cmyk.0 as f32;
+                        }
+                        if self.params.painted_channels & stet_graphics::device::CMYK_M != 0 {
+                            buf[ci + 1] = cmyk.1 as f32;
+                        }
+                        if self.params.painted_channels & stet_graphics::device::CMYK_Y != 0 {
+                            buf[ci + 2] = cmyk.2 as f32;
+                        }
+                        if self.params.painted_channels & stet_graphics::device::CMYK_K != 0 {
+                            buf[ci + 3] = cmyk.3 as f32;
+                        }
+                    }
+                } else {
+                    buf[ci] = cmyk.0 as f32;
+                    buf[ci + 1] = cmyk.1 as f32;
+                    buf[ci + 2] = cmyk.2 as f32;
+                    buf[ci + 3] = cmyk.3 as f32;
+                }
+            }
+        }
+
+        if clipped {
+            return;
+        }
+
+        // The CMYK buffer above took the ink; the transfer function
+        // applies to the colour painted.
+        let (r, g, b) = transfer_rgb(self.transfer, (r, g, b));
+        let offset = py * self.stride + px * 4;
+        let was = (cov != 255).then(|| self.edge_pixels.before(self.data, offset));
+        self.data[offset] = (r * 255.0).round().clamp(0.0, 255.0) as u8;
+        self.data[offset + 1] = (g * 255.0).round().clamp(0.0, 255.0) as u8;
+        self.data[offset + 2] = (b * 255.0).round().clamp(0.0, 255.0) as u8;
+        self.data[offset + 3] = 255;
+        if let Some(was) = was {
+            settle_covered(&mut self.data[offset..offset + 4], was, cov);
+        }
     }
 }
 
@@ -15722,6 +15828,100 @@ fn render_mesh_shading(
 /// a mesh that ends across a clip edge, not along it, is carried this far
 /// past its end on the pixels of that edge.
 const MESH_REACH: f64 = 0.75;
+
+/// Which blocks of a pixmap, eight pixels a side, have a pixel that one
+/// of some masks covers in part: a sample that is neither 0 nor 255. Each
+/// block is looked into the first time it is asked about.
+struct SoftBlocks<'a> {
+    /// Per block: not yet looked into, hard throughout, or soft somewhere.
+    known: Vec<u8>,
+    across: usize,
+    width: usize,
+    height: usize,
+    /// Each mask's samples, how many make a row, and where the pixmap's
+    /// first pixel is in it.
+    masks: Vec<(&'a [u8], usize, (i32, i32))>,
+}
+
+impl<'a> SoftBlocks<'a> {
+    const HARD: u8 = 1;
+    const SOFT: u8 = 2;
+
+    fn new(width: usize, height: usize, masks: Vec<(&'a [u8], usize, (i32, i32))>) -> Self {
+        let across = width.div_ceil(8);
+        Self {
+            known: vec![0; across * height.div_ceil(8)],
+            across,
+            width,
+            height,
+            masks,
+        }
+    }
+
+    /// Whether any mask covers in part a pixel of block `bx`, `by`. Pixels
+    /// a mask does not reach are passed over.
+    fn look(&self, bx: usize, by: usize) -> bool {
+        let (x0, x1) = (bx * 8, (bx * 8 + 8).min(self.width));
+        let (y0, y1) = (by * 8, (by * 8 + 8).min(self.height));
+        self.masks.iter().any(|&(mask, stride, at)| {
+            if stride == 0 {
+                return false;
+            }
+            let rows = (mask.len() / stride) as i64;
+            let (dx, dy) = (i64::from(at.0), i64::from(at.1));
+            let from = (x0 as i64 + dx).max(0);
+            let to = (x1 as i64 + dx).min(stride as i64);
+            if from >= to {
+                return false;
+            }
+            (y0..y1).any(|py| {
+                let my = py as i64 + dy;
+                if my < 0 || my >= rows {
+                    return false;
+                }
+                let row = my as usize * stride;
+                let samples = &mask[row + from as usize..row + to as usize];
+                match <[u8; 8]>::try_from(samples) {
+                    Ok(eight) => {
+                        let all = u64::from_ne_bytes(eight);
+                        all != 0 && all != u64::MAX && eight.iter().any(|v| !matches!(v, 0 | 255))
+                    }
+                    Err(_) => samples.iter().any(|v| !matches!(v, 0 | 255)),
+                }
+            })
+        })
+    }
+
+    /// Whether a block that the box of pixels from `(x0, y0)` up to but
+    /// not including `(x1, y1)` touches is soft somewhere.
+    #[inline]
+    fn any_in(&mut self, (x0, y0, x1, y1): (usize, usize, usize, usize)) -> bool {
+        if x0 >= x1 || y0 >= y1 {
+            return false;
+        }
+        let (bx0, by0, bx1, by1) = (x0 / 8, y0 / 8, (x1 - 1) / 8, (y1 - 1) / 8);
+        // Most triangles are small and lie in a block already looked into.
+        if bx0 == bx1 && by0 == by1 && self.known[by0 * self.across + bx0] == Self::HARD {
+            return false;
+        }
+        for by in by0..=by1 {
+            for bx in bx0..=bx1 {
+                let at = by * self.across + bx;
+                if self.known[at] == 0 {
+                    self.known[at] = if self.look(bx, by) {
+                        Self::SOFT
+                    } else {
+                        Self::HARD
+                    };
+                }
+                if self.known[at] == Self::SOFT {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
 
 /// The nearest triangle of a mesh to a pixel that none of them holds.
 #[derive(Clone, Copy)]
