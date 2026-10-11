@@ -11,8 +11,11 @@
 
 use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
 use stet_graphics::color::{DeviceColor, FillRule};
-use stet_graphics::device::{ClipParams, FillParams};
-use stet_graphics::display_list::{DisplayElement, DisplayList};
+use stet_graphics::device::{
+    CMYK_ALL, ClipParams, FillParams, MeshShadingParams, ShadingColorSpace, ShadingTriangle,
+    ShadingVertex, TransferState,
+};
+use stet_graphics::display_list::{DisplayElement, DisplayList, GroupColorSpace, GroupParams};
 use stet_render::render_to_rgba;
 
 const W: u32 = 200;
@@ -64,7 +67,12 @@ fn paint(regions: Vec<Vec<DisplayElement>>, no_aa: bool) -> Vec<u8> {
         }
         list.push(flood());
     }
-    render_to_rgba(&list, W, H, 72.0, None, no_aa)
+    reds(&list, no_aa)
+}
+
+/// The red channel of every pixel of the list rendered on white paper.
+fn reds(list: &DisplayList, no_aa: bool) -> Vec<u8> {
+    render_to_rgba(list, W, H, 72.0, None, no_aa)
         .as_chunks::<4>()
         .0
         .iter()
@@ -206,4 +214,93 @@ fn a_clip_inside_another_keeps_its_smooth_edge() {
     let outer = polygon(&[(10.0, 10.0), (120.0, 14.0), (116.0, 190.0), (8.0, 186.0)]);
     let nested = paint(vec![vec![clip(outer, NZ), clip(left_tile(), NZ)]], false);
     assert_eq!(alone, nested);
+}
+
+/// A black mesh of triangles fanned from `points[0]`: the polygon those
+/// points outline, drawn as a shading.
+fn mesh(points: &[(f64, f64)]) -> DisplayElement {
+    let vertex = |p: (f64, f64)| ShadingVertex {
+        x: p.0,
+        y: p.1,
+        color: DeviceColor::from_gray(0.0),
+        raw_components: vec![0.0],
+    };
+    DisplayElement::MeshShading {
+        params: MeshShadingParams {
+            triangles: points[1..]
+                .windows(2)
+                .map(|pair| ShadingTriangle {
+                    v0: vertex(points[0]),
+                    v1: vertex(pair[0]),
+                    v2: vertex(pair[1]),
+                })
+                .collect(),
+            ctm: Matrix::default(),
+            bbox: None,
+            color_space: ShadingColorSpace::DeviceGray,
+            overprint: false,
+            overprint_mode: 0,
+            painted_channels: CMYK_ALL,
+            color_lut: None,
+            color_lut_components: None,
+            alpha: 1.0,
+            blend_mode: 0,
+            alpha_is_shape: false,
+            rendering_intent: 0,
+            transfer: TransferState::default(),
+        },
+    }
+}
+
+const TILE: [(f64, f64); 4] = [(20.0, 20.0), (100.0, 24.0), (104.0, 180.0), (16.0, 176.0)];
+
+/// A mesh that ends where its clip does shows through the whole of the
+/// clip's edge, as a flat fill would: its colour reaches the edge pixels
+/// whose centres lie outside it.
+#[test]
+fn a_mesh_fills_the_smooth_edge_of_its_clip() {
+    let filled = paint(vec![vec![clip(left_tile(), NZ)]], false);
+    let mut list = DisplayList::new();
+    list.push(clip(left_tile(), NZ));
+    list.push(mesh(&TILE));
+    assert_eq!(reds(&list, false), filled);
+}
+
+/// The same with the mesh in a transparency group and the clip outside
+/// it, where the clip is applied only as the group is put on the page.
+#[test]
+fn a_mesh_in_a_group_fills_the_smooth_edge_of_the_clip_round_the_group() {
+    let filled = paint(vec![vec![clip(left_tile(), NZ)]], false);
+    let mut inner = DisplayList::new();
+    inner.push(mesh(&TILE));
+    let mut list = DisplayList::new();
+    list.push(clip(left_tile(), NZ));
+    list.push(DisplayElement::Group {
+        elements: inner,
+        params: GroupParams {
+            bbox: [0.0, 0.0, W as f64, H as f64],
+            isolated: true,
+            knockout: false,
+            blend_mode: 0,
+            alpha: 1.0,
+            color_space: GroupColorSpace::Inherited,
+        },
+    });
+    assert_eq!(reds(&list, false), filled);
+}
+
+/// Where no smooth clip edge runs along it a mesh ends where it always
+/// did: with no clip at all, and well inside a clip.
+#[test]
+fn a_mesh_reaches_no_further_without_a_clip_edge_beside_it() {
+    let mut bare = DisplayList::new();
+    bare.push(mesh(&TILE));
+    let bare = reds(&bare, false);
+    assert_eq!(grays(&bare), 0);
+
+    let outer = polygon(&[(4.0, 6.0), (190.0, 4.0), (192.0, 194.0), (6.0, 196.0)]);
+    let mut inside = DisplayList::new();
+    inside.push(clip(outer, NZ));
+    inside.push(mesh(&TILE));
+    assert_eq!(reds(&inside, false), bare);
 }

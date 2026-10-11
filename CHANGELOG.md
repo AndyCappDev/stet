@@ -37,7 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that keeps a table rule drawn through a clip of its own outline at its
   full weight. Rendering with anti-aliasing off (`--no-aa`, `no_aa`) is
   unchanged. Roughly one page in seven has such an edge and renders
-  differently.
+  differently. A mesh or patch shading clipped to its own outline fills
+  that edge: its colour is carried to the edge pixels whose centres lie
+  just outside it, which were otherwise left thin and light.
 
 - **A PDF page with thousands of images is read in a fraction of the
   time and memory.** Two costs grew with the number of images on a page.
