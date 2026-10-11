@@ -74,6 +74,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without a matching `showpage`, so that page was dropped" for a page
   that had just been output. The warning now counts what was painted,
   and `ExecWarningKind::DroppedFinalPage::objects` is that count.
+- **An EPS that calls `setpagedevice` and not `showpage` shows its page.**
+  It came out blank from `Interpreter::render` and `render_to_pdf`, from
+  the browser build, and from the `stet` command when the bounding box
+  did not start at the origin. The page was ended after the `grestore`
+  that closes the wrapper stet puts around an EPS, and that `grestore`
+  takes the EPS's page device, and what was painted on it, away. The
+  page is now ended first.
 - **A number or name ended by CR LF takes both characters** (issue #7).
   The scanner took the carriage return and left the line feed in the
   file, so a program that then read from `currentfile` — `readline`,

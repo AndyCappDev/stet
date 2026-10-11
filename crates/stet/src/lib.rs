@@ -539,7 +539,11 @@ impl Interpreter {
         let showpages_before = self.ctx.showpage_count;
         let _ = parse_and_exec(&mut self.ctx, ps_data);
         if self.ctx.showpage_count == showpages_before {
-            let _ = parse_and_exec(&mut self.ctx, b"grestore showpage");
+            // `showpage` first, as the EPS would have called it: on the
+            // page device it left current. One that called `setpagedevice`
+            // is on a device of its own, which the `grestore` deactivates,
+            // taking with it whatever was painted and not yet shown.
+            let _ = parse_and_exec(&mut self.ctx, b"showpage grestore");
         } else {
             let _ = parse_and_exec(&mut self.ctx, b"grestore");
         }

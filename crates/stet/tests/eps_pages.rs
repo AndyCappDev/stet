@@ -37,6 +37,35 @@ fn an_eps_renders_as_one_page() {
     }
 }
 
+/// An EPS is not meant to call `setpagedevice`, and some do. That puts it
+/// on a page device of its own, which the `grestore` closing the wrapper
+/// around it deactivates, with whatever was painted on it. The page was
+/// ended after that `grestore`, and came out blank.
+#[test]
+fn an_eps_that_sets_its_page_device_still_shows_its_page() {
+    for origin in [0, 10] {
+        for showpage in [true, false] {
+            let eps = format!(
+                "%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: {origin} {origin} {0} {0}\n\
+                 << /PageSize [200 200] >> setpagedevice\n\
+                 1 0 0 setrgbcolor {origin} {origin} 50 50 rectfill {1}\n",
+                origin + 200,
+                if showpage { "showpage" } else { "" }
+            );
+            let pages = Interpreter::new().render(eps.as_bytes(), 72.0).unwrap();
+            assert_eq!(pages.len(), 1, "origin {origin}, showpage: {showpage}");
+            let red = pages[0]
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|p| p[..3] == [255, 0, 0])
+                .count();
+            assert_eq!(red, 2500, "origin {origin}, showpage: {showpage}");
+        }
+    }
+}
+
 #[test]
 fn an_eps_becomes_a_one_page_pdf() {
     for showpage in [true, false] {

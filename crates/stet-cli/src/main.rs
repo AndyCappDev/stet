@@ -1927,13 +1927,17 @@ fn execjob(
             if let Some((llx, lly, _urx, _ury)) = translated {
                 let wrapper = format!("gsave {} {} translate", -llx, -lly);
                 parse_and_exec(ctx, wrapper.as_bytes())?;
-                parse_and_exec_file(ctx, ps_data, filename)?;
-                parse_and_exec(ctx, b"grestore")?;
-            } else {
-                parse_and_exec_file(ctx, ps_data, filename)?;
             }
+            parse_and_exec_file(ctx, ps_data, filename)?;
+            // Before the `grestore`, as the EPS would have called it: on
+            // the page device it left current. One that called
+            // `setpagedevice` is on a device of its own, which the
+            // `grestore` deactivates, taking what was painted with it.
             if ctx.showpage_count == showpages_before {
                 parse_and_exec(ctx, b"showpage")?;
+            }
+            if translated.is_some() {
+                parse_and_exec(ctx, b"grestore")?;
             }
             Ok(())
         })()

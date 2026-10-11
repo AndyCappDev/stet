@@ -319,9 +319,11 @@ pub fn render(
             .map_err(|e| JsValue::from_str(&format!("PS error (exec): {}", e)))?;
 
         // grestore to undo our translate; only call showpage if the EPS
-        // didn't already, as the CLI and the `stet` facade do.
+        // didn't already, as the CLI and the `stet` facade do — and before
+        // the grestore, which deactivates the page device of an EPS that
+        // called `setpagedevice` and takes what it painted with it.
         if interp.ctx.showpage_count == showpages_before {
-            parse_and_exec(&mut interp.ctx, b"grestore showpage")
+            parse_and_exec(&mut interp.ctx, b"showpage grestore")
                 .map_err(|e| JsValue::from_str(&format!("PS error (showpage): {}", e)))?;
         } else {
             parse_and_exec(&mut interp.ctx, b"grestore")
