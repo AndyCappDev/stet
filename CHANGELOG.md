@@ -70,6 +70,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to suppress the fault. On a 278 MB content stream of 4.4 million
   strokes, reading went from 5.3 s to 2.5 s. Output is unchanged.
 
+- **Pages built from many clipped gradients and small transparency
+  groups are rasterised several times faster.** Two costs, both paid per
+  band of the page. A radial shading worked out the gradient for every
+  pixel of its area — the whole page when it has no `/BBox` — and only
+  then asked whether the clip let the pixel through; the clip is now
+  asked first, and a row the clip masks out entirely is not visited. And
+  a transparency group nested in another was rendered for every band,
+  including the bands it does not reach, where it was given an offscreen
+  the size of the band and composited back to no effect; a band now
+  passes over a nested group outside it, as it already did a page-level
+  one. On a Keynote slide with 1,644 radial shadings and 185 nested
+  groups, rendering the page to PNG at 150 dpi went from 2.9 s to
+  0.7 s, and its rasterising on one thread from 7.1 s to 0.2 s. Output
+  is unchanged.
+
 - **Opening a PDF prints nothing.** `IccCache::search_system_cmyk_profile`
   — which `PdfDocument::from_bytes` and `from_owned` call — wrote
   `[ICC] Loaded system CMYK profile` to stderr every time it found one,

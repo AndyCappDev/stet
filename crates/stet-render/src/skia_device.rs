@@ -4039,6 +4039,17 @@ fn render_element(
     }
 }
 
+/// Whether a group's device-space bounding box, taken out to whole pixels,
+/// lies wholly outside the output: the case in which
+/// [`compute_group_crop`] has no region to give.
+fn group_misses_output(bbox: &[f64; 4], ctx: &RenderContext<'_>) -> bool {
+    let px_min = ((bbox[0] as f32 - ctx.vp_x) * ctx.scale_x).floor() as i32;
+    let py_min = ((bbox[1] as f32 - ctx.vp_y) * ctx.scale_y).floor() as i32;
+    let px_max = ((bbox[2] as f32 - ctx.vp_x) * ctx.scale_x).ceil() as i32;
+    let py_max = ((bbox[3] as f32 - ctx.vp_y) * ctx.scale_y).ceil() as i32;
+    px_min.max(0) >= px_max.min(ctx.out_w as i32) || py_min.max(0) >= py_max.min(ctx.out_h as i32)
+}
+
 /// Compute the cropped output-pixel region for a group's device-space bounding box.
 ///
 /// Returns `(crop_x, crop_y, crop_w, crop_h)` in output pixels, or `None` if
@@ -4449,6 +4460,16 @@ fn render_group(
     params: &stet_graphics::display_list::GroupParams,
     ctx: &RenderContext<'_>,
 ) {
+    // A group that does not reach this pixmap draws nothing in it. Bands
+    // already pass over a page-level group by its bbox; this is the same
+    // for a group inside another, which no band looks at by itself. Without
+    // it the group was given an offscreen the size of the whole pixmap —
+    // "no crop" — rendered into it and composited back, for every band of
+    // the page it is not in.
+    if group_misses_output(&params.bbox, ctx) {
+        return;
+    }
+
     if params.knockout {
         render_knockout_group(pixmap, band_state, elements, params, ctx);
         return;
@@ -14033,7 +14054,22 @@ fn render_radial_shading(
 
     for py in py_min..py_max {
         let dev_y = py as f64 * inv_sy + vp_y as f64;
-        for px in px_min..px_max {
+        // Only the stretch of the row the clip lets through, and within it
+        // only the pixels it lets through: the clip is tested before the
+        // gradient is solved for the pixel, not after.
+        let (row_min, row_max) = match clip_mask {
+            Some(mask) => match mask_row_span(mask.data(), pw as usize, py, px_min, px_max) {
+                Some(span) => span,
+                None => continue,
+            },
+            None => (px_min, px_max),
+        };
+        for px in row_min..row_max {
+            if clip_mask
+                .is_some_and(|mask| mask.data()[py as usize * pw as usize + px as usize] == 0)
+            {
+                continue;
+            }
             let dev_x = px as f64 * inv_sx + vp_x as f64;
             let (ux, uy) = inv_ctm.transform_point(dev_x, dev_y);
 
@@ -14059,13 +14095,6 @@ fn render_radial_shading(
             if let Some(t) = t {
                 let clamped = t.clamp(0.0, 1.0);
                 let color = interpolate_color_stops(&params.color_stops, clamped);
-
-                let clipped = clip_mask
-                    .is_some_and(|mask| mask.data()[py as usize * pw as usize + px as usize] == 0);
-
-                if clipped {
-                    continue;
-                }
 
                 // Decide whether this pixel should use the multiplicative
                 // ink-stacking blend to preserve a spot backdrop. We mirror
