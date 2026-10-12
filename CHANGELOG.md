@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.6] — 2026-10-12
+
 ### Added
 
 - **`PdfDocument::render_page_cancellable`: give up on a page that is
@@ -290,7 +292,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an embedded Calibri, the first page went from 370–640 ms to 100–140 ms
   end to end; the pages come out byte for byte the same. This is the PDF
   reader only — the PostScript interpreter's Type 42 path was not
-  affected.
+  affected. To hold what is set up, `TrueTypePdfFont` and
+  `CidTrueTypePdfFont` in `stet_pdf_reader::content::font` have a new
+  private field, so code that builds either with a struct literal no
+  longer compiles. Reading their fields is unaffected.
 - **Text is faster to read: a glyph's outline is drawn once per page.**
   The PDF reader asked the font for an outline — a hinting program or a
   charstring to run — every time a glyph was shown, and a page of prose
