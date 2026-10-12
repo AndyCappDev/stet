@@ -21,6 +21,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   several pieces has only its pieces of no area drawn as lines, lines
   laid over each other are drawn once, and the outline of a glyph is
   left alone. The lines now also overprint as the fill would have.
+- **Where a path overlaps itself, its edge is no heavier than the edge
+  of the shape.** The fill rule was applied to the total of what every
+  edge covered of a pixel, which is wrong wherever two edges share one.
+  Under the even-odd rule a hole that shared an edge with its shape left
+  a faint line along it — the stray line beside the L-shape in
+  Ghostscript's `zeroline.ps`. Under the non-zero rule the shared edge
+  came out fully dark where it should be partly covered, and the outline
+  of a stroke overlaps itself at every join, so closely spaced strokes
+  could merge at a corner and a thin rule drawn as overlapping pieces
+  came out heavy. The rule is now applied to the edges in order, row by
+  row. Most pages with strokes change by a few pixels, nearly always
+  towards less ink.
 
 ## [0.8.6] — 2026-10-12
 

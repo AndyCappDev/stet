@@ -277,13 +277,36 @@ fn walk_edges_subrow(
     loop {
         // --- Accumulate sub-row contributions into cells ---
 
-        // For each active edge at this sub-row, add its x position as a cell.
+        // The fill rule is applied here, to the edges of one sub-row in
+        // order of x, and only the edges at which the row goes from outside
+        // the shape to inside or back are recorded: the first as a left
+        // edge, the second as a right one. What the cells then add up is
+        // the width of spans that do not overlap, which is coverage.
+        //
+        // Recording every edge with its winding and applying the rule to
+        // the sum of a whole pixel is not the same thing wherever the
+        // winding within a pixel leaves 0 and 1. Two edges of the same
+        // direction on one line, 0.7 of the way across a pixel, sum to 1.4:
+        // under the even-odd rule that folded to 0.6 where the answer is
+        // nothing, and drew a line along the shared edge of two shapes one
+        // of which is cut out of the other; under the non-zero rule it
+        // clamped to 1 where the answer is 0.7, and the overlapping parts
+        // of a stroke's outline came out heavy.
+        let mut winding_sum = 0i32;
         let mut curr_idx = edges[0].next.unwrap() as usize;
         while edges[curr_idx].first_y <= curr_y as i32 {
             debug_assert!(edges[curr_idx].last_y >= curr_y as i32);
 
             let x = edges[curr_idx].x; // FDot16 at shifted resolution
-            let winding = edges[curr_idx].winding as i32;
+            let was_inside = is_inside(winding_sum, is_even_odd);
+            winding_sum += edges[curr_idx].winding as i32;
+            let inside = is_inside(winding_sum, is_even_odd);
+            if was_inside == inside {
+                curr_idx = edges[curr_idx].next.unwrap() as usize;
+                continue;
+            }
+            // +1 where a span starts, -1 where it ends.
+            let winding = if inside { 1 } else { -1 };
 
             // Convert FDot16 to GRID_X sub-pixel coordinates.
             // x is in shifted FDot16: the integer part is (pixel << SHIFT + sub_row).
@@ -312,14 +335,7 @@ fn walk_edges_subrow(
             if !cell_list.cells.is_empty() {
                 cell_list.sort();
                 emit_spans(
-                    &cell_list,
-                    clip_left,
-                    clip_right,
-                    pixel_y,
-                    is_even_odd,
-                    &mut runs,
-                    width,
-                    blitter,
+                    &cell_list, clip_left, clip_right, pixel_y, &mut runs, width, blitter,
                 );
             }
 
@@ -392,14 +408,7 @@ fn walk_edges_subrow(
         let pixel_y = (curr_y - 1) >> SHIFT;
         cell_list.sort();
         emit_spans(
-            &cell_list,
-            clip_left,
-            clip_right,
-            pixel_y,
-            is_even_odd,
-            &mut runs,
-            width,
-            blitter,
+            &cell_list, clip_left, clip_right, pixel_y, &mut runs, width, blitter,
         );
     }
 }
@@ -411,7 +420,6 @@ fn emit_spans(
     clip_left: i32,
     clip_right: i32,
     y: u32,
-    is_even_odd: bool,
     runs: &mut AlphaRuns,
     width: LengthU32,
     blitter: &mut dyn Blitter,
@@ -426,7 +434,7 @@ fn emit_spans(
 
         // Fill from last_x to x with current cover level.
         if x > last_x {
-            let alpha = cover_alpha(cover, is_even_odd);
+            let alpha = cover_alpha(cover);
             if alpha > 0 {
                 let span_start = last_x.max(clip_left);
                 let span_end = x.min(clip_right);
@@ -445,7 +453,7 @@ fn emit_spans(
         // Process this cell's coverage change.
         cover += cell.covered_height * (GRID_X * 2);
         let area = cover - cell.uncovered_area;
-        let alpha = raw_alpha(area, is_even_odd);
+        let alpha = cover_alpha(area);
 
         if alpha > 0 && x >= clip_left && x < clip_right {
             set_alpha_run(runs, (x - clip_left) as u32, 1, alpha);
@@ -457,7 +465,7 @@ fn emit_spans(
 
     // Fill trailing pixels.
     if last_x < clip_right {
-        let alpha = cover_alpha(cover, is_even_odd);
+        let alpha = cover_alpha(cover);
         if alpha > 0 {
             let span_start = last_x.max(clip_left);
             if clip_right > span_start {
@@ -477,30 +485,22 @@ fn emit_spans(
     }
 }
 
-/// Convert running cover to alpha (for pixels between cells).
+/// Whether a point with this winding number is inside the shape.
 #[inline]
-fn cover_alpha(cover: i32, is_even_odd: bool) -> AlphaU8 {
-    let mut a = cover.unsigned_abs();
+fn is_inside(winding: i32, is_even_odd: bool) -> bool {
     if is_even_odd {
-        a %= (2 * GRID_AREA) as u32;
-        if a > GRID_AREA as u32 {
-            a = (2 * GRID_AREA) as u32 - a;
-        }
+        winding & 1 != 0
+    } else {
+        winding != 0
     }
-    area_to_alpha(a)
 }
 
-/// Convert area (cover - uncovered_area) to alpha (for cell pixels).
+/// Convert the summed width of a pixel's spans to alpha. The spans of a
+/// sub-row do not overlap, so the sum lies between nothing and the whole
+/// pixel.
 #[inline]
-fn raw_alpha(area: i32, is_even_odd: bool) -> AlphaU8 {
-    let mut a = area.unsigned_abs();
-    if is_even_odd {
-        a %= (2 * GRID_AREA) as u32;
-        if a > GRID_AREA as u32 {
-            a = (2 * GRID_AREA) as u32 - a;
-        }
-    }
-    area_to_alpha(a)
+fn cover_alpha(cover: i32) -> AlphaU8 {
+    area_to_alpha(cover.max(0) as u32)
 }
 
 /// Set alpha value for a run of pixels in the AlphaRuns buffer.
