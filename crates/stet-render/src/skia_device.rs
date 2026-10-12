@@ -15819,6 +15819,10 @@ fn render_mesh_shading(
         stride,
     };
 
+    // Every pixel some triangle holds, for finding those between
+    // triangles that none does.
+    let mut painted = MeshPixels::new(pw, ph);
+
     for (index, tri) in params.triangles.iter().enumerate() {
         let placed = corners(tri);
         let [(x0, y0), (x1, y1), (x2, y2)] = placed;
@@ -15909,6 +15913,7 @@ fn render_mesh_shading(
                 if reach && !matches!(edge_coverage(px, py), 0 | 255) {
                     held.insert(py * pw + px);
                 }
+                painted.set(px, py);
 
                 let w0c = w0.max(0.0);
                 let w1c = w1.max(0.0);
@@ -15937,6 +15942,145 @@ fn render_mesh_shading(
             (&tri.v1, &tri.v2)
         };
         painter.paint(at % pw, at / pw, &tri.v0, v1_ref, v2_ref, nearest.weights);
+        painted.set(at % pw, at / pw);
+    }
+
+    // Two triangles that should share an edge do not always: the patches
+    // of a gradient mesh are each cut into triangles of their own, and
+    // where a long edge of one patch runs beside the short edges of
+    // several the two sides are different lines. A pixel whose centre
+    // falls in the sliver between is held by no triangle, and what was
+    // under the mesh shows through as a speck. Such a pixel has the mesh
+    // on opposite sides of it and a triangle within `MESH_GAP` of its
+    // centre, and is painted from the nearest.
+    let gaps = painted.gaps();
+    if gaps.is_empty() {
+        return;
+    }
+    let across = pw.div_ceil(8);
+    let mut blocks = vec![false; across * ph.div_ceil(8)];
+    let mut nearest: HashMap<usize, Option<MeshReach>, PixelHash> = HashMap::default();
+    for &at in &gaps {
+        blocks[(at / pw / 8) * across + at % pw / 8] = true;
+        nearest.insert(at, None);
+    }
+    for (index, tri) in params.triangles.iter().enumerate() {
+        let placed = corners(tri);
+        let (min_x, min_y, max_x, max_y) = pixel_box(placed, 1.0);
+        if min_x >= max_x || min_y >= max_y {
+            continue;
+        }
+        let near_a_gap = (min_y / 8..=(max_y - 1) / 8)
+            .any(|by| (min_x / 8..=(max_x - 1) / 8).any(|bx| blocks[by * across + bx]));
+        if !near_a_gap {
+            continue;
+        }
+        let [a, b, c] = placed.map(|(x, y)| (f64::from(x), f64::from(y)));
+        let denom = (b.1 - c.1) * (a.0 - c.0) + (c.0 - b.0) * (a.1 - c.1);
+        if denom.abs() < 1e-10 {
+            continue;
+        }
+        let swapped = denom < 0.0;
+        let (b, c) = if swapped { (c, b) } else { (b, c) };
+        for py in min_y..max_y {
+            for px in min_x..max_x {
+                let Some(best) = nearest.get_mut(&(py * pw + px)) else {
+                    continue;
+                };
+                let centre = (px as f64 + 0.5, py as f64 + 0.5);
+                let (weights, distance) = nearest_in_triangle(centre, a, b, c);
+                if distance <= MESH_GAP * MESH_GAP && best.is_none_or(|b| distance < b.distance) {
+                    *best = Some(MeshReach {
+                        distance,
+                        triangle: index,
+                        swapped,
+                        weights,
+                    });
+                }
+            }
+        }
+    }
+    for at in gaps {
+        let Some(found) = nearest[&at] else {
+            continue;
+        };
+        let tri = &params.triangles[found.triangle];
+        let (v1_ref, v2_ref) = if found.swapped {
+            (&tri.v2, &tri.v1)
+        } else {
+            (&tri.v1, &tri.v2)
+        };
+        painter.paint(at % pw, at / pw, &tri.v0, v1_ref, v2_ref, found.weights);
+    }
+}
+
+/// How far from the nearest triangle of a mesh, in pixels, the centre of
+/// a pixel between triangles may be and still be taken for one the mesh
+/// was meant to cover.
+const MESH_GAP: f64 = 0.5;
+
+/// Which pixels of a pixmap the triangles of a mesh hold.
+struct MeshPixels {
+    /// A bit a pixel, a row after a row, each row a whole number of words.
+    bits: Vec<u64>,
+    /// Words to a row.
+    across: usize,
+    /// The rows any pixel is set in: the first, and one past the last.
+    rows: (usize, usize),
+    width: usize,
+}
+
+impl MeshPixels {
+    fn new(width: usize, height: usize) -> Self {
+        let across = width.div_ceil(64);
+        MeshPixels {
+            bits: vec![0; across * height],
+            across,
+            rows: (usize::MAX, 0),
+            width,
+        }
+    }
+
+    #[inline]
+    fn set(&mut self, px: usize, py: usize) {
+        self.bits[py * self.across + px / 64] |= 1 << (px % 64);
+        self.rows = (self.rows.0.min(py), self.rows.1.max(py + 1));
+    }
+
+    /// The pixels not set that have set pixels on opposite sides of them:
+    /// left and right, above and below, or corner to corner. As places in
+    /// the pixmap, row by row.
+    fn gaps(&self) -> Vec<usize> {
+        let mut gaps = Vec::new();
+        let (first, end) = self.rows;
+        // A pixel of the first or last row has nothing on one side of it
+        // but along the row, and one in between has both rows.
+        for py in first.min(end)..end {
+            let row = |y: usize| &self.bits[y * self.across..(y + 1) * self.across];
+            let here = row(py);
+            let between = (py > first && py + 1 < end).then(|| (row(py - 1), row(py + 1)));
+            // The pixel to the left of each of a word's, and to the right.
+            let left = |r: &[u64], i: usize| (r[i] << 1) | if i > 0 { r[i - 1] >> 63 } else { 0 };
+            let right =
+                |r: &[u64], i: usize| (r[i] >> 1) | r.get(i + 1).map_or(0, |next| next << 63);
+            for i in 0..self.across {
+                let mut found = left(here, i) & right(here, i);
+                if let Some((up, down)) = between {
+                    found |= (up[i] & down[i])
+                        | (left(up, i) & right(down, i))
+                        | (right(up, i) & left(down, i));
+                }
+                found &= !here[i];
+                while found != 0 {
+                    let px = i * 64 + found.trailing_zeros() as usize;
+                    found &= found - 1;
+                    if px < self.width {
+                        gaps.push(py * self.width + px);
+                    }
+                }
+            }
+        }
+        gaps
     }
 }
 

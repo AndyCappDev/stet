@@ -194,6 +194,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A gradient mesh no longer shows specks of what is under it.** The
+  patches of a mesh are each drawn as triangles of their own, and where
+  two patches did not divide a shared edge alike a pixel could fall
+  between them and be painted by neither: a white or grey speck inside
+  the mesh, in a different place at every zoom. Illustrator's gradient
+  meshes showed it most. Such a pixel is now painted from the nearest
+  triangle. The outline of a mesh is unchanged, and a gap a pixel or
+  more wide is left as drawn.
+
 - **A program ending `showpage restore` is no longer told its last page
   was dropped.** The warning for marks painted after the last `showpage`
   counted everything recorded since it, and `restore`, `grestore` and
