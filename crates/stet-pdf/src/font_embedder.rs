@@ -326,7 +326,7 @@ fn build_type1_font_file(
 
     // Header
     writeln!(cleartext, "%!PS-AdobeFont-1.0: {}", font_name_str).unwrap();
-    writeln!(cleartext, "12 dict begin").unwrap();
+    writeln!(cleartext, "15 dict begin").unwrap();
     writeln!(cleartext, "/FontName /{} def", font_name_str).unwrap();
     writeln!(cleartext, "/FontType 1 def").unwrap();
     write!(cleartext, "/FontMatrix [").unwrap();
@@ -343,6 +343,8 @@ fn build_type1_font_file(
         bbox[0] as i32, bbox[1] as i32, bbox[2] as i32, bbox[3] as i32
     )
     .unwrap();
+
+    write_multiple_master_entries(&mut cleartext, fonts, font);
 
     // Encoding array
     writeln!(cleartext, "/Encoding 256 array").unwrap();
@@ -586,6 +588,73 @@ fn build_encoding_array_multi(fonts: &FontData, encodings: &[Option<&[Frozen]>])
 }
 
 /// Emit Private dict hint values as lines (for joining with \n).
+/// Write what makes a multiple master font one: the weight of each master
+/// design, the description of the design axes, and each master's bounding
+/// box.
+///
+/// The charstrings of such a font are embedded as they are, each carrying
+/// every master's coordinates, so whoever reads the font needs the weights
+/// to blend them by. The other two change no outline, but readers decide
+/// by them whether the font is a multiple master at all: Ghostscript
+/// ignores the weights of a font with no `/Blend` bounding boxes and draws
+/// the first master alone, and it and poppler draw nothing for one with
+/// `/Blend` and no axes.
+fn write_multiple_master_entries(cleartext: &mut Vec<u8>, fonts: &FontData, font: &FrozenDict) {
+    let Some(weights) = fonts
+        .get(font, b"WeightVector")
+        .and_then(|w| postscript_value(fonts, w))
+    else {
+        return;
+    };
+    let axes: Vec<(&str, String)> = fonts
+        .get(font, b"FontInfo")
+        .and_then(Frozen::as_dict)
+        .map(|info| {
+            ["BlendDesignPositions", "BlendDesignMap", "BlendAxisTypes"]
+                .into_iter()
+                .filter_map(|key| {
+                    let value = fonts.get(info, key.as_bytes())?;
+                    Some((key, postscript_value(fonts, value)?))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if !axes.is_empty() {
+        writeln!(cleartext, "/FontInfo {} dict dup begin", axes.len()).unwrap();
+        for (key, value) in &axes {
+            writeln!(cleartext, "/{key} {value} def").unwrap();
+        }
+        writeln!(cleartext, "end readonly def").unwrap();
+    }
+    writeln!(cleartext, "/WeightVector {weights} def").unwrap();
+    if let Some(bboxes) = fonts
+        .get(font, b"Blend")
+        .and_then(Frozen::as_dict)
+        .and_then(|blend| fonts.get(blend, b"FontBBox"))
+        .and_then(|b| postscript_value(fonts, b))
+    {
+        writeln!(cleartext, "/Blend 1 dict dup begin").unwrap();
+        writeln!(cleartext, "/FontBBox {bboxes} def").unwrap();
+        writeln!(cleartext, "end def").unwrap();
+    }
+}
+
+/// A number, a name, or an array of them to any depth, as PostScript.
+/// `None` for anything else.
+fn postscript_value(fonts: &FontData, value: &Frozen) -> Option<String> {
+    match value {
+        Frozen::Int(i) => Some(i.to_string()),
+        Frozen::Real(r) => Some(format_float(*r)),
+        Frozen::Name(id) => Some(format!("/{}", String::from_utf8_lossy(fonts.name(*id)))),
+        Frozen::Array(elems) | Frozen::PackedArray(elems) => {
+            let parts: Option<Vec<String>> =
+                elems.iter().map(|e| postscript_value(fonts, e)).collect();
+            Some(format!("[{}]", parts?.join(" ")))
+        }
+        _ => None,
+    }
+}
+
 fn emit_private_hint_lines(lines: &mut Vec<Vec<u8>>, fonts: &FontData, pe: &FrozenDict) {
     // Numeric hint keys
     let numeric_keys = [

@@ -26,6 +26,7 @@ stet-render = { workspace = true, optional = true, features = ["parallel", "ps-d
 stet-pdf = { workspace = true, optional = true }
 
 [dev-dependencies]
+flate2 = "1"
 png = { workspace = true }
 stet-pdf-reader = { workspace = true }
 

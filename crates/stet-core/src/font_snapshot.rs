@@ -64,6 +64,9 @@ pub const FONT_KEYS: &[&[u8]] = &[
     b"CIDSystemInfo",
     b"FDArray",
     b"FDepVector",
+    b"WeightVector",
+    b"FontInfo",
+    b"Blend",
 ];
 
 /// The keys copied from a Type 3 font: its encoding and geometry. Its

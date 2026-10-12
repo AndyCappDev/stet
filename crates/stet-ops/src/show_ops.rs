@@ -920,7 +920,7 @@ fn render_glyphshow(
         // Type 1 charstring
         let info = get_font_info(ctx)?;
         let subrs = get_subrs(ctx, &info);
-        let result = charstring::execute_charstring(&cs_bytes, &subrs, info.len_iv, false)
+        let result = run_type1_charstring(ctx, &info, &subrs, &cs_bytes)
             .map_err(|_| PsError::InvalidFont)?;
 
         let segments = Arc::new(result.path.segments);
@@ -996,8 +996,30 @@ struct FontInfo {
     subrs_entity: EntityId,
     subrs_len: u32,
     len_iv: usize,
+    /// The share of each master design in a multiple master font, from
+    /// `/WeightVector`. The charstrings of such a font carry every master's
+    /// coordinates and blend them by these weights.
+    weight_vector: Option<Vec<f64>>,
     /// Optional Metrics dict entity for width overrides (PLRM 5.9.2, used by dvips)
     metrics_entity: Option<EntityId>,
+}
+
+/// The `/WeightVector` of a multiple master font, or `None` for any other
+/// font.
+fn get_weight_vector(ctx: &Context, font_entity: EntityId) -> Option<Vec<f64>> {
+    let obj = ctx
+        .dicts
+        .get(font_entity, &DictKey::Name(ctx.name_cache.n_weight_vector))?;
+    let PsValue::Array { entity, start, len } = obj.value else {
+        return None;
+    };
+    let weights: Option<Vec<f64>> = ctx
+        .arrays
+        .get(entity, start, len)
+        .iter()
+        .map(|w| w.as_f64())
+        .collect();
+    weights.filter(|w| !w.is_empty())
 }
 
 /// Extract font info from the current font dict.
@@ -1091,6 +1113,7 @@ fn get_font_info(ctx: &Context) -> Result<FontInfo, PsError> {
         subrs_entity,
         subrs_len,
         len_iv,
+        weight_vector: get_weight_vector(ctx, font_entity),
         metrics_entity,
     })
 }
@@ -1173,6 +1196,7 @@ fn get_font_info_for(ctx: &Context, font_entity: EntityId) -> Result<FontInfo, P
         subrs_entity,
         subrs_len,
         len_iv,
+        weight_vector: get_weight_vector(ctx, font_entity),
         metrics_entity,
     })
 }
@@ -1192,31 +1216,41 @@ fn get_subrs(ctx: &Context, info: &FontInfo) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// Build a lookup table mapping StandardEncoding glyph names to encrypted charstring bytes.
-/// Used by the charstring interpreter for seac (composite character) support.
-fn build_seac_map(ctx: &Context, info: &FontInfo) -> std::collections::HashMap<String, Vec<u8>> {
-    use stet_fonts::encoding::STANDARD_ENCODING;
-    let mut map = std::collections::HashMap::new();
-    for &name in STANDARD_ENCODING.iter() {
-        if name == ".notdef" {
-            continue;
-        }
-        if let Some(PsValue::String { entity, start, len }) = ctx
-            .names
-            .find(name.as_bytes())
-            .and_then(|name_id| {
-                ctx.dicts
-                    .get(info.charstrings_entity, &DictKey::Name(name_id))
-            })
-            .map(|obj| obj.value)
+/// Run a Type 1 charstring of the font `info` describes.
+///
+/// Two things come from the font and not from the charstring. A glyph made
+/// of a base letter and an accent (`seac`) names the two by their
+/// StandardEncoding names, and they are looked up in the font's
+/// `CharStrings`. The charstrings of a multiple master font blend their
+/// master designs by the font's `/WeightVector`. Every operator that draws
+/// or measures a glyph needs both, so every one runs its charstrings here.
+fn run_type1_charstring(
+    ctx: &Context,
+    info: &FontInfo,
+    subrs: &[Vec<u8>],
+    cs_bytes: &[u8],
+) -> Result<charstring::CharstringResult, String> {
+    let lookup = |name: &str| -> Option<Vec<u8>> {
+        let name_id = ctx.names.find(name.as_bytes())?;
+        match ctx
+            .dicts
+            .get(info.charstrings_entity, &DictKey::Name(name_id))?
+            .value
         {
-            map.insert(
-                name.to_string(),
-                ctx.strings.get(entity, start, len).to_vec(),
-            );
+            PsValue::String { entity, start, len } => {
+                Some(ctx.strings.get(entity, start, len).to_vec())
+            }
+            _ => None,
         }
-    }
-    map
+    };
+    charstring::execute_charstring_mm(
+        cs_bytes,
+        subrs,
+        info.len_iv,
+        false,
+        Some(&lookup as &charstring::CharstringLookup<'_>),
+        info.weight_vector.as_deref(),
+    )
 }
 
 /// Look up a Metrics dict width override for a character (PLRM 5.9.2).
@@ -1334,10 +1368,6 @@ fn render_show(
     let info = get_font_info(ctx)?;
     let subrs = get_subrs(ctx, &info);
 
-    // Build seac lookup table: StandardEncoding glyph names → encrypted charstring bytes
-    let seac_map = build_seac_map(ctx, &info);
-    let cs_lookup = |name: &str| -> Option<Vec<u8>> { seac_map.get(name).cloned() };
-
     // Inverse-transform device-space current_point to user space for advancement math
     let (dev_cpx, dev_cpy) = ctx.gstate.current_point.ok_or(PsError::NoCurrentPoint)?;
     let ictm = ctx.gstate.ctm.invert().ok_or(PsError::UndefinedResult)?;
@@ -1392,15 +1422,8 @@ fn render_show(
 
             let cs_bytes = ctx.strings.get(cs_entity, cs_start, cs_len).to_vec();
 
-            // Execute charstring with seac support
-            let result = charstring::execute_charstring_ex(
-                &cs_bytes,
-                &subrs,
-                info.len_iv,
-                false,
-                Some(&cs_lookup as &charstring::CharstringLookup<'_>),
-            )
-            .map_err(|_| PsError::InvalidFont)?;
+            let result = run_type1_charstring(ctx, &info, &subrs, &cs_bytes)
+                .map_err(|_| PsError::InvalidFont)?;
 
             let segments = Arc::new(result.path.segments);
             // Store in cache
@@ -3843,7 +3866,7 @@ fn measure_string_width(ctx: &mut Context, bytes: &[u8]) -> Result<(f64, f64), P
 
             // Execute with width_only=false so we cache the full path
             // (stringwidth often precedes charpath/show on the same glyphs)
-            let result = charstring::execute_charstring(&cs_bytes, &subrs, info.len_iv, false)
+            let result = run_type1_charstring(ctx, &info, &subrs, &cs_bytes)
                 .map_err(|_| PsError::InvalidFont)?;
 
             let cache = ctx.glyph_caches.entry(font_entity_for_cache).or_default();
@@ -3938,7 +3961,7 @@ fn render_charpath(ctx: &mut Context, bytes: &[u8]) -> Result<(), PsError> {
 
             let cs_bytes = ctx.strings.get(cs_entity, cs_start, cs_len).to_vec();
 
-            let result = charstring::execute_charstring(&cs_bytes, &subrs, info.len_iv, false)
+            let result = run_type1_charstring(ctx, &info, &subrs, &cs_bytes)
                 .map_err(|_| PsError::InvalidFont)?;
 
             let segments = Arc::new(result.path.segments);
@@ -4515,9 +4538,7 @@ fn render_show_displaced(
                     } = cs_obj.value
                 {
                     let cs_bytes = ctx.strings.get(cs_entity, cs_start, cs_len).to_vec();
-                    if let Ok(result) =
-                        charstring::execute_charstring(&cs_bytes, &subrs, info.len_iv, false)
-                    {
+                    if let Ok(result) = run_type1_charstring(ctx, &info, &subrs, &cs_bytes) {
                         width = Some((result.width_x, result.width_y));
                         let segments = Arc::new(result.path.segments);
                         if !segments.is_empty() {
@@ -4783,9 +4804,7 @@ fn render_fmap_type0(
             } = cs_obj.value
         {
             let cs_bytes = ctx.strings.get(cs_entity, cs_start, cs_len).to_vec();
-            if let Ok(result) =
-                charstring::execute_charstring(&cs_bytes, &subrs, info.len_iv, false)
-            {
+            if let Ok(result) = run_type1_charstring(ctx, &info, &subrs, &cs_bytes) {
                 if !result.path.is_empty() {
                     let user_path = transform_path(&result.path, &composed_fm, *cur_x, *cur_y);
                     let device_path = ctm_transform_path(&user_path, ctm);
@@ -4927,9 +4946,7 @@ fn render_fmap_type0_displaced(
             } = cs_obj.value
         {
             let cs_bytes = ctx.strings.get(cs_entity, cs_start, cs_len).to_vec();
-            if let Ok(result) =
-                charstring::execute_charstring(&cs_bytes, &subrs, info.len_iv, false)
-            {
+            if let Ok(result) = run_type1_charstring(ctx, &info, &subrs, &cs_bytes) {
                 if !result.path.is_empty() {
                     let user_path = transform_path(&result.path, &composed_fm, *cur_x, *cur_y);
                     let device_path = ctm_transform_path(&user_path, ctm);

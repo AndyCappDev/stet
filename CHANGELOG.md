@@ -33,6 +33,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   came out heavy. The rule is now applied to the edges in order, row by
   row. Most pages with strokes change by a few pixels, nearly always
   towards less ink.
+- **Text in a multiple master font is drawn, where it came out as
+  scribbles.** The glyphs of such a font carry every master design, to be
+  blended by the font's `/WeightVector`, and the PostScript interpreter
+  never passed the weights on. Acrobat's substitute font AdobeSansMM is
+  one, and `pdftops` writes it into the PostScript of any PDF that used
+  it. PDF input was not affected.
+- **Accented letters are drawn by every text operator.** A Type 1 glyph
+  made of a letter and an accent (`seac`) names its two parts, and only
+  `show` and its nearest relatives looked them up: `xshow`, `yshow` and
+  `xyshow` — which is what `pdftops` positions all its text with —
+  `glyphshow`, `charpath` and the fonts of a composite font drew nothing
+  for such a glyph, and a `stringwidth` beforehand left `show` with
+  nothing to draw either.
+- **PDF output embeds a multiple master font as one.** It was written as
+  an ordinary Type 1 font, so its text was scribbles or missing in every
+  reader. The embedded font now carries its weights, its design axes and
+  its masters' bounding boxes, which between them are what Ghostscript,
+  poppler and stet need to blend it.
 
 ## [0.8.6] — 2026-10-12
 
