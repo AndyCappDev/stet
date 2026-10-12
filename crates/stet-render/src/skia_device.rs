@@ -1063,7 +1063,7 @@ const HARD_EDGE_REACH: f32 = 1.5;
 fn harden_met_edges(
     soft: &mut Mask,
     hard: &Mask,
-    met: &[crate::clip_neighbours::MetPiece],
+    met: crate::clip_neighbours::Met<'_>,
     scale: f32,
     ctx: &RenderContext<'_>,
 ) {
@@ -1076,9 +1076,21 @@ fn harden_met_edges(
         )
     };
     let reach = HARD_EDGE_REACH;
-    for piece in met.iter().filter(|p| p.meeting(scale) == Meeting::Hard) {
+    let rows = rows_in_reach(ctx, reach);
+    for piece in met
+        .between(rows)
+        .filter(|p| p.meeting(scale) == Meeting::Hard)
+    {
         let (ax, ay) = place(piece.a);
         let (bx, by) = place(piece.b);
+        // Most pieces of a path that crosses many bands are in another.
+        if ay.max(by) + reach < 0.0
+            || ay.min(by) - reach > h as f32
+            || ax.max(bx) + reach < 0.0
+            || ax.min(bx) - reach > w as f32
+        {
+            continue;
+        }
         // Pixel centres are at half-integers.
         let x0 = (ax.min(bx) - reach - 0.5).ceil().max(0.0) as usize;
         let y0 = (ay.min(by) - reach - 0.5).ceil().max(0.0) as usize;
@@ -1089,6 +1101,10 @@ fn harden_met_edges(
         for y in y0..y1 {
             let cy = y as f32 + 0.5 - ay;
             for x in x0..x1 {
+                // Away from the edge the two fills agree.
+                if dst[y * w + x] == src[y * w + x] {
+                    continue;
+                }
                 let cx = x as f32 + 0.5 - ax;
                 // The nearest point of the piece to the pixel's centre.
                 let t = if length_sq > 0.0 {
@@ -1103,6 +1119,16 @@ fn harden_met_edges(
             }
         }
     }
+}
+
+/// The rows of the display list's device space that come within `reach`
+/// output pixels of the pixmap being rendered.
+fn rows_in_reach(ctx: &RenderContext<'_>, reach: f32) -> [f32; 2] {
+    let from = |y: f32| y / ctx.scale_y + ctx.vp_y;
+    // And a pixel more, against rounding.
+    let reach = reach + 1.0;
+    let (top, bottom) = (from(-reach), from(ctx.out_h as f32 + reach));
+    [top.min(bottom), top.max(bottom)]
 }
 
 /// How far from a piece of edge, in output pixels, a pixel's centre may be
@@ -1143,6 +1169,15 @@ fn pixels_to_carry<'p>(
             (piece.b[0] - ctx.vp_x) * ctx.scale_x,
             (piece.b[1] - ctx.vp_y) * ctx.scale_y,
         );
+        let reach = CARRY_REACH;
+        // Most pieces of a path that crosses many bands are in another.
+        if ay.max(by) + reach < 0.0
+            || ay.min(by) - reach > h as f32
+            || ax.max(bx) + reach < 0.0
+            || ax.min(bx) - reach > w as f32
+        {
+            continue;
+        }
         let (dx, dy) = (bx - ax, by - ay);
         let length_sq = dx * dx + dy * dy;
         let [nx, ny] = piece.inward();
@@ -1163,7 +1198,6 @@ fn pixels_to_carry<'p>(
             main,
             (2 * main.0, 2 * main.1),
         ];
-        let reach = CARRY_REACH;
         let x0 = ((ax.min(bx) - reach - 0.5).ceil() as i64).max(0);
         let y0 = ((ay.min(by) - reach - 0.5).ceil() as i64).max(0);
         let x1 = ((ax.max(bx) + reach - 0.5).floor() as i64).min(w - 1);
@@ -8505,7 +8539,10 @@ fn clip_path_unified(
                         && !band_state.clip_meetings.carried.contains(&key)
                         && !band_state.clip_meetings.pixels.contains_key(&key)
                 })
-                .map(|n| n.lying_over(key, scale).peekable());
+                .map(|n| {
+                    n.lying_over(key, scale, rows_in_reach(ctx, CARRY_REACH))
+                        .peekable()
+                });
             let carrying = over.as_mut().is_some_and(|pieces| pieces.peek().is_some());
             match edges {
                 ClipEdgeState::Hard => {
