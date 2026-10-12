@@ -15,7 +15,7 @@ use stet_tiny_skia::{
     Mask, Paint, PathBuilder, Pixmap, Stroke, StrokeDash, Transform,
 };
 
-use crate::clip_neighbours::{ClipEdgeState, ClipNeighbours, clip_key};
+use crate::clip_neighbours::{ClipEdgeState, ClipNeighbours, Meeting, MetPiece, clip_key};
 #[cfg(feature = "ps-device")]
 use stet_core::device::OutputDevice;
 use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
@@ -1055,14 +1055,16 @@ const HARD_EDGE_REACH: f32 = 1.5;
 /// `hard`, the same path filled without, along the pieces of its edge
 /// that another clip runs beside.
 ///
-/// Both neighbours do this along the edge they share, so there each lets
-/// a pixel through wholly or not at all, as two hard clips do, and
-/// between them they let through every pixel once.
+/// Neighbours that are both hard along the edge they share each let a
+/// pixel through wholly or not at all there, as two hard clips do, and
+/// between them they let through every pixel once. A neighbour that lies
+/// over the others is left smooth, and has their colour carried across
+/// first ([`pixels_to_carry`]).
 fn harden_met_edges(
     soft: &mut Mask,
     hard: &Mask,
     met: &[crate::clip_neighbours::MetPiece],
-    within: f32,
+    scale: f32,
     ctx: &RenderContext<'_>,
 ) {
     let (w, h) = (soft.width() as usize, soft.height() as usize);
@@ -1074,7 +1076,7 @@ fn harden_met_edges(
         )
     };
     let reach = HARD_EDGE_REACH;
-    for piece in met.iter().filter(|p| p.gap <= within) {
+    for piece in met.iter().filter(|p| p.meeting(scale) == Meeting::Hard) {
         let (ax, ay) = place(piece.a);
         let (bx, by) = place(piece.b);
         // Pixel centres are at half-integers.
@@ -1103,6 +1105,128 @@ fn harden_met_edges(
     }
 }
 
+/// How far from a piece of edge, in output pixels, a pixel's centre may be
+/// for the piece to cover the pixel in part.
+const CARRY_REACH: f32 = 1.0;
+
+/// The sine of the least lean of an edge's normal towards an axis for the
+/// colour carried across the edge to be taken from the next pixel along
+/// that axis: half a right angle either side of the diagonal.
+const CARRY_LEAN: f32 = 0.38;
+
+/// The pixels along `pieces`, which lie over neighbours painted before
+/// them, that must be given a neighbour's colour before the path is first
+/// painted through, each with the pixel to take it from.
+///
+/// `soft` is the path filled with anti-aliasing and `hard` without. A
+/// pixel `hard` lets through was cut away from every neighbour, which are
+/// hard along this edge and were filled by the same rule; if `soft` covers
+/// it only in part, the path's paint will blend there with what the pixel
+/// holds, and that has to be the neighbour's colour. It is taken from the
+/// nearest pixel outward that `hard` does not let through: one the
+/// neighbour was not cut away from.
+fn pixels_to_carry<'p>(
+    soft: &Mask,
+    hard: &Mask,
+    pieces: impl Iterator<Item = &'p MetPiece>,
+    ctx: &RenderContext<'_>,
+) -> Vec<(u32, u32)> {
+    let (w, h) = (soft.width() as i64, soft.height() as i64);
+    let (soft, hard) = (soft.data(), hard.data());
+    let mut pixels = Vec::new();
+    for piece in pieces {
+        let (ax, ay) = (
+            (piece.a[0] - ctx.vp_x) * ctx.scale_x,
+            (piece.a[1] - ctx.vp_y) * ctx.scale_y,
+        );
+        let (bx, by) = (
+            (piece.b[0] - ctx.vp_x) * ctx.scale_x,
+            (piece.b[1] - ctx.vp_y) * ctx.scale_y,
+        );
+        let (dx, dy) = (bx - ax, by - ay);
+        let length_sq = dx * dx + dy * dy;
+        let [nx, ny] = piece.inward();
+        // One step out along each axis the normal leans to, and failing
+        // that along the one it leans to more, one step and then two.
+        let out = |lean: f32| -lean.signum() as i64;
+        let leans = |lean: f32| lean.abs() > CARRY_LEAN;
+        let main = if nx.abs() >= ny.abs() {
+            (out(nx), 0)
+        } else {
+            (0, out(ny))
+        };
+        let steps = [
+            (
+                if leans(nx) { out(nx) } else { 0 },
+                if leans(ny) { out(ny) } else { 0 },
+            ),
+            main,
+            (2 * main.0, 2 * main.1),
+        ];
+        let reach = CARRY_REACH;
+        let x0 = ((ax.min(bx) - reach - 0.5).ceil() as i64).max(0);
+        let y0 = ((ay.min(by) - reach - 0.5).ceil() as i64).max(0);
+        let x1 = ((ax.max(bx) + reach - 0.5).floor() as i64).min(w - 1);
+        let y1 = ((ay.max(by) + reach - 0.5).floor() as i64).min(h - 1);
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let to = (y * w + x) as usize;
+                if hard[to] != 255 || soft[to] == 255 {
+                    continue;
+                }
+                let (cx, cy) = (x as f32 + 0.5 - ax, y as f32 + 0.5 - ay);
+                let t = if length_sq > 0.0 {
+                    ((cx * dx + cy * dy) / length_sq).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let (ox, oy) = (cx - t * dx, cy - t * dy);
+                if ox * ox + oy * oy > reach * reach {
+                    continue;
+                }
+                let from = steps.iter().find_map(|&(sx, sy)| {
+                    let (fx, fy) = (x + sx, y + sy);
+                    let inside = fx >= 0 && fy >= 0 && fx < w && fy < h;
+                    let from = (fy * w + fx) as usize;
+                    (inside && hard[from] == 0).then_some(from)
+                });
+                if let Some(from) = from {
+                    pixels.push((to as u32, from as u32));
+                }
+            }
+        }
+    }
+    pixels
+}
+
+/// Give each of `pixels` the colour of the pixel it is paired with, and
+/// what is kept beside the pixmap about that pixel.
+fn carry_across_met_edges(pixmap: &mut Pixmap, band_state: &mut BandState, pixels: &[(u32, u32)]) {
+    let count = (pixmap.width() * pixmap.height()) as usize;
+    let data = pixmap.data_mut();
+    let mut cmyk = band_state
+        .cmyk_buffer
+        .as_deref_mut()
+        .filter(|buf| buf.len() == count * 4);
+    let mut spot = band_state
+        .spot_mask
+        .as_deref_mut()
+        .filter(|buf| buf.len() == count);
+    for &(to, from) in pixels {
+        let (to, from) = (to as usize, from as usize);
+        if to >= count || from >= count {
+            continue;
+        }
+        data.copy_within(from * 4..from * 4 + 4, to * 4);
+        if let Some(cmyk) = cmyk.as_deref_mut() {
+            cmyk.copy_within(from * 4..from * 4 + 4, to * 4);
+        }
+        if let Some(spot) = spot.as_deref_mut() {
+            spot[to] = spot[from];
+        }
+    }
+}
+
 // ---- Banded rendering support ----
 
 use stet_graphics::display_list::{DisplayElement, DisplayList, OcgVisibility};
@@ -1115,6 +1239,8 @@ struct BandState {
     clip_mask_cache: HashMap<u64, Arc<ClipMask>>,
     /// Persists across bands for cache-on-second-sight.
     clip_mask_seen: HashSet<u64>,
+    /// The clips that lie over a neighbour painted before them.
+    clip_meetings: ClipMeetings,
     /// Pool of recycled masks to avoid alloc/dealloc (mmap/munmap) per band.
     /// Nothing else holds a mask that is in the pool.
     mask_pool: Vec<Arc<ClipMask>>,
@@ -1142,6 +1268,26 @@ struct BandState {
     /// preserving the pixmap actually preserves spot colour — other pixels
     /// still go through the ICC(new_cmyk) replace path.
     spot_mask: Option<Vec<u8>>,
+}
+
+/// Which clip paths have still to have their neighbours' colour carried
+/// across the edges they share, and which have had it.
+///
+/// A path that lies smooth over a neighbour painted before it blends, in
+/// the pixels its edge covers in part, with what is there. Where such a
+/// pixel's centre is on the path's own side the neighbour was cut away
+/// from it, so before the first paint through the path it is given the
+/// neighbour's colour ([`carry_across_met_edges`]). Once only: after
+/// that the pixel holds the path's own paint.
+#[derive(Default)]
+struct ClipMeetings {
+    /// Set since the last paint, in the order they were set.
+    waiting: Vec<u64>,
+    /// For each path not yet done, the pixels to be given a colour and
+    /// the pixels to take it from, as places in the pixmap.
+    pixels: HashMap<u64, Vec<(u32, u32)>>,
+    /// Done on this pixmap.
+    carried: HashSet<u64>,
 }
 
 /// Maximum masks to keep in the recycling pool. Enough to avoid alloc churn
@@ -4136,6 +4282,26 @@ fn render_element(
     element: &DisplayElement,
     ctx: &RenderContext<'_>,
 ) {
+    // The first paint through a clip that lies over its neighbours is
+    // what the neighbours' colour has to be carried across for.
+    match element {
+        DisplayElement::InitClip | DisplayElement::ErasePage => {
+            band_state.clip_meetings.waiting.clear()
+        }
+        // These paint nothing, or (a layer) only by their children.
+        DisplayElement::Clip { .. }
+        | DisplayElement::Text { .. }
+        | DisplayElement::TextRun { .. }
+        | DisplayElement::OcgGroup { .. } => {}
+        _ => {
+            for key in std::mem::take(&mut band_state.clip_meetings.waiting) {
+                if let Some(pixels) = band_state.clip_meetings.pixels.remove(&key) {
+                    band_state.clip_meetings.carried.insert(key);
+                    carry_across_met_edges(pixmap, band_state, &pixels);
+                }
+            }
+        }
+    }
     match element {
         DisplayElement::Fill { path, params } => {
             // DeviceGray with overprint behaves as a K-only process paint —
@@ -5507,6 +5673,7 @@ fn render_group(
         spare_mask: None,
         clip_mask_cache: HashMap::new(),
         clip_mask_seen: HashSet::new(),
+        clip_meetings: ClipMeetings::default(),
         mask_pool: Vec::new(),
         cmyk_buffer: group_cmyk,
         op_bg_snapshot: None,
@@ -5562,6 +5729,7 @@ fn render_group(
                 spare_mask: None,
                 clip_mask_cache: HashMap::new(),
                 clip_mask_seen: HashSet::new(),
+                clip_meetings: ClipMeetings::default(),
                 mask_pool: Vec::new(),
                 cmyk_buffer: None,
                 op_bg_snapshot: None,
@@ -6096,6 +6264,7 @@ fn render_knockout_group(
         spare_mask: None,
         clip_mask_cache: HashMap::new(),
         clip_mask_seen: HashSet::new(),
+        clip_meetings: ClipMeetings::default(),
         mask_pool: Vec::new(),
         cmyk_buffer: None,
         op_bg_snapshot: None,
@@ -6486,6 +6655,7 @@ fn render_soft_masked(
             spare_mask: None,
             clip_mask_cache: HashMap::new(),
             clip_mask_seen: HashSet::new(),
+            clip_meetings: ClipMeetings::default(),
             mask_pool: Vec::new(),
             cmyk_buffer: None,
             op_bg_snapshot: None,
@@ -6602,6 +6772,7 @@ fn render_soft_masked(
         spare_mask: None,
         clip_mask_cache: HashMap::new(),
         clip_mask_seen: HashSet::new(),
+        clip_meetings: ClipMeetings::default(),
         mask_pool: Vec::new(),
         cmyk_buffer: content_cmyk,
         op_bg_snapshot: None,
@@ -7040,6 +7211,7 @@ fn rasterize_mask(
         spare_mask: None,
         clip_mask_cache: HashMap::new(),
         clip_mask_seen: HashSet::new(),
+        clip_meetings: ClipMeetings::default(),
         mask_pool: Vec::new(),
         cmyk_buffer: None,
         op_bg_snapshot: None,
@@ -7684,6 +7856,7 @@ fn paint_pattern_fill(
                     spare_mask: None,
                     clip_mask_cache: HashMap::new(),
                     clip_mask_seen: HashSet::new(),
+                    clip_meetings: ClipMeetings::default(),
                     mask_pool: Vec::new(),
                     cmyk_buffer: None,
                     op_bg_snapshot: None,
@@ -7766,6 +7939,7 @@ fn paint_pattern_fill(
                 spare_mask: None,
                 clip_mask_cache: HashMap::new(),
                 clip_mask_seen: HashSet::new(),
+                clip_meetings: ClipMeetings::default(),
                 mask_pool: Vec::new(),
                 cmyk_buffer: None,
                 op_bg_snapshot: None,
@@ -8319,20 +8493,28 @@ fn clip_path_unified(
             let transform = ctx.transform(&params.ctm);
             // An edge is smooth unless another clip runs along it from the
             // other side; a clip the table does not know is hard throughout.
-            let edges = match ctx.clip_neighbours {
-                Some(neighbours) if !ctx.no_aa => {
-                    neighbours.edges(clip_key(path, params), ctx.scale_x.min(ctx.scale_y))
-                }
-                _ => ClipEdgeState::Hard,
-            };
+            let key = clip_key(path, params);
+            let scale = ctx.scale_x.min(ctx.scale_y);
+            let neighbours = ctx.clip_neighbours.filter(|_| !ctx.no_aa);
+            let edges = neighbours.map_or(ClipEdgeState::Hard, |n| n.edges(key, scale));
+            // The pieces that lie over a neighbour painted earlier, if the
+            // neighbours' colour is still to be carried across to them.
+            let mut over = neighbours
+                .filter(|_| {
+                    !matches!(edges, ClipEdgeState::Hard)
+                        && !band_state.clip_meetings.carried.contains(&key)
+                        && !band_state.clip_meetings.pixels.contains_key(&key)
+                })
+                .map(|n| n.lying_over(key, scale).peekable());
+            let carrying = over.as_mut().is_some_and(|pieces| pieces.peek().is_some());
             match edges {
                 ClipEdgeState::Hard => {
                     mask.fill_path(&skia_path, fill_rule, false, transform);
                 }
-                ClipEdgeState::Smooth => {
+                ClipEdgeState::Smooth if !carrying => {
                     mask.fill_path(&skia_path, fill_rule, true, transform);
                 }
-                ClipEdgeState::Mixed { met, within } => {
+                ClipEdgeState::Smooth | ClipEdgeState::Mixed { .. } => {
                     mask.fill_path(&skia_path, fill_rule, true, transform);
                     let mut hard = band_state.take_mask(ctx.out_w, ctx.out_h);
                     let hard_own = Arc::get_mut(&mut hard)
@@ -8340,7 +8522,13 @@ fn clip_path_unified(
                     hard_own
                         .mask
                         .fill_path(&skia_path, fill_rule, false, transform);
-                    harden_met_edges(mask, &hard_own.mask, met, within, ctx);
+                    if let ClipEdgeState::Mixed { met, scale } = edges {
+                        harden_met_edges(mask, &hard_own.mask, met, scale, ctx);
+                    }
+                    if carrying && let Some(pieces) = over {
+                        let pixels = pixels_to_carry(mask, &hard_own.mask, pieces, ctx);
+                        band_state.clip_meetings.pixels.insert(key, pixels);
+                    }
                     hard_own.bounds = clip_path_bounds(path, &transform, ctx.out_w, ctx.out_h);
                     band_state.recycle_mask(hard);
                 }
@@ -8355,6 +8543,15 @@ fn clip_path_unified(
         band_state.cache_on_second_sight(path_hash, &shared);
         shared
     };
+
+    // A path with colour still to be carried across its edges has it
+    // carried before the next paint.
+    if !band_state.clip_meetings.pixels.is_empty() && params.stroke_params.is_none() {
+        let key = clip_key(path, params);
+        if band_state.clip_meetings.pixels.contains_key(&key) {
+            band_state.clip_meetings.waiting.push(key);
+        }
+    }
 
     match prev_region {
         None => {
@@ -8706,6 +8903,7 @@ impl OutputDevice for SkiaDevice {
             spare_mask: self.spare_mask.take(),
             clip_mask_cache: HashMap::new(),
             clip_mask_seen: HashSet::new(),
+            clip_meetings: ClipMeetings::default(),
             mask_pool: Vec::new(),
             cmyk_buffer: None,
             op_bg_snapshot: None,
@@ -11401,6 +11599,7 @@ fn render_banded_to_sink(
             spare_mask: None,
             clip_mask_cache: HashMap::new(),
             clip_mask_seen: clip_seen.clone(),
+            clip_meetings: ClipMeetings::default(),
             mask_pool: Vec::new(),
             cmyk_buffer: cmyk_buf,
             op_bg_snapshot: None,
@@ -12836,6 +13035,7 @@ fn render_region_prepared_inner(
         spare_mask: None,
         clip_mask_cache: HashMap::new(),
         clip_mask_seen: prepared.clip_seen.clone(),
+        clip_meetings: ClipMeetings::default(),
         mask_pool: Vec::new(),
         cmyk_buffer: cmyk_buf,
         op_bg_snapshot: None,
@@ -13011,6 +13211,7 @@ fn render_region_single_band_inner(
         spare_mask: None,
         clip_mask_cache: HashMap::new(),
         clip_mask_seen: prepared.clip_seen.clone(),
+        clip_meetings: ClipMeetings::default(),
         mask_pool: Vec::new(),
         cmyk_buffer: cmyk_buf,
         op_bg_snapshot: None,
@@ -14259,6 +14460,7 @@ pub fn render_region(
         spare_mask: None,
         clip_mask_cache: HashMap::new(),
         clip_mask_seen: clip_seen,
+        clip_meetings: ClipMeetings::default(),
         mask_pool: Vec::new(),
         cmyk_buffer: cmyk_buf,
         op_bg_snapshot: None,
@@ -19714,6 +19916,7 @@ mod clip_shortcut_tests {
             spare_mask: None,
             clip_mask_cache: HashMap::new(),
             clip_mask_seen: HashSet::new(),
+            clip_meetings: ClipMeetings::default(),
             mask_pool: Vec::new(),
             cmyk_buffer: None,
             op_bg_snapshot: None,

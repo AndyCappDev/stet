@@ -27,7 +27,6 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU8, Ordering};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -68,21 +67,23 @@ const BAND: f64 = 1.0;
 /// Past this many pieces, or entries in the bands of rows, the page is
 /// left with every clip hard: the table would cost more than the page.
 const BUDGET: usize = 4_000_000;
-/// How far inside its own edge, in pixels, a piece that lies over its
-/// neighbour must be painted, by one thing and no more.
+/// How far to either side of an edge, in pixels of the display list, the
+/// pieces that meet along it are asked what is painted: the one that lies
+/// over must be painted there by one thing and no more, and one of those
+/// it lies over by something.
 const INSIDE: f64 = 0.25;
-/// How deep, in output pixels, a piece that lies over its neighbour must
-/// go on being painted by that one thing: as far as the centre of any
-/// pixel its edge covers in part can be from the edge.
-const SHALLOW: f64 = 0.75;
-/// How deep the earlier piece must go behind the edge, and be painted.
-/// The colour carried across comes from the next pixel out, whose centre
-/// is at most this far in.
+/// How deep behind the edge, in output pixels, the colour carried across
+/// may come from: it is taken from a pixel one step out, whose centre is
+/// at most this far behind the edge. Nothing painted later may reach
+/// that far, or the pixel would not yet hold the colour it is to have.
 const DEEP: f64 = 1.5;
-/// How many times those depths are doubled and asked again, so that the
-/// answer is known for an output as coarse as one pixel to eight of the
-/// display list's.
-const LEVELS: u8 = 4;
+/// The depths behind an edge that are asked about, as multiples of
+/// [`DEEP`]: enough to know the answer for an output as coarse as one
+/// pixel to eight of the display list's.
+const DEPTHS: [f64; 9] = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0];
+/// The side of a cell of the grid that paths are found by, for asking
+/// which of them a point is in.
+const COVER_CELL: f64 = 32.0;
 /// The most paints through one clip path that are looked into. A path
 /// with more is taken to be painted nowhere that can be vouched for.
 const PAINTS: usize = 64;
@@ -110,17 +111,14 @@ pub(crate) struct MetPiece {
     /// same side, and may be smooth along it as well. Two such are two
     /// layers of paint along the edge.
     stack: f32,
-    /// How coarse an output the pieces are deep enough for: 1 for a pixel
-    /// of the display list to a pixel, and one more for each doubling.
-    level: u8,
+    /// How deep behind the edge, in pixels of the display list, nothing
+    /// painted after this piece's path is first painted through reaches.
+    deep: f32,
     /// Unit vector across the piece, into the path.
     inward: [f32; 2],
 }
 
 /// What is to be done with a piece of edge that has a neighbour.
-// The renderer asks from the next phase of the work; until then only the
-// tests do.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Meeting {
     /// No neighbour near enough at this scale: smooth, as a free edge is.
@@ -132,7 +130,6 @@ pub(crate) enum Meeting {
     Over,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl MetPiece {
     /// What to do with the piece when a pixel of the display list comes
     /// out `scale` pixels across.
@@ -141,10 +138,9 @@ impl MetPiece {
         if self.hard <= within {
             Meeting::Hard
         } else if self.over <= within {
-            // The depths were asked in pixels of the display list, and
-            // are wanted in pixels of the output.
-            let needed = (1..=LEVELS).find(|&level| scale * f32::from(1u8 << (level - 1)) >= 1.0);
-            if self.stack <= within || needed.is_none_or(|needed| needed > self.level) {
+            // The depth is in pixels of the display list and is wanted
+            // in pixels of the output.
+            if self.stack <= within || self.deep * scale < DEEP as f32 {
                 Meeting::Hard
             } else {
                 Meeting::Over
@@ -167,6 +163,8 @@ struct ClipEdges {
     pieces: u32,
     /// Those with a neighbour.
     met: Vec<MetPiece>,
+    /// Some of those may lie over a neighbour.
+    over: bool,
     /// Nothing but edges along the axes, which are cut hard along pixel edges
     /// whatever is beside it.
     rect: bool,
@@ -175,18 +173,20 @@ struct ClipEdges {
 /// How a clip path's edges are to be drawn.
 #[derive(Debug, PartialEq)]
 pub(crate) enum ClipEdgeState<'a> {
-    /// Every edge has a neighbour, or the path is one this table does not
-    /// know: hard throughout, as clips have always been.
+    /// Every edge is to be cut hard, or the path is one this table does
+    /// not know: hard throughout, as clips have always been.
     Hard,
-    /// No edge has a neighbour.
+    /// No edge is to be cut hard: none has a neighbour, or those that
+    /// have lie over theirs ([`ClipNeighbours::lying_over`]).
     Smooth,
-    /// Some edges have one. These are the pieces that do; a piece counts
-    /// where its `gap` is no more than `within`.
+    /// Some edges are to be cut hard. These are the pieces with a
+    /// neighbour; the hard ones are those whose
+    /// [`meeting`](MetPiece::meeting) at `scale` is [`Meeting::Hard`].
     Mixed {
         /// Every piece with a neighbour in reach.
         met: &'a [MetPiece],
-        /// The widest gap that still makes a piece hard at this scale.
-        within: f32,
+        /// How many output pixels a pixel of the display list comes to.
+        scale: f32,
     },
 }
 
@@ -291,6 +291,7 @@ impl ClipNeighbours {
                     ClipEdges {
                         pieces: pieces.len() as u32,
                         met: Vec::new(),
+                        over: false,
                         rect: shape.rect,
                     },
                 )
@@ -305,8 +306,7 @@ impl ClipNeighbours {
             stacks: &stacks,
             area: &area,
             pieces: &pieces,
-            earlier: pieces.iter().map(|_| AtomicU8::new(UNASKED)).collect(),
-            later: pieces.iter().map(|_| AtomicU8::new(UNASKED)).collect(),
+            cover: Cover::new(&shapes, &area),
         };
 
         let meet = |index: usize| {
@@ -322,17 +322,17 @@ impl ClipNeighbours {
         #[cfg(not(feature = "parallel"))]
         let met: Vec<(u32, MetPiece)> = (0..pieces.len()).filter_map(meet).collect();
         for (shape, piece) in met {
-            clips
+            let edges = clips
                 .get_mut(&shapes[shape as usize].key)
-                .expect("every shape has an entry")
-                .met
-                .push(piece);
+                .expect("every shape has an entry");
+            edges.over |= piece.over.is_finite();
+            edges.met.push(piece);
         }
         Self { clips }
     }
 
     /// The pieces of the clip path known by `key` that have a neighbour.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn met(&self, key: u64) -> &[MetPiece] {
         self.clips.get(&key).map_or(&[], |edges| &edges.met)
     }
@@ -347,8 +347,11 @@ impl ClipNeighbours {
         if edges.rect || scale.is_nan() || scale <= 0.0 {
             return ClipEdgeState::Hard;
         }
-        let within = NEAR as f32 / scale;
-        let hard = edges.met.iter().filter(|p| p.gap <= within).count();
+        let hard = edges
+            .met
+            .iter()
+            .filter(|p| p.meeting(scale) == Meeting::Hard)
+            .count();
         if hard == 0 {
             ClipEdgeState::Smooth
         } else if hard == edges.pieces as usize {
@@ -356,9 +359,25 @@ impl ClipNeighbours {
         } else {
             ClipEdgeState::Mixed {
                 met: &edges.met,
-                within,
+                scale,
             }
         }
+    }
+
+    /// The pieces of the clip path known by `key` that lie over their
+    /// neighbours at this scale: those the colour across the edge is to
+    /// be carried over before anything is painted through the path.
+    pub(crate) fn lying_over(&self, key: u64, scale: f32) -> impl Iterator<Item = &MetPiece> {
+        self.clips
+            .get(&key)
+            .filter(|edges| edges.over && !edges.rect && scale > 0.0)
+            .into_iter()
+            .flat_map(move |edges| {
+                edges
+                    .met
+                    .iter()
+                    .filter(move |p| p.meeting(scale) == Meeting::Over)
+            })
     }
 }
 
@@ -408,9 +427,11 @@ impl Painted {
     }
 }
 
-/// One thing painted through a clip path that is not a rectangle.
+/// One thing painted through a clip path.
 struct Paint<'a> {
     elem: &'a DisplayElement,
+    /// Its place in the order of painting.
+    place: u32,
     /// The clip paths it was painted through: where they start in
     /// [`Walk::stacks`], and how many.
     clips: (u32, u32),
@@ -436,23 +457,19 @@ const STROKED: u32 = u32::MAX;
 #[derive(Default)]
 struct Stack {
     clips: Vec<u32>,
-    /// One of them is neither a rectangle nor stroked.
-    shaped: bool,
     /// Where these clips are in [`Walk::stacks`], once a paint has needed
     /// them there.
     run: Option<(u32, u32)>,
 }
 
 impl Stack {
-    fn push(&mut self, clip: u32, shaped: bool) {
+    fn push(&mut self, clip: u32) {
         self.clips.push(clip);
-        self.shaped |= shaped;
         self.run = None;
     }
 
     fn clear(&mut self) {
         self.clips.clear();
-        self.shaped = false;
         self.run = None;
     }
 }
@@ -481,7 +498,7 @@ impl<'a> Walk<'a> {
             match elem {
                 DisplayElement::Clip { path, params } => {
                     if params.stroke_params.is_some() {
-                        stack.push(STROKED, false);
+                        stack.push(STROKED);
                         continue;
                     }
                     let key = clip_key(path, params);
@@ -497,7 +514,7 @@ impl<'a> Walk<'a> {
                             painted: Painted::never(),
                         });
                     }
-                    stack.push(shape, !self.shapes[shape as usize].rect);
+                    stack.push(shape);
                 }
                 DisplayElement::InitClip | DisplayElement::ErasePage => stack.clear(),
                 DisplayElement::Fill { params, .. } => self.paint(
@@ -575,9 +592,7 @@ impl<'a> Walk<'a> {
     fn paint(&mut self, stack: &mut Stack, list: u32, elem: &'a DisplayElement, opaque: bool) {
         let place = self.place;
         self.place += 1;
-        // Through rectangles alone it is no neighbour to anything that
-        // might be smoothed.
-        if !stack.shaped {
+        if stack.clips.is_empty() {
             return;
         }
         let (start, count) = *stack.run.get_or_insert_with(|| {
@@ -591,6 +606,7 @@ impl<'a> Walk<'a> {
         let index = self.paints.len() as u32;
         self.paints.push(Paint {
             elem,
+            place,
             clips: (start, count),
             reach: OnceLock::new(),
         });
@@ -616,9 +632,6 @@ impl<'a> Walk<'a> {
     }
 }
 
-/// A depth not yet asked for, in the lists of [`Page`].
-const UNASKED: u8 = u8::MAX;
-
 /// Everything known of a page's clips, for asking how a piece of edge
 /// stands to its neighbours.
 struct Page<'a> {
@@ -629,10 +642,100 @@ struct Page<'a> {
     stacks: &'a [u32],
     area: &'a Area,
     pieces: &'a [Piece],
-    /// For each piece, how deep it goes as the earlier of two, once asked.
-    earlier: Vec<AtomicU8>,
-    /// And as the later.
-    later: Vec<AtomicU8>,
+    cover: Cover,
+}
+
+/// Which paths' boxes reach each cell of a coarse grid over the area, for
+/// finding the paths a point is in.
+struct Cover {
+    /// The paths of each cell, one cell after another.
+    shapes: Vec<u32>,
+    /// Where each cell's start in those, and one past the last.
+    starts: Vec<u32>,
+    cols: usize,
+    rows: usize,
+    x0: f64,
+    y0: f64,
+}
+
+impl Cover {
+    /// The cells the box of a shape's points reaches, if it is in the area.
+    fn cells(&self, shape: &Shape, area: &Area) -> Option<(usize, usize, usize, usize)> {
+        let (mut x0, mut y0) = (f64::INFINITY, f64::INFINITY);
+        let (mut x1, mut y1) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for (a, _) in &shape.edges {
+            x0 = x0.min(a.0);
+            y0 = y0.min(a.1);
+            x1 = x1.max(a.0);
+            y1 = y1.max(a.1);
+        }
+        if !(x0 <= area.x1 && x1 >= area.x0 && y0 <= area.y1 && y1 >= area.y0) {
+            return None;
+        }
+        let col = |x: f64| (((x - self.x0) / COVER_CELL).max(0.0) as usize).min(self.cols - 1);
+        let row = |y: f64| (((y - self.y0) / COVER_CELL).max(0.0) as usize).min(self.rows - 1);
+        Some((col(x0), row(y0), col(x1), row(y1)))
+    }
+
+    /// The grid for the painted paths among `shapes`, or one with nothing
+    /// in it if it would be past [`BUDGET`].
+    fn new(shapes: &[Shape], area: &Area) -> Self {
+        let cols = (((area.x1 - area.x0) / COVER_CELL).ceil().max(1.0)) as usize;
+        let rows = (((area.y1 - area.y0) / COVER_CELL).ceil().max(1.0)) as usize;
+        let mut cover = Cover {
+            shapes: Vec::new(),
+            starts: vec![0; cols * rows + 1],
+            cols,
+            rows,
+            x0: area.x0,
+            y0: area.y0,
+        };
+        let reach: Vec<Option<(usize, usize, usize, usize)>> = shapes
+            .iter()
+            .map(|s| cover.cells(s, area).filter(|_| s.painted.at_all()))
+            .collect();
+        let mut total = 0usize;
+        for &(c0, r0, c1, r1) in reach.iter().flatten() {
+            total += (c1 - c0 + 1) * (r1 - r0 + 1);
+            for r in r0..=r1 {
+                for n in &mut cover.starts[r * cols + c0 + 1..=r * cols + c1 + 1] {
+                    *n += 1;
+                }
+            }
+            if total > BUDGET {
+                cover.starts.fill(0);
+                return cover;
+            }
+        }
+        for cell in 1..cover.starts.len() {
+            cover.starts[cell] += cover.starts[cell - 1];
+        }
+        let mut next = cover.starts.clone();
+        cover.shapes = vec![0; total];
+        for (shape, &(c0, r0, c1, r1)) in reach
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| r.as_ref().map(|r| (i, r)))
+        {
+            for r in r0..=r1 {
+                for at in &mut next[r * cols + c0..=r * cols + c1] {
+                    cover.shapes[*at as usize] = shape as u32;
+                    *at += 1;
+                }
+            }
+        }
+        cover
+    }
+
+    /// The paths whose boxes reach the cell `p` is in.
+    fn around(&self, p: Point) -> &[u32] {
+        let (col, row) = ((p.0 - self.x0) / COVER_CELL, (p.1 - self.y0) / COVER_CELL);
+        if !(col >= 0.0 && row >= 0.0 && (col as usize) < self.cols && (row as usize) < self.rows) {
+            return &[];
+        }
+        let cell = row as usize * self.cols + col as usize;
+        &self.shapes[self.starts[cell] as usize..self.starts[cell + 1] as usize]
+    }
 }
 
 impl Page<'_> {
@@ -661,25 +764,33 @@ impl Page<'_> {
         })
     }
 
+    /// Whether `paint` puts colour at `p`, clips aside. `None` if where it
+    /// paints is not known.
+    fn paints_there(&self, paint: &Paint<'_>, p: Point) -> Option<bool> {
+        match self.reach(paint) {
+            Reach::Image(m, width, height) => {
+                let (u, v) = m.transform_point(p.0, p.1);
+                Some((0.0..=*width).contains(&u) && (0.0..=*height).contains(&v))
+            }
+            Reach::Path(sides) => Some(sides.inside(p)),
+            Reach::Unknown => None,
+        }
+    }
+
+    /// Whether every clip path `paint` is painted through lets it reach
+    /// `p`, `shape` aside.
+    fn let_through(&self, paint: &Paint<'_>, p: Point, shape: u32) -> bool {
+        let (start, count) = paint.clips;
+        self.stacks[start as usize..(start + count) as usize]
+            .iter()
+            .all(|&clip| clip == shape || (clip != STROKED && self.sides[clip as usize].inside(p)))
+    }
+
     /// Whether `paint`, which is painted through `shape`, reaches `p`:
     /// it paints there, and every other clip it is painted through lets
     /// it.
     fn reaches(&self, paint: &Paint<'_>, p: Point, shape: u32) -> bool {
-        let there = match self.reach(paint) {
-            Reach::Image(m, width, height) => {
-                let (u, v) = m.transform_point(p.0, p.1);
-                (0.0..=*width).contains(&u) && (0.0..=*height).contains(&v)
-            }
-            Reach::Path(sides) => sides.inside(p),
-            Reach::Unknown => false,
-        };
-        let (start, count) = paint.clips;
-        there
-            && self.stacks[start as usize..(start + count) as usize]
-                .iter()
-                .all(|&clip| {
-                    clip == shape || (clip != STROKED && self.sides[clip as usize].inside(p))
-                })
+        self.paints_there(paint, p) == Some(true) && self.let_through(paint, p, shape)
     }
 
     /// How many paints through `shape` reach `p`, if that can be said.
@@ -705,81 +816,101 @@ impl Page<'_> {
         )
     }
 
-    /// How coarse an output piece `index` is deep enough for when it is
-    /// the earlier of two: 0 for none, else as [`MetPiece::level`]. Its
-    /// path must go [`DEEP`] output pixels behind the edge, and be
-    /// painted there, for the colour carried across to be its own.
-    fn deep_as_earlier(&self, index: usize) -> u8 {
-        let known = self.earlier[index].load(Ordering::Relaxed);
-        if known != UNASKED {
-            return known;
+    /// Whether exactly one thing is painted along the inside of a piece's
+    /// edge. With none, the colour carried across would be left showing;
+    /// with more, each smooth layer would let the one under it show.
+    fn painted_once(&self, piece: &Piece) -> bool {
+        self.paints_at(piece.shape, Self::inside(piece, INSIDE)) == Some(1)
+    }
+
+    /// Whether a piece of the page that is painted after the path of
+    /// `piece` is first painted through may reach `p`, a point behind the
+    /// piece's edge. The pixel there may not yet hold the colour it is to
+    /// have.
+    ///
+    /// Such a piece is a paint that reaches `p` and not the piece's own
+    /// side of the edge, by its clips or by where it paints. A paint that
+    /// reaches both sides is no piece of the page that meets this one: it
+    /// goes over both alike, and what is under it does not show.
+    ///
+    /// A path painted through more times than are kept is passed over. It
+    /// is a clip round a whole page or group, and what is painted through
+    /// it and matters here is painted through a smaller path as well, and
+    /// is found by that.
+    fn painted_later(&self, piece: &Piece, p: Point) -> bool {
+        let own = &self.shapes[piece.shape as usize].painted;
+        let near = Self::inside(piece, INSIDE);
+        self.cover.around(p).iter().any(|&shape| {
+            let painted = &self.shapes[shape as usize].painted;
+            shape != piece.shape
+                && painted.last > own.first
+                && !painted.many
+                && !painted.lists
+                && painted.list == own.list
+                && self.sides[shape as usize].inside(p)
+                && painted.paints.iter().any(|&i| {
+                    let paint = &self.paints[i as usize];
+                    let (start, count) = paint.clips;
+                    let clips = &self.stacks[start as usize..(start + count) as usize];
+                    if paint.place <= own.first
+                        || clips.contains(&piece.shape)
+                        || !self.let_through(paint, p, shape)
+                    {
+                        return false;
+                    }
+                    !self.let_through(paint, near, STROKED)
+                        || (self.paints_there(paint, p) == Some(true)
+                            && self.paints_there(paint, near) == Some(false))
+                })
+        })
+    }
+
+    /// How deep behind the edge of `piece`, in pixels, the colour carried
+    /// across may come from: the deepest of [`DEPTHS`] with every one
+    /// before it at which nothing is painted later. Nothing at all unless
+    /// one of the paths `under` is known to be painted along the edge:
+    /// what is carried across is to be a neighbour's paint.
+    ///
+    /// Further back it need not be one of theirs. A thin neighbour with
+    /// another piece behind it, or bare paper, has behind it what a pixel
+    /// there should hold, so long as it is all painted already.
+    fn deep_under(&self, piece: &Piece, under: &[u32]) -> f64 {
+        let beside = Self::inside(piece, -INSIDE);
+        let painted = under.iter().any(|&shape| {
+            self.sides[shape as usize].inside(beside)
+                && self.paints_at(shape, beside).is_some_and(|n| n > 0)
+        });
+        if !painted {
+            return 0.0;
         }
-        let piece = &self.pieces[index];
-        let sides = &self.sides[piece.shape as usize];
-        let painted = |by: f64| {
-            let p = Self::inside(piece, by);
-            sides.inside(p) && self.paints_at(piece.shape, p).is_some_and(|n| n > 0)
-        };
-        let mut level = 0;
-        while level < LEVELS {
-            let times = f64::from(1u8 << level);
-            if !(painted(DEEP / 2.0 * times) && painted(DEEP * times)) {
+        let mut deep = 0.0;
+        for by in DEPTHS.map(|times| times * DEEP) {
+            if self.painted_later(piece, Self::inside(piece, -by)) {
                 break;
             }
-            level += 1;
+            deep = by;
         }
-        self.earlier[index].store(level, Ordering::Relaxed);
-        level
+        deep
     }
 
-    /// The same for a piece that is the later of two. Along its edge and
-    /// [`SHALLOW`] output pixels in it must be painted by exactly one
-    /// thing: by none, the colour carried across would be left showing;
-    /// by more, each smooth layer would let the one under it show.
-    fn deep_as_later(&self, index: usize) -> u8 {
-        let known = self.later[index].load(Ordering::Relaxed);
-        if known != UNASKED {
-            return known;
-        }
-        let piece = &self.pieces[index];
-        let sides = &self.sides[piece.shape as usize];
-        let once = |by: f64| {
-            let p = Self::inside(piece, by);
-            sides.inside(p) && self.paints_at(piece.shape, p) == Some(1)
-        };
-        let mut level = 0;
-        if once(INSIDE) {
-            while level < LEVELS && once(SHALLOW * f64::from(1u8 << level)) {
-                level += 1;
-            }
-        }
-        self.later[index].store(level, Ordering::Relaxed);
-        level
-    }
-
-    /// Whether the piece `index` of `shape` may lie over a piece of
-    /// `other` across the edge from it, and for how coarse an output.
-    fn over(&self, index: usize, shape: &Shape, other: &Near) -> Option<u8> {
+    /// Whether a piece of `shape` might lie over a piece of another path
+    /// across the edge from it, going by how the two are painted.
+    fn may_follow(&self, shape: &Shape, other: &Near) -> bool {
         let (here, there) = (&shape.painted, &self.shapes[other.shape as usize]);
         let before = &there.painted;
         // A neighbour along the pixel grid is cut there whatever happens.
         if there.rect || other.along.0.abs() < UPRIGHT || other.along.1.abs() < UPRIGHT {
-            return None;
+            return false;
         }
         // The neighbour is all painted first, on the same pixmap, and
         // every paint through this path hides it.
-        if !(here.at_all() && before.at_all() && before.last < here.first)
-            || here.lists
-            || before.lists
-            || here.list != before.list
-            || here.veiled
-        {
-            return None;
-        }
-        let level = self
-            .deep_as_later(index)
-            .min(self.deep_as_earlier(other.index as usize));
-        (level > 0).then_some(level)
+        here.at_all()
+            && before.at_all()
+            && before.last < here.first
+            && !here.lists
+            && !before.lists
+            && here.list == before.list
+            && !here.veiled
     }
 
     /// What is known of piece `index` and its neighbours, if it has any
@@ -792,10 +923,11 @@ impl Page<'_> {
         let piece = &self.pieces[index];
         let shape = &self.shapes[piece.shape as usize];
         let (mut hard, mut over) = (f64::INFINITY, f64::INFINITY);
-        let mut level = LEVELS;
+        // The paths it might lie over.
+        let mut under: Vec<u32> = Vec::new();
         // Paths with this edge too, on the same side: how far off, and
         // the place of the last paint through each.
-        let mut beside: Vec<(f64, u32)> = Vec::new();
+        let mut beside: Vec<(f64, u32, u32)> = Vec::new();
         // The place of the first paint through the neighbour that starts
         // to be painted last.
         let mut newest = 0;
@@ -834,16 +966,18 @@ impl Page<'_> {
                         } else {
                             painted.last
                         };
-                        beside.push((gap, last));
+                        beside.push((gap, last, other.shape));
                     }
                     continue;
                 }
                 if painted.at_all() {
                     newest = newest.max(painted.first);
                 }
-                if let Some(deep) = self.over(index, shape, other) {
+                if self.may_follow(shape, other) {
                     over = over.min(gap);
-                    level = level.min(deep);
+                    if !under.contains(&other.shape) {
+                        under.push(other.shape);
+                    }
                 } else {
                     hard = hard.min(gap);
                 }
@@ -851,11 +985,24 @@ impl Page<'_> {
         }
         // A path beside this one that is all painted before some neighbour
         // is cut hard along the edge, and is no second smooth layer.
+        // Nor is one this piece lies over, whose far edge is this near.
         let stack = beside
             .iter()
-            .filter(|&&(_, last)| last >= newest)
-            .map(|&(gap, _)| gap)
+            .filter(|&&(_, last, shape)| last >= newest && !under.contains(&shape))
+            .map(|&(gap, _, _)| gap)
             .fold(f64::INFINITY, f64::min);
+        // It lies over them only if it is painted once along the edge and
+        // they are deep enough behind it at the display list's own scale.
+        let mut deep = 0.0;
+        if !under.is_empty() {
+            if self.painted_once(piece) {
+                deep = self.deep_under(piece, &under);
+            }
+            if deep < DEEP {
+                hard = hard.min(over);
+                over = f64::INFINITY;
+            }
+        }
         let gap = hard.min(over);
         gap.is_finite().then_some(MetPiece {
             a: [piece.a.0 as f32, piece.a.1 as f32],
@@ -864,7 +1011,7 @@ impl Page<'_> {
             hard: hard as f32,
             over: over as f32,
             stack: stack as f32,
-            level,
+            deep: deep as f32,
             inward: [piece.inward.0 as f32, piece.inward.1 as f32],
         })
     }
@@ -1280,8 +1427,6 @@ struct Near {
     along: Point,
     inward: Point,
     shape: u32,
-    /// Which piece it is, of all the page's.
-    index: u32,
 }
 
 /// Pieces sorted by the cell of the area their middle falls in, a row of
@@ -1343,7 +1488,6 @@ impl Grid {
                     along: p.along,
                     inward: p.inward,
                     shape: p.shape,
-                    index: i,
                 }
             })
             .collect();
@@ -1424,9 +1568,11 @@ mod tests {
     /// The hard pieces of a mixed path, at the scale the list was made for.
     fn hard(state: &ClipEdgeState<'_>) -> Vec<MetPiece> {
         match state {
-            ClipEdgeState::Mixed { met, within } => {
-                met.iter().filter(|p| p.gap <= *within).copied().collect()
-            }
+            ClipEdgeState::Mixed { met, scale } => met
+                .iter()
+                .filter(|p| p.meeting(*scale) == Meeting::Hard)
+                .copied()
+                .collect(),
             other => panic!("not mixed: {other:?}"),
         }
     }
@@ -1750,11 +1896,18 @@ mod tests {
         let t = painted(&[(&right, &[flood()]), (&left, &[flood()])]);
         assert_eq!(meeting(&t, &left, 1.0), Meeting::Over);
         assert_eq!(meeting(&t, &right, 1.0), Meeting::Hard);
-        // What `edges` says is as it was: both have a neighbour.
+        // The one that lies over is filled smooth, and the other is hard
+        // along the edge they share and smooth elsewhere.
+        assert_eq!(t.edges(key(&left), 1.0), ClipEdgeState::Smooth);
         assert!(matches!(
-            t.edges(key(&left), 1.0),
+            t.edges(key(&right), 1.0),
             ClipEdgeState::Mixed { .. }
         ));
+        assert_eq!(
+            t.lying_over(key(&left), 1.0).count(),
+            hard(&t.edges(key(&right), 1.0)).len()
+        );
+        assert_eq!(t.lying_over(key(&right), 1.0).count(), 0);
     }
 
     #[test]
@@ -1830,12 +1983,23 @@ mod tests {
     }
 
     #[test]
-    fn a_thin_earlier_path_stays_hard() {
-        // A sliver a pixel wide along the right tile's left edge.
+    fn a_thin_earlier_path_with_a_later_one_behind_it_stays_hard() {
+        // A sliver a pixel wide along the right tile's left edge, and
+        // behind it a tile painted last: the next pixel out is that
+        // tile's, and does not hold its colour yet.
         let sliver = polygon(&[(48.5, 0.0), (49.5, 0.0), (52.5, 72.0), (51.5, 72.0)]);
+        let beyond = polygon(&[(10.0, 0.0), (48.5, 0.0), (51.5, 72.0), (10.0, 72.0)]);
         let right = right_tile();
-        let t = painted(&[(&sliver, &[flood()]), (&right, &[flood()])]);
+        let t = painted(&[
+            (&sliver, &[flood()]),
+            (&right, &[flood()]),
+            (&beyond, &[flood()]),
+        ]);
         assert_eq!(meeting(&t, &right, 1.0), Meeting::Hard);
+        // With bare paper behind the sliver, the next pixel out holds
+        // what it should.
+        let t = painted(&[(&sliver, &[flood()]), (&right, &[flood()])]);
+        assert_eq!(meeting(&t, &right, 1.0), Meeting::Over);
     }
 
     #[test]
@@ -1913,21 +2077,51 @@ mod tests {
             assert!(met.iter().all(|m| *m == met[0]), "{met:?}");
             met[0]
         };
-        // Three pixels deep behind the shared edge: enough at the list's
-        // own scale and finer, not at a quarter of it.
+        // A strip three pixels deep behind the shared edge, and behind the
+        // strip a tile that is painted last of all. A pixel taken from
+        // further back than the strip would not yet hold that tile's
+        // colour, so the strip is deep enough only down to half scale.
         let strip = polygon(&[(46.5, 0.0), (49.5, 0.0), (52.5, 72.0), (49.5, 72.0)]);
+        let beyond = polygon(&[(10.0, 0.0), (46.5, 0.0), (49.5, 72.0), (10.0, 72.0)]);
         let right = right_tile();
-        let t = painted(&[(&strip, &[flood()]), (&right, &[flood()])]);
+        let t = painted(&[
+            (&strip, &[flood()]),
+            (&right, &[flood()]),
+            (&beyond, &[flood()]),
+        ]);
         assert_eq!(middle(&t, &right, 1.0), Meeting::Over);
         assert_eq!(middle(&t, &right, 4.0), Meeting::Over);
-        assert_eq!(middle(&t, &right, 0.25), Meeting::Hard);
-        // The whole tile is deep enough for an eighth, and nothing is
-        // vouched for past that.
-        let left = left_tile();
-        let t = painted(&[(&left, &[flood()]), (&right, &[flood()])]);
-        assert_eq!(middle(&t, &right, 0.25), Meeting::Over);
+        assert_eq!(middle(&t, &right, 0.7), Meeting::Over);
+        assert_eq!(middle(&t, &right, 0.4), Meeting::Hard);
+        // Painted first, the tile behind is no bar: its colour is there.
+        let t = painted(&[
+            (&beyond, &[flood()]),
+            (&strip, &[flood()]),
+            (&right, &[flood()]),
+        ]);
+        assert_eq!(middle(&t, &right, 0.4), Meeting::Over);
+        // Nor is bare paper behind the strip: it is what is there.
+        let t = painted(&[(&strip, &[flood()]), (&right, &[flood()])]);
+        assert_eq!(middle(&t, &right, 0.4), Meeting::Over);
+        // Nothing is vouched for past one pixel to eight.
         assert_eq!(middle(&t, &right, 0.125), Meeting::Over);
         assert_eq!(middle(&t, &right, 0.1), Meeting::Hard);
+    }
+
+    #[test]
+    fn a_thin_path_is_no_bar_with_another_behind_it() {
+        // A sliver along the right tile's edge, and the left tile behind
+        // the sliver: between them they are deep.
+        let sliver = polygon(&[(49.0, 12.0), (50.0, 12.0), (52.0, 60.0), (51.0, 60.0)]);
+        let behind = polygon(&[(10.0, 10.0), (50.0, 12.0), (52.0, 60.0), (8.0, 58.0)]);
+        let right = right_tile();
+        let t = painted(&[
+            (&behind, &[flood()]),
+            (&sliver, &[flood()]),
+            (&right, &[flood()]),
+        ]);
+        let over = t.lying_over(key(&right), 0.25).count();
+        assert!(over > 15, "{over} pieces lie over");
     }
 
     #[test]

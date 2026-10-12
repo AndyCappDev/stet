@@ -41,6 +41,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that edge: its colour is carried to the edge pixels whose centres lie
   just outside it, which were otherwise left thin and light.
 
+- **Artwork a transparency flattener has cut into pieces has smooth edges
+  too.** A flattened page is made of pieces that tile: each letter of a
+  heading an image clipped to the glyph, the background an image clipped
+  to everything but the letters. Such edges were the ones kept hard, so
+  flattened text was stepped beside smooth artwork. Where two clipped
+  pieces meet, the one painted later is now anti-aliased over the colour
+  of the one painted first, which keeps its hard edge underneath, so no
+  page shows between them. An edge stays hard on both sides where that
+  cannot be done safely: the later piece is translucent, blended,
+  overprinted or masked, more than one thing is painted through it along
+  the edge, nothing is known to be painted behind the edge, or something
+  painted later still shows there.
+
 - **A PDF page with thousands of images is read in a fraction of the
   time and memory.** Two costs grew with the number of images on a page.
   Every image in an ICCBased colour space decoded its profile's stream,

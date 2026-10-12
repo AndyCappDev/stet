@@ -5,9 +5,11 @@
 //! The edges of clipped shapes: smooth where nothing is beside them, and
 //! closed where two clipped regions meet.
 //!
-//! A clip with a free edge covers the pixels along it in part. Two clips
-//! that share an edge each cut it hard, so that painting one and then the
-//! other leaves none of the page showing between them.
+//! A clip with a free edge covers the pixels along it in part. Of two clips
+//! that share an edge the one painted first cuts it hard, and the one
+//! painted later lies smooth over the first one's colour where it can and
+//! cuts hard too where it cannot: either way none of the page shows
+//! between them.
 
 use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
 use stet_graphics::color::{DeviceColor, FillRule};
@@ -133,6 +135,105 @@ fn two_clips_that_meet_leave_no_paper_between_them() {
     assert!(grays(&page) > 300, "the outer edges: {}", grays(&page));
 }
 
+/// A flood of some gray, to be seen through whatever clip is set.
+fn flood_of(gray: f64) -> DisplayElement {
+    let DisplayElement::Fill { path, params } = flood() else {
+        unreachable!()
+    };
+    DisplayElement::Fill {
+        path,
+        params: FillParams {
+            color: DeviceColor::from_gray(gray),
+            ..params
+        },
+    }
+}
+
+/// The left tile painted black and the right one gray, in either order,
+/// each `(clip, paints)` set afresh.
+fn two_tones(parts: Vec<(PsPath, Vec<DisplayElement>)>) -> Vec<u8> {
+    let mut list = DisplayList::new();
+    for (path, paints) in parts {
+        list.push(DisplayElement::InitClip);
+        list.push(clip(path, NZ));
+        for p in paints {
+            list.push(p);
+        }
+    }
+    reds(&list, false)
+}
+
+/// What is found along the edge the two tiles share: the lightest pixel,
+/// and how many are neither tile's own colour.
+fn along_the_shared_edge(page: &[u8], gray: u8) -> (u8, usize) {
+    let mut lightest = 0;
+    let mut between = 0;
+    // The shared edge runs from (100, 24) to (104, 180).
+    for y in 30..175 {
+        for x in 95..110 {
+            let v = at(page, x, y);
+            lightest = lightest.max(v);
+            between += usize::from(v != 0 && v != gray);
+        }
+    }
+    (lightest, between)
+}
+
+/// Where two tiles of different colours meet, the one painted later is
+/// smooth over the earlier: the pixels along the edge are blends of the
+/// two colours, and none has any of the paper in it.
+#[test]
+fn the_later_of_two_tiles_is_smooth_over_the_earlier() {
+    for black_first in [true, false] {
+        let black = (left_tile(), vec![flood_of(0.0)]);
+        let gray = (right_tile(), vec![flood_of(0.5)]);
+        let page = two_tones(if black_first {
+            vec![black, gray]
+        } else {
+            vec![gray, black]
+        });
+        let tone = at(&page, 140, 100);
+        assert!((100..160).contains(&tone), "the gray tile: {tone}");
+        let (lightest, between) = along_the_shared_edge(&page, tone);
+        assert_eq!(lightest, tone, "nothing lighter than the gray tile");
+        assert!(between > 100, "a smooth edge: {between} pixels between");
+    }
+}
+
+/// Two paints through the later tile would each let the one under it
+/// show along a smooth edge, so there the edge stays hard.
+#[test]
+fn two_paints_through_the_later_tile_keep_the_edge_hard() {
+    let page = two_tones(vec![
+        (left_tile(), vec![flood_of(0.0)]),
+        (right_tile(), vec![flood_of(1.0), flood_of(0.5)]),
+    ]);
+    let tone = at(&page, 140, 100);
+    assert_eq!(along_the_shared_edge(&page, tone), (tone, 0));
+}
+
+/// Paint that does not hide what is under it would let the colour carried
+/// across the edge show through, so there too the edge stays hard.
+#[test]
+fn a_translucent_later_tile_keeps_the_edge_hard() {
+    let DisplayElement::Fill { path, params } = flood_of(0.5) else {
+        unreachable!()
+    };
+    let veil = DisplayElement::Fill {
+        path,
+        params: FillParams {
+            alpha: 0.5,
+            ..params
+        },
+    };
+    let page = two_tones(vec![
+        (left_tile(), vec![flood_of(0.0)]),
+        (right_tile(), vec![veil]),
+    ]);
+    let tone = at(&page, 140, 100);
+    assert_eq!(along_the_shared_edge(&page, tone), (tone, 0));
+}
+
 /// The same with a curve: a disc, and around it a ring whose hole is that
 /// circle drawn from other arcs.
 #[test]
@@ -176,11 +277,15 @@ fn a_disc_and_the_ring_around_it_leave_no_paper_between_them() {
     // The two circles are not the same curve to the last digit, and a
     // pixel whose centre falls between them belongs to neither clip. That
     // is so with every edge hard, and smoothing must not add to it: round
-    // the hole the page is as it is with anti-aliasing off.
+    // the hole no pixel is bare that is not bare with anti-aliasing off.
+    // (Some of those are bare no longer: the ring, painted second, has
+    // the disc's colour carried to them.)
     let mut bare = 0;
     for y in 20..180 {
         for x in 20..180 {
-            assert_eq!(at(&page, x, y), at(&hard, x, y), "({x}, {y})");
+            if at(&hard, x, y) == 0 {
+                assert_eq!(at(&page, x, y), 0, "({x}, {y})");
+            }
             bare += usize::from(at(&page, x, y) != 0);
         }
     }
