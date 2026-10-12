@@ -51,3 +51,14 @@ ps_corpus/
 /fuzz/artifacts/
 /fuzz/coverage/
 /docs/PLAN-SECURITY-HARDENING.md
+
+# PDF Association Brotli specification + vendor prototype samples. Third-party
+# material fetched by hand from pdfa.org's download area, which 403s every
+# non-browser client — so keep the local copies, but they are not ours to
+# redistribute in the repo.
+/Brotli files/
+
+# Ghostscript's zero-width fill test, kept locally as a rendering sample.
+# Artifex's header forbids copying or distributing it outside their licence,
+# so it is not ours to put in the repo.
+/ps_samples/zeroline.ps

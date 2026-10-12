@@ -719,48 +719,398 @@ fn build_skia_path(path: &PsPath) -> Option<stet_tiny_skia::Path> {
     Some(result)
 }
 
-/// Detect degenerate fill paths that have zero extent in one dimension.
-///
-/// PDFs commonly draw table grid lines as zero-width or zero-height filled
-/// rectangles (e.g., `8 0 1031 0 re f`). Since these have no area, the
-/// fill rasterizer produces zero pixels. This function detects such paths
-/// so they can be rendered as hairline strokes instead.
-///
-/// The check is performed in the path's own coordinate space (pre-transform)
-/// using a very tight epsilon, so only paths with *exactly* zero extent in
-/// one dimension are detected. Paths containing curves are never degenerate
-/// — only MoveTo/LineTo/ClosePath segments qualify.
-fn is_degenerate_fill(path: &PsPath) -> bool {
-    let mut x_min = f64::INFINITY;
-    let mut x_max = f64::NEG_INFINITY;
-    let mut y_min = f64::INFINITY;
-    let mut y_max = f64::NEG_INFINITY;
+/// One edge of a subpath, for telling whether the subpath has any area.
+#[derive(Clone, Copy)]
+struct PathEdge {
+    from: (f64, f64),
+    to: (f64, f64),
+    /// The control points of a curve.
+    controls: Option<((f64, f64), (f64, f64))>,
+}
 
-    for seg in &path.segments {
-        let (x, y) = match seg {
-            PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => (*x, *y),
-            // Paths with curves are real shapes, not degenerate lines
-            PathSegment::CurveTo { .. } => return false,
-            PathSegment::ClosePath => continue,
+/// A stretch of a straight line that a subpath of no area lies along.
+///
+/// The line is held by its direction and its distance from the origin, and
+/// the stretch by how far along the line it starts and ends, so that two
+/// stretches of one line can be told to overlap.
+#[derive(Clone, Copy)]
+struct LineStretch {
+    /// Unit direction, pointing right, or up when the line is vertical.
+    direction: (f64, f64),
+    /// Distance of the line from the origin, to the left of `direction`.
+    offset: f64,
+    low: f64,
+    high: f64,
+    /// How far apart two points of the subpath may be and count as one.
+    eps: f64,
+}
+
+impl LineStretch {
+    /// The stretch of the line through `origin` along `d`, a unit vector,
+    /// from `low` to `high` measured from `origin`.
+    fn new(origin: (f64, f64), d: (f64, f64), low: f64, high: f64, eps: f64) -> Self {
+        // Directions a rounding error apart are one direction, and so are
+        // the two ways along a line.
+        let round = |v: f64| (v * 1e9).round() / 1e9;
+        let (mut d, mut low, mut high) = ((round(d.0), round(d.1)), low, high);
+        if d.0 < 0.0 || (d.0 == 0.0 && d.1 < 0.0) {
+            d = (-d.0, -d.1);
+            (low, high) = (-high, -low);
+        }
+        let along = d.0 * origin.0 + d.1 * origin.1;
+        LineStretch {
+            direction: d,
+            offset: d.0 * origin.1 - d.1 * origin.0,
+            low: low + along,
+            high: high + along,
+            eps,
+        }
+    }
+
+    /// The point `along` the line.
+    fn point(&self, along: f64) -> (f64, f64) {
+        let d = self.direction;
+        (
+            d.0 * along - d.1 * self.offset,
+            d.1 * along + d.0 * self.offset,
+        )
+    }
+}
+
+/// Adds `stretches` to `lines`, each line drawn once however many of the
+/// stretches lie along it: two lines drawn over each other come out darker
+/// than one where their edges are smoothed.
+fn add_line_stretches(mut stretches: Vec<LineStretch>, lines: &mut Vec<PathSegment>) {
+    let order = |a: f64, b: f64| a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal);
+    stretches.sort_by(|a, b| {
+        order(a.direction.0, b.direction.0)
+            .then(order(a.direction.1, b.direction.1))
+            .then(order(a.offset, b.offset))
+    });
+    let mut from = 0;
+    while from < stretches.len() {
+        // The stretches of one line: the same direction, and offsets that
+        // run on from each other within a rounding error.
+        let mut to = from + 1;
+        while to < stretches.len()
+            && stretches[to].direction == stretches[from].direction
+            && stretches[to].offset - stretches[to - 1].offset
+                <= stretches[to].eps.max(stretches[to - 1].eps)
+        {
+            to += 1;
+        }
+        let line = &mut stretches[from..to];
+        line.sort_by(|a, b| order(a.low, b.low));
+        let mut run = line[0];
+        for next in &line[1..] {
+            if next.low <= run.high + run.eps.max(next.eps) {
+                run.high = run.high.max(next.high);
+                continue;
+            }
+            push_line_stretch(&run, lines);
+            run = LineStretch {
+                offset: run.offset,
+                ..*next
+            };
+        }
+        push_line_stretch(&run, lines);
+        from = to;
+    }
+}
+
+/// Adds one stretch of a line to `lines`.
+fn push_line_stretch(stretch: &LineStretch, lines: &mut Vec<PathSegment>) {
+    let (from, to) = (stretch.point(stretch.low), stretch.point(stretch.high));
+    lines.push(PathSegment::MoveTo(from.0, from.1));
+    lines.push(PathSegment::LineTo(to.0, to.1));
+}
+
+/// A fill's path with the subpaths that enclose no area taken out of it.
+struct ZeroAreaSplit {
+    /// The lines the subpaths that enclosed no area lie along, each drawn
+    /// once.
+    lines: PsPath,
+    /// The subpaths that enclose area, as they were.
+    rest: PsPath,
+}
+
+/// Takes out of a fill's path the subpaths that enclose no area, or gives
+/// `None` when every subpath encloses some.
+///
+/// A fill colours what its path encloses, and a path that runs out along a
+/// line and back along the same line encloses nothing, so the rasterizer
+/// paints no pixel for it. PostScript and PDF both paint such a path as a
+/// line one pixel wide (PLRM 7.5.1: a pixel is painted if any part of it
+/// lies inside the shape), and files rely on it: PDFs draw table rules as
+/// rectangles of no height (`8 0 1031 0 re f`), and PostScript programs
+/// fill a bare `moveto lineto`.
+///
+/// Two shapes of subpath are taken to enclose nothing:
+///
+/// - one whose points all lie on one straight line, which becomes the
+///   piece of that line from its first point along the line to its last;
+/// - one whose second half is its first half run backwards, curves
+///   included, which becomes its first half.
+///
+/// Points are compared in the path's own space to within a part in ten
+/// million of the largest coordinate, which is what a point carried through
+/// a matrix and back can be out by; a shape that is merely thin is left to
+/// the rasterizer.
+fn split_zero_area(path: &PsPath) -> Option<ZeroAreaSplit> {
+    let segments = &path.segments;
+    let mut lines: Vec<PathSegment> = Vec::new();
+    // The ranges of `segments` that are subpaths enclosing no area, each
+    // with the point its subpath started at.
+    let mut taken: Vec<(usize, usize, (f64, f64))> = Vec::new();
+    let mut edges: Vec<PathEdge> = Vec::new();
+    let mut stretches: Vec<LineStretch> = Vec::new();
+
+    let mut start = (0.0, 0.0);
+    let mut at = 0;
+    while at < segments.len() {
+        // A subpath runs from a `MoveTo`, or from where the one before it
+        // was closed, up to the next `MoveTo` or just past a `ClosePath`.
+        let first = at;
+        if let PathSegment::MoveTo(x, y) = segments[at] {
+            start = (x, y);
+            at += 1;
+        }
+        let mut end = at;
+        while end < segments.len() {
+            match segments[end] {
+                PathSegment::MoveTo(..) => break,
+                PathSegment::ClosePath => {
+                    end += 1;
+                    break;
+                }
+                _ => end += 1,
+            }
+        }
+        if zero_area_line(
+            start,
+            &segments[at..end],
+            &mut edges,
+            &mut stretches,
+            &mut lines,
+        ) {
+            taken.push((first, end, start));
+        }
+        at = end.max(first + 1);
+    }
+
+    if taken.is_empty() {
+        return None;
+    }
+    add_line_stretches(stretches, &mut lines);
+    let mut rest = Vec::with_capacity(segments.len());
+    let mut from = 0;
+    for &(first, end, start) in &taken {
+        rest.extend_from_slice(&segments[from..first]);
+        // A subpath that follows a closed one without a `MoveTo` of its own
+        // starts where that one did, and still must once that one is gone.
+        if segments
+            .get(end)
+            .is_some_and(|next| !matches!(next, PathSegment::MoveTo(..)))
+        {
+            rest.push(PathSegment::MoveTo(start.0, start.1));
+        }
+        from = end;
+    }
+    rest.extend_from_slice(&segments[from..]);
+    Some(ZeroAreaSplit {
+        lines: PsPath { segments: lines },
+        rest: PsPath { segments: rest },
+    })
+}
+
+/// Tells whether the subpath that starts at `start` and runs through
+/// `segments` encloses no area, and if so adds the line it lies along: to
+/// `stretches` if that is a straight line, and to `lines` if it bends.
+/// `edges` is scratch space.
+fn zero_area_line(
+    start: (f64, f64),
+    segments: &[PathSegment],
+    edges: &mut Vec<PathEdge>,
+    stretches: &mut Vec<LineStretch>,
+    lines: &mut Vec<PathSegment>,
+) -> bool {
+    let mut largest = start.0.abs().max(start.1.abs());
+    for seg in segments {
+        match *seg {
+            PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => {
+                largest = largest.max(x.abs()).max(y.abs());
+            }
+            PathSegment::CurveTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x3,
+                y3,
+            } => {
+                for v in [x1, y1, x2, y2, x3, y3] {
+                    largest = largest.max(v.abs());
+                }
+            }
+            PathSegment::ClosePath => {}
+        }
+    }
+    let eps = largest * 1e-7;
+    let near = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).abs() <= eps && (a.1 - b.1).abs() <= eps;
+
+    // The subpath's edges, the closing one included (a fill closes a
+    // subpath left open), without those of no length.
+    edges.clear();
+    let mut current = start;
+    for seg in segments {
+        match *seg {
+            PathSegment::LineTo(x, y) => {
+                if !near(current, (x, y)) {
+                    edges.push(PathEdge {
+                        from: current,
+                        to: (x, y),
+                        controls: None,
+                    });
+                }
+                current = (x, y);
+            }
+            PathSegment::CurveTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x3,
+                y3,
+            } => {
+                if !(near(current, (x1, y1)) && near(current, (x2, y2)) && near(current, (x3, y3)))
+                {
+                    edges.push(PathEdge {
+                        from: current,
+                        to: (x3, y3),
+                        controls: Some(((x1, y1), (x2, y2))),
+                    });
+                }
+                current = (x3, y3);
+            }
+            PathSegment::MoveTo(..) | PathSegment::ClosePath => {}
+        }
+    }
+    if !near(current, start) {
+        edges.push(PathEdge {
+            from: current,
+            to: start,
+            controls: None,
+        });
+    }
+    // A single point: nothing to draw a line along.
+    let Some(first) = edges.first().copied() else {
+        return false;
+    };
+
+    // All on one straight line? Measure each point's distance from the
+    // line through the first edge that has a direction.
+    let origin = first.from;
+    let direction = edges.iter().find_map(|e| {
+        let d = (e.to.0 - origin.0, e.to.1 - origin.1);
+        let length = d.0.hypot(d.1);
+        (length > eps).then_some((d.0 / length, d.1 / length))
+    });
+    if let Some(d) = direction {
+        let (mut low, mut high) = (0.0f64, 0.0f64);
+        let mut on_line = |p: (f64, f64)| {
+            let v = (p.0 - origin.0, p.1 - origin.1);
+            if (d.0 * v.1 - d.1 * v.0).abs() > eps {
+                return false;
+            }
+            let along = d.0 * v.0 + d.1 * v.1;
+            low = low.min(along);
+            high = high.max(along);
+            true
         };
-        x_min = x_min.min(x);
-        x_max = x_max.max(x);
-        y_min = y_min.min(y);
-        y_max = y_max.max(y);
+        let straight = edges
+            .iter()
+            .all(|e| on_line(e.to) && e.controls.is_none_or(|(c1, c2)| on_line(c1) && on_line(c2)));
+        if straight {
+            stretches.push(LineStretch::new(origin, d, low, high, eps));
+            return true;
+        }
     }
 
-    if x_min > x_max {
-        return false; // empty path
+    // Out and back the same way? Each edge of the first half is then an
+    // edge of the second half reversed, the last against the first.
+    let count = edges.len();
+    if !count.is_multiple_of(2) {
+        return false;
     }
+    let retraced = (0..count / 2).all(|i| {
+        let (out, back) = (edges[i], edges[count - 1 - i]);
+        near(out.from, back.to)
+            && near(out.to, back.from)
+            && match (out.controls, back.controls) {
+                (None, None) => true,
+                (Some((o1, o2)), Some((b1, b2))) => near(o1, b2) && near(o2, b1),
+                _ => false,
+            }
+    });
+    if !retraced {
+        return false;
+    }
+    lines.push(PathSegment::MoveTo(first.from.0, first.from.1));
+    for e in &edges[..count / 2] {
+        lines.push(match e.controls {
+            None => PathSegment::LineTo(e.to.0, e.to.1),
+            Some(((x1, y1), (x2, y2))) => PathSegment::CurveTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x3: e.to.0,
+                y3: e.to.1,
+            },
+        });
+    }
+    true
+}
 
-    let w = x_max - x_min;
-    let h = y_max - y_min;
+/// The stroke that draws the lines of a fill whose path encloses no area:
+/// as thin as a stroke gets, in the fill's colour and with its overprint
+/// and transparency.
+fn zero_area_stroke(params: &FillParams) -> StrokeParams {
+    StrokeParams {
+        color: params.color.clone(),
+        line_width: 0.0,
+        line_cap: LineCap::Butt,
+        line_join: LineJoin::Round,
+        miter_limit: 10.0,
+        dash_pattern: stet_graphics::color::DashPattern::solid(),
+        ctm: params.ctm,
+        stroke_adjust: true,
+        is_text_glyph: false,
+        overprint: params.overprint,
+        overprint_mode: params.overprint_mode,
+        opm_paired: params.opm_paired,
+        painted_channels: params.painted_channels,
+        is_device_cmyk: params.is_device_cmyk,
+        spot_color: params.spot_color.clone(),
+        icc_color: params.icc_color.clone(),
+        rendering_intent: params.rendering_intent,
+        transfer: params.transfer.clone(),
+        halftone: params.halftone.clone(),
+        bg_ucr: params.bg_ucr.clone(),
+        alpha: params.alpha,
+        blend_mode: params.blend_mode,
+        alpha_is_shape: params.alpha_is_shape,
+    }
+}
 
-    // Degenerate if one dimension is exactly zero (within f64 epsilon)
-    // while the other has real extent. This catches `re` rects with
-    // zero width or height but not legitimate small shapes.
-    let eps = 1e-6;
-    (w < eps && h > eps) || (h < eps && w > eps)
+/// The lines of a fill whose path has subpaths enclosing no area, with the
+/// stroke that draws them. A glyph has none: a font's outlines carry stray
+/// contours that were never meant to show.
+fn zero_area_lines(path: &PsPath, params: &FillParams) -> Option<(ZeroAreaSplit, StrokeParams)> {
+    if params.is_text_glyph {
+        return None;
+    }
+    split_zero_area(path).map(|split| (split, zero_area_stroke(params)))
 }
 
 /// Convert PostScript FillRule to tiny-skia FillRule.
@@ -1686,7 +2036,22 @@ fn precompute_bboxes(list: &DisplayList, dpi: f64) -> Vec<Option<YBBox>> {
     list.elements()
         .iter()
         .map(|elem| match elem {
-            DisplayElement::Fill { path, params } => fill_device_y_bbox(path, &params.ctm),
+            DisplayElement::Fill { path, params } => {
+                let filled = fill_device_y_bbox(path, &params.ctm);
+                // Lines drawn for subpaths of no area reach past the path.
+                match zero_area_lines(path, params) {
+                    Some((split, stroke)) => {
+                        match (filled, stroke_device_y_bbox(&split.lines, &stroke, dpi)) {
+                            (Some(a), Some(b)) => Some(YBBox {
+                                y_min: a.y_min.min(b.y_min),
+                                y_max: a.y_max.max(b.y_max),
+                            }),
+                            (a, b) => a.or(b),
+                        }
+                    }
+                    None => filled,
+                }
+            }
             DisplayElement::Stroke { path, params } => stroke_device_y_bbox(path, params, dpi),
             DisplayElement::Image { params, .. } => image_y_bbox(params),
             DisplayElement::AxialShading { params } => {
@@ -4338,6 +4703,23 @@ fn render_element(
     }
     match element {
         DisplayElement::Fill { path, params } => {
+            // Subpaths that enclose no area are drawn as lines; the rest
+            // of the path is filled as it would have been.
+            if let Some((split, stroke)) = zero_area_lines(path, params) {
+                if !split.rest.segments.is_empty() {
+                    let rest = DisplayElement::Fill {
+                        path: split.rest,
+                        params: params.clone(),
+                    };
+                    render_element(pixmap, band_state, &rest, ctx);
+                }
+                let lines = DisplayElement::Stroke {
+                    path: split.lines,
+                    params: stroke,
+                };
+                render_element(pixmap, band_state, &lines, ctx);
+                return;
+            }
             // DeviceGray with overprint behaves as a K-only process paint —
             // promote it to DeviceCMYK (0, 0, 0, 1-gray) with painted_channels
             // set to CMYK_K so it flows through the overprint subset path,
@@ -4445,21 +4827,8 @@ fn render_element(
                 );
                 let transform = ctx.transform(&params.ctm);
 
-                // Detect degenerate fill paths: rectangles/lines with zero extent
-                // in one dimension. These are commonly used in PDFs to draw table
-                // grid lines as zero-width or zero-height filled rectangles.
-                // Since they have no area, fill_path produces nothing. Render them
-                // as hairline strokes instead.
-                if is_degenerate_fill(path) {
-                    let stroke = Stroke {
-                        width: 1.0,
-                        ..Stroke::default()
-                    };
-                    pixmap.stroke_path(&skia_path, &paint, &stroke, transform, mask_ref);
-                } else {
-                    let fill_rule = to_fill_rule(&params.fill_rule);
-                    pixmap.fill_path(&skia_path, &paint, fill_rule, transform, mask_ref);
-                }
+                let fill_rule = to_fill_rule(&params.fill_rule);
+                pixmap.fill_path(&skia_path, &paint, fill_rule, transform, mask_ref);
 
                 // Update CMYK tracking buffer for non-overprint fills
                 if band_state.cmyk_buffer.is_some() {
@@ -11764,7 +12133,7 @@ fn precompute_full_bboxes(list: &DisplayList, dpi: f64) -> Vec<Option<BBox2D>> {
     list.elements()
         .iter()
         .map(|elem| match elem {
-            DisplayElement::Fill { path, params } => fill_device_full_bbox(path, &params.ctm),
+            DisplayElement::Fill { path, params } => fill_painted_full_bbox(path, params, dpi),
             DisplayElement::Stroke { path, params } => stroke_device_full_bbox(path, params, dpi),
             DisplayElement::Image { params, .. } => image_full_bbox(params),
             DisplayElement::AxialShading { params } => shading_full_bbox(&params.bbox, &params.ctm),
@@ -11965,7 +12334,7 @@ fn compute_paint_bounds(list: &DisplayList, dpi: f64) -> Option<BBox2D> {
             // their CTM alone (`transform_element_ctm`), their paths left in
             // pattern space.
             DisplayElement::Fill { path, params } => {
-                if let Some(b) = fill_device_full_bbox(path, &params.ctm) {
+                if let Some(b) = fill_painted_full_bbox(path, params, dpi) {
                     push_paint(&mut union, &clip_stack, b);
                 }
             }
@@ -12121,6 +12490,24 @@ fn stroke_device_full_bbox(path: &PsPath, params: &StrokeParams, dpi: f64) -> Op
         }
         bbox
     })
+}
+
+/// The device-space box a fill paints in: its path's, widened by the lines
+/// drawn for subpaths that enclose no area.
+fn fill_painted_full_bbox(path: &PsPath, params: &FillParams, dpi: f64) -> Option<BBox2D> {
+    let filled = fill_device_full_bbox(path, &params.ctm);
+    let Some((split, stroke)) = zero_area_lines(path, params) else {
+        return filled;
+    };
+    match (filled, stroke_device_full_bbox(&split.lines, &stroke, dpi)) {
+        (Some(a), Some(b)) => Some(BBox2D {
+            x_min: a.x_min.min(b.x_min),
+            y_min: a.y_min.min(b.y_min),
+            x_max: a.x_max.max(b.x_max),
+            y_max: a.y_max.max(b.y_max),
+        }),
+        (a, b) => a.or(b),
+    }
 }
 
 fn fill_device_full_bbox(path: &PsPath, ctm: &Matrix) -> Option<BBox2D> {
@@ -18046,6 +18433,330 @@ mod tests {
         let crop_x = ((220.0_f32 - 100.0) * 2.0).floor() as i32;
         let page_x_for_x_zero = vp_x_pixels + crop_x;
         assert_eq!(page_x_for_x_zero, 440, "viewport scale-2: page-x at x=0");
+    }
+
+    // --- fills whose path encloses no area ---
+
+    fn path_of(segments: Vec<PathSegment>) -> PsPath {
+        PsPath { segments }
+    }
+
+    /// The end points of each line in a path of `MoveTo` / `LineTo` pairs.
+    fn line_ends(path: &PsPath) -> Vec<((f64, f64), (f64, f64))> {
+        path.segments
+            .chunks(2)
+            .map(|pair| match pair {
+                [PathSegment::MoveTo(x0, y0), PathSegment::LineTo(x1, y1)] => {
+                    ((*x0, *y0), (*x1, *y1))
+                }
+                other => panic!("not a line: {other:?}"),
+            })
+            .collect()
+    }
+
+    fn assert_line(path: &PsPath, from: (f64, f64), to: (f64, f64)) {
+        let ends = line_ends(path);
+        assert_eq!(ends.len(), 1, "one line, got {ends:?}");
+        let close = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).hypot(a.1 - b.1) < 1e-6;
+        let (a, b) = ends[0];
+        assert!(
+            (close(a, from) && close(b, to)) || (close(a, to) && close(b, from)),
+            "line {a:?} to {b:?}, wanted {from:?} to {to:?}"
+        );
+    }
+
+    #[test]
+    fn a_rectangle_of_no_height_is_one_line() {
+        // `10 50 180 0 re`: a PDF table rule.
+        let split = split_zero_area(&path_of(vec![
+            PathSegment::MoveTo(10.0, 50.0),
+            PathSegment::LineTo(190.0, 50.0),
+            PathSegment::LineTo(190.0, 50.0),
+            PathSegment::LineTo(10.0, 50.0),
+            PathSegment::ClosePath,
+        ]))
+        .expect("no area");
+        assert_line(&split.lines, (10.0, 50.0), (190.0, 50.0));
+        assert!(split.rest.segments.is_empty());
+    }
+
+    #[test]
+    fn a_sloped_line_left_open_is_one_line() {
+        // `moveto lineto fill`: the fill closes it back along itself.
+        let split = split_zero_area(&path_of(vec![
+            PathSegment::MoveTo(10.0, 20.0),
+            PathSegment::LineTo(110.0, 40.0),
+        ]))
+        .expect("no area");
+        assert_line(&split.lines, (10.0, 20.0), (110.0, 40.0));
+    }
+
+    #[test]
+    fn points_along_one_line_in_any_order_are_one_line() {
+        // Out to the far end, back to the middle, then home.
+        let split = split_zero_area(&path_of(vec![
+            PathSegment::MoveTo(0.0, 0.0),
+            PathSegment::LineTo(90.0, 30.0),
+            PathSegment::LineTo(30.0, 10.0),
+            PathSegment::LineTo(-30.0, -10.0),
+            PathSegment::ClosePath,
+        ]))
+        .expect("no area");
+        assert_line(&split.lines, (-30.0, -10.0), (90.0, 30.0));
+    }
+
+    #[test]
+    fn a_curve_out_and_back_is_the_curve_once() {
+        let split = split_zero_area(&path_of(vec![
+            PathSegment::MoveTo(10.0, 60.0),
+            PathSegment::CurveTo {
+                x1: 60.0,
+                y1: 100.0,
+                x2: 140.0,
+                y2: 100.0,
+                x3: 190.0,
+                y3: 60.0,
+            },
+            PathSegment::CurveTo {
+                x1: 140.0,
+                y1: 100.0,
+                x2: 60.0,
+                y2: 100.0,
+                x3: 10.0,
+                y3: 60.0,
+            },
+            PathSegment::ClosePath,
+        ]))
+        .expect("no area");
+        assert!(split.rest.segments.is_empty());
+        assert!(
+            matches!(
+                split.lines.segments[..],
+                [
+                    PathSegment::MoveTo(10.0, 60.0),
+                    PathSegment::CurveTo {
+                        x1: 60.0,
+                        y1: 100.0,
+                        x2: 140.0,
+                        y2: 100.0,
+                        x3: 190.0,
+                        y3: 60.0
+                    }
+                ]
+            ),
+            "{:?}",
+            split.lines.segments
+        );
+    }
+
+    #[test]
+    fn a_curve_closed_by_its_chord_has_area() {
+        assert!(
+            split_zero_area(&path_of(vec![
+                PathSegment::MoveTo(10.0, 60.0),
+                PathSegment::CurveTo {
+                    x1: 60.0,
+                    y1: 100.0,
+                    x2: 140.0,
+                    y2: 100.0,
+                    x3: 190.0,
+                    y3: 60.0,
+                },
+                PathSegment::ClosePath,
+            ]))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_curve_with_its_control_points_on_one_line_is_a_line() {
+        let split = split_zero_area(&path_of(vec![
+            PathSegment::MoveTo(10.0, 60.0),
+            PathSegment::CurveTo {
+                x1: 70.0,
+                y1: 60.0,
+                x2: 130.0,
+                y2: 60.0,
+                x3: 190.0,
+                y3: 60.0,
+            },
+        ]))
+        .expect("no area");
+        assert_line(&split.lines, (10.0, 60.0), (190.0, 60.0));
+    }
+
+    #[test]
+    fn a_bent_line_out_and_back_is_its_first_half() {
+        let split = split_zero_area(&path_of(vec![
+            PathSegment::MoveTo(10.0, 20.0),
+            PathSegment::LineTo(100.0, 80.0),
+            PathSegment::LineTo(190.0, 20.0),
+            PathSegment::LineTo(100.0, 80.0),
+            PathSegment::ClosePath,
+        ]))
+        .expect("no area");
+        assert!(
+            matches!(
+                split.lines.segments[..],
+                [
+                    PathSegment::MoveTo(10.0, 20.0),
+                    PathSegment::LineTo(100.0, 80.0),
+                    PathSegment::LineTo(190.0, 20.0)
+                ]
+            ),
+            "{:?}",
+            split.lines.segments
+        );
+    }
+
+    #[test]
+    fn a_bow_tie_has_area() {
+        // Its two halves wind opposite ways, so the areas sum to nothing,
+        // but it is a shape and is filled as one.
+        assert!(
+            split_zero_area(&path_of(vec![
+                PathSegment::MoveTo(0.0, 0.0),
+                PathSegment::LineTo(10.0, 10.0),
+                PathSegment::LineTo(10.0, 0.0),
+                PathSegment::LineTo(0.0, 10.0),
+                PathSegment::ClosePath,
+            ]))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_thin_shape_and_a_single_point_are_left_to_the_fill() {
+        assert!(
+            split_zero_area(&path_of(vec![
+                PathSegment::MoveTo(10.0, 50.0),
+                PathSegment::LineTo(190.0, 50.0),
+                PathSegment::LineTo(190.0, 50.01),
+                PathSegment::LineTo(10.0, 50.01),
+                PathSegment::ClosePath,
+            ]))
+            .is_none()
+        );
+        assert!(
+            split_zero_area(&path_of(vec![
+                PathSegment::MoveTo(10.0, 50.0),
+                PathSegment::ClosePath,
+            ]))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_line_carried_through_a_matrix_and_back_still_has_no_area() {
+        // The way back misses the way out by a rounding error.
+        let split = split_zero_area(&path_of(vec![
+            PathSegment::MoveTo(1234.5, 678.25),
+            PathSegment::LineTo(1500.125, 900.5),
+            PathSegment::LineTo(1234.5 + 3e-11, 678.25 - 2e-11),
+        ]))
+        .expect("no area");
+        assert_line(&split.lines, (1234.5, 678.25), (1500.125, 900.5));
+    }
+
+    #[test]
+    fn only_the_subpaths_of_no_area_are_taken_out() {
+        let triangle = [
+            PathSegment::MoveTo(10.0, 10.0),
+            PathSegment::LineTo(60.0, 10.0),
+            PathSegment::LineTo(35.0, 40.0),
+            PathSegment::ClosePath,
+        ];
+        let mut segments = triangle.to_vec();
+        segments.extend([
+            PathSegment::MoveTo(60.0, 10.0),
+            PathSegment::LineTo(190.0, 40.0),
+            PathSegment::ClosePath,
+        ]);
+        segments.extend(triangle.iter().cloned());
+        let split = split_zero_area(&path_of(segments)).expect("one subpath of no area");
+        assert_line(&split.lines, (60.0, 10.0), (190.0, 40.0));
+        assert_eq!(split.rest.segments.len(), 8, "both triangles kept");
+    }
+
+    #[test]
+    fn a_subpath_that_starts_where_one_of_no_area_closed_keeps_its_start() {
+        // 4778.pdf: an arrowhead drawn as a line of no area, closed, and
+        // then a triangle with no `MoveTo` of its own.
+        let split = split_zero_area(&path_of(vec![
+            PathSegment::MoveTo(96.0, 39.0),
+            PathSegment::LineTo(96.0, 32.0),
+            PathSegment::LineTo(96.0, 39.0),
+            PathSegment::ClosePath,
+            PathSegment::LineTo(99.0, 35.0),
+            PathSegment::LineTo(96.0, 32.0),
+            PathSegment::LineTo(96.0, 39.0),
+            PathSegment::ClosePath,
+        ]))
+        .expect("one subpath of no area");
+        assert_line(&split.lines, (96.0, 32.0), (96.0, 39.0));
+        assert!(
+            matches!(
+                split.rest.segments[..],
+                [
+                    PathSegment::MoveTo(96.0, 39.0),
+                    PathSegment::LineTo(99.0, 35.0),
+                    PathSegment::LineTo(96.0, 32.0),
+                    PathSegment::LineTo(96.0, 39.0),
+                    PathSegment::ClosePath
+                ]
+            ),
+            "{:?}",
+            split.rest.segments
+        );
+    }
+
+    #[test]
+    fn lines_laid_over_each_other_are_drawn_once() {
+        // zeroline.ps: a line, and a shorter one along part of it; then
+        // one that runs on past its end, and one apart from all three.
+        let split = split_zero_area(&path_of(vec![
+            PathSegment::MoveTo(0.0, 0.0),
+            PathSegment::LineTo(100.0, 100.0),
+            PathSegment::MoveTo(20.0, 20.0),
+            PathSegment::LineTo(70.0, 70.0),
+            PathSegment::MoveTo(130.0, 130.0),
+            PathSegment::LineTo(90.0, 90.0),
+            PathSegment::MoveTo(200.0, 200.0),
+            PathSegment::LineTo(210.0, 210.0),
+            // The same slope, on another line.
+            PathSegment::MoveTo(0.0, 5.0),
+            PathSegment::LineTo(100.0, 105.0),
+        ]))
+        .expect("no area");
+        let close = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).hypot(a.1 - b.1) < 1e-6;
+        let ends = line_ends(&split.lines);
+        assert_eq!(ends.len(), 3, "{ends:?}");
+        for (from, to) in [
+            ((0.0, 0.0), (130.0, 130.0)),
+            ((200.0, 200.0), (210.0, 210.0)),
+            ((0.0, 5.0), (100.0, 105.0)),
+        ] {
+            assert!(
+                ends.iter().any(|&(a, b)| close(a, from) && close(b, to)),
+                "no line {from:?} to {to:?} in {ends:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_glyph_gets_no_lines() {
+        // A font's outlines carry stray contours of no area.
+        let stray = path_of(vec![
+            PathSegment::MoveTo(10.0, 20.0),
+            PathSegment::LineTo(110.0, 40.0),
+            PathSegment::ClosePath,
+        ]);
+        let DisplayElement::Fill { path, mut params } = fill(stray, 1.0, 0) else {
+            unreachable!()
+        };
+        assert!(zero_area_lines(&path, &params).is_some());
+        params.is_text_glyph = true;
+        assert!(zero_area_lines(&path, &params).is_none());
     }
 
     // --- obscured-fill skip (§ GWG reference-under-test pattern) ---

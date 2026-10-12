@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A fill whose path encloses no area is drawn as a thin line, at any
+  angle.** A path that runs out along a line and back along it — a bare
+  `moveto lineto fill`, a rectangle of no height, a curve retraced —
+  encloses nothing, and only the level and upright ones were drawn at
+  all. PostScript and PDF paint the pixels such a path passes through
+  (PLRM 7.5.1), and Ghostscript's `zeroline.ps` now shows its fans of
+  lines. Each line is drawn once, as thin as a stroke of no width: the
+  level and upright ones used to be drawn out and back, which made the
+  rules of a PDF table drawn this way as heavy as its border. A path of
+  several pieces has only its pieces of no area drawn as lines, lines
+  laid over each other are drawn once, and the outline of a glyph is
+  left alone. The lines now also overprint as the fill would have.
+
 ## [0.8.6] — 2026-10-12
 
 ### Added
