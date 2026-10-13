@@ -70,6 +70,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1.6 GB of memory to 49 MB; at 600 dpi from 20 s and 4.9 GB to 0.8 s
   and 250 MB. The tile's buffer also stopped at 8,192 pixels, so what a
   larger tile held beyond that was left unpainted; it is now drawn.
+- **A soft mask's content is drawn only where the mask can show it, and
+  a group with nothing to paint is skipped.** InDesign gives a feathered
+  or glowing object a form whose `/BBox` is far larger than the page, so
+  the bounds it declares bound nothing, and it leaves behind groups that
+  hold only a clip. A page of a hundred such objects drew a hundred
+  gradients the size of the page, each to show a small part, and
+  composited dozens of empty page-sized groups. The content is now kept
+  to the mask's own extent wherever the mask is nought outside it, and
+  an empty group costs nothing. One such page at 150 dpi went from 7.2 s
+  to 0.95 s on one thread and from 1.4 s to 0.45 s on 24. Pixels at
+  the very edge of a mask can differ slightly on a page drawn with
+  overprint, where the hidden part of the content used to be recorded
+  as if it had been painted.
 
 ## [0.8.6] — 2026-10-12
 

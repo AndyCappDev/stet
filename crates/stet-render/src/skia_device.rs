@@ -5835,6 +5835,21 @@ fn paths_approximately_equal(a: &PsPath, b: &PsPath, tolerance: f64) -> bool {
     true
 }
 
+/// Whether anything in `list` paints: a clip, a text run and a group or
+/// soft mask holding only those do not.
+fn list_paints(list: &DisplayList) -> bool {
+    list.elements().iter().any(|element| match element {
+        DisplayElement::Clip { .. } | DisplayElement::InitClip | DisplayElement::TextRun { .. } => {
+            false
+        }
+        DisplayElement::Group { elements, .. } | DisplayElement::OcgGroup { elements, .. } => {
+            list_paints(elements)
+        }
+        DisplayElement::SoftMasked { content, .. } => list_paints(content),
+        _ => true,
+    })
+}
+
 ///
 /// Creates an offscreen pixmap, renders the group's child elements into it,
 /// then composites back onto the parent with the group's blend mode and alpha.
@@ -5852,6 +5867,12 @@ fn render_group(
     // "no crop" — rendered into it and composited back, for every band of
     // the page it is not in.
     if group_misses_output(&params.bbox, ctx) {
+        return;
+    }
+    // Nor does a group with nothing in it to paint. InDesign leaves groups
+    // holding only a clip, each with a `/BBox` larger than the page: every
+    // one was given an offscreen the size of the page and composited back.
+    if !list_paints(elements) {
         return;
     }
 
@@ -6998,12 +7019,74 @@ fn render_soft_masked(
     let smask_px_y1 = ((bbox[3] as f32 - ctx.vp_y) * ctx.scale_y).ceil() as i32;
 
     // Clip to parent output bounds
-    let crop_x = smask_px_x0.max(0);
-    let crop_y = smask_px_y0.max(0);
-    let crop_x1 = smask_px_x1.min(ctx.out_w as i32);
-    let crop_y1 = smask_px_y1.min(ctx.out_h as i32);
+    let mut crop_x = smask_px_x0.max(0);
+    let mut crop_y = smask_px_y0.max(0);
+    let mut crop_x1 = smask_px_x1.min(ctx.out_w as i32);
+    let mut crop_y1 = smask_px_y1.min(ctx.out_h as i32);
     if crop_x >= crop_x1 || crop_y >= crop_y1 {
         return;
+    }
+
+    // The content and the mask each find their images in their own entries.
+    let (content_images, mask_images) = cached_masked(ctx.image_cache, ctx.elem_idx);
+    let (content_preprocessed, mask_preprocessed) = cached_masked(ctx.preprocessed, ctx.elem_idx);
+
+    // 1b. CACHED RASTER PATH: simple masks (no nested offscreens).
+    let raster_owned: Option<stet_graphics::display_list::MaskRaster> = if use_inline_mask {
+        None
+    } else {
+        let mut guard = mask_cache.lock().unwrap();
+        let needs_build = match guard.as_ref() {
+            None => true,
+            Some(None) => false, // memoized "no mask"
+            Some(Some(r)) => {
+                (r.scale_x - ctx.scale_x).abs() > 1e-4 || (r.scale_y - ctx.scale_y).abs() > 1e-4
+            }
+        };
+        if needs_build {
+            let built = rasterize_mask(
+                mask_list,
+                params,
+                ctx.icc,
+                ctx.no_aa,
+                ctx.effective_dpi,
+                ctx.scale_x,
+                ctx.scale_y,
+                ctx.layer_set,
+                ctx.clip_neighbours,
+                mask_images,
+                mask_preprocessed,
+            );
+            *guard = Some(built);
+        }
+        guard.as_ref().and_then(|inner| inner.clone())
+    };
+
+    // Default mask value for content pixels that fall outside the mask
+    // raster (e.g. backdrop region for a Luminosity mask with non-black
+    // /BC, or always 0 for Alpha masks).
+    let fallback_mask = out_of_bounds_mask_value(params) as i32;
+
+    // Where the mask is nought the content shows nothing, and outside its
+    // raster the mask is `fallback_mask`. So when that is nought the
+    // content is wanted only within the raster. InDesign gives a feathered
+    // or glowing object a form whose `/BBox` is far larger than the page,
+    // so `params.bbox` bounds nothing: a page of a hundred such objects
+    // drew a hundred gradients the size of the page, to show a small part
+    // of each.
+    if !use_inline_mask && fallback_mask == 0 {
+        let Some(raster) = raster_owned.as_ref() else {
+            return;
+        };
+        let left = raster.origin_x - (ctx.vp_x * ctx.scale_x).round() as i32;
+        let top = raster.origin_y - (ctx.vp_y * ctx.scale_y).round() as i32;
+        crop_x = crop_x.max(left);
+        crop_y = crop_y.max(top);
+        crop_x1 = crop_x1.min(left.saturating_add(raster.width as i32));
+        crop_y1 = crop_y1.min(top.saturating_add(raster.height as i32));
+        if crop_x >= crop_x1 || crop_y >= crop_y1 {
+            return;
+        }
     }
     let eff_w = (crop_x1 - crop_x) as u32;
     let eff_h = (crop_y1 - crop_y) as u32;
@@ -7014,10 +7097,6 @@ fn render_soft_masked(
     // the content can paint.
     let eff_vp_x = ctx.vp_x + crop_x as f32 / ctx.scale_x;
     let eff_vp_y = ctx.vp_y + crop_y as f32 / ctx.scale_y;
-
-    // The content and the mask each find their images in their own entries.
-    let (content_images, mask_images) = cached_masked(ctx.image_cache, ctx.elem_idx);
-    let (content_preprocessed, mask_preprocessed) = cached_masked(ctx.preprocessed, ctx.elem_idx);
 
     let sub_ctx = RenderContext {
         vp_x: eff_vp_x,
@@ -7096,42 +7175,6 @@ fn render_soft_masked(
         mask_values_inline = vec![0u8; (eff_w * eff_h) as usize];
         extract_soft_mask_values(mask_pixmap.data(), &mut mask_values_inline, params);
     }
-
-    // 1b. CACHED RASTER PATH: simple masks (no nested offscreens).
-    let raster_owned: Option<stet_graphics::display_list::MaskRaster> = if use_inline_mask {
-        None
-    } else {
-        let mut guard = mask_cache.lock().unwrap();
-        let needs_build = match guard.as_ref() {
-            None => true,
-            Some(None) => false, // memoized "no mask"
-            Some(Some(r)) => {
-                (r.scale_x - ctx.scale_x).abs() > 1e-4 || (r.scale_y - ctx.scale_y).abs() > 1e-4
-            }
-        };
-        if needs_build {
-            let built = rasterize_mask(
-                mask_list,
-                params,
-                ctx.icc,
-                ctx.no_aa,
-                ctx.effective_dpi,
-                ctx.scale_x,
-                ctx.scale_y,
-                ctx.layer_set,
-                ctx.clip_neighbours,
-                mask_images,
-                mask_preprocessed,
-            );
-            *guard = Some(built);
-        }
-        guard.as_ref().and_then(|inner| inner.clone())
-    };
-
-    // Default mask value for content pixels that fall outside the mask
-    // raster (e.g. backdrop region for a Luminosity mask with non-black
-    // /BC, or always 0 for Alpha masks).
-    let fallback_mask = out_of_bounds_mask_value(params) as i32;
 
     // 2. Render content into an offscreen, initialized with the parent's
     // backdrop so non-isolated groups with blend modes (e.g. Multiply) see
