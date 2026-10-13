@@ -506,7 +506,7 @@ impl PixmapMut<'_> {
         };
 
         if sprite {
-            self.draw_sprite(x, y, pixmap, opacity, &paint, mask);
+            self.draw_sprite(x, y, pixmap, opacity, mask);
         } else {
             self.fill_rect(rect, &paint, transform, mask);
         }
@@ -514,21 +514,22 @@ impl PixmapMut<'_> {
 
     /// Draws `pixmap` over this one at `(x, y)`, pixel for pixel.
     ///
-    /// The pipeline blends every pixel in floating point, whatever it
-    /// holds. A row of the source that is wholly transparent, or wholly
-    /// hidden by `mask`, leaves its row of the destination as it was. In a
-    /// row whose pixels are each opaque or transparent, drawn at full
-    /// opacity through no mask or a mask that hides none of it, the opaque
-    /// ones replace theirs and the rest leave theirs. Those rows are passed
-    /// over or copied; the rest go through `paint`'s pipeline as before.
-    /// The pixels are the pipeline's either way.
+    /// The pipeline does this a stage at a time for eight pixels: it works
+    /// out where in the source each pixel is, fetches it, and hands eight
+    /// numbers a channel from stage to stage. Here the source pixel is the
+    /// one opposite, and a row is blended in one loop. A row of the source
+    /// that is wholly transparent, or wholly hidden by `mask`, leaves its
+    /// row of the destination as it was, and is passed over. In a row whose
+    /// pixels are each opaque or transparent, drawn at full opacity through
+    /// no mask or a mask that hides none of it, the opaque ones replace
+    /// theirs and the rest leave theirs; that row is copied. The pixels are
+    /// the pipeline's in every case.
     fn draw_sprite(
         &mut self,
         x: i32,
         y: i32,
         pixmap: PixmapRef,
         opacity: f32,
-        paint: &Paint,
         mask: Option<&Mask>,
     ) {
         let (dst_w, dst_h) = (i64::from(self.width()), i64::from(self.height()));
@@ -551,21 +552,6 @@ impl PixmapMut<'_> {
                 && tail.iter().all(|b| *b == want)
         };
 
-        // Rows waiting for the pipeline, as rows of the source.
-        let mut waiting: Option<(i64, i64)> = None;
-        let through_pipeline = |this: &mut Self, rows: Option<(i64, i64)>| {
-            let Some((first, end)) = rows else { return };
-            let rect = Rect::from_ltrb(
-                x as f32,
-                (y + first) as f32,
-                (x + src_w) as f32,
-                (y + end) as f32,
-            );
-            if let Some(rect) = rect {
-                this.fill_rect(rect, paint, Transform::identity(), mask);
-            }
-        };
-
         for row in row0..row1 {
             let at = ((row * src_w + col0) * 4) as usize;
             let src_row = &src[at..at + width * 4];
@@ -574,41 +560,30 @@ impl PixmapMut<'_> {
                 let at = dst_y * dst_w as usize + dst_x;
                 &mask.data()[at..at + width]
             });
-
             if all(src_row, 0) || mask_row.is_some_and(|m| all(m, 0)) {
-                through_pipeline(self, waiting.take());
-            } else if opacity == 1.0
-                && mask_row.is_none_or(|m| all(m, 255))
-                && src_row
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .all(|px| px[3] == 255 || *px == [0; 4])
+                continue;
+            }
+
+            let at = (dst_y * dst_w as usize + dst_x) * 4;
+            let dst_row = &mut self.data_mut()[at..at + width * 4];
+            let (src_px, dst_px) = (src_row.as_chunks::<4>().0, dst_row.as_chunks_mut::<4>().0);
+            let mask_row = mask_row.filter(|m| !all(m, 255));
+            if opacity == 1.0
+                && mask_row.is_none()
+                && src_px.iter().all(|px| px[3] == 255 || *px == [0; 4])
             {
                 // Every pixel of the row either replaces its pixel of the
                 // destination or leaves it: a shape with hard edges, such
                 // as a gradient that stops at its circle.
-                through_pipeline(self, waiting.take());
-                let at = (dst_y * dst_w as usize + dst_x) * 4;
-                let dst_row = &mut self.data_mut()[at..at + width * 4];
-                for (dst, src) in dst_row
-                    .as_chunks_mut::<4>()
-                    .0
-                    .iter_mut()
-                    .zip(src_row.as_chunks::<4>().0)
-                {
+                for (dst, src) in dst_px.iter_mut().zip(src_px) {
                     if src[3] == 255 {
                         *dst = *src;
                     }
                 }
             } else {
-                waiting = Some(match waiting {
-                    Some((first, _)) => (first, row + 1),
-                    None => (row, row + 1),
-                });
+                source_over_row(dst_px, src_px, mask_row, opacity);
             }
         }
-        through_pipeline(self, waiting.take());
     }
 
     /// Applies a masks.
@@ -839,4 +814,77 @@ mod tests {
         );
         assert_eq!(iter.next(), None);
     }
+}
+
+/// Blends a row of `src` over `dst` at `opacity`, through `mask` if there
+/// is one: what the pipeline's stages do to a pattern drawn source-over,
+/// in the pipeline's arithmetic and its order, so that the bytes are the
+/// same. Those stages are `gather`, `scale_1_float`, `mask_u8`,
+/// `source_over` and `store` in `pipeline::highp`.
+fn source_over_row(dst: &mut [[u8; 4]], src: &[[u8; 4]], mask: Option<&[u8]>, opacity: f32) {
+    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: the processor has just said it has AVX2.
+        unsafe { source_over_row_avx2(dst, src, mask, opacity) };
+        return;
+    }
+    source_over_row_lanes(dst, src, mask, opacity);
+}
+
+/// [`source_over_row_lanes`] compiled for eight numbers to an instruction.
+/// The arithmetic is the same and so are the bytes.
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn source_over_row_avx2(
+    dst: &mut [[u8; 4]],
+    src: &[[u8; 4]],
+    mask: Option<&[u8]>,
+    opacity: f32,
+) {
+    source_over_row_lanes(dst, src, mask, opacity);
+}
+
+#[inline(always)]
+fn source_over_row_lanes(dst: &mut [[u8; 4]], src: &[[u8; 4]], mask: Option<&[u8]>, opacity: f32) {
+    match mask {
+        Some(mask) => {
+            for ((dst, src), &cover) in dst.iter_mut().zip(src).zip(mask) {
+                *dst = source_over_pixel(*dst, *src, opacity, f32::from(cover) / 255.0);
+            }
+        }
+        // Multiplying by one changes nothing, as leaving the stage out
+        // changes nothing.
+        None => {
+            for (dst, src) in dst.iter_mut().zip(src) {
+                *dst = source_over_pixel(*dst, *src, opacity, 1.0);
+            }
+        }
+    }
+}
+
+#[inline(always)]
+fn source_over_pixel(dst: [u8; 4], src: [u8; 4], opacity: f32, cover: f32) -> [u8; 4] {
+    // The pipeline's `load_8888` multiplies by this where `mask_u8`
+    // divides by 255.
+    const FACTOR: f32 = 1.0 / 255.0;
+    // Adding and taking away this much leaves the nearest whole number, a
+    // half going to the even one, as the pipeline's `round_int` does.
+    const WHOLE: f32 = 8_388_608.0; // 2^23
+    let s = src.map(|v| f32::from(v) * FACTOR * opacity * cover);
+    let keep = 1.0 - s[3];
+    let mut out = [0; 4];
+    for c in 0..4 {
+        let v = f32::from(dst[c]) * FACTOR * keep + s[c];
+        // Written as comparisons, and the conversion as one that trusts
+        // its range, because `max`, `min` and `as` each carry a rule for
+        // numbers that cannot arise here, and the rule keeps the loop from
+        // being worked in lanes: it ran no faster than the pipeline.
+        let v = if v > 0.0 { v } else { 0.0 };
+        let v = if v < 1.0 { v } else { 1.0 };
+        let v = (v * 255.0 + WHOLE) - WHOLE;
+        // SAFETY: the comparisons leave a number from 0 to 1, whatever
+        // came in, so this one is whole and from 0 to 255.
+        out[c] = unsafe { v.to_int_unchecked::<i32>() } as u8;
+    }
+    out
 }

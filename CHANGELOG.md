@@ -91,20 +91,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   table lookup itself passes over the entries that carry no weight. A
   page with a 3,806 × 5,349 four-colorant photograph at 150 dpi went
   from 3.2 s to 1.5 s on one thread. Output is unchanged.
-- **Pages built from layers of gradients draw faster.** Four costs came
-  out of them. A radial gradient worked out a CMYK value through the
-  colour profile for every pixel, though only a page drawn with overprint
-  reads it. It searched its colour stops from the first for every pixel,
-  where a gradient sampled from a function has dozens and neighbouring
-  pixels fall between the same two. It solved its equation, a square
-  root and four divisions, one pixel at a time; a row is now solved
-  together, four pixels to an instruction on a processor with AVX2 and
-  two elsewhere, in the same arithmetic. And a transparency group was
-  blended back onto the page a pixel at a time in floating point even
-  where its pixels were all opaque or all transparent; such rows are now
-  copied or passed over. A slide of ten full-page gradients at 300 dpi
-  went from 1.5 s to 0.9 s on one thread, and an InDesign page of several
-  hundred groups from 0.97 s to 0.82 s. Output is unchanged.
+- **Pages built from layers of gradients and transparency draw faster.**
+  Several costs came out of them, none changing a pixel. A radial
+  gradient worked out a CMYK value through the colour profile for every
+  pixel, though only a page drawn with overprint reads it. It searched
+  its colour stops from the first for every pixel, where a gradient
+  sampled from a function has dozens and neighbouring pixels fall between
+  the same two. It solved its equation, a square root and four divisions,
+  one pixel at a time; a row is now solved together, in the same
+  arithmetic. A transparency group was blended back onto the page through
+  the rasteriser's general pipeline, a stage at a time; it is now blended
+  a row at a time in one loop, rows that are all transparent are passed
+  over, and rows that are all opaque are copied. And content under a soft
+  mask was laid over its backdrop one pixel at a time, which is now a row
+  at a time as well. The row loops run eight numbers to an instruction on
+  a processor with AVX2 and four elsewhere. A slide of ten full-page
+  gradients at 300 dpi went from 1.5 s to 0.7 s on one thread, and an
+  InDesign page of several hundred groups from 0.97 s to 0.69 s.
 
 ## [0.8.6] — 2026-10-12
 

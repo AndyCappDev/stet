@@ -274,3 +274,57 @@ fn draw_pixmap_matches_the_pipeline_row_by_row() {
         }
     }
 }
+
+/// A pixmap blended over another gives the pipeline's pixels at every
+/// alpha and every value a channel can hold under it, over backdrops dark,
+/// light, clear and mixed, at full and part opacity, with and without a
+/// mask.
+#[test]
+fn draw_pixmap_blends_as_the_pipeline_does_at_every_alpha() {
+    let mut seed = 0xD1B5_4A32_D192_ED03u64;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed >> 32) as u8
+    };
+    // A column for each value of a channel, a row for each alpha; the
+    // channels run through the values in different orders.
+    let mut source = Pixmap::new(256, 256).unwrap();
+    for (alpha, pixels) in source.data_mut().chunks_exact_mut(256 * 4).enumerate() {
+        for (col, px) in pixels.chunks_exact_mut(4).enumerate() {
+            let channel = |value: usize| (value * alpha / 255) as u8;
+            let rgb = [channel(col), channel(255 - col), channel(col * 7 % 256)];
+            px.copy_from_slice(&[rgb[0], rgb[1], rgb[2], alpha as u8]);
+        }
+    }
+    let mut mask = Mask::new(256, 256).unwrap();
+    mask.data_mut().iter_mut().for_each(|value| *value = next());
+
+    for backdrop_alpha in [Some(255), Some(0), Some(1), Some(128), Some(254), None] {
+        let mut backdrop = Pixmap::new(256, 256).unwrap();
+        for px in backdrop.data_mut().chunks_exact_mut(4) {
+            let alpha = backdrop_alpha.unwrap_or_else(&mut next);
+            let channel = |value: u8| (u16::from(value) * u16::from(alpha) / 255) as u8;
+            px.copy_from_slice(&[channel(next()), channel(next()), channel(next()), alpha]);
+        }
+        for opacity in [1.0, 0.5, 0.3, 0.999] {
+            for mask in [None, Some(&mask)] {
+                let mut got = backdrop.clone();
+                let mut want = backdrop.clone();
+                let paint = PixmapPaint {
+                    opacity,
+                    blend_mode: BlendMode::SourceOver,
+                    quality: FilterQuality::Nearest,
+                };
+                got.draw_pixmap(0, 0, source.as_ref(), &paint, Transform::identity(), mask);
+                draw_pixmap_through_pipeline(&mut want, 0, 0, source.as_ref(), opacity, mask);
+                assert!(
+                    got == want,
+                    "backdrop alpha {backdrop_alpha:?}, opacity {opacity}, mask {}",
+                    mask.is_some()
+                );
+            }
+        }
+    }
+}

@@ -7317,6 +7317,8 @@ fn render_soft_masked(
     let parent_stride = ctx.out_w as usize * 4;
     let content_stride = eff_w as usize * 4;
     let clip_data = clip_ref.map(|m| m.data());
+    // The mask along one row, as far as the clip lets it through.
+    let mut row_mask = vec![0u8; eff_w as usize];
 
     for y in 0..eff_h as usize {
         let py = crop_y as usize + y;
@@ -7326,6 +7328,49 @@ fn render_soft_masked(
         let ci_row = y * content_stride;
         let pi_row = py * parent_stride;
         let page_y = vp_y_pixels + crop_y + y as i32;
+
+        if !use_cmyk_blend {
+            // Nothing below asks a question of a single pixel unless the
+            // blend is in CMYK, so the row is done at once: the mask
+            // gathered for it, then every channel moved from the backdrop
+            // toward the content by that much. The arithmetic is the
+            // per-pixel loop's; a pixel it passes over is one this leaves
+            // as it was.
+            let width = eff_w as usize;
+            if use_inline_mask {
+                row_mask.copy_from_slice(&mask_values_inline[y * width..(y + 1) * width]);
+            } else {
+                row_mask.fill(fallback_mask as u8);
+                if let Some(ref raster) = raster_owned {
+                    let my = page_y - raster.origin_y;
+                    // The raster's column under the row's first pixel.
+                    let first = i64::from(vp_x_pixels + crop_x) - i64::from(raster.origin_x);
+                    let x0 = (-first).max(0);
+                    let x1 = (i64::from(raster.width) - first).min(width as i64);
+                    if my >= 0 && (my as u32) < raster.height && x0 < x1 {
+                        let at = my as usize * raster.width as usize + (first + x0) as usize;
+                        row_mask[x0 as usize..x1 as usize]
+                            .copy_from_slice(&raster.data[at..at + (x1 - x0) as usize]);
+                    }
+                }
+            }
+            if let Some(clip) = clip_data {
+                let at = py * ctx.out_w as usize + crop_x as usize;
+                for (m, &cov) in row_mask.iter_mut().zip(&clip[at..at + width]) {
+                    if cov != 255 {
+                        *m = ((u32::from(*m) * u32::from(cov) + 127) / 255) as u8;
+                    }
+                }
+            }
+            let at = pi_row + crop_x as usize * 4;
+            blend_row_by_mask(
+                &mut parent_data[at..at + width * 4],
+                &content_data[ci_row..ci_row + width * 4],
+                &backdrop[ci_row..ci_row + width * 4],
+                &row_mask,
+            );
+            continue;
+        }
 
         for x in 0..eff_w as usize {
             let px = crop_x as usize + x;
@@ -15154,6 +15199,51 @@ fn mask_row_span(mask: &[u8], width: usize, py: u32, x0: u32, x1: u32) -> Option
     Some((x0 + first as u32, x0 + last as u32 + 1))
 }
 
+/// Move each channel of a row of `parent` by `mask` parts in 255 of the way
+/// from `backdrop` to `content`: masked content laid over its backdrop.
+///
+/// A channel the content left alone, or a pixel the mask shuts out, moves
+/// by nothing and keeps its value, so no pixel needs asking about, and the
+/// compiler can work the row in lanes.
+fn blend_row_by_mask(parent: &mut [u8], content: &[u8], backdrop: &[u8], mask: &[u8]) {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        // SAFETY: the processor has just said it has AVX2.
+        unsafe { blend_row_by_mask_avx2(parent, content, backdrop, mask) };
+        return;
+    }
+    blend_row_by_mask_lanes(parent, content, backdrop, mask);
+}
+
+/// [`blend_row_by_mask_lanes`] compiled for eight numbers to an
+/// instruction. The arithmetic is the same and so are the bytes.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn blend_row_by_mask_avx2(parent: &mut [u8], content: &[u8], backdrop: &[u8], mask: &[u8]) {
+    blend_row_by_mask_lanes(parent, content, backdrop, mask);
+}
+
+#[inline(always)]
+fn blend_row_by_mask_lanes(parent: &mut [u8], content: &[u8], backdrop: &[u8], mask: &[u8]) {
+    let pixels = parent
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(content.as_chunks::<4>().0)
+        .zip(backdrop.as_chunks::<4>().0)
+        .zip(mask);
+    for (((parent, content), backdrop), &m) in pixels {
+        let m = i32::from(m);
+        for c in 0..4 {
+            let delta = i32::from(content[c]) - i32::from(backdrop[c]);
+            // Rounded to the nearest, away from nought at a half.
+            let half = if delta > 0 { 128 } else { -128 };
+            let moved = i32::from(parent[c]) + (delta * m + half) / 255;
+            parent[c] = moved.clamp(0, 255) as u8;
+        }
+    }
+}
+
 /// How much of a pixel a clip lets through: 0 for none of it, 255 for all.
 ///
 /// The painters that write pixels themselves, rather than handing
@@ -16098,9 +16188,9 @@ fn render_radial_shading(
                     data[offset + 3] = 255;
                 } else {
                     let (cr, cg, cb) = transfer_rgb(transfer, (color.r, color.g, color.b));
-                    data[offset] = (cr * 255.0).round().clamp(0.0, 255.0) as u8;
-                    data[offset + 1] = (cg * 255.0).round().clamp(0.0, 255.0) as u8;
-                    data[offset + 2] = (cb * 255.0).round().clamp(0.0, 255.0) as u8;
+                    data[offset] = unit_to_byte(cr);
+                    data[offset + 1] = unit_to_byte(cg);
+                    data[offset + 2] = unit_to_byte(cb);
                     data[offset + 3] = 255;
 
                     // Recomposite RGB from the CMYK buffer via ICC only for
@@ -21521,6 +21611,53 @@ mod clip_coverage_tests {
             None,
         );
         assert_blended(&surface);
+    }
+
+    /// A row blended by its mask at once is the row blended a pixel at a
+    /// time, for every content value over every backdrop value at every
+    /// mask value, on parents that start at the backdrop, at the content
+    /// and at either end.
+    #[test]
+    fn a_row_blended_by_its_mask_is_its_pixels_blended() {
+        // The loop as it stood: a shut pixel and an unmoved channel passed
+        // over, the rest moved and held within a byte.
+        fn one_at_a_time(parent: &mut [u8], content: &[u8], backdrop: &[u8], mask: &[u8]) {
+            for (x, &m) in mask.iter().enumerate() {
+                let m = i32::from(m);
+                if m == 0 {
+                    continue;
+                }
+                for c in 0..4 {
+                    let i = x * 4 + c;
+                    let delta = i32::from(content[i]) - i32::from(backdrop[i]);
+                    if delta != 0 {
+                        let masked_delta = if delta > 0 {
+                            (delta * m + 128) / 255
+                        } else {
+                            (delta * m - 128) / 255
+                        };
+                        parent[i] = (i32::from(parent[i]) + masked_delta).clamp(0, 255) as u8;
+                    }
+                }
+            }
+        }
+
+        // A pixel for each mask value and one over, so the lanes have a
+        // remainder; every channel of a row holds the same content and
+        // backdrop, and a different parent.
+        let mask: Vec<u8> = (0..=256u32).map(|m| m as u8).collect();
+        for content in 0..=255u8 {
+            for backdrop in 0..=255u8 {
+                let row = |px: [u8; 4]| px.repeat(mask.len());
+                let content_row = row([content; 4]);
+                let backdrop_row = row([backdrop; 4]);
+                let mut got = row([backdrop, content, 0, 255]);
+                let mut want = got.clone();
+                blend_row_by_mask(&mut got, &content_row, &backdrop_row, &mask);
+                one_at_a_time(&mut want, &content_row, &backdrop_row, &mask);
+                assert_eq!(got, want, "content {content} over backdrop {backdrop}");
+            }
+        }
     }
 
     /// Rounding done in lanes is the library's rounding: halves away from
