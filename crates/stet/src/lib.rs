@@ -754,7 +754,7 @@ fn install_device(
     let setup = format!(
         "<< /PageSize [{w} {h}] /HWResolution [{dpi} {dpi}] \
          /.IsPageDevice true \
-         /Install {{ /DeviceRGB setcolorspace }} bind \
+         /Install {{}} bind \
          /BeginPage {{pop}} bind \
          /EndPage {{ \
              dup 0 eq {{ pop pop true }} {{ \

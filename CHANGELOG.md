@@ -51,6 +51,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reader. The embedded font now carries its weights, its design axes and
   its masters' bounding boxes, which between them are what Ghostscript,
   poppler and stet need to blend it.
+- **A PostScript job starts in `DeviceGray`.** Every output device, and
+  the library's own page setup, put the graphics state in `DeviceRGB`
+  when the device was installed. So on the first page of a job, and on
+  the first page after each `setpagedevice`, `currentcolorspace` gave
+  `DeviceRGB` and `0.5 setcolor` with no colour space set before it
+  raised `stackunderflow`. `showpage` put `DeviceGray` back, so later
+  pages were right. The initial colour space is now `DeviceGray` on
+  every device, as PLRM Table 4.1 gives it and as Ghostscript has it.
 
 ## [0.8.6] — 2026-10-12
 

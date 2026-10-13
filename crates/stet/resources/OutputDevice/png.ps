@@ -18,10 +18,8 @@
         % set other things here like...
         %   halftone screen
         %   color rendering dictionary
-
-        % set the color space here with setcolorspace
-        % this device is DeviceRGB
-        /DeviceRGB setcolorspace
+        % The colour space is not the device's to set: the graphics state
+        % starts in DeviceGray (PLRM Table 4.1) on every device.
     } bind
     /BeginPage {pop} bind
     /EndPage {
