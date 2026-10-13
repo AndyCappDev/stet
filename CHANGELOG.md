@@ -83,6 +83,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the very edge of a mask can differ slightly on a page drawn with
   overprint, where the hidden part of the content used to be recorded
   as if it had been painted.
+- **Separation and DeviceN images convert faster.** Every pixel of such
+  an image went through its tint transform's table on its own: sixteen
+  table entries blended for a four-colorant pixel. A one-colorant image
+  now works out its 256 answers once, an image of up to four colorants
+  keeps the answers for the sample values it has lately seen, and the
+  table lookup itself passes over the entries that carry no weight. A
+  page with a 3,806 × 5,349 four-colorant photograph at 150 dpi went
+  from 3.2 s to 1.5 s on one thread. Output is unchanged.
 
 ## [0.8.6] — 2026-10-12
 

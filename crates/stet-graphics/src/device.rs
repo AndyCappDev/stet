@@ -722,6 +722,10 @@ impl TintLookupTable {
         }
     }
 
+    /// The most inputs [`lookup_nd`](Self::lookup_nd) takes its short way
+    /// for: sixteen corners.
+    const FAST_INPUTS: usize = 4;
+
     /// Multilinear interpolation lookup for N-D (DeviceN) tint transforms.
     ///
     /// Writes zeros when the table has more than
@@ -749,6 +753,43 @@ impl TintLookupTable {
         }
 
         let corners = 1usize << ni;
+        if ni <= Self::FAST_INPUTS {
+            // Each corner's weight and place, built up a dimension at a
+            // time: the products are those of the loop below, in its order,
+            // without working each corner's out from the start.
+            let mut weights = [1.0f32; 1 << Self::FAST_INPUTS];
+            let mut places = [0usize; 1 << Self::FAST_INPUTS];
+            let mut step = n.pow(ni as u32 - 1);
+            let mut built = 1;
+            for d in 0..ni {
+                for corner in 0..built {
+                    let so_far = weights[corner];
+                    weights[corner] = so_far * (1.0 - frac[d]);
+                    weights[corner + built] = so_far * frac[d];
+                    places[corner] += idx[d] * step;
+                    places[corner + built] = places[corner] + step;
+                }
+                built *= 2;
+                step /= n;
+            }
+            // The last corner is the furthest into the table.
+            if (places[corners - 1] + 1) * stride <= self.data.len() {
+                for corner in 0..corners {
+                    let weight = weights[corner];
+                    // A corner of no weight adds nothing: a sample on a
+                    // grid line, as a colorant left at nought always is,
+                    // has half its corners so.
+                    if weight == 0.0 {
+                        continue;
+                    }
+                    let base = places[corner] * stride;
+                    for (out_val, value) in out[..no].iter_mut().zip(&self.data[base..base + no]) {
+                        *out_val += weight * value;
+                    }
+                }
+                return;
+            }
+        }
         for corner in 0..corners {
             let mut weight = 1.0f32;
             let mut linear_idx = 0usize;
@@ -1488,6 +1529,71 @@ mod tests {
         for n in 1..=TintLookupTable::MAX_INPUTS {
             let spd = TintLookupTable::grid_samples(n, 256).unwrap() as usize;
             assert!(spd.pow(n) <= TintLookupTable::MAX_GRID_POINTS, "{n} inputs");
+        }
+    }
+
+    /// `lookup_nd` as it was written first: every corner's weight and place
+    /// worked out from the start.
+    fn lookup_nd_by_corner(table: &TintLookupTable, inputs: &[f32], out: &mut [f32]) {
+        let ni = table.num_inputs as usize;
+        let stride = table.num_outputs as usize;
+        let n = table.samples_per_dim as usize;
+        out.fill(0.0);
+        for corner in 0..1usize << ni {
+            let mut weight = 1.0f32;
+            let mut place = 0usize;
+            for (d, input) in inputs.iter().enumerate().take(ni) {
+                let fi = input.clamp(0.0, 1.0) * (n - 1) as f32;
+                let at = (fi as usize).min(n - 2);
+                let frac = fi - at as f32;
+                let bit = (corner >> d) & 1;
+                weight *= if bit == 1 { frac } else { 1.0 - frac };
+                place = place * n + at + bit;
+            }
+            for (c, out_val) in out.iter_mut().enumerate() {
+                *out_val += weight * table.data[place * stride + c];
+            }
+        }
+    }
+
+    /// The short way through `lookup_nd` gives the bits the long way does,
+    /// on grid lines and off them.
+    #[test]
+    fn lookup_nd_blends_the_same_by_either_way() {
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 40) as f32 / (1u64 << 24) as f32
+        };
+        for (num_inputs, samples_per_dim) in [(1, 5), (2, 7), (3, 4), (4, 3), (4, 2), (5, 3)] {
+            let table = TintLookupTable {
+                num_inputs,
+                num_outputs: 4,
+                samples_per_dim,
+                data: (0..(samples_per_dim as usize).pow(num_inputs) * 4)
+                    .map(|_| next())
+                    .collect(),
+            };
+            for trial in 0..400 {
+                let inputs: Vec<f32> = (0..num_inputs)
+                    .map(|d| match (trial + d) % 5 {
+                        0 => 0.0,
+                        1 => 1.0,
+                        2 => 0.5,
+                        _ => next(),
+                    })
+                    .collect();
+                let (mut got, mut want) = ([9.0f32; 4], [9.0f32; 4]);
+                table.lookup_nd(&inputs, &mut got);
+                lookup_nd_by_corner(&table, &inputs, &mut want);
+                assert_eq!(
+                    got.map(f32::to_bits),
+                    want.map(f32::to_bits),
+                    "{num_inputs} inputs at {inputs:?}"
+                );
+            }
         }
     }
 

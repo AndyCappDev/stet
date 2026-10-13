@@ -3738,16 +3738,17 @@ fn tint_separation_via_icc(
     let cache = icc?;
     let cmyk_hash = cache.default_cmyk_hash()?;
     // Build CMYK byte buffer from tint table
+    // A sample is one byte, so there are 256 answers: work each out once.
+    let mut by_sample = [[0u8; 4]; 256];
+    for (sample, cmyk) in by_sample.iter_mut().enumerate() {
+        let mut alt_comps = [0.0f32; 4];
+        tint_table.lookup_1d(sample as f32 / 255.0, &mut alt_comps);
+        *cmyk = alt_comps.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+    }
     let mut cmyk_data = vec![0u8; npixels * 4];
-    let mut alt_comps = [0.0f32; 4];
-    for i in 0..npixels {
-        let tint = data.get(i).copied().unwrap_or(0) as f32 / 255.0;
-        tint_table.lookup_1d(tint, &mut alt_comps);
-        let si = i * 4;
-        cmyk_data[si] = (alt_comps[0].clamp(0.0, 1.0) * 255.0).round() as u8;
-        cmyk_data[si + 1] = (alt_comps[1].clamp(0.0, 1.0) * 255.0).round() as u8;
-        cmyk_data[si + 2] = (alt_comps[2].clamp(0.0, 1.0) * 255.0).round() as u8;
-        cmyk_data[si + 3] = (alt_comps[3].clamp(0.0, 1.0) * 255.0).round() as u8;
+    for (i, out) in cmyk_data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let sample = data.get(i).copied().unwrap_or(0);
+        *out = by_sample[usize::from(sample)];
     }
     let intent = stet_graphics::icc::intent_from_byte(rendering_intent);
     let rgb = cache.convert_image_8bit_with_intent(cmyk_hash, &cmyk_data, npixels, intent)?;
@@ -3775,17 +3776,41 @@ fn tint_devicen_via_icc(
     let mut cmyk_data = vec![0u8; npixels * 4];
     let mut inputs = vec![0.0f32; ni];
     let mut alt_comps = [0.0f32; 4];
-    for i in 0..npixels {
-        let si = i * ni;
-        for (c, inp) in inputs.iter_mut().enumerate() {
-            *inp = data.get(si + c).copied().unwrap_or(0) as f32 / 255.0;
+    let mut convert = |samples: &[u8]| {
+        for (inp, sample) in inputs.iter_mut().zip(samples) {
+            *inp = *sample as f32 / 255.0;
         }
         tint_table.lookup_nd(&inputs, &mut alt_comps);
-        let di = i * 4;
-        cmyk_data[di] = (alt_comps[0].clamp(0.0, 1.0) * 255.0).round() as u8;
-        cmyk_data[di + 1] = (alt_comps[1].clamp(0.0, 1.0) * 255.0).round() as u8;
-        cmyk_data[di + 2] = (alt_comps[2].clamp(0.0, 1.0) * 255.0).round() as u8;
-        cmyk_data[di + 3] = (alt_comps[3].clamp(0.0, 1.0) * 255.0).round() as u8;
+        alt_comps.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
+    };
+    if (1..=4).contains(&ni) && data.len() >= npixels * ni {
+        // A pixel's CMYK depends on its samples alone, and an image repeats
+        // them: flat areas, and every pixel of a colorant the image leaves
+        // unused. The last answer for each of a few thousand sample values
+        // is kept, found by a hash of the samples.
+        const SLOTS: usize = 1 << 12;
+        let mut seen: Vec<Option<(u32, [u8; 4])>> = vec![None; SLOTS];
+        for (samples, out) in data.chunks_exact(ni).zip(cmyk_data.as_chunks_mut::<4>().0) {
+            let key = samples.iter().fold(0u32, |key, s| key << 8 | u32::from(*s));
+            let slot = (key.wrapping_mul(0x9E37_79B1) >> 20) as usize;
+            let cmyk = match seen[slot] {
+                Some((held, cmyk)) if held == key => cmyk,
+                _ => {
+                    let cmyk = convert(samples);
+                    seen[slot] = Some((key, cmyk));
+                    cmyk
+                }
+            };
+            *out = cmyk;
+        }
+    } else {
+        let mut samples = vec![0u8; ni];
+        for (i, out) in cmyk_data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            for (c, sample) in samples.iter_mut().enumerate() {
+                *sample = data.get(i * ni + c).copied().unwrap_or(0);
+            }
+            *out = convert(&samples);
+        }
     }
     let intent = stet_graphics::icc::intent_from_byte(rendering_intent);
     let rgb = cache.convert_image_8bit_with_intent(cmyk_hash, &cmyk_data, npixels, intent)?;
