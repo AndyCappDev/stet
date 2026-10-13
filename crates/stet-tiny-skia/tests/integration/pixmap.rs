@@ -171,3 +171,106 @@ fn draw_pixmap_opacity() {
     let expected = Pixmap::load_png("tests/images/canvas/draw-pixmap-opacity.png").unwrap();
     assert_eq!(pixmap, expected);
 }
+
+/// `draw_pixmap` as it was before it passed over transparent rows and
+/// copied opaque ones: the pixmap as a pattern, through the pipeline.
+fn draw_pixmap_through_pipeline(
+    onto: &mut Pixmap,
+    x: i32,
+    y: i32,
+    pixmap: PixmapRef,
+    opacity: f32,
+    mask: Option<&Mask>,
+) {
+    let rect = Rect::from_xywh(x as f32, y as f32, pixmap.width() as f32, pixmap.height() as f32)
+        .unwrap();
+    let paint = Paint {
+        shader: Pattern::new(
+            pixmap,
+            SpreadMode::Pad,
+            FilterQuality::Nearest,
+            opacity,
+            Transform::from_translate(x as f32, y as f32),
+        ),
+        blend_mode: BlendMode::SourceOver,
+        anti_alias: false,
+        force_hq_pipeline: false,
+    };
+    onto.fill_rect(rect, &paint, Transform::identity(), mask);
+}
+
+/// A pixmap drawn over another gives the pipeline's pixels, whichever rows
+/// are passed over, copied or blended.
+#[test]
+fn draw_pixmap_matches_the_pipeline_row_by_row() {
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed >> 32) as u8
+    };
+    const W: u32 = 300;
+    const H: u32 = 64;
+
+    // Rows by kind: transparent, opaque in every value a channel can
+    // take, part transparent, and translucent.
+    let mut source = Pixmap::new(W, H).unwrap();
+    for (row, pixels) in source.data_mut().chunks_exact_mut(W as usize * 4).enumerate() {
+        for (col, px) in pixels.chunks_exact_mut(4).enumerate() {
+            let alpha = match row % 8 {
+                0 | 1 => 0,
+                2 | 3 | 4 => 255,
+                5 => [0, 255][col / 40 % 2],
+                _ => next(),
+            };
+            let channel = |value: u8| (u16::from(value) * u16::from(alpha) / 255) as u8;
+            let rgb = if row % 8 == 2 {
+                [col as u8, (col as u8).wrapping_add(85), 255 - col as u8]
+            } else {
+                [next(), next(), next()]
+            };
+            px.copy_from_slice(&[channel(rgb[0]), channel(rgb[1]), channel(rgb[2]), alpha]);
+        }
+    }
+
+    let mut backdrop = Pixmap::new(260, 90).unwrap();
+    for px in backdrop.data_mut().chunks_exact_mut(4) {
+        let alpha = [255, 255, next(), 0][usize::from(next() % 4)];
+        let channel = |value: u8| (u16::from(value) * u16::from(alpha) / 255) as u8;
+        px.copy_from_slice(&[channel(next()), channel(next()), channel(next()), alpha]);
+    }
+
+    // Masks: rows wholly open, wholly shut, and mixed.
+    let mut mask = Mask::new(260, 90).unwrap();
+    for (row, values) in mask.data_mut().chunks_exact_mut(260).enumerate() {
+        for value in values.iter_mut() {
+            *value = match row % 5 {
+                0 | 1 => 255,
+                2 => 0,
+                _ => next(),
+            };
+        }
+    }
+
+    for (x, y) in [(0, 0), (-37, -9), (11, 30), (-290, 5), (255, -60), (0, 41), (203, 0), (400, 400)] {
+        for opacity in [1.0, 0.5] {
+            for mask in [None, Some(&mask)] {
+                let mut got = backdrop.clone();
+                let mut want = backdrop.clone();
+                let paint = PixmapPaint {
+                    opacity,
+                    blend_mode: BlendMode::SourceOver,
+                    quality: FilterQuality::Nearest,
+                };
+                got.draw_pixmap(x, y, source.as_ref(), &paint, Transform::identity(), mask);
+                draw_pixmap_through_pipeline(&mut want, x, y, source.as_ref(), opacity, mask);
+                assert!(
+                    got == want,
+                    "at {x},{y}, opacity {opacity}, mask {}",
+                    mask.is_some()
+                );
+            }
+        }
+    }
+}

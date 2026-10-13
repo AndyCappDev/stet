@@ -15948,6 +15948,7 @@ fn render_radial_shading(
 
     let data = pixmap.data_mut();
     let stride = pw as usize * 4;
+    let mut stop_finder = StopFinder::new(&params.color_stops);
 
     for py in py_min..py_max {
         let dev_y = py as f64 * inv_sy + vp_y as f64;
@@ -15993,7 +15994,7 @@ fn render_radial_shading(
             );
             if let Some(t) = t {
                 let clamped = t.clamp(0.0, 1.0);
-                let color = interpolate_color_stops(&params.color_stops, clamped);
+                let color = stop_finder.color(clamped);
 
                 // Decide whether this pixel should use the multiplicative
                 // ink-stacking blend to preserve a spot backdrop. We mirror
@@ -16003,13 +16004,21 @@ fn render_radial_shading(
                 // pixel is fresh), so per-channel ink-stacking gives the
                 // correct result whether the backdrop was spot-painted or
                 // plain.
-                let cmyk = interpolate_cmyk_from_stops(
-                    &params.color_stops,
-                    &params.color_space,
-                    clamped,
-                    &color,
-                    icc,
-                );
+                // The CMYK is for the CMYK buffer and for inks stacked on
+                // what it holds; with no buffer nothing reads it, and for a
+                // gradient that is not CMYK it costs a conversion through
+                // the profile for every pixel.
+                let cmyk = if cmyk_buf.is_some() {
+                    interpolate_cmyk_from_stops(
+                        &params.color_stops,
+                        &params.color_space,
+                        clamped,
+                        &color,
+                        icc,
+                    )
+                } else {
+                    (0.0, 0.0, 0.0, 0.0)
+                };
                 let ci = (py as usize * pw as usize + px as usize) * 4;
                 let buffer_clean = if let Some(ref buf) = cmyk_buf {
                     if ci + 3 < buf.len() {
@@ -17601,24 +17610,77 @@ fn interpolate_color_stops(
     // Find the two stops bracketing this position
     for i in 1..stops.len() {
         if position <= stops[i].position {
-            let t0 = stops[i - 1].position;
-            let t1 = stops[i].position;
-            let frac = if (t1 - t0).abs() < 1e-10 {
-                0.0
-            } else {
-                (position - t0) / (t1 - t0)
-            };
-            let c0 = &stops[i - 1].color;
-            let c1 = &stops[i].color;
-            return DeviceColor::from_rgb(
-                (c0.r + frac * (c1.r - c0.r)).clamp(0.0, 1.0),
-                (c0.g + frac * (c1.g - c0.g)).clamp(0.0, 1.0),
-                (c0.b + frac * (c1.b - c0.b)).clamp(0.0, 1.0),
-            );
+            return blend_stops(stops, i, position);
         }
     }
 
     stops.last().unwrap().color.clone()
+}
+
+/// The colour at `position` between stop `i - 1` and stop `i`.
+fn blend_stops(stops: &[stet_graphics::device::ColorStop], i: usize, position: f64) -> DeviceColor {
+    let t0 = stops[i - 1].position;
+    let t1 = stops[i].position;
+    let frac = if (t1 - t0).abs() < 1e-10 {
+        0.0
+    } else {
+        (position - t0) / (t1 - t0)
+    };
+    let c0 = &stops[i - 1].color;
+    let c1 = &stops[i].color;
+    DeviceColor::from_rgb(
+        (c0.r + frac * (c1.r - c0.r)).clamp(0.0, 1.0),
+        (c0.g + frac * (c1.g - c0.g)).clamp(0.0, 1.0),
+        (c0.b + frac * (c1.b - c0.b)).clamp(0.0, 1.0),
+    )
+}
+
+/// Finds colours along a gradient for a run of pixels, each search starting
+/// from the stops the last one ended between.
+///
+/// A gradient sampled from a function has dozens of stops, and neighbouring
+/// pixels fall between the same two or the next two along; looking from the
+/// first stop for every pixel was most of the cost of a radial gradient.
+/// The colours are those of [`interpolate_color_stops`], which is still
+/// what answers when the stops are out of order.
+struct StopFinder<'a> {
+    stops: &'a [stet_graphics::device::ColorStop],
+    in_order: bool,
+    last: usize,
+}
+
+impl<'a> StopFinder<'a> {
+    fn new(stops: &'a [stet_graphics::device::ColorStop]) -> Self {
+        StopFinder {
+            stops,
+            in_order: stops
+                .windows(2)
+                .all(|pair| pair[0].position <= pair[1].position),
+            last: 1,
+        }
+    }
+
+    fn color(&mut self, position: f64) -> DeviceColor {
+        let stops = self.stops;
+        // Within the stops, and a number: everything else is an end colour,
+        // or the slow way's to decide.
+        if !self.in_order
+            || stops.len() < 2
+            || !(position > stops[0].position && position < stops[stops.len() - 1].position)
+        {
+            return interpolate_color_stops(stops, position);
+        }
+        // The first stop not before `position`, as the slow way finds it.
+        let mut i = self.last;
+        while i > 1 && position <= stops[i - 1].position {
+            i -= 1;
+        }
+        while position > stops[i].position {
+            i += 1;
+        }
+        self.last = i;
+        blend_stops(stops, i, position)
+    }
 }
 
 /// Derive CMYK values from color stops at parameter t.
@@ -21300,6 +21362,60 @@ mod clip_coverage_tests {
 
     /// Two triangles, the second over the first: the edge pixels are
     /// written twice and still come out as one layer of paint.
+    /// A `StopFinder` gives the colour `interpolate_color_stops` does,
+    /// wherever the last search left it: for stops in order, stops that
+    /// share a position, stops out of order, and positions off the ends
+    /// and not a number.
+    #[test]
+    fn a_stop_finder_finds_what_the_search_from_the_start_does() {
+        let mut seed = 0xD1B5_4A32_D192_ED03u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let stop = |position: f64, shade: f64| stet_graphics::device::ColorStop {
+            position,
+            color: DeviceColor::from_rgb(shade, 1.0 - shade, shade * shade),
+            raw_components: Vec::new(),
+            source_components: Vec::new(),
+        };
+        let in_order: Vec<_> = (0..66).map(|i| stop(f64::from(i) / 65.0, next())).collect();
+        let doubled: Vec<_> = [0.0, 0.25, 0.25, 0.25, 0.6, 0.6, 1.0]
+            .into_iter()
+            .map(|position| stop(position, next()))
+            .collect();
+        let out_of_order: Vec<_> = [0.0, 0.7, 0.3, 0.9, 0.5, 1.0]
+            .into_iter()
+            .map(|position| stop(position, next()))
+            .collect();
+        let one = vec![stop(0.5, 0.25)];
+        for stops in [&in_order, &doubled, &out_of_order, &one, &Vec::new()] {
+            let mut finder = StopFinder::new(stops);
+            for trial in 0..4000 {
+                let position = match trial % 9 {
+                    0 => next() * 1.4 - 0.2,
+                    1 => 0.25,
+                    2 => 0.6,
+                    3 => f64::NAN,
+                    // A run of neighbours, as along a row of pixels.
+                    _ => (f64::from(trial) / 4000.0 + next() * 0.01).fract(),
+                };
+                let (got, want) = (
+                    finder.color(position),
+                    interpolate_color_stops(stops, position),
+                );
+                assert_eq!(
+                    [got.r, got.g, got.b].map(f64::to_bits),
+                    [want.r, want.g, want.b].map(f64::to_bits),
+                    "{} stops at {position}",
+                    stops.len()
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_mesh_shading_blends_by_the_clip_however_often_it_paints_a_pixel() {
         let (mut surface, clip) = surface_and_clip();

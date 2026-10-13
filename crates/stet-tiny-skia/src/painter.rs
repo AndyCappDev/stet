@@ -479,6 +479,19 @@ impl PixmapMut<'_> {
         // Translate pattern as well as bounds.
         let patt_transform = Transform::from_translate(x as f32, y as f32);
 
+        let opacity = paint.opacity;
+        // A pixmap placed above or left of this one is left to the
+        // pipeline, which then paints past the pixmap's far edge with its
+        // last row or column: nothing here should depend on that, and
+        // nothing here changes it.
+        let sprite = x >= 0
+            && y >= 0
+            && paint.blend_mode == BlendMode::SourceOver
+            && paint.quality == FilterQuality::Nearest
+            && transform.is_identity()
+            && !DrawTiler::required(self.width(), self.height())
+            && mask.is_none_or(|mask| mask.size() == self.size());
+
         let paint = Paint {
             shader: Pattern::new(
                 pixmap,
@@ -492,7 +505,110 @@ impl PixmapMut<'_> {
             force_hq_pipeline: false, // Pattern will use hq anyway.
         };
 
-        self.fill_rect(rect, &paint, transform, mask);
+        if sprite {
+            self.draw_sprite(x, y, pixmap, opacity, &paint, mask);
+        } else {
+            self.fill_rect(rect, &paint, transform, mask);
+        }
+    }
+
+    /// Draws `pixmap` over this one at `(x, y)`, pixel for pixel.
+    ///
+    /// The pipeline blends every pixel in floating point, whatever it
+    /// holds. A row of the source that is wholly transparent, or wholly
+    /// hidden by `mask`, leaves its row of the destination as it was. In a
+    /// row whose pixels are each opaque or transparent, drawn at full
+    /// opacity through no mask or a mask that hides none of it, the opaque
+    /// ones replace theirs and the rest leave theirs. Those rows are passed
+    /// over or copied; the rest go through `paint`'s pipeline as before.
+    /// The pixels are the pipeline's either way.
+    fn draw_sprite(
+        &mut self,
+        x: i32,
+        y: i32,
+        pixmap: PixmapRef,
+        opacity: f32,
+        paint: &Paint,
+        mask: Option<&Mask>,
+    ) {
+        let (dst_w, dst_h) = (i64::from(self.width()), i64::from(self.height()));
+        let (src_w, src_h) = (i64::from(pixmap.width()), i64::from(pixmap.height()));
+        let (x, y) = (i64::from(x), i64::from(y));
+        // The columns and rows of the source that land on the destination.
+        let (col0, col1) = ((-x).max(0), (dst_w - x).min(src_w));
+        let (row0, row1) = ((-y).max(0), (dst_h - y).min(src_h));
+        if col0 >= col1 || row0 >= row1 {
+            return;
+        }
+        let width = (col1 - col0) as usize;
+        let dst_x = (x + col0) as usize;
+        let src = pixmap.data();
+
+        let all = |bytes: &[u8], want: u8| {
+            let (chunks, tail) = bytes.as_chunks::<8>();
+            let wanted = u64::from_ne_bytes([want; 8]);
+            chunks.iter().all(|c| u64::from_ne_bytes(*c) == wanted)
+                && tail.iter().all(|b| *b == want)
+        };
+
+        // Rows waiting for the pipeline, as rows of the source.
+        let mut waiting: Option<(i64, i64)> = None;
+        let through_pipeline = |this: &mut Self, rows: Option<(i64, i64)>| {
+            let Some((first, end)) = rows else { return };
+            let rect = Rect::from_ltrb(
+                x as f32,
+                (y + first) as f32,
+                (x + src_w) as f32,
+                (y + end) as f32,
+            );
+            if let Some(rect) = rect {
+                this.fill_rect(rect, paint, Transform::identity(), mask);
+            }
+        };
+
+        for row in row0..row1 {
+            let at = ((row * src_w + col0) * 4) as usize;
+            let src_row = &src[at..at + width * 4];
+            let dst_y = (y + row) as usize;
+            let mask_row = mask.map(|mask| {
+                let at = dst_y * dst_w as usize + dst_x;
+                &mask.data()[at..at + width]
+            });
+
+            if all(src_row, 0) || mask_row.is_some_and(|m| all(m, 0)) {
+                through_pipeline(self, waiting.take());
+            } else if opacity == 1.0
+                && mask_row.is_none_or(|m| all(m, 255))
+                && src_row
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .all(|px| px[3] == 255 || *px == [0; 4])
+            {
+                // Every pixel of the row either replaces its pixel of the
+                // destination or leaves it: a shape with hard edges, such
+                // as a gradient that stops at its circle.
+                through_pipeline(self, waiting.take());
+                let at = (dst_y * dst_w as usize + dst_x) * 4;
+                let dst_row = &mut self.data_mut()[at..at + width * 4];
+                for (dst, src) in dst_row
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(src_row.as_chunks::<4>().0)
+                {
+                    if src[3] == 255 {
+                        *dst = *src;
+                    }
+                }
+            } else {
+                waiting = Some(match waiting {
+                    Some((first, _)) => (first, row + 1),
+                    None => (row, row + 1),
+                });
+            }
+        }
+        through_pipeline(self, waiting.take());
     }
 
     /// Applies a masks.
