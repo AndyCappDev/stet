@@ -15949,12 +15949,13 @@ fn render_radial_shading(
     let data = pixmap.data_mut();
     let stride = pw as usize * 4;
     let mut stop_finder = StopFinder::new(&params.color_stops);
+    let row_solver = RadialRow::new(params, &inv_ctm, rotated_bbox, inv_sx, vp_x as f64);
+    let mut row_t = vec![0.0f64; px_max.saturating_sub(px_min) as usize];
 
     for py in py_min..py_max {
         let dev_y = py as f64 * inv_sy + vp_y as f64;
         // Only the stretch of the row the clip lets through, and within it
-        // only the pixels it lets through: the clip is tested before the
-        // gradient is solved for the pixel, not after.
+        // only the pixels it lets through.
         let (row_min, row_max) = match clip_mask {
             Some(mask) => match mask_row_span(mask.data(), pw as usize, py, px_min, px_max) {
                 Some(span) => span,
@@ -15962,7 +15963,11 @@ fn render_radial_shading(
             },
             None => (px_min, px_max),
         };
-        for px in row_min..row_max {
+        // The gradient is solved for the whole stretch at once, several
+        // pixels to an instruction, before any of it is painted.
+        let row_t = &mut row_t[..(row_max - row_min) as usize];
+        row_solver.solve(row_t, row_min, dev_y);
+        for (px, &t) in (row_min..row_max).zip(row_t.iter()) {
             let cov = clip_coverage(
                 clip_mask.map(|m| m.data()),
                 py as usize * pw as usize + px as usize,
@@ -15970,29 +15975,8 @@ fn render_radial_shading(
             if cov == 0 {
                 continue;
             }
-            let dev_x = px as f64 * inv_sx + vp_x as f64;
-            let (ux, uy) = inv_ctm.transform_point(dev_x, dev_y);
-
-            // Per-pixel rotated BBox clip
-            if let Some((bx0, by0, bx1, by1)) = rotated_bbox
-                && (ux < bx0 || ux > bx1 || uy < by0 || uy > by1)
-            {
-                continue;
-            }
-
-            let t = solve_radial_t(
-                ux,
-                uy,
-                params.x0,
-                params.y0,
-                params.r0,
-                params.x1,
-                params.y1,
-                params.r1,
-                params.extend_start,
-                params.extend_end,
-            );
-            if let Some(t) = t {
+            // Not a number where the gradient paints nothing.
+            if !t.is_nan() {
                 let clamped = t.clamp(0.0, 1.0);
                 let color = stop_finder.color(clamped);
 
@@ -16164,6 +16148,185 @@ fn render_radial_shading(
         }
     }
 }
+/// Solves a radial gradient for a row of pixels at a time.
+///
+/// The answers are those of [`Matrix::transform_point`] and
+/// [`solve_radial_t`] taken a pixel at a time, to the last bit, with "paints
+/// nothing here" written as not-a-number. Done for a row, with nothing in
+/// the loop to branch on, the compiler works several pixels to an
+/// instruction; a pixel at a time, the square root and four divisions of
+/// each were most of what a page of radial gradients cost.
+struct RadialRow {
+    inv_ctm: Matrix,
+    /// The shading's box in its own space, when the page turns it so that
+    /// its sides are not rows and columns of pixels.
+    bbox: Option<(f64, f64, f64, f64)>,
+    inv_sx: f64,
+    vp_x: f64,
+    x0: f64,
+    y0: f64,
+    r0: f64,
+    x1: f64,
+    y1: f64,
+    r1: f64,
+    extend_start: bool,
+    extend_end: bool,
+}
+
+impl RadialRow {
+    fn new(
+        params: &RadialShadingParams,
+        inv_ctm: &Matrix,
+        bbox: Option<(f64, f64, f64, f64)>,
+        inv_sx: f64,
+        vp_x: f64,
+    ) -> Self {
+        RadialRow {
+            inv_ctm: *inv_ctm,
+            bbox,
+            inv_sx,
+            vp_x,
+            x0: params.x0,
+            y0: params.y0,
+            r0: params.r0,
+            x1: params.x1,
+            y1: params.y1,
+            r1: params.r1,
+            extend_start: params.extend_start,
+            extend_end: params.extend_end,
+        }
+    }
+
+    /// Fill `out` with the gradient's parameter at pixels `px0..` of the
+    /// row at `dev_y`.
+    fn solve(&self, out: &mut [f64], px0: u32, dev_y: f64) {
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: the processor has just said it has AVX2.
+            unsafe { self.solve_avx2(out, px0, dev_y) };
+            return;
+        }
+        self.solve_row(out, px0, dev_y);
+    }
+
+    /// [`solve_row`](Self::solve_row) compiled for four pixels to an
+    /// instruction. The arithmetic is the same and so are the answers.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn solve_avx2(&self, out: &mut [f64], px0: u32, dev_y: f64) {
+        self.solve_row(out, px0, dev_y);
+    }
+
+    #[inline(always)]
+    fn solve_row(&self, out: &mut [f64], px0: u32, dev_y: f64) {
+        let (x0, y0, r0) = (self.x0, self.y0, self.r0);
+        let cdx = self.x1 - x0;
+        let cdy = self.y1 - y0;
+        let dr = self.r1 - r0;
+        let a = cdx * cdx + cdy * cdy - dr * dr;
+        let m = &self.inv_ctm;
+        // A box that is not there shuts nothing out.
+        let (bx0, by0, bx1, by1) = self.bbox.unwrap_or((
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            f64::INFINITY,
+        ));
+
+        if a.abs() < 1e-10 {
+            // The two circles grow as fast as they move apart, and the
+            // equation is not a quadratic. Rare; a pixel at a time.
+            for (i, t) in out.iter_mut().enumerate() {
+                let dev_x = (px0 + i as u32) as f64 * self.inv_sx + self.vp_x;
+                let (ux, uy) = m.transform_point(dev_x, dev_y);
+                let outside = ux < bx0 || ux > bx1 || uy < by0 || uy > by1;
+                *t = match solve_radial_t(
+                    ux,
+                    uy,
+                    x0,
+                    y0,
+                    r0,
+                    self.x1,
+                    self.y1,
+                    self.r1,
+                    self.extend_start,
+                    self.extend_end,
+                ) {
+                    Some(t) if !outside => t,
+                    _ => f64::NAN,
+                };
+            }
+            return;
+        }
+
+        let (extend_start, extend_end) = (self.extend_start, self.extend_end);
+        let two_a = 2.0 * a;
+        let r0_dr = r0 * dr;
+        let r0_r0 = r0 * r0;
+        for (i, t) in out.iter_mut().enumerate() {
+            let dev_x = (px0 + i as u32) as f64 * self.inv_sx + self.vp_x;
+            let ux = round_half_away(m.a * dev_x + m.c * dev_y + m.tx, 1e10) / 1e10;
+            let uy = round_half_away(m.b * dev_x + m.d * dev_y + m.ty, 1e10) / 1e10;
+            let outside = (ux < bx0) | (ux > bx1) | (uy < by0) | (uy > by1);
+
+            let dpx = ux - x0;
+            let dpy = uy - y0;
+            let b = -2.0 * (dpx * cdx + dpy * cdy + r0_dr);
+            let c = dpx * dpx + dpy * dpy - r0_r0;
+            let discriminant = b * b - 4.0 * a * c;
+            let sqrt_d = discriminant.sqrt();
+            let t1 = (-b + sqrt_d) / two_a;
+            let t2 = (-b - sqrt_d) / two_a;
+            // A root counts where the circle it names has a radius and the
+            // gradient reaches that far.
+            let counts = |t: f64| {
+                (r0 + t * dr >= 0.0)
+                    & ((0.0..=1.0).contains(&t)
+                        | ((t < 0.0) & extend_start)
+                        | ((t > 1.0) & extend_end))
+            };
+            let (one, two) = (counts(t1), counts(t2));
+            let larger = t1.max(t2);
+            let root = if one & two {
+                larger
+            } else if one {
+                t1
+            } else if two {
+                t2
+            } else {
+                f64::NAN
+            };
+            *t = if (discriminant < 0.0) | outside {
+                f64::NAN
+            } else {
+                root
+            };
+        }
+    }
+}
+
+/// `(v * scale).round()` as [`f64::round`] gives it, halves away from zero,
+/// in arithmetic a compiler can do several numbers at a time. `round` on its
+/// own is a call into the maths library on processors with no instruction
+/// for it, and a call is what stops a loop being worked in lanes.
+#[inline(always)]
+fn round_half_away(v: f64, scale: f64) -> f64 {
+    // Above this every number is whole already. Below it, adding and taking
+    // away this much leaves the nearest whole number, a half going to the
+    // even one; the half that went down is put up again.
+    const WHOLE: f64 = 4503599627370496.0; // 2^52
+    let v = v * scale;
+    let size = v.abs();
+    let nearest = (size + WHOLE) - WHOLE;
+    let rounded = if size - nearest == 0.5 {
+        nearest + 1.0
+    } else {
+        nearest
+    };
+    let rounded = if size < WHOLE { rounded } else { size };
+    rounded.copysign(v)
+}
+
 /// Solve for the parameter t of a two-circle radial gradient at point (px, py).
 ///
 /// Returns the largest root of the circle equation that falls within the valid
@@ -21358,6 +21521,170 @@ mod clip_coverage_tests {
             None,
         );
         assert_blended(&surface);
+    }
+
+    /// Rounding done in lanes is the library's rounding: halves away from
+    /// zero either side of it, the numbers a breath off a half, numbers too
+    /// large to have a fraction, and the ones that are not numbers.
+    #[test]
+    fn rounding_in_lanes_is_the_librarys_rounding() {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut values = vec![
+            0.0,
+            -0.0,
+            0.5,
+            -0.5,
+            1.5,
+            2.5,
+            -2.5,
+            0.499_999_999_999_999_94,
+            -0.499_999_999_999_999_94,
+            4_503_599_627_370_495.5,
+            4_503_599_627_370_496.0,
+            9_007_199_254_740_993.0,
+            1e300,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            f64::MIN_POSITIVE,
+        ];
+        for _ in 0..200_000 {
+            let bits = next();
+            // Any number at all, then ones the size a page works in, then
+            // ones that sit on a half.
+            values.push(f64::from_bits(bits));
+            values.push((bits >> 11) as f64 / (1u64 << 53) as f64 * 4000.0 - 2000.0);
+            values.push(((bits >> 40) as f64 - 8_000_000.0) / 2.0);
+        }
+        for v in values {
+            for scale in [1.0, 255.0, 1e10] {
+                let (got, want) = (round_half_away(v, scale), (v * scale).round());
+                assert!(
+                    got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan()),
+                    "{v} by {scale}: {got} for {want}"
+                );
+            }
+        }
+    }
+
+    /// A row of a radial gradient solved at once is the row solved a pixel
+    /// at a time: circles one inside the other and side by side, a point
+    /// for a start, the circles that make the equation a straight line,
+    /// each way of extending, a page that turns the gradient, and a box.
+    #[test]
+    fn a_radial_row_is_solved_as_its_pixels_are() {
+        let circles = [
+            // x0, y0, r0, x1, y1, r1
+            [300.0, 150.0, 0.0, 300.0, 150.0, 420.0],
+            [300.0, 150.0, 0.0, 310.0, 160.0, 420.0],
+            [100.0, 100.0, 30.0, 400.0, 180.0, 60.0],
+            [100.0, 100.0, 80.0, 400.0, 100.0, 10.0],
+            // As far apart as one is larger: not a quadratic.
+            [100.0, 100.0, 0.0, 400.0, 100.0, 300.0],
+            [250.0, 120.0, 40.0, 250.0, 120.0, 40.0],
+            [0.5, 0.5, 0.0, 0.5, 0.5, 0.5],
+        ];
+        let pages = [
+            Matrix {
+                a: 1.3,
+                b: 0.0,
+                c: 0.0,
+                d: -1.3,
+                tx: 20.0,
+                ty: 540.0,
+            },
+            Matrix {
+                a: 0.9,
+                b: 0.7,
+                c: -0.6,
+                d: 1.1,
+                tx: 310.0,
+                ty: -40.0,
+            },
+            Matrix {
+                a: 800.0,
+                b: 0.0,
+                c: 0.0,
+                d: 450.0,
+                tx: 0.0,
+                ty: 0.0,
+            },
+        ];
+        let boxes = [None, Some((120.0, 60.0, 380.0, 200.0))];
+        let mut rows = 0;
+        for [x0, y0, r0, x1, y1, r1] in circles {
+            for page in pages {
+                let inv_ctm = page.invert().unwrap();
+                for (bbox, extend) in boxes
+                    .into_iter()
+                    .zip([0u8, 3])
+                    .chain([(None, 1), (None, 2)])
+                {
+                    let row = RadialRow {
+                        inv_ctm,
+                        bbox,
+                        inv_sx: 1.0 / f64::from(300.0f32 / 72.0),
+                        vp_x: 3.0,
+                        x0,
+                        y0,
+                        r0,
+                        x1,
+                        y1,
+                        r1,
+                        extend_start: extend & 1 != 0,
+                        extend_end: extend & 2 != 0,
+                    };
+                    for line in 0..40u32 {
+                        let dev_y = f64::from(line * 17) * row.inv_sx + 1.5;
+                        // Lengths that leave the lanes a remainder.
+                        let px0 = line * 3;
+                        let mut by_row = vec![0.0; 1001 + line as usize];
+                        let mut dispatched = by_row.clone();
+                        row.solve_row(&mut by_row, px0, dev_y);
+                        row.solve(&mut dispatched, px0, dev_y);
+                        for (i, (&got, &also)) in by_row.iter().zip(&dispatched).enumerate() {
+                            let dev_x = f64::from(px0 + i as u32) * row.inv_sx + row.vp_x;
+                            let (ux, uy) = inv_ctm.transform_point(dev_x, dev_y);
+                            let outside = bbox.is_some_and(|(bx0, by0, bx1, by1)| {
+                                ux < bx0 || ux > bx1 || uy < by0 || uy > by1
+                            });
+                            let want = solve_radial_t(
+                                ux,
+                                uy,
+                                x0,
+                                y0,
+                                r0,
+                                x1,
+                                y1,
+                                r1,
+                                row.extend_start,
+                                row.extend_end,
+                            )
+                            .filter(|_| !outside);
+                            for got in [got, also] {
+                                match want {
+                                    // Either zero is the same place.
+                                    Some(want) => assert_eq!(
+                                        (got + 0.0).to_bits(),
+                                        (want + 0.0).to_bits(),
+                                        "pixel {i} of line {line}: {got} for {want}"
+                                    ),
+                                    None => assert!(got.is_nan(), "pixel {i} of line {line}"),
+                                }
+                            }
+                        }
+                        rows += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(rows, 7 * 3 * 4 * 40);
     }
 
     /// Two triangles, the second over the first: the edge pixels are

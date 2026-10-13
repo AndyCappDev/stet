@@ -91,18 +91,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   table lookup itself passes over the entries that carry no weight. A
   page with a 3,806 × 5,349 four-colorant photograph at 150 dpi went
   from 3.2 s to 1.5 s on one thread. Output is unchanged.
-- **Pages built from layers of gradients draw somewhat faster.** Three
-  costs came out of them. A radial gradient worked out a CMYK value
-  through the colour profile for every pixel, though only a page drawn
-  with overprint reads it. It searched its colour stops from the first
-  for every pixel, where a gradient sampled from a function has dozens
-  and neighbouring pixels fall between the same two. And a transparency
-  group was blended back onto the page a pixel at a time in floating
-  point even where its pixels were all opaque or all transparent; such
-  rows are now copied or passed over. A slide of ten full-page gradients
-  at 300 dpi went from 1.5 s to 1.2 s on one thread, and an InDesign
-  page of several hundred groups from 0.97 s to 0.82 s. Output is
-  unchanged.
+- **Pages built from layers of gradients draw faster.** Four costs came
+  out of them. A radial gradient worked out a CMYK value through the
+  colour profile for every pixel, though only a page drawn with overprint
+  reads it. It searched its colour stops from the first for every pixel,
+  where a gradient sampled from a function has dozens and neighbouring
+  pixels fall between the same two. It solved its equation, a square
+  root and four divisions, one pixel at a time; a row is now solved
+  together, four pixels to an instruction on a processor with AVX2 and
+  two elsewhere, in the same arithmetic. And a transparency group was
+  blended back onto the page a pixel at a time in floating point even
+  where its pixels were all opaque or all transparent; such rows are now
+  copied or passed over. A slide of ten full-page gradients at 300 dpi
+  went from 1.5 s to 0.9 s on one thread, and an InDesign page of several
+  hundred groups from 0.97 s to 0.82 s. Output is unchanged.
 
 ## [0.8.6] — 2026-10-12
 
