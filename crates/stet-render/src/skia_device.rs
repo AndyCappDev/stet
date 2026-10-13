@@ -8310,17 +8310,18 @@ fn paint_pattern_fill(
         }
         let tile_pw = ((td_x1 - td_x0) * sx_f).ceil().max(1.0) as u32;
         let tile_ph = ((td_y1 - td_y0) * sy_f).ceil().max(1.0) as u32;
-        let tile_pw = tile_pw.min(8192);
-        let tile_ph = tile_ph.min(8192);
 
-        if let Some(mut one_tile) = Pixmap::new(tile_pw, tile_ph) {
-            let tile_render_ctx = RenderContext {
-                vp_x: td_x0 as f32,
-                vp_y: td_y0 as f32,
+        // The part of the tile `w` × `h` pixels in size that starts
+        // `(left, top)` pixels into it.
+        let render_part = |left: u32, top: u32, w: u32, h: u32| {
+            let mut part = Pixmap::new(w, h)?;
+            let part_ctx = RenderContext {
+                vp_x: (td_x0 + left as f64 / sx_f) as f32,
+                vp_y: (td_y0 + top as f64 / sy_f) as f32,
                 scale_x: ctx.scale_x,
                 scale_y: ctx.scale_y,
-                out_w: tile_pw,
-                out_h: tile_ph,
+                out_w: w,
+                out_h: h,
                 effective_dpi: ctx.effective_dpi,
                 icc: ctx.icc,
                 image_cache: None,
@@ -8337,7 +8338,7 @@ fn paint_pattern_fill(
                 enclosing_clip: None,
                 transfer_suppressed: ctx.transfer_suppressed,
             };
-            let mut tile_bs = BandState {
+            let mut part_bs = BandState {
                 clip_region: None,
                 spare_mask: None,
                 clip_mask_cache: HashMap::new(),
@@ -8353,31 +8354,65 @@ fn paint_pattern_fill(
                 let transformed = transform_element_ctm(elem, pm);
                 let elem_ctx = RenderContext {
                     elem_idx: idx,
-                    ..tile_render_ctx
+                    ..part_ctx
                 };
-                render_element(&mut one_tile, &mut tile_bs, &transformed, &elem_ctx);
+                render_element(&mut part, &mut part_bs, &transformed, &elem_ctx);
             }
-            // Stamp pre-rendered tile at each position
-            for tv in tile_y_start..tile_y_end {
-                for tu in tile_x_start..tile_x_end {
-                    let offset_x = tu as f64 * step_ux + tv as f64 * step_vx;
-                    let offset_y = tu as f64 * step_uy + tv as f64 * step_vy;
-                    let px = tile_pixel(td_x0 + offset_x, dev_vp_x, sx_f);
-                    let py = tile_pixel(td_y0 + offset_y, dev_vp_y, sy_f);
-                    let paint = stet_tiny_skia::PixmapPaint {
-                        opacity: 1.0,
-                        blend_mode: BlendMode::SourceOver,
-                        quality: stet_tiny_skia::FilterQuality::Nearest,
-                    };
-                    tile_buf.draw_pixmap(
-                        px,
-                        py,
-                        one_tile.as_ref(),
-                        &paint,
-                        Transform::identity(),
-                        None,
-                    );
+            Some(part)
+        };
+        let stamp = |onto: &mut Pixmap, px: i32, py: i32, part: &Pixmap| {
+            let paint = stet_tiny_skia::PixmapPaint {
+                opacity: 1.0,
+                blend_mode: BlendMode::SourceOver,
+                quality: stet_tiny_skia::FilterQuality::Nearest,
+            };
+            onto.draw_pixmap(px, py, part.as_ref(), &paint, Transform::identity(), None);
+        };
+
+        // Where each tile is stamped, and the part of it that lands on the
+        // surface: `(left, top, width, height)` within the tile.
+        let mut places = Vec::new();
+        let mut shown_pixels = 0u64;
+        for tv in tile_y_start..tile_y_end {
+            for tu in tile_x_start..tile_x_end {
+                let offset_x = tu as f64 * step_ux + tv as f64 * step_vx;
+                let offset_y = tu as f64 * step_uy + tv as f64 * step_vy;
+                let px = tile_pixel(td_x0 + offset_x, dev_vp_x, sx_f);
+                let py = tile_pixel(td_y0 + offset_y, dev_vp_y, sy_f);
+                let left = (-(px as i64)).max(0);
+                let top = (-(py as i64)).max(0);
+                let right = (ctx.out_w as i64 - px as i64).min(tile_pw as i64);
+                let bottom = (ctx.out_h as i64 - py as i64).min(tile_ph as i64);
+                if left >= right || top >= bottom {
+                    continue;
                 }
+                let shown = (
+                    left as u32,
+                    top as u32,
+                    (right - left) as u32,
+                    (bottom - top) as u32,
+                );
+                shown_pixels += shown.2 as u64 * shown.3 as u64;
+                places.push((px, py, shown));
+            }
+        }
+
+        // A tile is drawn once and stamped wherever it falls, which is the
+        // least work when it is small and repeats. One larger than the
+        // surface — a gradient made as a single tile bigger than the page,
+        // of which a band shows a strip — cost its whole area for every
+        // band, so when the parts that show come to less than the tile,
+        // each is drawn on its own. The pixels are those the whole tile
+        // would have had there.
+        if shown_pixels < tile_pw as u64 * tile_ph as u64 {
+            for (px, py, (left, top, w, h)) in places {
+                if let Some(part) = render_part(left, top, w, h) {
+                    stamp(&mut tile_buf, px + left as i32, py + top as i32, &part);
+                }
+            }
+        } else if let Some(one_tile) = render_part(0, 0, tile_pw, tile_ph) {
+            for (px, py, _) in places {
+                stamp(&mut tile_buf, px, py, &one_tile);
             }
         }
     } else {

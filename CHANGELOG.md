@@ -59,6 +59,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   raised `stackunderflow`. `showpage` put `DeviceGray` back, so later
   pages were right. The initial colour space is now `DeviceGray` on
   every device, as PLRM Table 4.1 gives it and as Ghostscript has it.
+- **A pattern tile larger than the page is drawn only where it shows.**
+  A tile that holds a shading, a transparency group or a soft mask is
+  drawn once into a buffer of its own and stamped wherever it falls.
+  PowerPoint writes a gradient fill as a single such tile several times
+  the size of the slide, and every band of the page drew the whole of
+  it. When the parts of the tiles that show come to less than one tile,
+  each part is now drawn on its own. A slide of this kind at 150 dpi
+  went from 5.6 s to 0.25 s on one thread, and on 24 threads from
+  1.6 GB of memory to 49 MB; at 600 dpi from 20 s and 4.9 GB to 0.8 s
+  and 250 MB. The tile's buffer also stopped at 8,192 pixels, so what a
+  larger tile held beyond that was left unpainted; it is now drawn.
 
 ## [0.8.6] — 2026-10-12
 
