@@ -91,6 +91,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   table lookup itself passes over the entries that carry no weight. A
   page with a 3,806 × 5,349 four-colorant photograph at 150 dpi went
   from 3.2 s to 1.5 s on one thread. Output is unchanged.
+- **A blend drawn as lines side by side is no longer striped.** Older
+  programs drew a blend as a few hundred stroked lines of slowly changing
+  colour, each overlapping the last. Painted one after another with
+  smooth edges, each line was laid over a pixel as though its neighbours
+  might lie anywhere in it, so a pixel two lines covered between them
+  still showed some of the page. Below about 600 dpi, where the lines
+  are finer than the pixels, every row showed it by a different amount
+  and the blend came out in light and dark stripes, lighter overall than
+  its colours. A run of such lines — the same pen, nearly the same
+  colour, each a step across from the last and no farther than its own
+  width — now covers the page as its outline does. A line alone, and
+  lines that are apart, transparent, or of unlike colours, are painted
+  as before.
 - **Pages built from layers of gradients and transparency draw faster.**
   Several costs came out of them, none changing a pixel. A radial
   gradient worked out a CMYK value through the colour profile for every

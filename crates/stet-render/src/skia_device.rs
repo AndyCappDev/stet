@@ -1625,6 +1625,9 @@ struct BandState {
     clip_mask_seen: HashSet<u64>,
     /// The clips that lie over a neighbour painted before them.
     clip_meetings: ClipMeetings,
+    /// The lines being stroked side by side, if the last stroke was one
+    /// that could begin or carry on such a run.
+    stroke_run: StrokeRun,
     /// Pool of recycled masks to avoid alloc/dealloc (mmap/munmap) per band.
     /// Nothing else holds a mask that is in the pool.
     mask_pool: Vec<Arc<ClipMask>>,
@@ -1652,6 +1655,342 @@ struct BandState {
     /// preserving the pixmap actually preserves spot colour — other pixels
     /// still go through the ICC(new_cmyk) replace path.
     spot_mask: Option<Vec<u8>>,
+}
+
+/// A run of straight lines stroked side by side, each a step across from
+/// the last and no farther than its own width: a blend drawn the way
+/// programs drew one before there were shadings, as a few hundred lines of
+/// slowly changing colour that overlap a little.
+///
+/// Painted one after another with smooth edges, such lines let the page
+/// show between them. A pixel that one line covers the top six tenths of
+/// and the next the bottom six tenths is covered, yet painting them in
+/// turn leaves a sixth of what was underneath: each line is laid over the
+/// pixel as though the other might lie anywhere in it. Where the pixels
+/// are finer than the lines only the rows at the joins show it; where the
+/// lines are finer than the pixels every row does, by an amount that
+/// drifts as the lines fall differently on the rows, and the blend is
+/// striped.
+///
+/// Within a run each line is known to lie a step across from the last,
+/// so it is known how much fresh ground it can cover in a pixel: a strip
+/// as wide as the step. What the run has covered of each pixel is kept,
+/// and a line is painted so that the page shows through by what is still
+/// uncovered after it, not by what the line alone would leave.
+#[derive(Default)]
+struct StrokeRun {
+    /// The last stroke, if it could begin or carry on a run.
+    last: Option<RunStroke>,
+    /// Whether a second line has joined the first. Until then nothing is
+    /// kept and nothing is painted differently.
+    running: bool,
+    /// How much of each pixel the run has covered, 255 for all of it.
+    covered: Vec<u8>,
+    /// The coverage one line is painted through; clear between lines.
+    through: Option<Mask>,
+    /// The pixels `covered` has been written in: columns, then rows.
+    touched: Option<(usize, usize, usize, usize)>,
+}
+
+/// A stroke that could be one of a [`StrokeRun`]: a single straight line.
+struct RunStroke {
+    /// The ends of the line as its path gives them.
+    line: [(f32, f32); 2],
+    stroke: Stroke,
+    transform: Transform,
+    /// The colour it is painted.
+    color: [f64; 3],
+    /// The ends of the line on the page, in pixels.
+    ends: [(f32, f32); 2],
+    /// How thick the line is drawn, in pixels across it.
+    thickness: f32,
+}
+
+impl RunStroke {
+    fn of(
+        path: &PsPath,
+        stroke: &Stroke,
+        transform: Transform,
+        color: &DeviceColor,
+    ) -> Option<Self> {
+        let [PathSegment::MoveTo(x0, y0), PathSegment::LineTo(x1, y1)] = path.segments[..] else {
+            return None;
+        };
+        if stroke.dash.is_some() {
+            return None;
+        }
+        let (x0, y0, x1, y1) = (x0 as f32, y0 as f32, x1 as f32, y1 as f32);
+        let on_page = |x: f32, y: f32| {
+            (
+                transform.sx * x + transform.kx * y + transform.tx,
+                transform.ky * x + transform.sy * y + transform.ty,
+            )
+        };
+        let ends = [on_page(x0, y0), on_page(x1, y1)];
+        let along = (ends[1].0 - ends[0].0, ends[1].1 - ends[0].1);
+        let (length, drawn) = (along.0.hypot(along.1), (x1 - x0).hypot(y1 - y0));
+        if !(length > 0.0 && drawn > 0.0 && length.is_finite()) {
+            return None;
+        }
+        // The pen's width lies across the line as it is drawn; on the page
+        // the matrix may have squeezed it.
+        let across = (
+            -(y1 - y0) / drawn * stroke.width,
+            (x1 - x0) / drawn * stroke.width,
+        );
+        let across = (
+            transform.sx * across.0 + transform.kx * across.1,
+            transform.ky * across.0 + transform.sy * across.1,
+        );
+        let thickness = (along.0 * across.1 - along.1 * across.0).abs() / length;
+        Some(RunStroke {
+            line: [(x0, y0), (x1, y1)],
+            stroke: stroke.clone(),
+            transform,
+            color: [color.r, color.g, color.b],
+            ends,
+            thickness,
+        })
+    }
+
+    /// The most two neighbours' colours may differ by, in any of red,
+    /// green and blue, and still be steps of one blend.
+    ///
+    /// A pixel two lines share is given to the later one by as much as it
+    /// covers of what the earlier left uncovered, which may be more or
+    /// less than its own coverage of the pixel. Between two steps of a
+    /// blend the difference in colour cannot be seen. Between a black
+    /// line and a white one drawn against it, it would move the edge.
+    const BLEND_STEP: f64 = 0.125;
+
+    /// If `self` is `last` moved across — the same pen and the same line
+    /// in nearly the same colour, a step to one side, and no farther than
+    /// the line is thick, so that the two touch or overlap — the most of
+    /// a pixel that `self` covers and `last` did not: the strip between
+    /// their leading edges, as wide as the step, where it crosses a pixel
+    /// the long way.
+    fn fresh_beside(&self, last: &RunStroke) -> Option<f32> {
+        if self.stroke != last.stroke || self.transform != last.transform {
+            return None;
+        }
+        if (self.color.iter().zip(&last.color)).any(|(a, b)| (a - b).abs() > Self::BLEND_STEP) {
+            return None;
+        }
+        // Drawn the same way round, or back the other way.
+        [[0, 1], [1, 0]].into_iter().find_map(|[a, b]| {
+            let step = (
+                self.ends[a].0 - last.ends[0].0,
+                self.ends[a].1 - last.ends[0].1,
+            );
+            let other = (
+                self.ends[b].0 - last.ends[1].0,
+                self.ends[b].1 - last.ends[1].1,
+            );
+            let along = (
+                last.ends[1].0 - last.ends[0].0,
+                last.ends[1].1 - last.ends[0].1,
+            );
+            let length = along.0.hypot(along.1);
+            let across = (along.0 * step.1 - along.1 * step.0).abs() / length;
+            let slid = (along.0 * step.0 + along.1 * step.1).abs() / length;
+            let beside = (step.0 - other.0).abs() <= 0.05
+                && (step.1 - other.1).abs() <= 0.05
+                && across > 0.01
+                && across <= last.thickness + 0.05
+                && slid < length;
+            beside.then(|| across * length / along.0.abs().max(along.1.abs()))
+        })
+    }
+
+    /// How much of each pixel the line covers, as its stroke paints it:
+    /// the corner of the pixels it reaches, and their coverage in the alpha
+    /// of a pixmap of them.
+    fn coverage(&self, width: u32, height: u32) -> Option<(usize, usize, Pixmap)> {
+        let reach = self.thickness.max(self.stroke.width) + 2.0;
+        let x0 = (self.ends[0].0.min(self.ends[1].0) - reach)
+            .floor()
+            .max(0.0);
+        let y0 = (self.ends[0].1.min(self.ends[1].1) - reach)
+            .floor()
+            .max(0.0);
+        let x1 = (self.ends[0].0.max(self.ends[1].0) + reach)
+            .ceil()
+            .min(width as f32);
+        let y1 = (self.ends[0].1.max(self.ends[1].1) + reach)
+            .ceil()
+            .min(height as f32);
+        if !(x1 > x0 && y1 > y0) {
+            return None;
+        }
+        let mut pixmap = Pixmap::new((x1 - x0) as u32, (y1 - y0) as u32)?;
+        let mut path = stet_tiny_skia::PathBuilder::new();
+        path.move_to(self.line[0].0, self.line[0].1);
+        path.line_to(self.line[1].0, self.line[1].1);
+        let path = path.finish()?;
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(255, 255, 255, 255);
+        paint.anti_alias = true;
+        pixmap.stroke_path(
+            &path,
+            &paint,
+            &self.stroke,
+            self.transform.post_translate(-x0, -y0),
+            None,
+        );
+        Some((x0 as usize, y0 as usize, pixmap))
+    }
+}
+
+impl StrokeRun {
+    /// The run is over: something other than its next line is being
+    /// painted.
+    fn end(&mut self) {
+        self.last = None;
+        if self.running {
+            self.running = false;
+            self.forget_covered();
+        }
+    }
+
+    fn forget_covered(&mut self) {
+        if let Some((x0, x1, y0, y1)) = self.touched.take() {
+            let width = self.through.as_ref().map_or(0, |m| m.width() as usize);
+            for y in y0..y1 {
+                self.covered[y * width + x0..y * width + x1].fill(0);
+            }
+        }
+    }
+
+    /// Paint `stroke` as the next line of the run, if it is one. `false`
+    /// when it is not, with nothing painted: the caller strokes it as it
+    /// would any line, and it may be the first of a run to come.
+    fn paint(
+        &mut self,
+        pixmap: &mut Pixmap,
+        this: Option<RunStroke>,
+        paint: &Paint,
+        clip: Option<&Mask>,
+    ) -> bool {
+        let Some(this) = this else {
+            self.end();
+            return false;
+        };
+        let fresh = self.last.as_ref().and_then(|last| this.fresh_beside(last));
+        let (Some(last), Some(fresh)) = (self.last.take(), fresh) else {
+            self.end();
+            self.last = Some(this);
+            return false;
+        };
+        // In 255ths of a pixel, as coverage is; a step too fine to count
+        // still covers something.
+        let fresh = ((fresh * 255.0).round() as u32).clamp(1, 255);
+        let (width, height) = (pixmap.width(), pixmap.height());
+        let size = width as usize * height as usize;
+        if self.through.as_ref().map(|m| (m.width(), m.height())) != Some((width, height)) {
+            self.touched = None;
+            self.covered = vec![0; size];
+            self.through = Mask::new(width, height);
+        }
+        if !self.running {
+            // The line before this one was painted as any line is, and
+            // covered what such a line covers.
+            self.running = true;
+            if let Some((x0, y0, cover)) = last.coverage(width, height) {
+                self.cover(x0, y0, &cover, None, None);
+            }
+        }
+        if let Some((x0, y0, cover)) = this.coverage(width, height) {
+            self.cover(x0, y0, &cover, Some(fresh), clip);
+            if let (Some(through), Some(rect)) = (
+                self.through.as_mut(),
+                stet_tiny_skia::Rect::from_xywh(
+                    x0 as f32,
+                    y0 as f32,
+                    cover.width() as f32,
+                    cover.height() as f32,
+                ),
+            ) {
+                pixmap.fill_rect(rect, paint, Transform::identity(), Some(through));
+                let stride = width as usize;
+                for y in y0..y0 + cover.height() as usize {
+                    through.data_mut()[y * stride + x0..y * stride + x0 + cover.width() as usize]
+                        .fill(0);
+                }
+            }
+        }
+        self.last = Some(this);
+        true
+    }
+
+    /// Add a line's coverage to what the run has covered. The first line
+    /// of a run covers what it covers. A later one, about to be painted,
+    /// covers at most `fresh` of a pixel that the run had not, and
+    /// `through` is left holding how much of each pixel to give it, as far
+    /// as `clip` lets it through.
+    fn cover(
+        &mut self,
+        x0: usize,
+        y0: usize,
+        cover: &Pixmap,
+        fresh: Option<u32>,
+        clip: Option<&Mask>,
+    ) {
+        let Some(through) = self.through.as_mut() else {
+            return;
+        };
+        let stride = through.width() as usize;
+        let (w, h) = (cover.width() as usize, cover.height() as usize);
+        for (row, line) in cover.data().chunks_exact(w * 4).enumerate() {
+            let at = (y0 + row) * stride + x0;
+            let covered = &mut self.covered[at..at + w];
+            let through = &mut through.data_mut()[at..at + w];
+            for (x, px) in line.as_chunks::<4>().0.iter().enumerate() {
+                let line = u32::from(px[3]);
+                if line == 0 {
+                    continue;
+                }
+                let before = u32::from(covered[x]);
+                let Some(fresh) = fresh else {
+                    covered[x] = (before + line).min(255) as u8;
+                    continue;
+                };
+                let gained = line.min(fresh).min(255 - before);
+                covered[x] = (before + gained) as u8;
+                through[x] = share_of_uncovered(line, gained, before);
+            }
+        }
+        if let Some(clip) = clip {
+            for row in 0..h {
+                let at = (y0 + row) * stride + x0;
+                for (t, &c) in through.data_mut()[at..at + w]
+                    .iter_mut()
+                    .zip(&clip.data()[at..at + w])
+                {
+                    *t = ((u32::from(*t) * u32::from(c) + 127) / 255) as u8;
+                }
+            }
+        }
+        let (x1, y1) = (x0 + w, y0 + h);
+        self.touched = Some(match self.touched {
+            Some((a, b, c, d)) => (a.min(x0), b.max(x1), c.min(y0), d.max(y1)),
+            None => (x0, x1, y0, y1),
+        });
+    }
+}
+
+/// How much of a pixel to give a line that covers `line` parts in 255 of
+/// it, `gained` of them where the run it belongs to had covered `before`
+/// parts and not these.
+///
+/// Painting it at this share leaves the page showing by exactly what is
+/// uncovered after it. In a pixel the run had covered already, where no
+/// page shows, it is the line's own coverage laid over the lines before.
+fn share_of_uncovered(line: u32, gained: u32, before: u32) -> u8 {
+    let uncovered = 255 - before;
+    match (gained * 255 + uncovered / 2).checked_div(uncovered) {
+        Some(share) => share.min(255) as u8,
+        None => line as u8,
+    }
 }
 
 /// Which clip paths have still to have their neighbours' colour carried
@@ -4706,6 +5045,10 @@ fn render_element(
     element: &DisplayElement,
     ctx: &RenderContext<'_>,
 ) {
+    // Lines stroked side by side are a run only with nothing between.
+    if !matches!(element, DisplayElement::Stroke { .. }) {
+        band_state.stroke_run.end();
+    }
     // The first paint through a clip that lies over its neighbours is
     // what the neighbours' colour has to be carried across for.
     match element {
@@ -4963,6 +5306,7 @@ fn render_element(
             };
 
             if needs_overprint {
+                band_state.stroke_run.end();
                 // Convert the stroke outline to a fill path and route it
                 // through the same per-channel CMYK compositing logic the
                 // fill path uses, so the post-overprint result lands in the
@@ -4997,7 +5341,21 @@ fn render_element(
                     params.blend_mode,
                     ctx.no_aa,
                 );
-                pixmap.stroke_path(&skia_path, &paint, &stroke, transform, mask_ref);
+                // One of a run of lines side by side is painted with the
+                // run; any other line, and the first of a run, as itself.
+                let plain = !ctx.no_aa && params.alpha >= 1.0 && params.blend_mode == 0;
+                let in_run = plain
+                    .then(|| {
+                        let color = transfer_color(&params.color, transfer);
+                        RunStroke::of(draw_path, &stroke, transform, &color)
+                    })
+                    .flatten();
+                if !band_state
+                    .stroke_run
+                    .paint(pixmap, in_run, &paint, mask_ref)
+                {
+                    pixmap.stroke_path(&skia_path, &paint, &stroke, transform, mask_ref);
+                }
 
                 if band_state.cmyk_buffer.is_some() {
                     let mut cmyk_buf = band_state.cmyk_buffer.take().unwrap();
@@ -6123,6 +6481,7 @@ fn render_group(
         clip_mask_cache: HashMap::new(),
         clip_mask_seen: HashSet::new(),
         clip_meetings: ClipMeetings::default(),
+        stroke_run: StrokeRun::default(),
         mask_pool: Vec::new(),
         cmyk_buffer: group_cmyk,
         op_bg_snapshot: None,
@@ -6179,6 +6538,7 @@ fn render_group(
                 clip_mask_cache: HashMap::new(),
                 clip_mask_seen: HashSet::new(),
                 clip_meetings: ClipMeetings::default(),
+                stroke_run: StrokeRun::default(),
                 mask_pool: Vec::new(),
                 cmyk_buffer: None,
                 op_bg_snapshot: None,
@@ -6714,6 +7074,7 @@ fn render_knockout_group(
         clip_mask_cache: HashMap::new(),
         clip_mask_seen: HashSet::new(),
         clip_meetings: ClipMeetings::default(),
+        stroke_run: StrokeRun::default(),
         mask_pool: Vec::new(),
         cmyk_buffer: None,
         op_bg_snapshot: None,
@@ -7163,6 +7524,7 @@ fn render_soft_masked(
             clip_mask_cache: HashMap::new(),
             clip_mask_seen: HashSet::new(),
             clip_meetings: ClipMeetings::default(),
+            stroke_run: StrokeRun::default(),
             mask_pool: Vec::new(),
             cmyk_buffer: None,
             op_bg_snapshot: None,
@@ -7244,6 +7606,7 @@ fn render_soft_masked(
         clip_mask_cache: HashMap::new(),
         clip_mask_seen: HashSet::new(),
         clip_meetings: ClipMeetings::default(),
+        stroke_run: StrokeRun::default(),
         mask_pool: Vec::new(),
         cmyk_buffer: content_cmyk,
         op_bg_snapshot: None,
@@ -7728,6 +8091,7 @@ fn rasterize_mask(
         clip_mask_cache: HashMap::new(),
         clip_mask_seen: HashSet::new(),
         clip_meetings: ClipMeetings::default(),
+        stroke_run: StrokeRun::default(),
         mask_pool: Vec::new(),
         cmyk_buffer: None,
         op_bg_snapshot: None,
@@ -8373,6 +8737,7 @@ fn paint_pattern_fill(
                     clip_mask_cache: HashMap::new(),
                     clip_mask_seen: HashSet::new(),
                     clip_meetings: ClipMeetings::default(),
+                    stroke_run: StrokeRun::default(),
                     mask_pool: Vec::new(),
                     cmyk_buffer: None,
                     op_bg_snapshot: None,
@@ -8457,6 +8822,7 @@ fn paint_pattern_fill(
                 clip_mask_cache: HashMap::new(),
                 clip_mask_seen: HashSet::new(),
                 clip_meetings: ClipMeetings::default(),
+                stroke_run: StrokeRun::default(),
                 mask_pool: Vec::new(),
                 cmyk_buffer: None,
                 op_bg_snapshot: None,
@@ -9458,6 +9824,7 @@ impl OutputDevice for SkiaDevice {
             clip_mask_cache: HashMap::new(),
             clip_mask_seen: HashSet::new(),
             clip_meetings: ClipMeetings::default(),
+            stroke_run: StrokeRun::default(),
             mask_pool: Vec::new(),
             cmyk_buffer: None,
             op_bg_snapshot: None,
@@ -12154,6 +12521,7 @@ fn render_banded_to_sink(
             clip_mask_cache: HashMap::new(),
             clip_mask_seen: clip_seen.clone(),
             clip_meetings: ClipMeetings::default(),
+            stroke_run: StrokeRun::default(),
             mask_pool: Vec::new(),
             cmyk_buffer: cmyk_buf,
             op_bg_snapshot: None,
@@ -13608,6 +13976,7 @@ fn render_region_prepared_inner(
         clip_mask_cache: HashMap::new(),
         clip_mask_seen: prepared.clip_seen.clone(),
         clip_meetings: ClipMeetings::default(),
+        stroke_run: StrokeRun::default(),
         mask_pool: Vec::new(),
         cmyk_buffer: cmyk_buf,
         op_bg_snapshot: None,
@@ -13784,6 +14153,7 @@ fn render_region_single_band_inner(
         clip_mask_cache: HashMap::new(),
         clip_mask_seen: prepared.clip_seen.clone(),
         clip_meetings: ClipMeetings::default(),
+        stroke_run: StrokeRun::default(),
         mask_pool: Vec::new(),
         cmyk_buffer: cmyk_buf,
         op_bg_snapshot: None,
@@ -15033,6 +15403,7 @@ pub fn render_region(
         clip_mask_cache: HashMap::new(),
         clip_mask_seen: clip_seen,
         clip_meetings: ClipMeetings::default(),
+        stroke_run: StrokeRun::default(),
         mask_pool: Vec::new(),
         cmyk_buffer: cmyk_buf,
         op_bg_snapshot: None,
@@ -21227,6 +21598,7 @@ mod clip_shortcut_tests {
             clip_mask_cache: HashMap::new(),
             clip_mask_seen: HashSet::new(),
             clip_meetings: ClipMeetings::default(),
+            stroke_run: StrokeRun::default(),
             mask_pool: Vec::new(),
             cmyk_buffer: None,
             op_bg_snapshot: None,
