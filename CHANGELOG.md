@@ -115,6 +115,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than a triangle at a time, so where the two layers lie close
   together the edge between them is a line, not a row of teeth. stet now
   draws these folds as Ghostscript and cairo do.
+- **A gradient mesh has a smooth edge.** A mesh shading — free-form,
+  lattice, Coons or tensor-product (types 4 to 7) — coloured each pixel
+  whose centre one of its triangles held, so its outline came out in
+  steps where everything else on the page is smoothed. The pixels along
+  its edge are now painted at the part of them the mesh covers, as a fill
+  of its outline is, and the edge of a patch is its curved sides
+  themselves rather than the chords its triangles are cut along. Where
+  two meshes meet, as in a gradient drawn as many meshes side by side,
+  both stay hard along the line they share: each covering part of the
+  pixels there, painted one after the other they would leave the page
+  showing between them. With `--no-aa` every mesh edge is hard, as
+  before. A page of many patches takes about 5% longer on one thread.
 - **Pages built from layers of gradients and transparency draw faster.**
   Several costs came out of them, none changing a pixel. A radial
   gradient worked out a CMYK value through the colour profile for every

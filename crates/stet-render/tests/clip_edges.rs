@@ -394,18 +394,28 @@ fn a_mesh_in_a_group_fills_the_smooth_edge_of_the_clip_round_the_group() {
     assert_eq!(reds(&list, false), filled);
 }
 
-/// Where no smooth clip edge runs along it a mesh ends where it always
-/// did: with no clip at all, and well inside a clip.
+/// Where no clip edge runs along it a mesh has the smooth edge a fill of
+/// its outline has: with no clip at all, and well inside a clip. With
+/// anti-aliasing off the edge is hard.
 #[test]
-fn a_mesh_reaches_no_further_without_a_clip_edge_beside_it() {
+fn a_mesh_without_a_clip_edge_beside_it_has_the_edge_of_its_outline() {
+    let mut fill = DisplayList::new();
+    fill.push(DisplayElement::Fill {
+        path: left_tile(),
+        params: FillParams {
+            color: DeviceColor::from_gray(0.0),
+            fill_rule: NZ,
+            ..FillParams::default()
+        },
+    });
     let mut bare = DisplayList::new();
     bare.push(mesh(&TILE));
-    let bare = reds(&bare, false);
-    assert_eq!(grays(&bare), 0);
+    assert_eq!(reds(&bare, false), reds(&fill, false));
+    assert_eq!(grays(&reds(&bare, true)), 0);
 
     let outer = polygon(&[(4.0, 6.0), (190.0, 4.0), (192.0, 194.0), (6.0, 196.0)]);
     let mut inside = DisplayList::new();
     inside.push(clip(outer, NZ));
     inside.push(mesh(&TILE));
-    assert_eq!(reds(&inside, false), bare);
+    assert_eq!(reds(&inside, false), reds(&bare, false));
 }

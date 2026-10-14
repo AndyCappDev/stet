@@ -49,8 +49,14 @@ const POINTS: [(f64, f64); 12] = [
 const CORNERS: [f64; 4] = [0.0, 0.302, 0.702, 1.0];
 
 /// The patch with gray corners `corners`, drawn under `ctm` on a page
-/// `w` by `h`.
-fn render(points: &[(f64, f64)], corners: [f64; 4], ctm: Matrix, (w, h): (u32, u32)) -> Vec<u8> {
+/// `w` by `h`, its edge smooth unless `hard`.
+fn render(
+    points: &[(f64, f64)],
+    corners: [f64; 4],
+    ctm: Matrix,
+    (w, h): (u32, u32),
+    hard: bool,
+) -> Vec<u8> {
     let mut list = DisplayList::new();
     list.push(DisplayElement::PatchShading {
         params: PatchShadingParams {
@@ -64,8 +70,8 @@ fn render(points: &[(f64, f64)], corners: [f64; 4], ctm: Matrix, (w, h): (u32, u
             ..PatchShadingParams::default()
         },
     });
-    let banded = render_to_rgba(&list, w, h, 72.0, None, false);
-    let viewport = render_to_rgba_viewport(&list, w, h, 72.0, None, false);
+    let banded = render_to_rgba(&list, w, h, 72.0, None, hard);
+    let viewport = render_to_rgba_viewport(&list, w, h, 72.0, None, hard);
     assert!(banded == viewport, "banded and viewport renders disagree");
     banded
 }
@@ -80,7 +86,7 @@ fn gray(data: &[u8], x: u32, y: u32) -> u8 {
 /// the spec's u first and puts the light part there instead.
 #[test]
 fn the_part_with_the_larger_v_is_on_top() {
-    let page = render(&POINTS, CORNERS, HALF, (W, H));
+    let page = render(&POINTS, CORNERS, HALF, (W, H), false);
     // Covered by both parts.
     for (x, y) in [(28, 26), (32, 40), (38, 50)] {
         let g = gray(&page, x, y);
@@ -142,7 +148,9 @@ fn truth(
 /// Of the pixels with the patch on all four sides in both `page` and
 /// `truth`, how many there are and how many show what no sample at or
 /// beside them does. Where two layers meet, the sample that shows in a
-/// pixel need not be the one at its centre; a neighbour's will do.
+/// pixel need not be the one at its centre; a neighbour's will do. The
+/// page is drawn with hard edges, as the samples are: which layer shows
+/// is the question here, not how the edge is smoothed.
 fn disagreements(page: &[u8], truth: &[Option<u8>], (w, h): (u32, u32)) -> (usize, usize) {
     let (w, h) = (w as usize, h as usize);
     let both = |x: usize, y: usize| truth[y * w + x].is_some() && page[(y * w + x) * 4] != 255;
@@ -197,7 +205,7 @@ fn a_fold_is_decided_pixel_by_pixel() {
         tx: 0.0,
         ty: 380.0,
     };
-    let page = render(&POINTS, CORNERS, ctm, SIZE);
+    let page = render(&POINTS, CORNERS, ctm, SIZE, true);
     let (checked, wrong) = disagreements(&page, &truth(&POINTS, CORNERS, ctm, SIZE), SIZE);
     assert!(checked > 30_000, "only {checked} pixels inside");
     assert!(
@@ -244,7 +252,7 @@ fn layers_at_the_same_v_show_the_larger_u() {
         tx: 60.0,
         ty: 240.0,
     };
-    let page = render(&points, CORNERS, ctm, SIZE);
+    let page = render(&points, CORNERS, ctm, SIZE, true);
     let (checked, wrong) = disagreements(&page, &truth(&points, CORNERS, ctm, SIZE), SIZE);
     assert!(checked > 10_000, "only {checked} pixels inside");
     assert!(

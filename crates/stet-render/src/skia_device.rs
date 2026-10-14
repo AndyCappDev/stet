@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use rayon::prelude::*;
 use stet_tiny_skia::{
     BlendMode, Color, FillRule as SkiaFillRule, LineCap as SkiaLineCap, LineJoin as SkiaLineJoin,
-    Mask, Paint, PathBuilder, Pixmap, Stroke, StrokeDash, Transform,
+    Mask, Paint, Path, PathBuilder, Pixmap, Stroke, StrokeDash, Transform,
 };
 
 use crate::clip_neighbours::{ClipEdgeState, ClipNeighbours, Meeting, MetPiece, clip_key};
@@ -2263,6 +2263,12 @@ struct RenderContext<'a> {
     /// `None` where there is no such table — a pattern tile, the
     /// PostScript device painting as it goes — and every clip is hard.
     clip_neighbours: Option<&'a ClipNeighbours>,
+    /// Where on the output two or more mesh shadings meet, for the list
+    /// being rendered and the lists nested in it. `None` where there is
+    /// no such table — a pattern tile, a soft mask's mask drawn by itself,
+    /// the PostScript device painting as it goes — and every mesh's edge
+    /// is hard.
+    mesh_crowd: Option<&'a MeshCrowd>,
     /// The clip the group being painted will be composited through, for a
     /// painter that has to meet its smooth edge. `None` outside a group,
     /// and where the group meets no mask.
@@ -2288,6 +2294,16 @@ enum KnockoutPainterPass {
 }
 
 impl RenderContext<'_> {
+    /// Where on this output two or more mesh shadings meet, if a mesh's
+    /// own edge may be smooth here at all.
+    fn mesh_crowd(&self) -> Option<MeshCrowdView<'_>> {
+        if self.no_aa {
+            return None;
+        }
+        self.mesh_crowd?
+            .view(self.vp_x, self.vp_y, self.scale_x, self.scale_y)
+    }
+
     /// Apply viewport transform to a PostScript matrix.
     fn transform(&self, m: &Matrix) -> Transform {
         viewport_transform(
@@ -5729,6 +5745,8 @@ fn render_element(
                     ctx.transfer_suppressed,
                 ),
                 None,
+                None,
+                ctx.mesh_crowd(),
             );
         }
         DisplayElement::PatchShading { params } => {
@@ -5758,6 +5776,7 @@ fn render_element(
                     params.blend_mode,
                     ctx.transfer_suppressed,
                 ),
+                ctx.mesh_crowd(),
             );
         }
         DisplayElement::PatternFill { params } => {
@@ -6511,6 +6530,7 @@ fn render_group(
         alpha_extraction_pass: ctx.alpha_extraction_pass,
         layer_set: ctx.layer_set,
         clip_neighbours: ctx.clip_neighbours,
+        mesh_crowd: ctx.mesh_crowd,
         enclosing_clip: EnclosingClip::for_group(mask_ref, ctx.enclosing_clip, crop_x, crop_y),
         transfer_suppressed: group_suppresses_transfer(ctx.transfer_suppressed, params),
     };
@@ -7062,6 +7082,7 @@ fn render_knockout_group(
         alpha_extraction_pass: false,
         layer_set: ctx.layer_set,
         clip_neighbours: ctx.clip_neighbours,
+        mesh_crowd: ctx.mesh_crowd,
         enclosing_clip: None,
         transfer_suppressed: group_suppresses_transfer(ctx.transfer_suppressed, params),
     };
@@ -7507,6 +7528,7 @@ fn render_soft_masked(
         alpha_extraction_pass: false,
         layer_set: ctx.layer_set,
         clip_neighbours: ctx.clip_neighbours,
+        mesh_crowd: ctx.mesh_crowd,
         enclosing_clip: None,
         transfer_suppressed: true,
     };
@@ -8081,6 +8103,7 @@ fn rasterize_mask(
         alpha_extraction_pass: false,
         layer_set,
         clip_neighbours,
+        mesh_crowd: None,
         enclosing_clip: None,
         transfer_suppressed: true,
     };
@@ -8728,6 +8751,7 @@ fn paint_pattern_fill(
                     layer_set: ctx.layer_set,
                     // A tile is a list of its own, in a space of its own.
                     clip_neighbours: None,
+                    mesh_crowd: None,
                     enclosing_clip: None,
                     transfer_suppressed: ctx.transfer_suppressed,
                 };
@@ -8814,6 +8838,7 @@ fn paint_pattern_fill(
                 layer_set: ctx.layer_set,
                 // A tile is a list of its own, in a space of its own.
                 clip_neighbours: None,
+                mesh_crowd: None,
                 enclosing_clip: None,
                 transfer_suppressed: ctx.transfer_suppressed,
             };
@@ -9791,6 +9816,8 @@ impl OutputDevice for SkiaDevice {
             None,
             paint_transfer(&params.transfer, params.alpha, params.blend_mode, false),
             None,
+            None,
+            None,
         );
     }
 
@@ -9813,6 +9840,7 @@ impl OutputDevice for SkiaDevice {
             None,
             None,
             paint_transfer(&params.transfer, params.alpha, params.blend_mode, false),
+            None,
         );
     }
 
@@ -9853,6 +9881,7 @@ impl OutputDevice for SkiaDevice {
                 alpha_extraction_pass: false,
                 layer_set: &self.layer_set,
                 clip_neighbours: None,
+                mesh_crowd: None,
                 enclosing_clip: None,
                 transfer_suppressed: false,
             };
@@ -12509,6 +12538,13 @@ fn render_banded_to_sink(
         let mut band_pixmap = Pixmap::new(page_w, render_h).expect("Failed to create band pixmap");
         // Start transparent — white background composited after content rendering
         band_pixmap.as_mut().data_mut().fill(0x00);
+        let mesh_crowd = MeshCrowd::build(
+            list,
+            layer_set,
+            (0.0, render_y_start as f32),
+            (1.0, 1.0),
+            (page_w, render_h),
+        );
 
         let cmyk_buf = if needs_cmyk_buffer {
             // CMYK buffer for the render region (including overlap)
@@ -12581,6 +12617,7 @@ fn render_banded_to_sink(
                     alpha_extraction_pass: false,
                     layer_set,
                     clip_neighbours: Some(&clip_neighbours),
+                    mesh_crowd: Some(&mesh_crowd),
                     enclosing_clip: None,
                     transfer_suppressed: false,
                 };
@@ -13993,6 +14030,13 @@ fn render_region_prepared_inner(
     let sy = scale_y as f32;
     let vp_x_max = vp_x + vp_w;
     let vp_y_max = vp_y + vp_h;
+    let mesh_crowd = MeshCrowd::build(
+        list,
+        layer_set,
+        (vp_x_f, vp_y_f),
+        (sx, sy),
+        (pixel_w, render_h),
+    );
 
     for epoch in &prepared.epochs {
         if !epoch.has_erase_page {
@@ -14047,6 +14091,7 @@ fn render_region_prepared_inner(
                 alpha_extraction_pass: false,
                 layer_set,
                 clip_neighbours: Some(&prepared.clip_neighbours),
+                mesh_crowd: Some(&mesh_crowd),
                 enclosing_clip: None,
                 transfer_suppressed: false,
             };
@@ -14168,6 +14213,13 @@ fn render_region_single_band_inner(
     let band_vp_y_f = band_vp_y as f32;
     let sx = scale_x as f32;
     let sy = scale_y as f32;
+    let mesh_crowd = MeshCrowd::build(
+        list,
+        layer_set,
+        (vp_x_f, band_vp_y_f),
+        (sx, sy),
+        (pixel_w, render_h),
+    );
     let vp_x_max = vp_x + vp_w;
 
     for epoch in &prepared.epochs {
@@ -14224,6 +14276,7 @@ fn render_region_single_band_inner(
                 alpha_extraction_pass: false,
                 layer_set,
                 clip_neighbours: Some(&prepared.clip_neighbours),
+                mesh_crowd: Some(&mesh_crowd),
                 enclosing_clip: None,
                 transfer_suppressed: false,
             };
@@ -15420,6 +15473,13 @@ pub fn render_region(
     let sy = scale_y as f32;
     let vp_x_max = vp_x + vp_w;
     let vp_y_max = vp_y + vp_h;
+    let mesh_crowd = MeshCrowd::build(
+        list,
+        &layer_set,
+        (vp_x_f, vp_y_f),
+        (sx, sy),
+        (pixel_w, render_h),
+    );
 
     for epoch in &epochs {
         // Epoch-level culling
@@ -15475,6 +15535,7 @@ pub fn render_region(
                 alpha_extraction_pass: false,
                 layer_set: &layer_set,
                 clip_neighbours: Some(&clip_neighbours),
+                mesh_crowd: Some(&mesh_crowd),
                 enclosing_clip: None,
                 transfer_suppressed: false,
             };
@@ -16874,6 +16935,8 @@ fn render_mesh_shading(
     icc: Option<&IccCache>,
     transfer: Option<&TransferState>,
     places: Option<&PatchPlaces>,
+    shape: Option<&MeshShape>,
+    crowd: Option<MeshCrowdView<'_>>,
 ) {
     let pw = pixmap.width() as usize;
     let ph = pixmap.height() as usize;
@@ -16932,10 +16995,35 @@ fn render_mesh_shading(
     let mut held: HashSet<usize, PixelHash> = HashSet::default();
     let mut beyond: HashMap<usize, MeshReach, PixelHash> = HashMap::default();
 
+    // Its own edge is smoothed where no other mesh comes near it; with no
+    // table of where meshes crowd, it is hard throughout. The shape it
+    // covers is the triangles', unless it was cut from patches and the
+    // patches' shape comes with it.
+    let cover = crowd.and_then(|crowd| {
+        let built;
+        let shape = match shape {
+            Some(shape) => shape,
+            None => {
+                let place = |ctm: &Matrix, (x, y): (f64, f64)| {
+                    let (dx, dy) = ctm.transform_point(x, y);
+                    ((dx as f32 - vp_x) * scale_x, (dy as f32 - vp_y) * scale_y)
+                };
+                let cull = ShadingCull::new(
+                    params.ctm, vp_x, vp_y, scale_x, scale_y, pw as u32, ph as u32, 2.0,
+                );
+                built = mesh_shape(CrowdMesh::Triangles(params), &place, cull.as_ref(), 1.0)?;
+                &built
+            }
+        };
+        MeshCover::of(shape, pw, ph, crowd)
+    });
+
     let mut painter = MeshPainter {
         data,
         cmyk_buf,
         clip_data,
+        cover: cover.as_ref(),
+        enclosing,
         lut: lut.map(|v| v.as_slice()),
         params,
         icc,
@@ -16948,6 +17036,8 @@ fn render_mesh_shading(
     // Every pixel some triangle holds, for finding those between
     // triangles that none does.
     let mut painted = MeshPixels::new(pw, ph);
+    // The triangles that come near a pixel of the mesh's own edge.
+    let mut near_edge: Vec<usize> = Vec::new();
 
     // What each pixel shows, while the triangles are those of a patch that
     // folds over itself.
@@ -16976,7 +17066,15 @@ fn render_mesh_shading(
             }
         }
         let placed = corners(tri);
-        let [(x0, y0), (x1, y1), (x2, y2)] = placed;
+        if let Some(cover) = cover.as_ref() {
+            let [a, b, c] = placed;
+            let reach = MESH_REACH as f32;
+            let lo = (a.0.min(b.0).min(c.0) - reach, a.1.min(b.1).min(c.1) - reach);
+            let hi = (a.0.max(b.0).max(c.0) + reach, a.1.max(b.1).max(c.1) + reach);
+            if cover.blocks.reach(lo, hi) {
+                near_edge.push(index);
+            }
+        }
         // The pixels the triangle can hold, and those it may paint.
         let own = pixel_box(placed, 0.0);
         let reached = soft_blocks.as_mut().and_then(|blocks| {
@@ -16990,33 +17088,28 @@ fn render_mesh_shading(
             continue;
         }
 
-        let x0 = x0 as f64;
-        let y0 = y0 as f64;
-        let x1 = x1 as f64;
-        let y1 = y1 as f64;
-        let x2 = x2 as f64;
-        let y2 = y2 as f64;
-        // Swap vertices 1 and 2 when the triangle has reversed winding
-        // (from a CTM with negative determinant, e.g. X- or Y-flip).
-        // This ensures barycentric coordinates stay positive for interior
+        // Vertices 1 and 2 are swapped when the triangle has reversed
+        // winding (from a CTM with negative determinant, e.g. X- or
+        // Y-flip), so barycentric coordinates stay positive for interior
         // points regardless of the CTM orientation.
-        let denom = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
-        if denom.abs() < 1e-10 {
+        let Some(placed) = PlacedTriangle::new(placed) else {
             continue;
-        }
-        let (x1, y1, x2, y2) = if denom < 0.0 {
-            (x2, y2, x1, y1)
-        } else {
-            (x1, y1, x2, y2)
         };
-        let swapped = denom < 0.0;
+        let PlacedTriangle {
+            x0,
+            y0,
+            x1,
+            y1,
+            x2,
+            y2,
+            swapped,
+            ..
+        } = placed;
         let (v1_ref, v2_ref) = if swapped {
             (&tri.v2, &tri.v1)
         } else {
             (&tri.v1, &tri.v2)
         };
-        let denom = denom.abs();
-        let inv_denom = 1.0 / denom;
 
         for py in min_y..max_y {
             for px in min_x..max_x {
@@ -17031,9 +17124,7 @@ fn render_mesh_shading(
                 let pxf = px as f64 + 0.5;
                 let pyf = py as f64 + 0.5;
 
-                let w0 = ((y1 - y2) * (pxf - x2) + (x2 - x1) * (pyf - y2)) * inv_denom;
-                let w1 = ((y2 - y0) * (pxf - x2) + (x0 - x2) * (pyf - y2)) * inv_denom;
-                let w2 = 1.0 - w0 - w1;
+                let (w0, w1, w2) = placed.weights(pxf, pyf);
 
                 if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
                     if !reach || matches!(edge_coverage(px, py), 0 | 255) {
@@ -17109,18 +17200,39 @@ fn render_mesh_shading(
     // under the mesh shows through as a speck. Such a pixel has the mesh
     // on opposite sides of it and a triangle within `MESH_GAP` of its
     // centre, and is painted from the nearest.
+    //
+    // So is a pixel on the mesh's own edge that the mesh covers in part
+    // but whose centre no triangle holds; it is painted at that part.
     let gaps = painted.gaps();
-    if gaps.is_empty() {
+    let any_gap = !gaps.is_empty();
+    let mut wanted: Vec<(usize, f64)> = gaps.into_iter().map(|at| (at, MESH_GAP)).collect();
+    if let Some(cover) = cover.as_ref() {
+        wanted.extend(
+            cover
+                .covered()
+                .filter(|&at| !painted.get(at % pw, at / pw))
+                .map(|at| (at, MESH_REACH)),
+        );
+    }
+    if wanted.is_empty() {
         return;
     }
     let across = pw.div_ceil(8);
     let mut blocks = vec![false; across * ph.div_ceil(8)];
-    let mut nearest: HashMap<usize, Option<MeshReach>, PixelHash> = HashMap::default();
-    for &at in &gaps {
+    let mut nearest: HashMap<usize, (f64, Option<MeshReach>), PixelHash> = HashMap::default();
+    for &(at, limit) in &wanted {
         blocks[(at / pw / 8) * across + at % pw / 8] = true;
-        nearest.insert(at, None);
+        nearest.entry(at).or_insert((limit, None));
     }
-    for (index, tri) in params.triangles.iter().enumerate() {
+    // Any triangle may be the nearest to a gap; to a pixel of the edge, only
+    // one found near the edge.
+    let search: Box<dyn Iterator<Item = usize>> = if any_gap {
+        Box::new(0..params.triangles.len())
+    } else {
+        Box::new(near_edge.into_iter())
+    };
+    for index in search {
+        let tri = &params.triangles[index];
         let placed = corners(tri);
         let (min_x, min_y, max_x, max_y) = pixel_box(placed, 1.0);
         if min_x >= max_x || min_y >= max_y {
@@ -17140,12 +17252,12 @@ fn render_mesh_shading(
         let (b, c) = if swapped { (c, b) } else { (b, c) };
         for py in min_y..max_y {
             for px in min_x..max_x {
-                let Some(best) = nearest.get_mut(&(py * pw + px)) else {
+                let Some((limit, best)) = nearest.get_mut(&(py * pw + px)) else {
                     continue;
                 };
                 let centre = (px as f64 + 0.5, py as f64 + 0.5);
                 let (weights, distance) = nearest_in_triangle(centre, a, b, c);
-                if distance <= MESH_GAP * MESH_GAP && best.is_none_or(|b| distance < b.distance) {
+                if distance <= *limit * *limit && best.is_none_or(|b| distance < b.distance) {
                     *best = Some(MeshReach {
                         distance,
                         triangle: index,
@@ -17156,8 +17268,8 @@ fn render_mesh_shading(
             }
         }
     }
-    for at in gaps {
-        let Some(found) = nearest[&at] else {
+    for (at, _) in wanted {
+        let Some((_, Some(found))) = nearest.remove(&at) else {
             continue;
         };
         let tri = &params.triangles[found.triangle];
@@ -17300,6 +17412,247 @@ impl MeshPixels {
         self.rows = (self.rows.0.min(py), self.rows.1.max(py + 1));
     }
 
+    #[inline]
+    fn get(&self, px: usize, py: usize) -> bool {
+        self.bits[py * self.across + px / 64] & (1 << (px % 64)) != 0
+    }
+
+    /// The box the set pixels lie in: the first column and row, and one
+    /// past the last. `None` when none is set.
+    fn bounds(&self) -> Option<(usize, usize, usize, usize)> {
+        let (first, end) = self.rows;
+        let (mut x0, mut x1) = (usize::MAX, 0);
+        for py in first..end {
+            let row = &self.bits[py * self.across..(py + 1) * self.across];
+            if let Some(i) = row.iter().position(|&w| w != 0) {
+                x0 = x0.min(i * 64 + row[i].trailing_zeros() as usize);
+            }
+            if let Some(i) = row.iter().rposition(|&w| w != 0) {
+                x1 = x1.max(i * 64 + 64 - row[i].leading_zeros() as usize);
+            }
+        }
+        (x0 < x1).then_some((x0, first, x1, end))
+    }
+
+    /// Sets the pixels in `within` — first column and row, and one past
+    /// the last — whose centres `shape` holds. The first of these pixels
+    /// lies at `origin` on the output the shape is placed on.
+    fn fill(&mut self, shape: &MeshShape, origin: (i64, i64), within: [usize; 4]) {
+        // No further than the shape reaches.
+        let Some([left, top, right, bottom]) = shape.bounds() else {
+            return;
+        };
+        let clamp = |v: f32, at: i64, lo: usize, hi: usize| {
+            ((v as f64 - at as f64).clamp(lo as f64, hi as f64)) as usize
+        };
+        let x0 = clamp(left.floor(), origin.0, within[0], within[2]);
+        let y0 = clamp(top.floor(), origin.1, within[1], within[3]);
+        let x1 = clamp(right.ceil() + 1.0, origin.0, x0, within[2]);
+        let y1 = clamp(bottom.ceil() + 1.0, origin.1, y0, within[3]);
+        let Some(mut mask) = Mask::new((x1 - x0) as u32, (y1 - y0) as u32) else {
+            return;
+        };
+        shape.fill(
+            &mut mask,
+            false,
+            Transform::from_translate(
+                -((origin.0 + x0 as i64) as f32),
+                -((origin.1 + y0 as i64) as f32),
+            ),
+        );
+        let w = x1 - x0;
+        for (y, row) in mask.data().chunks_exact(w).enumerate() {
+            let bits = &mut self.bits[(y0 + y) * self.across..(y0 + y + 1) * self.across];
+            // Sets the pixels from `from` to `to` of the row of the mask.
+            let mut set = |from: usize, to: usize| {
+                let (mut px, end) = (x0 + from, x0 + to);
+                while px < end {
+                    let (word, bit) = (px / 64, px % 64);
+                    let take = (64 - bit).min(end - px);
+                    bits[word] |= (u64::MAX >> (64 - take)) << bit;
+                    px += take;
+                }
+            };
+            // Eight pixels at a time: inside a shape most are all set or
+            // all clear, and a run of them all set is set at once.
+            let (eights, rest) = row.as_chunks::<8>();
+            let mut run: Option<usize> = None;
+            let mut any = false;
+            for (i, eight) in eights.iter().enumerate() {
+                let word = u64::from_ne_bytes(*eight);
+                if word != 0 && eight.iter().all(|&v| v != 0) {
+                    run.get_or_insert(i * 8);
+                    continue;
+                }
+                if let Some(from) = run.take() {
+                    set(from, i * 8);
+                    any = true;
+                }
+                if word != 0 {
+                    for (k, &v) in eight.iter().enumerate() {
+                        if v != 0 {
+                            set(i * 8 + k, i * 8 + k + 1);
+                            any = true;
+                        }
+                    }
+                }
+            }
+            if let Some(from) = run {
+                set(from, eights.len() * 8);
+                any = true;
+            }
+            for (k, &v) in rest.iter().enumerate() {
+                if v != 0 {
+                    set(eights.len() * 8 + k, eights.len() * 8 + k + 1);
+                    any = true;
+                }
+            }
+            if any {
+                self.touch_row(y0 + y);
+            }
+        }
+    }
+
+    /// Sets the pixels between set ones: a mesh paints those from the
+    /// nearest triangle, so holds them too.
+    fn close_gaps(&mut self) {
+        for at in self.gaps() {
+            self.set(at % self.width, at / self.width);
+        }
+    }
+
+    /// Clears the set pixels `keep` turns down.
+    fn retain(&mut self, keep: impl Fn(usize, usize) -> bool) {
+        let (first, end) = self.rows;
+        let mut rows = (usize::MAX, 0);
+        for py in first.min(end)..end {
+            for i in 0..self.across {
+                let word = &mut self.bits[py * self.across + i];
+                let mut set = *word;
+                while set != 0 {
+                    let bit = set.trailing_zeros() as usize;
+                    set &= set - 1;
+                    if !keep(i * 64 + bit, py) {
+                        *word &= !(1 << bit);
+                    }
+                }
+                if *word != 0 {
+                    rows = (rows.0.min(py), py + 1);
+                }
+            }
+        }
+        self.rows = rows;
+    }
+
+    /// The rows the pixels these reach lie in, being set or beside a set
+    /// one: the first, and one past the last.
+    fn reach_rows(&self) -> std::ops::Range<usize> {
+        let (first, end) = self.rows;
+        let height = self.bits.len() / self.across;
+        if first >= end {
+            return 0..0;
+        }
+        first.saturating_sub(1)..(end + 1).min(height)
+    }
+
+    /// The pixels of row `py` these reach, into `reach`, a row's words.
+    fn reach_row(&self, py: usize, reach: &mut [u64]) {
+        let height = self.bits.len() / self.across;
+        let row = |y: usize| &self.bits[y * self.across..(y + 1) * self.across];
+        let left = |r: &[u64], i: usize| (r[i] << 1) | if i > 0 { r[i - 1] >> 63 } else { 0 };
+        let right = |r: &[u64], i: usize| (r[i] >> 1) | r.get(i + 1).map_or(0, |next| next << 63);
+        reach.fill(0);
+        for r in (py.saturating_sub(1)..(py + 2).min(height)).map(row) {
+            for (i, word) in reach.iter_mut().enumerate() {
+                *word |= r[i] | left(r, i) | right(r, i);
+            }
+        }
+    }
+
+    /// Notes that row `py` may have pixels set.
+    fn touch_row(&mut self, py: usize) {
+        self.rows = (self.rows.0.min(py), self.rows.1.max(py + 1));
+    }
+
+    /// Adds to `once` the pixels these reach, and to `twice` those of them
+    /// `once` held already; then clears these. All three are the same size.
+    fn add_reach(&mut self, once: &mut MeshPixels, twice: &mut MeshPixels) {
+        let mut reach = vec![0u64; self.across];
+        for py in self.reach_rows() {
+            self.reach_row(py, &mut reach);
+            let at = py * self.across;
+            let mut again = false;
+            for (i, &word) in reach.iter().enumerate() {
+                let both = once.bits[at + i] & word;
+                twice.bits[at + i] |= both;
+                once.bits[at + i] |= word;
+                again |= both != 0;
+            }
+            once.touch_row(py);
+            if again {
+                twice.touch_row(py);
+            }
+        }
+        let (first, end) = self.rows;
+        if first < end {
+            self.bits[first * self.across..end * self.across].fill(0);
+        }
+        self.rows = (usize::MAX, 0);
+    }
+
+    /// The pixels these reach.
+    fn grown(&self) -> MeshPixels {
+        let height = self.bits.len() / self.across;
+        let mut grown = MeshPixels::new(self.width, height);
+        let mut reach = vec![0u64; self.across];
+        for py in self.reach_rows() {
+            self.reach_row(py, &mut reach);
+            grown.bits[py * self.across..(py + 1) * self.across].copy_from_slice(&reach);
+            grown.touch_row(py);
+        }
+        grown
+    }
+
+    /// Taking these as the pixels a mesh holds in a frame one pixel wider
+    /// all round than a pixmap `width` by `height`: the pixels of the
+    /// pixmap on the mesh's edge. Those held with one of their eight
+    /// neighbours not, and those not held with one of them held.
+    fn edge(&self, width: usize, height: usize) -> MeshPixels {
+        let mut edge = MeshPixels::new(width, height);
+        let left = |r: &[u64], i: usize| (r[i] << 1) | if i > 0 { r[i - 1] >> 63 } else { 0 };
+        let right = |r: &[u64], i: usize| (r[i] >> 1) | r.get(i + 1).map_or(0, |next| next << 63);
+        let row = |y: usize| &self.bits[y * self.across..(y + 1) * self.across];
+        // Rows of the frame that can hold an edge pixel: a held row, or
+        // one beside it.
+        let (first, end) = self.rows;
+        for fy in first.saturating_sub(1).max(1)..(end + 1).min(height + 1) {
+            let (up, here, down) = (row(fy - 1), row(fy), row(fy + 1));
+            for i in 0..self.across {
+                let rows = [up, here, down];
+                let mut some = 0;
+                let mut all = u64::MAX;
+                for (k, r) in rows.iter().enumerate() {
+                    let around = [left(r, i), right(r, i)];
+                    let mid = if k == 1 { None } else { Some(r[i]) };
+                    for n in around.into_iter().chain(mid) {
+                        some |= n;
+                        all &= n;
+                    }
+                }
+                let held = here[i];
+                let mut found = (held & !all) | (!held & some);
+                while found != 0 {
+                    let fx = i * 64 + found.trailing_zeros() as usize;
+                    found &= found - 1;
+                    if (1..=width).contains(&fx) {
+                        edge.set(fx - 1, fy - 1);
+                    }
+                }
+            }
+        }
+        edge
+    }
+
     /// The pixels not set that have set pixels on opposite sides of them:
     /// left and right, above and below, or corner to corner. As places in
     /// the pixmap, row by row.
@@ -17337,11 +17690,732 @@ impl MeshPixels {
     }
 }
 
+/// How much of each pixel on its own edge a mesh covers.
+///
+/// A triangle colours the pixels whose centres it holds, so a mesh drawn
+/// that way ends in whole pixels and its edge comes out stepped. The
+/// pixels of its edge are those it holds beside one it does not, and the
+/// other way round; the shape the mesh covers ([`MeshShape`]) is filled
+/// over them, which gives how much of each the mesh as a whole covers. A
+/// pixel inside the mesh is covered whole, as before.
+///
+/// Where another mesh comes up to the edge ([`MeshCrowd`]) the edge is
+/// left hard, as both meshes' are: each covering the pixels along the line
+/// they share in part, the paper would show between them.
+struct MeshCover {
+    /// The pixels of the edge, in the pixmap.
+    edge: MeshPixels,
+    /// Where they lie, coarsely.
+    blocks: EdgeBlocks,
+    /// What the mesh covers of the box of pixels the edge lies in.
+    mask: Mask,
+    /// Where in the pixmap the mask's first pixel is.
+    origin: (usize, usize),
+}
+
+impl MeshCover {
+    /// For a mesh covering `shape`, placed in a pixmap `pw` by `ph`, where
+    /// `crowd` says other meshes come. `None` when the mesh has no edge
+    /// there that may be smooth.
+    fn of(shape: &MeshShape, pw: usize, ph: usize, crowd: MeshCrowdView<'_>) -> Option<Self> {
+        // The pixel centres the shape holds, in a frame one pixel wider than
+        // the pixmap all round so a pixel on its border has neighbours.
+        let mut held = MeshPixels::new(pw + 2, ph + 2);
+        held.fill(shape, (-1, -1), [0, 0, pw + 2, ph + 2]);
+        held.close_gaps();
+
+        let mut edge = held.edge(pw, ph);
+        edge.retain(|px, py| !crowd.shared(px, py));
+        let (x0, y0, x1, y1) = edge.bounds()?;
+        let blocks = EdgeBlocks::new(&edge, (x0, y0, x1, y1));
+        let mut mask = Mask::new((x1 - x0) as u32, (y1 - y0) as u32)?;
+        let near = MeshShape {
+            front: shape.front.as_ref().and_then(|p| shape_near(p, &blocks)),
+            back: shape.back.as_ref().and_then(|p| shape_near(p, &blocks)),
+        };
+        near.fill(
+            &mut mask,
+            true,
+            Transform::from_translate(-(x0 as f32), -(y0 as f32)),
+        );
+        Some(MeshCover {
+            edge,
+            blocks,
+            mask,
+            origin: (x0, y0),
+        })
+    }
+
+    /// How much of the pixel at `px`, `py` the mesh covers, of 255.
+    #[inline]
+    fn at(&self, px: usize, py: usize) -> u8 {
+        if !self.edge.get(px, py) {
+            return 255;
+        }
+        let (x, y) = (px - self.origin.0, py - self.origin.1);
+        self.mask.data()[y * self.mask.width() as usize + x]
+    }
+
+    /// The pixels of the edge, as places in the pixmap, that the mesh
+    /// covers some part of.
+    fn covered(&self) -> impl Iterator<Item = usize> + '_ {
+        let pw = self.edge.width;
+        let (x0, y0) = self.origin;
+        let (w, h) = (self.mask.width() as usize, self.mask.height() as usize);
+        (y0..y0 + h)
+            .flat_map(move |py| (x0..x0 + w).map(move |px| (px, py)))
+            .filter(|&(px, py)| self.edge.get(px, py) && self.at(px, py) > 0)
+            .map(move |(px, py)| py * pw + px)
+    }
+}
+
+/// Which blocks of eight pixels by eight hold a pixel of a mesh's edge.
+struct EdgeBlocks {
+    /// The box of pixels the edge lies in: the first column and row, and
+    /// one past the last.
+    bounds: (usize, usize, usize, usize),
+    across: usize,
+    blocks: Vec<bool>,
+}
+
+impl EdgeBlocks {
+    const SIDE: usize = 8;
+
+    /// For the pixels of `edge`, which lie in `bounds`.
+    fn new(edge: &MeshPixels, bounds: (usize, usize, usize, usize)) -> Self {
+        let (x0, y0, x1, y1) = bounds;
+        let across = (x1 - x0).div_ceil(Self::SIDE);
+        let mut blocks = vec![false; across * (y1 - y0).div_ceil(Self::SIDE)];
+        for py in y0..y1 {
+            for px in x0..x1 {
+                if edge.get(px, py) {
+                    blocks[(py - y0) / Self::SIDE * across + (px - x0) / Self::SIDE] = true;
+                }
+            }
+        }
+        EdgeBlocks {
+            bounds,
+            across,
+            blocks,
+        }
+    }
+
+    /// Whether the box from `lo` to `hi`, in pixels, reaches a block that
+    /// holds one.
+    fn reach(&self, lo: (f32, f32), hi: (f32, f32)) -> bool {
+        let (x0, y0, x1, y1) = self.bounds;
+        if !(hi.0 >= x0 as f32 && hi.1 >= y0 as f32 && lo.0 < x1 as f32 && lo.1 < y1 as f32) {
+            return false;
+        }
+        let down = self.blocks.len() / self.across;
+        let block = |v: f32, from: usize, count: usize| {
+            ((v.floor() as i64 - from as i64).max(0) as usize / Self::SIDE).min(count - 1)
+        };
+        let (bx0, bx1) = (block(lo.0, x0, self.across), block(hi.0, x0, self.across));
+        (block(lo.1, y0, down)..=block(hi.1, y0, down))
+            .any(|by| (bx0..=bx1).any(|bx| self.blocks[by * self.across + bx]))
+    }
+}
+
+/// The parts of `shape` that may cover a pixel of a mesh's edge: those
+/// whose control points' box reaches one of `blocks`. Most of a mesh of
+/// many triangles is nowhere near its edge.
+fn shape_near(shape: &Path, blocks: &EdgeBlocks) -> Option<Path> {
+    use stet_tiny_skia::PathSegment as Segment;
+    let mut near = PathBuilder::new();
+    let mut part: Vec<Segment> = Vec::new();
+    let keep = |part: &mut Vec<Segment>, near: &mut PathBuilder| {
+        let (mut lo, mut hi) = (
+            (f32::INFINITY, f32::INFINITY),
+            (f32::NEG_INFINITY, f32::NEG_INFINITY),
+        );
+        let mut take = |p: stet_tiny_skia::Point| {
+            lo = (lo.0.min(p.x), lo.1.min(p.y));
+            hi = (hi.0.max(p.x), hi.1.max(p.y));
+        };
+        for segment in part.iter() {
+            match *segment {
+                Segment::MoveTo(a) | Segment::LineTo(a) => take(a),
+                Segment::QuadTo(a, b) => [a, b].into_iter().for_each(&mut take),
+                Segment::CubicTo(a, b, c) => [a, b, c].into_iter().for_each(&mut take),
+                Segment::Close => {}
+            }
+        }
+        if blocks.reach(lo, hi) {
+            for segment in part.iter() {
+                match *segment {
+                    Segment::MoveTo(a) => near.move_to(a.x, a.y),
+                    Segment::LineTo(a) => near.line_to(a.x, a.y),
+                    Segment::QuadTo(a, b) => near.quad_to(a.x, a.y, b.x, b.y),
+                    Segment::CubicTo(a, b, c) => near.cubic_to(a.x, a.y, b.x, b.y, c.x, c.y),
+                    Segment::Close => near.close(),
+                }
+            }
+        }
+        part.clear();
+    };
+    for segment in shape.segments() {
+        if matches!(segment, Segment::MoveTo(_)) && !part.is_empty() {
+            keep(&mut part, &mut near);
+        }
+        part.push(segment);
+    }
+    keep(&mut part, &mut near);
+    near.finish()
+}
+
+/// The shape a mesh covers, as two paths on an output, each filled
+/// non-zero; the shape is the two together.
+///
+/// A patch that does not fold over itself covers what its four sides
+/// enclose, and is that outline in `front`: four curves where its
+/// triangles would be hundreds, and the edge itself rather than the chords
+/// the triangles are cut along. Every outline is turned so the part of its
+/// patch that most of its triangles cover winds positive.
+///
+/// A patch that does fold winds the other way where its triangles face
+/// the other way, and where layers facing both ways lie on one another its
+/// outline cancels out. Every such point lies in a triangle facing the
+/// other way from most, so those triangles, turned to wind positive, are
+/// `back`. Filled apart from the outlines they cannot cancel them, and
+/// where outlines cancel one another — one patch winding back over
+/// another — they cover what is missing.
+///
+/// A mesh of triangles is its triangles, each turned to wind positive, in
+/// `front`.
+struct MeshShape {
+    front: Option<Path>,
+    back: Option<Path>,
+}
+
+impl MeshShape {
+    /// From what was added to `front` and `back`; `None` if nothing was.
+    fn new(front: PathBuilder, back: PathBuilder) -> Option<Self> {
+        let shape = MeshShape {
+            front: front.finish(),
+            back: back.finish(),
+        };
+        (shape.front.is_some() || shape.back.is_some()).then_some(shape)
+    }
+
+    /// The two paths there are.
+    fn parts(&self) -> impl Iterator<Item = &Path> {
+        self.front.iter().chain(&self.back)
+    }
+
+    /// Fills the shape into `mask`, each part over what is there.
+    fn fill(&self, mask: &mut Mask, anti_alias: bool, transform: Transform) {
+        for part in self.parts() {
+            mask.fill_path(
+                part,
+                stet_tiny_skia::FillRule::Winding,
+                anti_alias,
+                transform,
+            );
+        }
+    }
+
+    /// The box the shape lies in: least x and y, greatest x and y.
+    fn bounds(&self) -> Option<[f32; 4]> {
+        self.parts().map(|p| p.bounds()).fold(None, |all, b| {
+            let b = [b.left(), b.top(), b.right(), b.bottom()];
+            Some(all.map_or(b, |a: [f32; 4]| {
+                [
+                    a[0].min(b[0]),
+                    a[1].min(b[1]),
+                    a[2].max(b[2]),
+                    a[3].max(b[3]),
+                ]
+            }))
+        })
+    }
+}
+
+/// Adds to `front` and `back` what one patch of a mesh covers (see
+/// [`MeshShape`]). `points` are the patch's points at `n` steps along each
+/// side ([`patch_points`]), in the shading's space; `place` puts a point of
+/// that space on the output, and triangles `cull` says cannot reach it are
+/// left out.
+#[expect(clippy::too_many_arguments)]
+fn add_patch_shape(
+    front: &mut PathBuilder,
+    back: &mut PathBuilder,
+    patch: &stet_graphics::device::ShadingPatch,
+    points: &[(f64, f64)],
+    n: usize,
+    ctm: &Matrix,
+    place: &impl Fn(&Matrix, (f64, f64)) -> (f32, f32),
+    cull: Option<&ShadingCull>,
+) {
+    let turn = |a: (f64, f64), b: (f64, f64), c: (f64, f64)| {
+        (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)
+    };
+    let cols = n + 1;
+    // How many of its triangles face each way on the output, anticlockwise
+    // and clockwise: as they face in the shading's space, unless the matrix
+    // turns that space over. Each cell of the grid is cut from the corner
+    // on whose sides `u` and `v` grow.
+    let over = ctm.a * ctm.d - ctm.b * ctm.c < 0.0;
+    let facing = |t: f64| if over { -t } else { t };
+    let cell = |row: usize, col: usize| {
+        let i00 = row * cols + col;
+        let (i10, i01) = (i00 + 1, i00 + cols);
+        [[i00, i10, i01], [i10, i01 + 1, i01]]
+    };
+    let mut faces = (0usize, 0usize);
+    for row in 0..n {
+        for col in 0..n {
+            for [a, b, c] in cell(row, col) {
+                let t = facing(turn(points[a], points[b], points[c]));
+                faces.0 += usize::from(t > 0.0);
+                faces.1 += usize::from(t < 0.0);
+            }
+        }
+    }
+    if faces == (0, 0) {
+        return;
+    }
+    let forward = faces.0 >= faces.1;
+    // Its sides run round the patch the way its triangles turn: p00 to p03
+    // is along `u`, then `v`, and back.
+    let ring: [usize; 12] = if forward {
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    } else {
+        [0, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1]
+    };
+    let point = |i: usize| place(ctm, patch.points[ring[i % 12]]);
+    let start = point(0);
+    front.move_to(start.0, start.1);
+    for side in 0..4 {
+        let [b, c, d] = [1, 2, 3].map(|k| point(side * 3 + k));
+        front.cubic_to(b.0, b.1, c.0, c.1, d.0, d.1);
+    }
+    front.close();
+
+    if faces.0 == 0 || faces.1 == 0 {
+        return;
+    }
+    for row in 0..n {
+        for col in 0..n {
+            for [a, b, c] in cell(row, col) {
+                let t = facing(turn(points[a], points[b], points[c]));
+                if t == 0.0 || (t > 0.0) == forward {
+                    continue;
+                }
+                let [da, db, dc] = [a, b, c].map(|k| ctm.transform_point(points[k].0, points[k].1));
+                if cull.is_some_and(|cull| cull.rejects_triangle(da, db, dc)) {
+                    continue;
+                }
+                let [a, b, c] = [a, b, c].map(|k| place(ctm, points[k]));
+                // Placed on the output it turns as `t` does; turned to wind
+                // positive.
+                let (b, c) = if t > 0.0 { (b, c) } else { (c, b) };
+                back.move_to(a.0, a.1);
+                back.line_to(b.0, b.1);
+                back.line_to(c.0, c.1);
+                back.close();
+            }
+        }
+    }
+}
+
+/// The shape a mesh covers ([`MeshShape`]) on an output: each point placed
+/// by `place`, and the parts `cull` says cannot reach the output left out.
+/// `scale` is how many pixels of the output a unit of device space comes
+/// to, which decides how finely a patch is cut.
+fn mesh_shape(
+    mesh: CrowdMesh<'_>,
+    place: &impl Fn(&Matrix, (f64, f64)) -> (f32, f32),
+    cull: Option<&ShadingCull>,
+    scale: f64,
+) -> Option<MeshShape> {
+    let mut front = PathBuilder::new();
+    let mut back = PathBuilder::new();
+    match mesh {
+        CrowdMesh::Triangles(params) => {
+            let ctm = &params.ctm;
+            for t in &params.triangles {
+                let [a, b, c] = [&t.v0, &t.v1, &t.v2].map(|v| (v.x, v.y));
+                if cull.is_some_and(|cull| {
+                    let [a, b, c] = [a, b, c].map(|p| ctm.transform_point(p.0, p.1));
+                    cull.rejects_triangle(a, b, c)
+                }) {
+                    continue;
+                }
+                let [a, b, c] = [a, b, c].map(|p| place(ctm, p));
+                let turn = (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
+                if turn == 0.0 {
+                    continue;
+                }
+                let (b, c) = if turn > 0.0 { (b, c) } else { (c, b) };
+                front.move_to(a.0, a.1);
+                front.line_to(b.0, b.1);
+                front.line_to(c.0, c.1);
+                front.close();
+            }
+        }
+        CrowdMesh::Patches(params) => {
+            let ctm = &params.ctm;
+            for patch in params.patches.iter().filter(|p| p.points.len() >= 12) {
+                if let Some(cull) = cull
+                    && let Some((x0, y0, x1, y1)) = patch_hull_bbox(patch, ctm)
+                    && cull.rejects(x0, y0, x1, y1)
+                {
+                    continue;
+                }
+                let n = patch_subdivisions(patch, ctm, scale);
+                let points = patch_points(patch, n);
+                add_patch_shape(&mut front, &mut back, patch, &points, n, ctm, place, cull);
+            }
+        }
+    }
+    MeshShape::new(front, back)
+}
+
+/// How many pixels past each side of the output the table of a
+/// [`MeshCrowd`] reaches. A pixel is crowded when it is beside one that two
+/// meshes reach, a mesh reaching the pixels it holds and those beside them,
+/// and a mesh holds a pixel between two it holds; so which pixels are
+/// crowded is known three pixels in from the table's sides, at every
+/// pixel of the output.
+const CROWD_MARGIN: usize = 3;
+
+/// The side, in pixels, of the cells in which meshes' boxes are counted to
+/// find where two might meet. Only a mesh whose box reaches a cell another
+/// mesh's box reaches is filled into the table.
+const CROWD_CELL: usize = 32;
+
+/// A mesh shading, as a [`MeshCrowd`] finds it in a display list.
+#[derive(Clone, Copy)]
+enum CrowdMesh<'a> {
+    /// Free-form or lattice triangles (types 4 and 5).
+    Triangles(&'a MeshShadingParams),
+    /// Coons or tensor-product patches (types 6 and 7).
+    Patches(&'a PatchShadingParams),
+}
+
+/// Which pixels of an output two or more mesh shadings reach.
+///
+/// A mesh's own edge is smoothed by [`MeshCover`], each pixel along it
+/// painted at the part of it the mesh covers. Where two meshes abut, each
+/// covers part of the pixels along the line they share, and painted one
+/// after the other at those parts they leave the paper showing between
+/// them: a seam where the artwork has none. So each mesh is taken to reach
+/// the pixels it holds and those beside them, and where two reach the same
+/// pixel neither is smoothed there or beside it. Their edges stay hard, as
+/// they always were, and meet without a seam; an edge no other mesh comes
+/// near is smooth.
+///
+/// Worked out for each output a display list is rendered into — a band,
+/// or a region of the page — from every mesh in the list and in the lists
+/// nested in it that are drawn on the same pixels: groups, soft masks and
+/// visible layers. Meshes in a pattern's tile, which is drawn in a space of
+/// its own, are left out, and a mesh painted there is hard.
+struct MeshCrowd {
+    /// Where the output starts in device space.
+    vp: (f32, f32),
+    /// Pixels of the output to a unit of device space.
+    scale: (f32, f32),
+    /// The table's size: the output's, with [`CROWD_MARGIN`] pixels more
+    /// on each side.
+    width: usize,
+    height: usize,
+    /// The pixels two or more meshes reach, and those beside them. `None`
+    /// when there are none.
+    crowded: Option<MeshPixels>,
+}
+
+/// A [`MeshCrowd`] as seen from a pixmap drawn on its pixels: a group's,
+/// or a soft mask's, which start some whole number of pixels into it.
+#[derive(Clone, Copy)]
+struct MeshCrowdView<'a> {
+    crowd: &'a MeshCrowd,
+    /// Where the pixmap's first pixel is in the table.
+    dx: i64,
+    dy: i64,
+}
+
+impl MeshCrowd {
+    /// The table for the meshes of `list` as drawn on an output `size`
+    /// pixels, starting at `vp` in device space and `scale` pixels to a
+    /// unit of it, with the layers `layer_set` shows.
+    fn build(
+        list: &DisplayList,
+        layer_set: &LayerSet,
+        vp: (f32, f32),
+        scale: (f32, f32),
+        size: (u32, u32),
+    ) -> Self {
+        let m = CROWD_MARGIN;
+        let (pw, ph) = (size.0 as usize, size.1 as usize);
+        let (width, height) = (pw + 2 * m, ph + 2 * m);
+        let mut crowd = MeshCrowd {
+            vp,
+            scale,
+            width,
+            height,
+            crowded: None,
+        };
+        let mut meshes = Vec::new();
+        collect_crowd_meshes(list, layer_set, &mut meshes);
+        if meshes.len() < 2 {
+            return crowd;
+        }
+
+        // Where a point of a mesh falls on the output, as `render_mesh_shading`
+        // places it; and the box of table pixels a mesh reaches if its points
+        // lie between `lo` and `hi`. A pixel between triangles and a pixel
+        // beside one held are reached too, so the box reaches two further.
+        let place = |ctm: &Matrix, (x, y): (f64, f64)| {
+            let (dx, dy) = ctm.transform_point(x, y);
+            ((dx as f32 - vp.0) * scale.0, (dy as f32 - vp.1) * scale.1)
+        };
+        let table_box = |lo: (f32, f32), hi: (f32, f32)| {
+            let from =
+                |v: f32, end: usize| ((v.floor() as i64 - 2 + m as i64).max(0) as usize).min(end);
+            let to =
+                |v: f32, end: usize| ((v.ceil() as i64 + 2 + m as i64).max(0) as usize).min(end);
+            let b = [
+                from(lo.0, width),
+                from(lo.1, height),
+                to(hi.0, width),
+                to(hi.1, height),
+            ];
+            (b[0] < b[2] && b[1] < b[3]).then_some(b)
+        };
+        let corners_box = |corners: &[(f32, f32)]| {
+            let lo = corners.iter().fold((f32::INFINITY, f32::INFINITY), |a, p| {
+                (a.0.min(p.0), a.1.min(p.1))
+            });
+            let hi = corners
+                .iter()
+                .fold((f32::NEG_INFINITY, f32::NEG_INFINITY), |a, p| {
+                    (a.0.max(p.0), a.1.max(p.1))
+                });
+            table_box(lo, hi)
+        };
+        let boxes: Vec<Option<[usize; 4]>> = meshes
+            .iter()
+            .map(|mesh| match *mesh {
+                CrowdMesh::Triangles(params) => {
+                    let corners: Vec<(f32, f32)> = params
+                        .triangles
+                        .iter()
+                        .flat_map(|t| [&t.v0, &t.v1, &t.v2])
+                        .map(|v| place(&params.ctm, (v.x, v.y)))
+                        .collect();
+                    corners_box(&corners)
+                }
+                CrowdMesh::Patches(params) => {
+                    let corners: Vec<(f32, f32)> = params
+                        .patches
+                        .iter()
+                        .filter_map(|patch| patch_hull_bbox(patch, &params.ctm))
+                        .flat_map(|(x0, y0, x1, y1)| [(x0, y0), (x1, y1)])
+                        .map(|p| place(&Matrix::default(), p))
+                        .collect();
+                    corners_box(&corners)
+                }
+            })
+            .collect();
+
+        // How many boxes reach each cell, as far as two.
+        let across = width.div_ceil(CROWD_CELL);
+        let down = height.div_ceil(CROWD_CELL);
+        let cells = |b: &[usize; 4]| {
+            let (x0, x1) = (b[0] / CROWD_CELL, (b[2] - 1) / CROWD_CELL);
+            (b[1] / CROWD_CELL..=(b[3] - 1) / CROWD_CELL)
+                .flat_map(move |cy| (x0..=x1).map(move |cx| cy * across + cx))
+        };
+        let mut counts = vec![0u8; across * down];
+        for b in boxes.iter().flatten() {
+            for cell in cells(b) {
+                counts[cell] = (counts[cell] + 1).min(2);
+            }
+        }
+        if !counts.contains(&2) {
+            return crowd;
+        }
+        let hot: Vec<bool> = counts.iter().map(|&c| c == 2).collect();
+
+        // Parts of a mesh are tested in device space, so the matrix here
+        // goes unused.
+        let cull = ShadingCull::new(
+            Matrix::default(),
+            vp.0,
+            vp.1,
+            scale.0,
+            scale.1,
+            size.0,
+            size.1,
+            m as f32 + 1.0,
+        );
+        let fineness = scale.0.max(scale.1) as f64;
+        let mut held = MeshPixels::new(width, height);
+        let mut once = MeshPixels::new(width, height);
+        let mut twice = MeshPixels::new(width, height);
+        for (mesh, b) in meshes.iter().zip(&boxes) {
+            let Some(b) = b else { continue };
+            if !cells(b).any(|cell| hot[cell]) {
+                continue;
+            }
+            let Some(shape) = mesh_shape(*mesh, &place, cull.as_ref(), fineness) else {
+                continue;
+            };
+            held.fill(&shape, (-(m as i64), -(m as i64)), *b);
+            held.close_gaps();
+            held.add_reach(&mut once, &mut twice);
+        }
+        // An edge pixel beside one left hard is left hard too: smoothed
+        // between hard ones, it would show as a notch in the edge.
+        if twice.rows.0 < twice.rows.1 {
+            crowd.crowded = Some(twice.grown());
+        }
+        crowd
+    }
+
+    /// The table as seen from a pixmap drawn on the same pixels, starting
+    /// at `vp_x`, `vp_y` in device space with pixels `scale_x` by `scale_y`
+    /// to a unit of it. `None` if its pixels are not the table's.
+    fn view(&self, vp_x: f32, vp_y: f32, scale_x: f32, scale_y: f32) -> Option<MeshCrowdView<'_>> {
+        if (scale_x, scale_y) != self.scale {
+            return None;
+        }
+        let shift = |at: f32, from: f32, scale: f32| {
+            ((at - from) * scale).round() as i64 + CROWD_MARGIN as i64
+        };
+        Some(MeshCrowdView {
+            crowd: self,
+            dx: shift(vp_x, self.vp.0, scale_x),
+            dy: shift(vp_y, self.vp.1, scale_y),
+        })
+    }
+}
+
+impl MeshCrowdView<'_> {
+    /// Whether a mesh's edge at the pixel `px`, `py` of the pixmap may meet
+    /// another mesh's there. Past the table's reach nothing is known, and
+    /// it may.
+    fn shared(&self, px: usize, py: usize) -> bool {
+        let (x, y) = (px as i64 + self.dx, py as i64 + self.dy);
+        let crowd = self.crowd;
+        if x < 0 || y < 0 || x >= crowd.width as i64 || y >= crowd.height as i64 {
+            return true;
+        }
+        crowd
+            .crowded
+            .as_ref()
+            .is_some_and(|c| c.get(x as usize, y as usize))
+    }
+}
+
+/// Every mesh shading of `list`, and of the lists nested in it, that is
+/// drawn on the same pixels as `list` and shown by `layer_set`.
+fn collect_crowd_meshes<'a>(
+    list: &'a DisplayList,
+    layer_set: &LayerSet,
+    out: &mut Vec<CrowdMesh<'a>>,
+) {
+    for element in list.elements() {
+        match element {
+            DisplayElement::MeshShading { params } => out.push(CrowdMesh::Triangles(params)),
+            DisplayElement::PatchShading { params } => out.push(CrowdMesh::Patches(params)),
+            DisplayElement::Group { elements, .. } => {
+                collect_crowd_meshes(elements, layer_set, out);
+            }
+            DisplayElement::SoftMasked { mask, content, .. } => {
+                collect_crowd_meshes(mask, layer_set, out);
+                collect_crowd_meshes(content, layer_set, out);
+            }
+            DisplayElement::OcgGroup {
+                elements,
+                visibility,
+            } if layer_set.evaluate(visibility) => {
+                collect_crowd_meshes(elements, layer_set, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A triangle of a mesh placed in a pixmap, for finding the pixel centres
+/// it holds.
+#[derive(Clone, Copy)]
+struct PlacedTriangle {
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+    inv_denom: f64,
+    /// Whether the second and third corners were exchanged so the weights
+    /// of the points inside come out positive whichever way the triangle
+    /// faces.
+    swapped: bool,
+}
+
+impl PlacedTriangle {
+    /// `None` for a triangle with no area.
+    #[inline]
+    fn new([(x0, y0), (x1, y1), (x2, y2)]: [(f32, f32); 3]) -> Option<Self> {
+        let x0 = x0 as f64;
+        let y0 = y0 as f64;
+        let x1 = x1 as f64;
+        let y1 = y1 as f64;
+        let x2 = x2 as f64;
+        let y2 = y2 as f64;
+        let denom = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
+        if denom.abs() < 1e-10 {
+            return None;
+        }
+        let swapped = denom < 0.0;
+        let (x1, y1, x2, y2) = if swapped {
+            (x2, y2, x1, y1)
+        } else {
+            (x1, y1, x2, y2)
+        };
+        Some(PlacedTriangle {
+            x0,
+            y0,
+            x1,
+            y1,
+            x2,
+            y2,
+            inv_denom: 1.0 / denom.abs(),
+            swapped,
+        })
+    }
+
+    /// The weights of the three corners at a point, in order, whether or
+    /// not it lies inside.
+    #[inline]
+    fn weights(&self, x: f64, y: f64) -> (f64, f64, f64) {
+        let PlacedTriangle {
+            x0,
+            y0,
+            x1,
+            y1,
+            x2,
+            y2,
+            inv_denom,
+            ..
+        } = *self;
+        let w0 = ((y1 - y2) * (x - x2) + (x2 - x1) * (y - y2)) * inv_denom;
+        let w1 = ((y2 - y0) * (x - x2) + (x0 - x2) * (y - y2)) * inv_denom;
+        (w0, w1, 1.0 - w0 - w1)
+    }
+}
+
 /// Paints the pixels of a mesh, one at a time.
 struct MeshPainter<'a> {
     data: &'a mut [u8],
     cmyk_buf: Option<&'a mut [f32]>,
     clip_data: Option<&'a [u8]>,
+    /// How much of each pixel on its own edge the mesh covers.
+    cover: Option<&'a MeshCover>,
+    /// The clip a group the mesh is in will be put on the page through.
+    enclosing: Option<EnclosingClip<'a>>,
     lut: Option<&'a [DeviceColor]>,
     params: &'a MeshShadingParams,
     icc: Option<&'a IccCache>,
@@ -17365,7 +18439,22 @@ impl MeshPainter<'_> {
         v2_ref: &ShadingVertex,
         [w0n, w1n, w2n]: [f64; 3],
     ) {
-        let cov = clip_coverage(self.clip_data, py * self.pw + px);
+        // Where the mesh's edge and a clip's both pass through a pixel they
+        // are most often the same edge, the clip drawn along the mesh, and
+        // the pixel is covered by the less of the two, not by a part of a
+        // part. The clip round a group comes after, as the group is put on
+        // the page, so under its edge the mesh is painted at its own part
+        // of the clip's: what the clip then lets through is the less.
+        let mut cov = clip_coverage(self.clip_data, py * self.pw + px);
+        if let Some(cover) = self.cover {
+            let mesh = u32::from(cover.at(px, py));
+            let outer = self
+                .enclosing
+                .map_or(255, |outer| u32::from(outer.coverage(px, py)));
+            if mesh < outer {
+                cov = cov.min((mesh * 255 / outer) as u8);
+            }
+        }
         let clipped = cov == 0;
 
         // Per-pixel color: either LUT lookup (for function-based meshes)
@@ -17857,6 +18946,51 @@ fn patch_hull_bbox(
     x_min.is_finite().then_some((x_min, y_min, x_max, y_max))
 }
 
+/// How many steps a patch is cut into along each side, when a pixel of the
+/// display list comes out `scale` pixels across: about one to every two
+/// pixels of its control points' extent, and between 8 and 64.
+fn patch_subdivisions(
+    patch: &stet_graphics::device::ShadingPatch,
+    ctm: &Matrix,
+    scale: f64,
+) -> usize {
+    let mut x_min = f64::INFINITY;
+    let mut y_min = f64::INFINITY;
+    let mut x_max = f64::NEG_INFINITY;
+    let mut y_max = f64::NEG_INFINITY;
+    for &(px, py) in &patch.points {
+        let (dx, dy) = ctm.transform_point(px, py);
+        x_min = x_min.min(dx);
+        y_min = y_min.min(dy);
+        x_max = x_max.max(dx);
+        y_max = y_max.max(dy);
+    }
+    let extent = (x_max - x_min).max(y_max - y_min).abs() * scale;
+    (extent / 2.0).ceil().clamp(8.0, 64.0) as usize
+}
+
+/// The points of a patch at `n` + 1 steps along each side, in the shading's
+/// space: a row after a row, `u` stepping along each row and `v` from one
+/// row to the next, as [`eval_coons_patch()`] takes them.
+fn patch_points(patch: &stet_graphics::device::ShadingPatch, n: usize) -> Vec<(f64, f64)> {
+    // Tensor-product evaluation when 16 control points are available (Type
+    // 7), otherwise Coons blending (Type 6, 12 points).
+    let use_tensor = patch.points.len() >= 16;
+    let mut points = Vec::with_capacity((n + 1) * (n + 1));
+    for row in 0..=n {
+        let v = row as f64 / n as f64;
+        for col in 0..=n {
+            let u = col as f64 / n as f64;
+            points.push(if use_tensor {
+                eval_tensor_patch(patch, u, v)
+            } else {
+                eval_coons_patch(patch, u, v)
+            });
+        }
+    }
+    points
+}
+
 /// Render a Coons/tensor-product patch mesh by subdividing into triangles.
 #[expect(clippy::too_many_arguments)]
 fn render_patch_shading(
@@ -17871,11 +19005,18 @@ fn render_patch_shading(
     cmyk_buf: Option<&mut [f32]>,
     icc: Option<&IccCache>,
     transfer: Option<&TransferState>,
+    crowd: Option<MeshCrowdView<'_>>,
 ) {
     let mut triangles = Vec::new();
     let mut places = PatchPlaces {
         keys: Vec::new(),
         runs: Vec::new(),
+    };
+    // The shape the patches cover, for smoothing the mesh's edge.
+    let mut shape = crowd.map(|_| (PathBuilder::new(), PathBuilder::new()));
+    let place = |ctm: &Matrix, (x, y): (f64, f64)| {
+        let (dx, dy) = ctm.transform_point(x, y);
+        ((dx as f32 - vp_x) * scale_x, (dy as f32 - vp_y) * scale_y)
     };
     let scale = scale_x.max(scale_y) as f64;
     // Every band renders the whole display list, so without this the patches
@@ -17889,8 +19030,9 @@ fn render_patch_shading(
         scale_y,
         pixmap.width(),
         pixmap.height(),
-        // As far as `render_mesh_shading` will reach.
-        if clip_mask.is_some() || enclosing.is_some() {
+        // As far as `render_mesh_shading` will reach: along a smooth clip
+        // edge, and to the pixels of its own edge.
+        if crowd.is_some() || clip_mask.is_some() || enclosing.is_some() {
             1.0
         } else {
             0.0
@@ -17898,23 +19040,9 @@ fn render_patch_shading(
     );
     for patch in &params.patches {
         if patch.points.len() >= 12 {
-            // Compute device-space extent to choose subdivision level
-            let mut x_min = f64::INFINITY;
-            let mut y_min = f64::INFINITY;
-            let mut x_max = f64::NEG_INFINITY;
-            let mut y_max = f64::NEG_INFINITY;
-            for &(px, py) in &patch.points {
-                let (dx, dy) = params.ctm.transform_point(px, py);
-                x_min = x_min.min(dx);
-                y_min = y_min.min(dy);
-                x_max = x_max.max(dx);
-                y_max = y_max.max(dy);
-            }
-            let extent = (x_max - x_min).max(y_max - y_min).abs() * scale;
-            // Target ~2 device pixels per boundary segment
-            let n = (extent / 2.0).ceil().clamp(8.0, 64.0) as usize;
-            // Skip patches that cannot reach the target pixmap. The bbox above
-            // is over the raw control points and is only a subdivision-level
+            let n = patch_subdivisions(patch, &params.ctm, scale);
+            // Skip patches that cannot reach the target pixmap. `n` is chosen
+            // from the extent of the raw control points, which is only a
             // heuristic; culling needs a bound that provably contains the
             // surface, which is what `patch_hull_bbox` returns.
             if let Some(cull) = cull.as_ref()
@@ -17930,10 +19058,24 @@ fn render_patch_shading(
                 }
                 _ => None,
             };
+            let points = patch_points(patch, n);
+            if let Some((front, back)) = shape.as_mut() {
+                add_patch_shape(
+                    front,
+                    back,
+                    patch,
+                    &points,
+                    n,
+                    &params.ctm,
+                    &place,
+                    cull.as_ref(),
+                );
+            }
             let start = triangles.len();
             let keys = places.keys.len();
             let folds = subdivide_patch_to_triangles(
                 patch,
+                &points,
                 &mut triangles,
                 &mut places.keys,
                 n,
@@ -17981,11 +19123,16 @@ fn render_patch_shading(
             icc,
             transfer,
             Some(&places),
+            shape
+                .and_then(|(front, back)| MeshShape::new(front, back))
+                .as_ref(),
+            crowd,
         );
     }
 }
 /// Subdivide a Coons/tensor patch into triangles via grid subdivision.
-/// Evaluates the patch at NxN points and triangulates the resulting grid.
+/// Triangulates the grid of `points`, the patch evaluated at `n` steps along
+/// each side ([`patch_points`]).
 /// When an ICC profile hash and cache are provided, interpolates colors in the
 /// source ICC color space and converts per-grid-point for accurate rendering.
 ///
@@ -17996,6 +19143,7 @@ fn render_patch_shading(
 #[expect(clippy::too_many_arguments)]
 fn subdivide_patch_to_triangles(
     patch: &stet_graphics::device::ShadingPatch,
+    points: &[(f64, f64)],
     triangles: &mut Vec<stet_graphics::device::ShadingTriangle>,
     keys: &mut Vec<[(f64, f64); 3]>,
     n: usize,
@@ -18014,7 +19162,6 @@ fn subdivide_patch_to_triangles(
     if cull.is_some() {
         device.reserve((n + 1) * (n + 1));
     }
-    let use_tensor = patch.points.len() >= 16;
     let has_raw = !patch.raw_colors[0].is_empty();
     // Use per-grid-point ICC conversion when profile info is available
     let use_icc_interp = has_raw && icc_profile_hash.is_some() && icc_cache.is_some();
@@ -18023,11 +19170,7 @@ fn subdivide_patch_to_triangles(
         let v = row as f64 / n as f64;
         for col in 0..=n {
             let u = col as f64 / n as f64;
-            let (x, y) = if use_tensor {
-                eval_tensor_patch(patch, u, v)
-            } else {
-                eval_coons_patch(patch, u, v)
-            };
+            let (x, y) = points[row * (n + 1) + col];
             if let Some(cull) = cull {
                 device.push(cull.ctm.transform_point(x, y));
             }
@@ -18780,6 +19923,7 @@ mod tests {
         let mut all = Vec::new();
         subdivide_patch_to_triangles(
             &patch,
+            &patch_points(&patch, n),
             &mut all,
             &mut Vec::new(),
             n,
@@ -18797,6 +19941,7 @@ mod tests {
         let mut kept = Vec::new();
         subdivide_patch_to_triangles(
             &patch,
+            &patch_points(&patch, n),
             &mut kept,
             &mut Vec::new(),
             n,
@@ -18812,6 +19957,7 @@ mod tests {
         let mut none = Vec::new();
         subdivide_patch_to_triangles(
             &patch,
+            &patch_points(&patch, n),
             &mut none,
             &mut Vec::new(),
             n,
@@ -18827,6 +19973,7 @@ mod tests {
         let mut banded = Vec::new();
         subdivide_patch_to_triangles(
             &patch,
+            &patch_points(&patch, n),
             &mut banded,
             &mut Vec::new(),
             n,
@@ -22467,6 +23614,8 @@ mod clip_coverage_tests {
             1.0,
             1.0,
             Some(&clip),
+            None,
+            None,
             None,
             None,
             None,
