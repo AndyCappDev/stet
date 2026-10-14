@@ -242,3 +242,29 @@ fn a_bbox_bounds_the_samples() {
     let (w, h) = drawn[0];
     assert!(w <= 40 + MARGIN && h <= 30 + MARGIN, "{w} x {h}");
 }
+
+/// Sampled on several threads, a band at a time, a shading comes out as it
+/// does on one.
+#[cfg(all(feature = "render", feature = "parallel"))]
+#[test]
+fn threads_sample_what_one_thread_does() {
+    let render = |content: &str, threads: usize| {
+        let pdf = page(content);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("pool builds")
+            .install(|| {
+                let doc = PdfDocument::from_bytes(&pdf).expect("fixture parses");
+                doc.render_page_to_rgba(0, 300.0).expect("page renders")
+            })
+    };
+    // At 300 dpi the page is 417 samples across, so a band is about 160
+    // rows and the page takes three.
+    for content in ["/Wheel sh", "q 40 30 10 20 re W n /Wheel sh Q", "/Boxed sh"] {
+        let one = render(content, 1);
+        let many = render(content, 4);
+        assert_eq!(one.1, many.1);
+        assert!(one.0 == many.0, "{content}: the pixels differ");
+    }
+}

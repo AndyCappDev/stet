@@ -3087,6 +3087,7 @@ dependencies = [
  "jpeg-decoder",
  "md5",
  "png 0.17.16",
+ "rayon",
  "sha2",
  "skrifa",
  "stet-fonts",

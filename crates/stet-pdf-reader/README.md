@@ -40,6 +40,7 @@ for detail.
 | `jpx` | yes | JPEG 2000 (JPXDecode) via `hayro-jpeg2000` |
 | `saslprep` | yes | SASLprep for AES-256 passwords, as PDF 2.0 requires, via `stringprep`. Without it a password is used as the bytes given, which is enough for plain ASCII |
 | `render` | yes | `render_page_to_rgba()` via `stet-render`, taken without its `ps-device` feature so no PostScript VM is linked |
+| `parallel` | yes | A function-based shading is sampled on several threads while the page is read, via `rayon`. Without it, on one |
 
 ## Usage
 

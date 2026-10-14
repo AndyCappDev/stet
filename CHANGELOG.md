@@ -145,16 +145,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gradients at 300 dpi went from 1.5 s to 0.7 s on one thread, and an
   InDesign page of several hundred groups from 0.97 s to 0.69 s.
 - **A function-based shading in a PDF is worked out only where it can
-  show.** Such a shading (type 1) is sampled into an image before the
-  page is drawn, one sample per device pixel, and every sample runs its
-  function. The whole of its domain was sampled, though a shading is
-  drawn inside its clip and on the page. A colour wheel drawn as a large
-  square cut to a ring sampled four million points to show a fifth of
-  them. The samples now stop at the page and at every clip in force when
-  the shading is drawn. That page went from 1.9 s to 0.4 s at 300 dpi,
-  with every pixel unchanged. At 600 dpi it went from 2.6 s to 1.5 s, and
-  it is sharper there: the image stopped at 2,048 samples across the
-  whole domain, and that limit now applies to the part that shows.
+  show, and on several threads.** Such a shading (type 1) is sampled
+  into an image before the page is drawn, one sample per device pixel,
+  and every sample runs its function. The whole of its domain was
+  sampled, though a shading is drawn inside its clip and on the page. A
+  colour wheel drawn as a large square cut to a ring sampled four
+  million points to show a fifth of them. The samples now stop at the
+  page and at every clip in force when the shading is drawn. That page
+  went from 1.9 s to 0.4 s at 300 dpi on one thread, with every pixel
+  unchanged. At 600 dpi it went from 2.6 s to 1.5 s, and it is sharper
+  there: the image stopped at 2,048 samples across the whole domain, and
+  that limit now applies to the part that shows. The samples are also
+  worked out on several threads, under the new `parallel` feature of
+  `stet-pdf-reader`, on by default: on 24 threads the colour wheel takes
+  0.18 s, and a shading pattern that fills most of a page went from
+  1.3 s to 0.55 s. On one thread nothing changes.
 - **A function-based shading is cut to its `BBox`.** The bounding box of
   a shading clips it wherever it is painted (PLRM 3, 4.9.3; ISO 32000-1,
   8.7.4.5.1), and both the PostScript and the PDF interpreter dropped it

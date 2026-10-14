@@ -218,6 +218,11 @@ pub(crate) fn handle_shading_cached(
 /// the part of it that shows.
 const MAX_FUNCTION_SAMPLES: f64 = 2048.0;
 
+/// About how many samples of a function-based shading are evaluated before
+/// they are turned into colour.
+#[cfg(feature = "parallel")]
+const FUNCTION_SAMPLES_PER_BAND: usize = 65_536;
+
 /// Samples kept past each side of what shows, for the renderer's
 /// interpolation to read at the edge.
 const FUNCTION_SAMPLE_MARGIN: f64 = 2.0;
@@ -382,21 +387,75 @@ fn handle_function_based(
 
     let mut rgba = vec![255u8; width as usize * height as usize * 4];
 
-    for (row, grid_row) in (row0..row1).enumerate() {
-        for (col, grid_col) in (col0..col1).enumerate() {
-            let x = domain[0] + (grid_col as f64 + 0.5) / grid_w * (domain[1] - domain[0]);
-            let y = domain[3] - (grid_row as f64 + 0.5) / grid_h * (domain[3] - domain[2]);
-            let components = function.evaluate(&[x, y]);
-            let color = components_to_device_color_icc_with_intent(
-                resolved_cs,
-                &components,
-                Some(icc_cache),
-                gstate.rendering_intent,
-            );
-            let idx = (row * width as usize + col) * 4;
-            rgba[idx] = (color.r * 255.0 + 0.5) as u8;
-            rgba[idx + 1] = (color.g * 255.0 + 0.5) as u8;
-            rgba[idx + 2] = (color.b * 255.0 + 0.5) as u8;
+    // The point of the domain each sample stands for.
+    let sample_x =
+        |grid_col: u32| domain[0] + (grid_col as f64 + 0.5) / grid_w * (domain[1] - domain[0]);
+    let sample_y =
+        |grid_row: usize| domain[3] - (grid_row as f64 + 0.5) / grid_h * (domain[3] - domain[2]);
+    // Colour goes through the ICC cache, which is not shared.
+    let mut put = |pixel: &mut [u8; 4], components: &[f64]| {
+        let color = components_to_device_color_icc_with_intent(
+            resolved_cs,
+            components,
+            Some(&mut *icc_cache),
+            gstate.rendering_intent,
+        );
+        pixel[0] = (color.r * 255.0 + 0.5) as u8;
+        pixel[1] = (color.g * 255.0 + 0.5) as u8;
+        pixel[2] = (color.b * 255.0 + 0.5) as u8;
+    };
+    let row_bytes = width as usize * 4;
+
+    #[cfg(feature = "parallel")]
+    let parallel = rayon::current_num_threads() > 1;
+    #[cfg(not(feature = "parallel"))]
+    let parallel = false;
+    if parallel {
+        // Evaluating the function is most of the cost, and each sample is
+        // independent of the rest, so the rows of a band are evaluated side
+        // by side and their colours worked out after, in order. A band at a
+        // time bounds what is held between the two.
+        #[cfg(feature = "parallel")]
+        {
+            let band_rows = FUNCTION_SAMPLES_PER_BAND.div_ceil(width as usize);
+            for (band, pixels) in rgba.chunks_mut(band_rows * row_bytes).enumerate() {
+                use rayon::prelude::*;
+                let first_row = row0 as usize + band * band_rows;
+                // A row's results end to end, and where each sample's end: a
+                // function gives as many as it gives, which a malformed one need
+                // not keep to.
+                let samples: Vec<(Vec<f64>, Vec<usize>)> = (0..pixels.len() / row_bytes)
+                    .into_par_iter()
+                    .map(|row| {
+                        let y = sample_y(first_row + row);
+                        let mut values = Vec::with_capacity(width as usize * function.n_outputs());
+                        let mut ends = Vec::with_capacity(width as usize);
+                        for grid_col in col0..col1 {
+                            values.extend(function.evaluate(&[sample_x(grid_col), y]));
+                            ends.push(values.len());
+                        }
+                        (values, ends)
+                    })
+                    .collect();
+                let components = samples.iter().flat_map(|(values, ends)| {
+                    ends.iter().scan(0, |start, &end| {
+                        Some(&values[std::mem::replace(start, end)..end])
+                    })
+                });
+                for (pixel, components) in pixels.as_chunks_mut::<4>().0.iter_mut().zip(components)
+                {
+                    put(pixel, components);
+                }
+            }
+        }
+    } else {
+        // On one thread each sample goes straight to its colour, with
+        // nothing held between.
+        for (row, pixels) in rgba.chunks_exact_mut(row_bytes).enumerate() {
+            let y = sample_y(row0 as usize + row);
+            for (pixel, grid_col) in pixels.as_chunks_mut::<4>().0.iter_mut().zip(col0..col1) {
+                put(pixel, &function.evaluate(&[sample_x(grid_col), y]));
+            }
         }
     }
 
