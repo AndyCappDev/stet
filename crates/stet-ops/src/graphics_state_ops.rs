@@ -113,6 +113,13 @@ pub fn restore_device_clip(ctx: &mut Context, old_version: u32) {
     if ctx.gstate.clip_path_version == old_version {
         return; // clip unchanged, skip
     }
+    replay_device_clip(ctx);
+}
+
+/// Set the device's clip again from the graphics state: after something
+/// drawn under a clip of its own that the graphics state never held, such
+/// as a shading's `BBox`.
+pub fn replay_device_clip(ctx: &mut Context) {
     let mut regions: Vec<(stet_fonts::geometry::PsPath, FillRule)> = ctx
         .gstate
         .clip_chain

@@ -12,10 +12,10 @@ use stet_core::dict::DictKey;
 use stet_core::error::PsError;
 use stet_core::graphics_state::ColorSpace;
 use stet_core::object::{EntityId, PsObject, PsValue};
-use stet_fonts::geometry::Matrix;
-use stet_graphics::color::DeviceColor;
+use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
+use stet_graphics::color::{DeviceColor, FillRule};
 use stet_graphics::device::{
-    AxialShadingParams, ColorStop, ImageParams, MeshShadingParams, PatchShadingParams,
+    AxialShadingParams, ClipParams, ColorStop, ImageParams, MeshShadingParams, PatchShadingParams,
     RadialShadingParams, ShadingColorSpace,
 };
 use stet_graphics::display_list::{DisplayElement, DisplayList};
@@ -45,10 +45,21 @@ pub fn op_shfill(ctx: &mut Context) -> Result<(), PsError> {
     };
 
     let ctm = ctx.gstate.ctm;
-    emit_shading(ctx, dict_entity, ctm)?;
+    emit_shading(ctx, dict_entity, ctm, ShadingTarget::Page)?;
 
     ctx.o_stack.pop()?;
     Ok(())
+}
+
+/// Where a shading's display elements are going.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShadingTarget {
+    /// Into the page, by `shfill`: a clip set for the shading's `BBox` is
+    /// undone after it, by setting again the clip in force.
+    Page,
+    /// Into a shading pattern, which is painted inside a group of its own
+    /// that ends any clip set within it.
+    Pattern,
 }
 
 /// Append the display elements that paint a shading dictionary, its space
@@ -56,7 +67,12 @@ pub fn op_shfill(ctx: &mut Context) -> Result<(), PsError> {
 ///
 /// `shfill` passes the current matrix; a shading pattern passes the matrix
 /// `makepattern` fixed for it.
-fn emit_shading(ctx: &mut Context, dict_entity: EntityId, ctm: Matrix) -> Result<(), PsError> {
+fn emit_shading(
+    ctx: &mut Context,
+    dict_entity: EntityId,
+    ctm: Matrix,
+    target: ShadingTarget,
+) -> Result<(), PsError> {
     // Extract ShadingType (required, integer 1-7)
     let shading_type = get_dict_int(ctx, dict_entity, b"ShadingType").ok_or(PsError::RangeCheck)?;
     if !(1..=7).contains(&shading_type) {
@@ -76,7 +92,7 @@ fn emit_shading(ctx: &mut Context, dict_entity: EntityId, ctm: Matrix) -> Result
 
     // Dispatch to type-specific builders
     match shading_type {
-        1 => build_type1_shading(ctx, dict_entity, &color_space, n_comps, ctm, bbox)?,
+        1 => build_type1_shading(ctx, dict_entity, &color_space, n_comps, ctm, bbox, target)?,
         2 => build_type2_shading(
             ctx,
             dict_entity,
@@ -172,7 +188,7 @@ pub(crate) fn build_pattern_shading(
     }
 
     let start = ctx.current_display_list_mut().len();
-    let result = emit_shading(ctx, shading, pattern_matrix);
+    let result = emit_shading(ctx, shading, pattern_matrix, ShadingTarget::Pattern);
     let elements = ctx.current_display_list_mut().split_off(start);
     result?;
 
@@ -351,6 +367,7 @@ fn build_type1_shading(
     n_comps: usize,
     ctm: Matrix,
     bbox: Option<[f64; 4]>,
+    target: ShadingTarget,
 ) -> Result<(), PsError> {
     // Domain [x0 x1 y0 y1] (default [0 1 0 1])
     let domain_vec = get_dict_float_vec(ctx, dict, b"Domain");
@@ -467,9 +484,27 @@ fn build_type1_shading(
         return Ok(()); // degenerate matrix — nothing to render
     };
 
-    // Apply bbox clip if present — the image covers the full domain
-    // and bbox clipping happens at the device level
-    let _ = bbox;
+    // The image covers the whole domain, and `BBox` cuts it: a clip, as
+    // the samples are too coarse to carry an edge of their own.
+    if let Some([x0, y0, x1, y1]) = bbox {
+        let mut path = PsPath::new();
+        let corners =
+            [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].map(|(x, y)| ctm.transform_point(x, y));
+        path.segments
+            .push(PathSegment::MoveTo(corners[0].0, corners[0].1));
+        for &(x, y) in &corners[1..] {
+            path.segments.push(PathSegment::LineTo(x, y));
+        }
+        path.segments.push(PathSegment::ClosePath);
+        ctx.current_display_list_mut().push(DisplayElement::Clip {
+            path,
+            params: ClipParams {
+                fill_rule: FillRule::NonZeroWinding,
+                ctm: Matrix::identity(),
+                stroke_params: None,
+            },
+        });
+    }
 
     let gs_alpha = ctx.gstate.fill_opacity;
     let gs_blend_mode = ctx.gstate.blend_mode;
@@ -498,6 +533,9 @@ fn build_type1_shading(
             transfer: gs_transfer,
         },
     });
+    if bbox.is_some() && target == ShadingTarget::Page {
+        crate::graphics_state_ops::replay_device_clip(ctx);
+    }
 
     Ok(())
 }

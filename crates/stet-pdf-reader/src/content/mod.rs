@@ -8093,6 +8093,7 @@ impl<'a> ContentInterpreter<'a> {
             &mut self.icc_cache,
             &mut self.shading_stops,
             bounds,
+            crate::resources::shading::ShadingTarget::Page,
         )
     }
 
@@ -8507,6 +8508,7 @@ impl<'a> ContentInterpreter<'a> {
             &mut self.icc_cache,
             &mut self.shading_stops,
             bounds,
+            crate::resources::shading::ShadingTarget::Pattern,
         );
         self.gstate.ctm = saved_ctm;
         self.gstate.overprint = saved_overprint;

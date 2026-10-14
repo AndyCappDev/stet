@@ -42,14 +42,17 @@ fn stream(dict: &str, body: &str) -> String {
 
 /// A 100 x 100 pt page running `content`, with `/Wheel` (object 5) a
 /// function-based shading whose red is x and green is y across its
-/// domain, which spans 400 pt from (-150, -150), and `/Cell` (object 7) a
-/// tiling pattern whose cell draws `/Wheel`.
+/// domain, which spans 400 pt from (-150, -150), `/Cell` (object 7) a
+/// tiling pattern whose cell draws `/Wheel`, `/Boxed` (object 8) the same
+/// shading with the `/BBox` [`BOX`], and `/Box` (object 9) a shading
+/// pattern of `/Boxed`.
 fn page(content: &str) -> Vec<u8> {
     pdf_from(&[
         "<< /Type /Catalog /Pages 2 0 R >>".into(),
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R \
-         /Resources << /Shading << /Wheel 5 0 R >> /Pattern << /Cell 7 0 R >> >> >>"
+         /Resources << /Shading << /Wheel 5 0 R /Boxed 8 0 R >> \
+         /Pattern << /Cell 7 0 R /Box 9 0 R >> >> >>"
             .into(),
         stream("", content),
         "<< /ShadingType 1 /ColorSpace /DeviceRGB /Domain [0 1 0 1] \
@@ -65,8 +68,15 @@ fn page(content: &str) -> Vec<u8> {
              /Resources << /Shading << /Wheel 5 0 R >> >>",
             "/Wheel sh",
         ),
+        "<< /ShadingType 1 /ColorSpace /DeviceRGB /Domain [0 1 0 1] \
+         /Matrix [400 0 0 400 -150 -150] /Function 6 0 R /BBox [20 20 60 50] >>"
+            .into(),
+        "<< /Type /Pattern /PatternType 2 /Shading 8 0 R >>".into(),
     ])
 }
+
+/// `/Boxed`'s `/BBox`, in default user space.
+const BOX: [usize; 4] = [20, 20, 60, 50];
 
 /// The size of every image in the list, tiling cells included.
 fn images(pdf: &[u8]) -> Vec<(u32, u32)> {
@@ -152,4 +162,83 @@ fn the_pixels_inside_the_clip_are_unchanged() {
             assert_eq!(whole[i..i + 4], clipped[i..i + 4], "pixel ({x}, {y})");
         }
     }
+}
+
+/// The page rendered at 72 dpi, and the colour at a point given in default
+/// user space.
+#[cfg(feature = "render")]
+fn rendered(content: &str) -> impl Fn(usize, usize) -> [u8; 3] {
+    let pdf = page(content);
+    let doc = PdfDocument::from_bytes(&pdf).expect("fixture parses");
+    let (rgba, w, h) = doc.render_page_to_rgba(0, 72.0).expect("page renders");
+    move |x, y| {
+        let i = ((h as usize - 1 - y) * w as usize + x) * 4;
+        [rgba[i], rgba[i + 1], rgba[i + 2]]
+    }
+}
+
+#[cfg(feature = "render")]
+const WHITE: [u8; 3] = [255, 255, 255];
+
+/// Whether a point lies inside [`BOX`], a pixel clear of its edge.
+#[cfg(feature = "render")]
+fn inside_box(x: usize, y: usize) -> bool {
+    (BOX[0] + 1..BOX[2] - 1).contains(&x) && (BOX[1] + 1..BOX[3] - 1).contains(&y)
+}
+
+/// Whether a point lies outside [`BOX`], a pixel clear of its edge.
+#[cfg(feature = "render")]
+fn outside_box(x: usize, y: usize) -> bool {
+    !(BOX[0] - 1..=BOX[2]).contains(&x) || !(BOX[1] - 1..=BOX[3]).contains(&y)
+}
+
+/// The shading shows inside its `/BBox`, as it would without one, and
+/// nowhere outside it.
+#[cfg(feature = "render")]
+fn assert_cut_to_box(boxed: impl Fn(usize, usize) -> [u8; 3], what: &str) {
+    let whole = rendered("/Wheel sh");
+    for y in 0..100 {
+        for x in 0..100 {
+            if inside_box(x, y) {
+                assert_eq!(boxed(x, y), whole(x, y), "{what}: ({x}, {y}) inside");
+            } else if outside_box(x, y) {
+                assert_eq!(boxed(x, y), WHITE, "{what}: ({x}, {y}) outside");
+            }
+        }
+    }
+}
+
+#[cfg(feature = "render")]
+#[test]
+fn a_shading_is_cut_to_its_bbox() {
+    assert_cut_to_box(rendered("/Boxed sh"), "sh");
+    assert_cut_to_box(
+        rendered("/Pattern cs /Box scn 0 0 100 100 re f"),
+        "shading pattern",
+    );
+}
+
+/// The `/BBox` clip ends with the shading: what is painted next is cut
+/// only by the clips the content set.
+#[cfg(feature = "render")]
+#[test]
+fn the_bbox_clip_ends_with_the_shading() {
+    let blue = [0, 0, 255];
+    let after = rendered("/Boxed sh 0 0 1 rg 70 70 20 20 re f");
+    assert_eq!(after(80, 80), blue);
+    let after = rendered("/Pattern cs /Box scn 0 0 100 100 re f 0 0 1 rg 70 70 20 20 re f");
+    assert_eq!(after(80, 80), blue);
+    // A clip in force before the shading is in force after it.
+    let after = rendered("0 0 75 75 re W n /Boxed sh 0 0 1 rg 70 70 20 20 re f");
+    assert_eq!(after(72, 72), blue);
+    assert_eq!(after(80, 80), WHITE);
+}
+
+/// Nothing outside the `/BBox` is sampled.
+#[test]
+fn a_bbox_bounds_the_samples() {
+    let drawn = images(&page("/Boxed sh"));
+    assert_eq!(drawn.len(), 1);
+    let (w, h) = drawn[0];
+    assert!(w <= 40 + MARGIN && h <= 30 + MARGIN, "{w} x {h}");
 }

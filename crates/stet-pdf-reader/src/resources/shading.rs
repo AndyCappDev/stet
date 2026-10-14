@@ -15,9 +15,10 @@ use crate::resolver::Resolver;
 use crate::resources::function::PdfFunction;
 use std::sync::Arc;
 
-use stet_fonts::geometry::Matrix;
+use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
+use stet_graphics::color::FillRule;
 use stet_graphics::device::{
-    AxialShadingParams, ColorStop, ImageColorSpace, ImageParams, MeshShadingParams,
+    AxialShadingParams, ClipParams, ColorStop, ImageColorSpace, ImageParams, MeshShadingParams,
     PatchShadingParams, RadialShadingParams, ShadingColorSpace, SimpleColorSpace, SpotTintFunction,
 };
 use stet_graphics::display_list::{DisplayElement, DisplayList};
@@ -43,7 +44,19 @@ pub fn handle_shading(
         icc_cache,
         &mut ShadingStops::default(),
         None,
+        ShadingTarget::Page,
     )
+}
+
+/// Where a shading's display elements are going.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShadingTarget {
+    /// Into the list being painted, by `sh`: a clip set for the shading's
+    /// `/BBox` is undone after it, by setting again the clips in force.
+    Page,
+    /// Into a shading pattern's own list, which is painted inside a group
+    /// that ends any clip set within it.
+    Pattern,
 }
 
 /// The colour stops of the axial and radial shadings a page has drawn so
@@ -92,7 +105,7 @@ impl ShadingStops {
 
 /// [`handle_shading`], reusing the stops of shadings already drawn on the
 /// page. `bounds` is the device area the shading can show in, when known,
-/// as `[x0, y0, x1, y1]`.
+/// as `[x0, y0, x1, y1]`, and `target` where its elements are going.
 #[expect(clippy::too_many_arguments)]
 pub(crate) fn handle_shading_cached(
     shading_obj: &PdfObj,
@@ -103,6 +116,7 @@ pub(crate) fn handle_shading_cached(
     icc_cache: &mut IccCache,
     stops: &mut ShadingStops,
     bounds: Option<[f64; 4]>,
+    target: ShadingTarget,
 ) -> Result<(), PdfError> {
     let shading_type =
         dict.get_int(b"ShadingType")
@@ -150,6 +164,7 @@ pub(crate) fn handle_shading_cached(
             &resolved_cs,
             icc_cache,
             bounds,
+            target,
         ),
         2 => handle_axial(
             shading_obj,
@@ -265,6 +280,30 @@ fn sample_run(size: f64, t0: f64, t1: f64) -> (u32, u32) {
     (first as u32, end as u32)
 }
 
+/// The rectangle `[x0, y0, x1, y1]` in the space `ctm` maps to device
+/// space, as a closed device path, and that path's device bounds.
+fn device_rect(rect: [f64; 4], ctm: &Matrix) -> (PsPath, [f64; 4]) {
+    let [x0, y0, x1, y1] = rect;
+    let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].map(|(x, y)| ctm.transform_point(x, y));
+    let mut path = PsPath::new();
+    path.segments
+        .push(PathSegment::MoveTo(corners[0].0, corners[0].1));
+    for &(x, y) in &corners[1..] {
+        path.segments.push(PathSegment::LineTo(x, y));
+    }
+    path.segments.push(PathSegment::ClosePath);
+    let xs = corners.map(|c| c.0);
+    let ys = corners.map(|c| c.1);
+    let bounds = [
+        xs.into_iter().fold(f64::INFINITY, f64::min),
+        ys.into_iter().fold(f64::INFINITY, f64::min),
+        xs.into_iter().fold(f64::NEG_INFINITY, f64::max),
+        ys.into_iter().fold(f64::NEG_INFINITY, f64::max),
+    ];
+    (path, bounds)
+}
+
+#[expect(clippy::too_many_arguments)]
 fn handle_function_based(
     dict: &PdfDict,
     gstate: &PdfGraphicsState,
@@ -273,6 +312,7 @@ fn handle_function_based(
     resolved_cs: &ResolvedColorSpace,
     icc_cache: &mut IccCache,
     bounds: Option<[f64; 4]>,
+    target: ShadingTarget,
 ) -> Result<(), PdfError> {
     let function = parse_shading_function(dict, resolver)?;
 
@@ -304,6 +344,20 @@ fn handle_function_based(
     let domain_h = domain[3] - domain[2];
     let domain_matrix = Matrix::new(domain_w, 0.0, 0.0, domain_h, domain[0], domain[2]);
     let combined = gstate.ctm.concat(&shading_matrix).concat(&domain_matrix);
+
+    // `/BBox` clips the shading, in the space the CTM maps; nothing
+    // outside it needs sampling.
+    let bbox_clip = parse_bbox(dict).map(|bbox| device_rect(bbox, &gstate.ctm));
+    let bounds = match (&bbox_clip, bounds) {
+        (None, bounds) => bounds,
+        (Some((_, b)), None) => Some(*b),
+        (Some((_, b)), Some(a)) => Some([
+            a[0].max(b[0]),
+            a[1].max(b[1]),
+            a[2].min(b[2]),
+            a[3].min(b[3]),
+        ]),
+    };
 
     // The function is sampled into an image on a grid over the whole
     // domain, one sample per device pixel: the combined matrix's column
@@ -361,6 +415,16 @@ fn handle_function_based(
     };
     let image_matrix = Matrix::new(width as f64, 0.0, 0.0, -(height as f64), 0.0, height as f64);
 
+    if let Some((path, _)) = &bbox_clip {
+        display_list.push(DisplayElement::Clip {
+            path: path.clone(),
+            params: ClipParams {
+                fill_rule: FillRule::NonZeroWinding,
+                ctm: Matrix::identity(),
+                stroke_params: None,
+            },
+        });
+    }
     display_list.push(DisplayElement::Image {
         sample_data: std::sync::Arc::new(rgba),
         params: ImageParams {
@@ -383,6 +447,19 @@ fn handle_function_based(
             transfer: gstate.transfer.clone(),
         },
     });
+    if bbox_clip.is_some() && target == ShadingTarget::Page {
+        display_list.push(DisplayElement::InitClip);
+        for (path, fill_rule) in &gstate.clip_stack {
+            display_list.push(DisplayElement::Clip {
+                path: path.clone(),
+                params: ClipParams {
+                    fill_rule: *fill_rule,
+                    ctm: Matrix::identity(),
+                    stroke_params: None,
+                },
+            });
+        }
+    }
     Ok(())
 }
 

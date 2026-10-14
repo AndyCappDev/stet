@@ -155,6 +155,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with every pixel unchanged. At 600 dpi it went from 2.6 s to 1.5 s, and
   it is sharper there: the image stopped at 2,048 samples across the
   whole domain, and that limit now applies to the part that shows.
+- **A function-based shading is cut to its `BBox`.** The bounding box of
+  a shading clips it wherever it is painted (PLRM 3, 4.9.3; ISO 32000-1,
+  8.7.4.5.1), and both the PostScript and the PDF interpreter dropped it
+  for a function-based shading (type 1), the one type that is sampled
+  into an image: the whole domain was painted, with `shfill` and `sh` and
+  in a shading pattern. The other shading types already kept to theirs.
+  In a PDF nothing outside the box is sampled either.
 
 ## [0.8.6] — 2026-10-12
 
