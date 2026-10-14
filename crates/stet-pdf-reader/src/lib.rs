@@ -1065,6 +1065,20 @@ impl<'a> PdfDocument<'a> {
         interpreter.set_text_extraction(self.text_extraction);
         interpreter.set_annotation_filter(self.annotation_filter);
         interpreter.set_image_resolution(image_resolution);
+        let corners = [(llx, lly), (urx, lly), (urx, ury), (llx, ury)]
+            .map(|(x, y)| ctm.transform_point(x, y));
+        interpreter.set_page_bounds([
+            corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min),
+            corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min),
+            corners
+                .iter()
+                .map(|c| c.0)
+                .fold(f64::NEG_INFINITY, f64::max),
+            corners
+                .iter()
+                .map(|c| c.1)
+                .fold(f64::NEG_INFINITY, f64::max),
+        ]);
         interpreter.set_initial_rendering_intent(self.default_rendering_intent);
         if let Some(cancel) = cancel {
             interpreter.set_cancel_flag(cancel);

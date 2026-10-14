@@ -42,6 +42,7 @@ pub fn handle_shading(
         display_list,
         icc_cache,
         &mut ShadingStops::default(),
+        None,
     )
 }
 
@@ -90,7 +91,9 @@ impl ShadingStops {
 }
 
 /// [`handle_shading`], reusing the stops of shadings already drawn on the
-/// page.
+/// page. `bounds` is the device area the shading can show in, when known,
+/// as `[x0, y0, x1, y1]`.
+#[expect(clippy::too_many_arguments)]
 pub(crate) fn handle_shading_cached(
     shading_obj: &PdfObj,
     dict: &PdfDict,
@@ -99,6 +102,7 @@ pub(crate) fn handle_shading_cached(
     display_list: &mut DisplayList,
     icc_cache: &mut IccCache,
     stops: &mut ShadingStops,
+    bounds: Option<[f64; 4]>,
 ) -> Result<(), PdfError> {
     let shading_type =
         dict.get_int(b"ShadingType")
@@ -145,6 +149,7 @@ pub(crate) fn handle_shading_cached(
             display_list,
             &resolved_cs,
             icc_cache,
+            bounds,
         ),
         2 => handle_axial(
             shading_obj,
@@ -194,6 +199,72 @@ pub(crate) fn handle_shading_cached(
     }
 }
 
+/// The most samples a function-based shading takes across either axis of
+/// the part of it that shows.
+const MAX_FUNCTION_SAMPLES: f64 = 2048.0;
+
+/// Samples kept past each side of what shows, for the renderer's
+/// interpolation to read at the edge.
+const FUNCTION_SAMPLE_MARGIN: f64 = 2.0;
+
+/// The part of the unit square — a function-based shading's domain,
+/// normalised — that `to_device` carries into `bounds`, as
+/// `[u0, u1, v0, v1]`. The whole square when there are no bounds or the
+/// matrix cannot be inverted; `None` when none of it lands inside.
+fn visible_unit_square(to_device: &Matrix, bounds: Option<[f64; 4]>) -> Option<[f64; 4]> {
+    let whole = [0.0, 1.0, 0.0, 1.0];
+    let (Some([x0, y0, x1, y1]), Some(inverse)) = (bounds, to_device.invert()) else {
+        return Some(whole);
+    };
+    if !(x0 < x1 && y0 < y1) {
+        return None;
+    }
+    let mut seen = [
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ];
+    for (x, y) in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)] {
+        let (u, v) = inverse.transform_point(x, y);
+        seen = [
+            seen[0].min(u),
+            seen[1].max(u),
+            seen[2].min(v),
+            seen[3].max(v),
+        ];
+    }
+    if !seen.iter().all(|v| v.is_finite()) {
+        return Some(whole);
+    }
+    let [u0, u1, v0, v1] = [
+        seen[0].max(0.0),
+        seen[1].min(1.0),
+        seen[2].max(0.0),
+        seen[3].min(1.0),
+    ];
+    (u0 < u1 && v0 < v1).then_some([u0, u1, v0, v1])
+}
+
+/// How many samples a function-based shading takes across one axis of its
+/// whole domain: one per device pixel of `extent`, the axis's length on
+/// the device, but no more than [`MAX_FUNCTION_SAMPLES`] across the
+/// `visible` fraction of it.
+fn function_grid_size(extent: f64, visible: f64) -> f64 {
+    let size = extent.ceil().max(2.0);
+    let limit = (MAX_FUNCTION_SAMPLES / visible).floor().max(2.0);
+    // Past this, a sample is far smaller than any device pixel could be.
+    size.min(limit).min(1e9)
+}
+
+/// The run `[first, end)` of the `size` samples across an axis that covers
+/// the fraction `[t0, t1]` of it, with a margin either side.
+fn sample_run(size: f64, t0: f64, t1: f64) -> (u32, u32) {
+    let first = ((t0 * size).floor() - FUNCTION_SAMPLE_MARGIN).max(0.0);
+    let end = ((t1 * size).ceil() + FUNCTION_SAMPLE_MARGIN).min(size);
+    (first as u32, end as u32)
+}
+
 fn handle_function_based(
     dict: &PdfDict,
     gstate: &PdfGraphicsState,
@@ -201,6 +272,7 @@ fn handle_function_based(
     display_list: &mut DisplayList,
     resolved_cs: &ResolvedColorSpace,
     icc_cache: &mut IccCache,
+    bounds: Option<[f64; 4]>,
 ) -> Result<(), PdfError> {
     let function = parse_shading_function(dict, resolver)?;
 
@@ -233,20 +305,33 @@ fn handle_function_based(
     let domain_matrix = Matrix::new(domain_w, 0.0, 0.0, domain_h, domain[0], domain[2]);
     let combined = gstate.ctm.concat(&shading_matrix).concat(&domain_matrix);
 
-    // Compute rasterization resolution from device-space dimensions.
-    // The combined matrix column vectors give the device extent of the
-    // unit square.  Match that so each rasterized pixel ≈ 1 device pixel.
+    // The function is sampled into an image on a grid over the whole
+    // domain, one sample per device pixel: the combined matrix's column
+    // vectors are the device extent of the unit square. Only the samples
+    // that can show are taken. A domain much larger than the clip around
+    // it — a colour wheel cut to a ring — otherwise costs an evaluation
+    // for every pixel of a square that is mostly never seen.
+    let Some([u0, u1, v0, v1]) = visible_unit_square(&combined, bounds) else {
+        return Ok(());
+    };
     let dev_w = (combined.a * combined.a + combined.b * combined.b).sqrt();
     let dev_h = (combined.c * combined.c + combined.d * combined.d).sqrt();
-    let width = (dev_w.ceil() as u32).clamp(2, 2048);
-    let height = (dev_h.ceil() as u32).clamp(2, 2048);
+    let grid_w = function_grid_size(dev_w, u1 - u0);
+    let grid_h = function_grid_size(dev_h, v1 - v0);
+    let (col0, col1) = sample_run(grid_w, u0, u1);
+    // Rows run down from the top of the domain, where v is 1.
+    let (row0, row1) = sample_run(grid_h, 1.0 - v1, 1.0 - v0);
+    let (width, height) = (col1 - col0, row1 - row0);
+    if width == 0 || height == 0 {
+        return Ok(());
+    }
 
-    let mut rgba = vec![255u8; (width * height * 4) as usize];
+    let mut rgba = vec![255u8; width as usize * height as usize * 4];
 
-    for row in 0..height {
-        for col in 0..width {
-            let x = domain[0] + (col as f64 + 0.5) / width as f64 * (domain[1] - domain[0]);
-            let y = domain[3] - (row as f64 + 0.5) / height as f64 * (domain[3] - domain[2]);
+    for (row, grid_row) in (row0..row1).enumerate() {
+        for (col, grid_col) in (col0..col1).enumerate() {
+            let x = domain[0] + (grid_col as f64 + 0.5) / grid_w * (domain[1] - domain[0]);
+            let y = domain[3] - (grid_row as f64 + 0.5) / grid_h * (domain[3] - domain[2]);
             let components = function.evaluate(&[x, y]);
             let color = components_to_device_color_icc_with_intent(
                 resolved_cs,
@@ -254,13 +339,26 @@ fn handle_function_based(
                 Some(icc_cache),
                 gstate.rendering_intent,
             );
-            let idx = ((row * width + col) * 4) as usize;
+            let idx = (row * width as usize + col) * 4;
             rgba[idx] = (color.r * 255.0 + 0.5) as u8;
             rgba[idx + 1] = (color.g * 255.0 + 0.5) as u8;
             rgba[idx + 2] = (color.b * 255.0 + 0.5) as u8;
         }
     }
 
+    // The image covers its samples' part of the unit square.
+    let ctm = if (col0, col1, row0, row1) == (0, grid_w as u32, 0, grid_h as u32) {
+        combined
+    } else {
+        combined.concat(&Matrix::new(
+            f64::from(width) / grid_w,
+            0.0,
+            0.0,
+            f64::from(height) / grid_h,
+            f64::from(col0) / grid_w,
+            1.0 - f64::from(row1) / grid_h,
+        ))
+    };
     let image_matrix = Matrix::new(width as f64, 0.0, 0.0, -(height as f64), 0.0, height as f64);
 
     display_list.push(DisplayElement::Image {
@@ -270,7 +368,7 @@ fn handle_function_based(
             height,
             color_space: ImageColorSpace::PreconvertedRGBA,
             bits_per_component: 8,
-            ctm: combined,
+            ctm,
             image_matrix,
             interpolate: true,
             mask_color: None,

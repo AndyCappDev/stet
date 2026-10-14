@@ -144,6 +144,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a processor with AVX2 and four elsewhere. A slide of ten full-page
   gradients at 300 dpi went from 1.5 s to 0.7 s on one thread, and an
   InDesign page of several hundred groups from 0.97 s to 0.69 s.
+- **A function-based shading in a PDF is worked out only where it can
+  show.** Such a shading (type 1) is sampled into an image before the
+  page is drawn, one sample per device pixel, and every sample runs its
+  function. The whole of its domain was sampled, though a shading is
+  drawn inside its clip and on the page. A colour wheel drawn as a large
+  square cut to a ring sampled four million points to show a fifth of
+  them. The samples now stop at the page and at every clip in force when
+  the shading is drawn. That page went from 1.9 s to 0.4 s at 300 dpi,
+  with every pixel unchanged. At 600 dpi it went from 2.6 s to 1.5 s, and
+  it is sharper there: the image stopped at 2,048 samples across the
+  whole domain, and that limit now applies to the part that shows.
 
 ## [0.8.6] — 2026-10-12
 

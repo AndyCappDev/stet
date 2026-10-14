@@ -603,6 +603,9 @@ pub struct ContentInterpreter<'a> {
     /// here does not show — a tiling pattern's cell, a Type 3 glyph — so
     /// that the size an image is drawn at cannot be read from it.
     unscaled_nesting: u32,
+    /// The page in device space, when known; see
+    /// [`Self::set_page_bounds`].
+    page_bounds: Option<[f64; 4]>,
     /// Text-extraction data for each font resolved while `text_extraction`
     /// is on, keyed by the font's `Arc` address. The `Arc` is held so the
     /// address cannot be reused by another font.
@@ -766,6 +769,7 @@ impl<'a> ContentInterpreter<'a> {
             shading_stops: Default::default(),
             image_resolution: crate::ImageResolution::Full,
             unscaled_nesting: 0,
+            page_bounds: None,
             font_text: std::collections::HashMap::new(),
             text_show: None,
             last_text_run: None,
@@ -821,6 +825,14 @@ impl<'a> ContentInterpreter<'a> {
     /// [`ImageResolution`](crate::ImageResolution).
     pub fn set_image_resolution(&mut self, resolution: crate::ImageResolution) {
         self.image_resolution = resolution;
+    }
+
+    /// Say where the page lies in device space, as `[x0, y0, x1, y1]`, so
+    /// that what is sampled into an image ahead of rendering — a
+    /// function-based shading — is sampled only where it can show. Without
+    /// it the whole of such a shading is sampled.
+    pub fn set_page_bounds(&mut self, bounds: [f64; 4]) {
+        self.page_bounds = Some(bounds);
     }
 
     /// Choose which annotations [`Self::render_annotation`] draws. The
@@ -6791,6 +6803,40 @@ impl<'a> ContentInterpreter<'a> {
     /// clip path. Clip paths are stored in device coordinates, so this
     /// is just `path_bbox(clip_path)`. Returns `None` when no clip path
     /// is active.
+    /// The device area a paint made here can reach, as `[x0, y0, x1, y1]`,
+    /// or `None` when it cannot be bounded: the page, cut to every clip in
+    /// force when `clipped`. An empty clip gives an empty area.
+    ///
+    /// Inside a tiling cell or a Type 3 glyph nothing is known, as the
+    /// content there is not drawn where the CTM puts it. A shading
+    /// pattern is resolved when it is selected, not when it paints, so
+    /// its caller leaves the clip out.
+    fn paint_bounds(&self, clipped: bool) -> Option<[f64; 4]> {
+        if self.unscaled_nesting > 0 {
+            return None;
+        }
+        let mut bounds = self.page_bounds;
+        if clipped {
+            for (path, _) in &self.gstate.clip_stack {
+                let b = path_device_bbox(path);
+                if !b.iter().all(|v| v.is_finite()) {
+                    // A clip with no points shows nothing.
+                    return Some([0.0; 4]);
+                }
+                bounds = Some(match bounds {
+                    None => b,
+                    Some(a) => [
+                        a[0].max(b[0]),
+                        a[1].max(b[1]),
+                        a[2].min(b[2]),
+                        a[3].min(b[3]),
+                    ],
+                });
+            }
+        }
+        bounds
+    }
+
     fn current_clip_bbox(&self) -> Option<[f64; 4]> {
         let path = self.gstate.clip_path.as_ref()?;
         let mut x_min = f64::INFINITY;
@@ -8037,6 +8083,7 @@ impl<'a> ContentInterpreter<'a> {
             .as_dict()
             .ok_or_else(|| PdfError::Other("Shading is not a dict".into()))?;
 
+        let bounds = self.paint_bounds(true);
         crate::resources::shading::handle_shading_cached(
             &sh_ref_clone,
             sh_dict,
@@ -8045,6 +8092,7 @@ impl<'a> ContentInterpreter<'a> {
             &mut self.display_list,
             &mut self.icc_cache,
             &mut self.shading_stops,
+            bounds,
         )
     }
 
@@ -8449,6 +8497,7 @@ impl<'a> ContentInterpreter<'a> {
         self.gstate.overprint_stroke = false;
 
         let mut shading_dl = DisplayList::new();
+        let bounds = self.paint_bounds(false);
         let result = crate::resources::shading::handle_shading_cached(
             &sh_ref_clone,
             sh_dict,
@@ -8457,6 +8506,7 @@ impl<'a> ContentInterpreter<'a> {
             &mut shading_dl,
             &mut self.icc_cache,
             &mut self.shading_stops,
+            bounds,
         );
         self.gstate.ctm = saved_ctm;
         self.gstate.overprint = saved_overprint;
