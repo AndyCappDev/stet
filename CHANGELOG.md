@@ -104,6 +104,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   width — now covers the page as its outline does. A line alone, and
   lines that are apart, transparent, or of unlike colours, are painted
   as before.
+- **Where a gradient mesh patch folds over itself, the part on top is the
+  one the spec puts there.** A Coons or tensor-product patch (shading
+  types 6 and 7) that curls back across itself shows the part with the
+  larger v, and of parts with equal v the one with the larger u. Its
+  control points are named with u first, so the first side of the data
+  runs along v, and stet took that side for u: the folds of a patch were
+  drawn the other way round, the back of a curled sheet in front of it.
+  The order is now the spec's, decided pixel by pixel where a patch folds
+  rather than a triangle at a time, so where the two layers lie close
+  together the edge between them is a line, not a row of teeth. stet now
+  draws these folds as Ghostscript and cairo do.
 - **Pages built from layers of gradients and transparency draw faster.**
   Several costs came out of them, none changing a pixel. A radial
   gradient worked out a CMYK value through the colour profile for every

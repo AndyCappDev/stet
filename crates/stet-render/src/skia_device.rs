@@ -5728,6 +5728,7 @@ fn render_element(
                     params.blend_mode,
                     ctx.transfer_suppressed,
                 ),
+                None,
             );
         }
         DisplayElement::PatchShading { params } => {
@@ -9789,6 +9790,7 @@ impl OutputDevice for SkiaDevice {
             None,
             None,
             paint_transfer(&params.transfer, params.alpha, params.blend_mode, false),
+            None,
         );
     }
 
@@ -16871,6 +16873,7 @@ fn render_mesh_shading(
     cmyk_buf: Option<&mut [f32]>,
     icc: Option<&IccCache>,
     transfer: Option<&TransferState>,
+    places: Option<&PatchPlaces>,
 ) {
     let pw = pixmap.width() as usize;
     let ph = pixmap.height() as usize;
@@ -16946,7 +16949,32 @@ fn render_mesh_shading(
     // triangles that none does.
     let mut painted = MeshPixels::new(pw, ph);
 
+    // What each pixel shows, while the triangles are those of a patch that
+    // folds over itself.
+    let mut fold: Option<FoldDepth> = None;
+    let mut runs = places.map(|p| p.runs.iter().peekable());
+
     for (index, tri) in params.triangles.iter().enumerate() {
+        if let Some(runs) = runs.as_mut() {
+            while runs.next_if(|run| run.triangles.end <= index).is_some() {}
+            if let Some(run) = runs.peek()
+                && run.triangles.start == index
+            {
+                fold = run.keys.map(|keys| {
+                    let mut bounds = (pw, ph, 0, 0);
+                    for tri in &params.triangles[run.triangles.clone()] {
+                        let (x0, y0, x1, y1) = pixel_box(corners(tri), 0.0);
+                        bounds = (
+                            bounds.0.min(x0),
+                            bounds.1.min(y0),
+                            bounds.2.max(x1),
+                            bounds.3.max(y1),
+                        );
+                    }
+                    FoldDepth::new(bounds, keys, index, fold.take())
+                });
+            }
+        }
         let placed = corners(tri);
         let [(x0, y0), (x1, y1), (x2, y2)] = placed;
         // The pixels the triangle can hold, and those it may paint.
@@ -17042,14 +17070,19 @@ fn render_mesh_shading(
                 let w1c = w1.max(0.0);
                 let w2c = w2.max(0.0);
                 let wsum = w0c + w1c + w2c;
-                painter.paint(
-                    px,
-                    py,
-                    &tri.v0,
-                    v1_ref,
-                    v2_ref,
-                    [w0c / wsum, w1c / wsum, w2c / wsum],
-                );
+                let weights = [w0c / wsum, w1c / wsum, w2c / wsum];
+                if let (Some(fold), Some(places)) = (fold.as_mut(), places) {
+                    let [k0, k1, k2] = places.keys[fold.keys + index - fold.first];
+                    let (k1, k2) = if swapped { (k2, k1) } else { (k1, k2) };
+                    let here = (
+                        weights[0] * k0.0 + weights[1] * k1.0 + weights[2] * k2.0,
+                        weights[0] * k0.1 + weights[1] * k1.1 + weights[2] * k2.1,
+                    );
+                    if !fold.shows(px, py, here) {
+                        continue;
+                    }
+                }
+                painter.paint(px, py, &tri.v0, v1_ref, v2_ref, weights);
             }
         }
     }
@@ -17134,6 +17167,103 @@ fn render_mesh_shading(
             (&tri.v1, &tri.v2)
         };
         painter.paint(at % pw, at / pw, &tri.v0, v1_ref, v2_ref, found.weights);
+    }
+}
+
+/// Where the triangles of a patch mesh lie in their patches.
+///
+/// Where a patch folds over itself, the spec puts on top the part with the
+/// larger v, and of parts with equal v the one with the larger u (ISO
+/// 32000-1 §8.7.4.5.7). Painting the triangles in that order is right to
+/// within a triangle, and where the two layers lie that close in v the
+/// triangles' edges show as teeth. So for a patch that folds, each pixel
+/// keeps the place in the patch of what it shows, and a later triangle
+/// paints it only from a place that ranks higher.
+struct PatchPlaces {
+    /// Per triangle of a patch that folds, its corners' places in the
+    /// patch, `(u, v)` as [`eval_coons_patch()`] takes them. Its `u` runs
+    /// along the data's first side, which is the spec's v, so these rank
+    /// as pairs: the first, then the second.
+    keys: Vec<[(f64, f64); 3]>,
+    /// The patches' triangles, in order.
+    runs: Vec<PatchRun>,
+}
+
+/// The triangles of one patch.
+struct PatchRun {
+    triangles: std::ops::Range<usize>,
+    /// Where the places of its triangles begin in [`PatchPlaces::keys`],
+    /// if the patch folds over itself. One that does not keeps none: no
+    /// pixel of it is painted twice.
+    keys: Option<usize>,
+}
+
+/// What each pixel of a patch that folds over itself shows, as its place
+/// in the patch (see [`PatchPlaces`]).
+struct FoldDepth {
+    /// Where the places of the patch's triangles begin in
+    /// [`PatchPlaces::keys`], and the first of its triangles.
+    keys: usize,
+    first: usize,
+    /// The pixels the patch can reach: the first, and one past the last.
+    x0: usize,
+    y0: usize,
+    x1: usize,
+    y1: usize,
+    /// A place a pixel, row after row; NaN where nothing is painted yet.
+    places: Vec<(f32, f32)>,
+}
+
+impl FoldDepth {
+    /// For a patch over the pixels in `bounds`, whose places begin at
+    /// `keys` and triangles at `first`, reusing the storage of the patch
+    /// before it.
+    fn new(
+        (x0, y0, x1, y1): (usize, usize, usize, usize),
+        keys: usize,
+        first: usize,
+        before: Option<Self>,
+    ) -> Self {
+        let (x1, y1) = (x1.max(x0), y1.max(y0));
+        let mut places = before.map(|b| b.places).unwrap_or_default();
+        places.clear();
+        places.resize((x1 - x0) * (y1 - y0), (f32::NAN, f32::NAN));
+        FoldDepth {
+            keys,
+            first,
+            x0,
+            y0,
+            x1,
+            y1,
+            places,
+        }
+    }
+
+    /// Whether the pixel at `px`, `py` is to show the place `here`, which
+    /// it then keeps: whether it ranks above the place it shows already.
+    /// Places are kept as `f32`, so two closer than `TIE` in the first are
+    /// taken to be level in it and ranked by the second; a later triangle
+    /// wins a tie.
+    fn shows(&mut self, px: usize, py: usize, here: (f64, f64)) -> bool {
+        const TIE: f64 = 1e-6;
+        if px < self.x0 || px >= self.x1 || py < self.y0 || py >= self.y1 {
+            return true;
+        }
+        let at = (py - self.y0) * (self.x1 - self.x0) + (px - self.x0);
+        let (u, v) = self.places[at];
+        if !u.is_nan() {
+            let (u, v) = (f64::from(u), f64::from(v));
+            let higher = if (here.0 - u).abs() > TIE {
+                here.0 > u
+            } else {
+                here.1 >= v
+            };
+            if !higher {
+                return false;
+            }
+        }
+        self.places[at] = (here.0 as f32, here.1 as f32);
+        true
     }
 }
 
@@ -17743,6 +17873,10 @@ fn render_patch_shading(
     transfer: Option<&TransferState>,
 ) {
     let mut triangles = Vec::new();
+    let mut places = PatchPlaces {
+        keys: Vec::new(),
+        runs: Vec::new(),
+    };
     let scale = scale_x.max(scale_y) as f64;
     // Every band renders the whole display list, so without this the patches
     // of a page-spanning shading are triangulated once per band, and with
@@ -17796,15 +17930,25 @@ fn render_patch_shading(
                 }
                 _ => None,
             };
-            subdivide_patch_to_triangles(
+            let start = triangles.len();
+            let keys = places.keys.len();
+            let folds = subdivide_patch_to_triangles(
                 patch,
                 &mut triangles,
+                &mut places.keys,
                 n,
                 icc_profile_hash,
                 icc,
                 stet_graphics::icc::intent_from_byte(params.rendering_intent),
                 cull.as_ref(),
             );
+            if !folds {
+                places.keys.truncate(keys);
+            }
+            places.runs.push(PatchRun {
+                triangles: start..triangles.len(),
+                keys: folds.then_some(keys),
+            });
         }
     }
     if !triangles.is_empty() {
@@ -17836,6 +17980,7 @@ fn render_patch_shading(
             cmyk_buf,
             icc,
             transfer,
+            Some(&places),
         );
     }
 }
@@ -17843,15 +17988,22 @@ fn render_patch_shading(
 /// Evaluates the patch at NxN points and triangulates the resulting grid.
 /// When an ICC profile hash and cache are provided, interpolates colors in the
 /// source ICC color space and converts per-grid-point for accurate rendering.
+///
+/// Each triangle's corners are also pushed onto `keys` as their places in
+/// the patch, `(u, v)` as [`eval_coons_patch()`] takes them. Returns whether
+/// the triangles face both ways, which they do where the patch folds over
+/// itself.
+#[expect(clippy::too_many_arguments)]
 fn subdivide_patch_to_triangles(
     patch: &stet_graphics::device::ShadingPatch,
     triangles: &mut Vec<stet_graphics::device::ShadingTriangle>,
+    keys: &mut Vec<[(f64, f64); 3]>,
     n: usize,
     icc_profile_hash: Option<&stet_graphics::icc::ProfileHash>,
     icc_cache: Option<&IccCache>,
     intent: stet_graphics::icc::IccRenderingIntent,
     cull: Option<&ShadingCull>,
-) {
+) -> bool {
     // Evaluate patch at grid points.
     // Use tensor-product evaluation when 16 control points are available (Type 7),
     // otherwise fall back to Coons blending (Type 6, 12 points).
@@ -17906,10 +18058,27 @@ fn subdivide_patch_to_triangles(
         }
     }
 
-    // Triangulate grid
+    // Triangulate grid. Where a patch folds over itself the triangle painted
+    // last shows, and the spec puts the part with the larger v on top, then
+    // the larger u. Its control points are named p_ij, i stepping along u and
+    // j along v, and the first side of the data runs p00 to p03, which is
+    // along v. Here `u` follows that first side, so it is the spec's v, and
+    // the grid is walked `col` by `col` with `row` inside.
     let cols = n + 1;
-    for row in 0..n {
-        for col in 0..n {
+    let step = 1.0 / n as f64;
+    // Which ways the triangles face: anticlockwise, clockwise.
+    let mut faces = (false, false);
+    let mut face = |a: &(f64, f64, DeviceColor, Vec<f64>),
+                    b: &(f64, f64, DeviceColor, Vec<f64>),
+                    c: &(f64, f64, DeviceColor, Vec<f64>)| {
+        let turn = (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
+        faces.0 |= turn > 0.0;
+        faces.1 |= turn < 0.0;
+    };
+    for col in 0..n {
+        for row in 0..n {
+            let (u0, v0) = (col as f64 * step, row as f64 * step);
+            let (u1, v1) = ((col + 1) as f64 * step, (row + 1) as f64 * step);
             let i00 = row * cols + col;
             let i10 = i00 + 1;
             let i01 = i00 + cols;
@@ -17937,6 +18106,8 @@ fn subdivide_patch_to_triangles(
 
             use stet_graphics::device::ShadingVertex;
             if keep_lower {
+                face(&grid[i00], &grid[i10], &grid[i01]);
+                keys.push([(u0, v0), (u1, v0), (u0, v1)]);
                 triangles.push(stet_graphics::device::ShadingTriangle {
                     v0: ShadingVertex {
                         x: *x00,
@@ -17959,6 +18130,8 @@ fn subdivide_patch_to_triangles(
                 });
             }
             if keep_upper {
+                face(&grid[i10], &grid[i11], &grid[i01]);
+                keys.push([(u1, v0), (u1, v1), (u0, v1)]);
                 triangles.push(stet_graphics::device::ShadingTriangle {
                     v0: ShadingVertex {
                         x: *x10,
@@ -17982,6 +18155,7 @@ fn subdivide_patch_to_triangles(
             }
         }
     }
+    faces.0 && faces.1
 }
 
 /// Evaluate a Coons patch at parameter (u, v).
@@ -18027,14 +18201,13 @@ fn eval_coons_patch(patch: &stet_graphics::device::ShadingPatch, u: f64, v: f64)
 /// Uses 16 control points arranged in a 4×4 grid, evaluated as a bicubic
 /// Bernstein surface: S(u,v) = ΣΣ B_i(u) * B_j(v) * P_ij
 ///
-/// PDF spec (ISO 32000, Table 85) data ordering for flag=0:
-///   p₁₁ p₁₂ p₁₃ p₁₄  p₂₁ p₂₂ p₂₃ p₂₄  p₃₁ p₃₂ p₃₃ p₃₄  p₄₁ p₄₂ p₄₃ p₄₄
-///
-/// In the grid (Figure 86), column index = u direction, row index = v direction:
-///   grid[v=0][u] = p₁₁, p₂₁, p₃₁, p₄₁  = pts[0], pts[4], pts[8],  pts[12]
-///   grid[v=⅓][u] = p₁₂, p₂₂, p₃₂, p₄₂  = pts[1], pts[5], pts[9],  pts[13]
-///   grid[v=⅔][u] = p₁₃, p₂₃, p₃₃, p₄₃  = pts[2], pts[6], pts[10], pts[14]
-///   grid[v=1][u] = p₁₄, p₂₄, p₃₄, p₄₄  = pts[3], pts[7], pts[11], pts[15]
+/// The data (ISO 32000-1 §8.7.4.5.8, flag 0) runs round the edge, then
+/// through the middle:
+///   p00 p01 p02 p03 p13 p23 p33 p32 p31 p30 p20 p10  p11 p12 p22 p21
+/// where p_ij is the spec's i along u and j along v, so `grid[r][c]` below
+/// is p_rc. As in [`eval_coons_patch()`], this function's `u` follows the
+/// first side, p00 to p03, and so is the spec's v; `subdivide_patch_to_triangles`
+/// orders folds by it accordingly.
 fn eval_tensor_patch(patch: &stet_graphics::device::ShadingPatch, u: f64, v: f64) -> (f64, f64) {
     let pts = &patch.points;
 
@@ -18608,6 +18781,7 @@ mod tests {
         subdivide_patch_to_triangles(
             &patch,
             &mut all,
+            &mut Vec::new(),
             n,
             None,
             None,
@@ -18624,6 +18798,7 @@ mod tests {
         subdivide_patch_to_triangles(
             &patch,
             &mut kept,
+            &mut Vec::new(),
             n,
             None,
             None,
@@ -18638,6 +18813,7 @@ mod tests {
         subdivide_patch_to_triangles(
             &patch,
             &mut none,
+            &mut Vec::new(),
             n,
             None,
             None,
@@ -18652,6 +18828,7 @@ mod tests {
         subdivide_patch_to_triangles(
             &patch,
             &mut banded,
+            &mut Vec::new(),
             n,
             None,
             None,
@@ -22290,6 +22467,7 @@ mod clip_coverage_tests {
             1.0,
             1.0,
             Some(&clip),
+            None,
             None,
             None,
             None,
