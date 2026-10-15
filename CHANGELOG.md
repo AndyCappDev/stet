@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.7] — 2026-10-14
+
 ### Fixed
 
 - **A fill whose path encloses no area is drawn as a thin line, at any
@@ -38,7 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   blended by the font's `/WeightVector`, and the PostScript interpreter
   never passed the weights on. Acrobat's substitute font AdobeSansMM is
   one, and `pdftops` writes it into the PostScript of any PDF that used
-  it. PDF input was not affected.
+  it. PDF input was not affected. To hold the name it is looked up by,
+  `NameCache` in `stet_core::context` has a new public field, so code
+  that builds one with a struct literal no longer compiles. Reading its
+  fields is unaffected.
 - **Accented letters are drawn by every text operator.** A Type 1 glyph
   made of a letter and an accent (`seac`) names its two parts, and only
   `show` and its nearest relatives looked them up: `xshow`, `yshow` and
