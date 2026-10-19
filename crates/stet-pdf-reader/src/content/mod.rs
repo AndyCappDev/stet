@@ -3516,7 +3516,10 @@ impl<'a> ContentInterpreter<'a> {
             Some(r) => r,
             None => {
                 // Font resource missing — try loading a default substitution font
-                if let Some(fallback) = font::fallback_font(self.font_provider.as_ref()) {
+                if let Some(fallback) = font::fallback_font_with(
+                    self.font_provider.as_ref(),
+                    self.resolver.host_files(),
+                ) {
                     let arc = Arc::new(fallback);
                     self.font_cache.insert(name.to_vec(), Arc::clone(&arc));
                     self.current_font = Some(arc);
@@ -3555,7 +3558,10 @@ impl<'a> ContentInterpreter<'a> {
                     format!("font /{}: {}", String::from_utf8_lossy(name), e),
                 );
                 // Try fallback font on resolution failure too
-                if let Some(fallback) = font::fallback_font(self.font_provider.as_ref()) {
+                if let Some(fallback) = font::fallback_font_with(
+                    self.font_provider.as_ref(),
+                    self.resolver.host_files(),
+                ) {
                     let arc = Arc::new(fallback);
                     self.register_font_text(&arc, &font_ref, false);
                     // Under the object's key as well as the name: a font

@@ -65,6 +65,9 @@ pub struct Resolver<'a> {
     /// Most samples an image may have and still be decoded: the
     /// application's ceiling, or the built-in one.
     max_image_pixels: std::cell::Cell<u64>,
+    /// Whether fonts and CMaps may be read from the machine's files: see
+    /// `PdfDocument::set_host_files`.
+    host_files: std::cell::Cell<bool>,
     /// The fonts resolved so far, kept from one page to the next.
     pub(crate) fonts: RefCell<crate::content::font::DocumentFonts>,
     /// The ICC profile streams read so far, by object: the decoded bytes and
@@ -259,6 +262,16 @@ impl<'a> Resolver<'a> {
             .set(pixels.min(stet_graphics::image_limits::MAX_IMAGE_PIXELS));
     }
 
+    /// Whether fonts and CMaps may be read from the machine's files.
+    pub(crate) fn host_files(&self) -> bool {
+        self.host_files.get()
+    }
+
+    /// Set [`host_files`](Self::host_files).
+    pub(crate) fn set_host_files(&self, enabled: bool) {
+        self.host_files.set(enabled);
+    }
+
     /// Decode a stream's filters, recording what the decoders recovered
     /// from as content warnings.
     pub(crate) fn decode_filters(
@@ -310,6 +323,7 @@ impl<'a> Resolver<'a> {
             icc_profiles: RefCell::new(HashMap::new()),
             content_capture: RefCell::default(),
             max_image_pixels: std::cell::Cell::new(stet_graphics::image_limits::MAX_IMAGE_PIXELS),
+            host_files: std::cell::Cell::new(true),
         }
     }
 
@@ -346,6 +360,7 @@ impl<'a> Resolver<'a> {
             icc_profiles: RefCell::new(HashMap::new()),
             content_capture: RefCell::default(),
             max_image_pixels: std::cell::Cell::new(stet_graphics::image_limits::MAX_IMAGE_PIXELS),
+            host_files: std::cell::Cell::new(true),
         }
     }
 

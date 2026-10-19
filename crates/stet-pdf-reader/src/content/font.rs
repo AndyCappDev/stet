@@ -345,10 +345,11 @@ pub fn resolve_font(
         .as_dict()
         .ok_or_else(|| PdfError::Other("Font is not a dict".into()))?;
 
+    let host_files = resolver.host_files();
     let subtype = font_dict.get_name(b"Subtype").unwrap_or(b"Type1");
     // Handle Type 0 composite fonts (CID fonts)
     if subtype == b"Type0" {
-        return resolve_type0(resolver, font_dict);
+        return resolve_type0(resolver, font_dict, font_provider);
     }
 
     // Handle Type 3 fonts (glyph content streams)
@@ -452,6 +453,7 @@ pub fn resolve_font(
                         widths,
                         has_pdf_widths,
                         font_provider,
+                        host_files,
                         desc_flags,
                         first_char,
                         last_char,
@@ -472,6 +474,7 @@ pub fn resolve_font(
                         widths,
                         has_pdf_widths,
                         font_provider,
+                        host_files,
                         desc_flags,
                         first_char,
                         last_char,
@@ -502,6 +505,7 @@ pub fn resolve_font(
                         widths,
                         has_pdf_widths,
                         font_provider,
+                        host_files,
                         desc_flags,
                         first_char,
                         last_char,
@@ -519,6 +523,7 @@ pub fn resolve_font(
         widths,
         has_pdf_widths,
         font_provider,
+        host_files,
         desc_flags,
         first_char,
         last_char,
@@ -527,7 +532,7 @@ pub fn resolve_font(
     }
     // For TrueType fonts, try loading from system fonts before giving up
     if subtype == b"TrueType"
-        && let Ok(data) = load_system_truetype_font(&base_font_name)
+        && let Ok(data) = load_system_truetype_font(&base_font_name, host_files)
     {
         let units_per_em = get_units_per_em(&data) as f64;
         let (cmap, cmap_is_unicode) = parse_cmap_with_info(&data);
@@ -753,6 +758,15 @@ fn encoding_table_by_name(name: &[u8]) -> Option<&'static [&'static str; 256]> {
 
 /// Load a fallback font (Helvetica/NimbusSans) for when no font resource exists.
 pub fn fallback_font(font_provider: Option<&FontProvider>) -> Option<PdfFont> {
+    fallback_font_with(font_provider, true)
+}
+
+/// [`fallback_font`], looking among the machine's fonts only when
+/// `host_files` allows it (`PdfDocument::set_host_files`).
+pub(crate) fn fallback_font_with(
+    font_provider: Option<&FontProvider>,
+    host_files: bool,
+) -> Option<PdfFont> {
     let encoding: [Option<String>; 256] = std::array::from_fn(|i| {
         WINANSI_ENCODING.get(i).and_then(|&s| {
             if s.is_empty() {
@@ -769,6 +783,7 @@ pub fn fallback_font(font_provider: Option<&FontProvider>) -> Option<PdfFont> {
         widths,
         false,
         font_provider,
+        host_files,
         0,
         0,
         255,
@@ -854,30 +869,12 @@ fn substitute_font(
     widths: [f64; 256],
     has_pdf_widths: bool,
     font_provider: Option<&FontProvider>,
+    host_files: bool,
     descriptor_flags: u32,
     first_char: usize,
     last_char: usize,
 ) -> Option<PdfFont> {
-    use stet_fonts::FONT_SUBSTITUTIONS;
-
-    // Strip subset prefix (e.g. "ABCDEF+Times-Roman" → "Times-Roman")
-    let mut clean_name: &str = base_font;
-    if clean_name.len() > 7 && clean_name.as_bytes().get(6) == Some(&b'+') {
-        clean_name = &clean_name[7..];
-    }
-    // Strip trailing "*N" suffix (e.g. "ArialMT*1" → "ArialMT")
-    if let Some(star_pos) = clean_name.rfind('*') {
-        clean_name = &clean_name[..star_pos];
-    }
-
-    // Look up substitution (exact match first, then fuzzy family match)
-    let urw_name = FONT_SUBSTITUTIONS
-        .iter()
-        .find(|&&(ps, _)| ps == clean_name)
-        .map(|&(_, urw)| urw)
-        .or_else(|| fuzzy_font_match(clean_name));
-
-    let font_file_name = urw_name.unwrap_or(clean_name);
+    let (clean_name, font_file_name) = substitute_names(base_font);
 
     // Try the font provider first (for WASM and other non-filesystem environments)
     let font_data = if let Some(provider) = font_provider {
@@ -888,7 +885,7 @@ fn substitute_font(
 
     // Try system font (full glyph set) before bundled subset
     let font_data = font_data.or_else(|| {
-        let cache = stet_fonts::system_fonts::get_system_font_cache();
+        let cache = system_font_cache(host_files).ok()?;
         let path = cache.get_font_path(font_file_name)?;
         read_font_file(path, font_file_name).ok()
     });
@@ -898,36 +895,8 @@ fn substitute_font(
 
     // If the named font wasn't found, use a default substitute based on the
     // font descriptor Flags (serif bit) and weight/style from the font name.
-    let font_data = font_data.or_else(|| {
-        let lower = clean_name.to_ascii_lowercase();
-        let is_bold = lower.contains("bold")
-            || lower.contains("demi")
-            || lower.contains("black")
-            || lower.contains("heavy");
-        let is_italic = lower.contains("italic") || lower.contains("oblique");
-        let is_serif = descriptor_flags & 2 != 0; // PDF flag bit 2 = Serif
-        let default_name = if is_serif {
-            match (is_bold, is_italic) {
-                (true, true) => "NimbusRoman-BoldItalic",
-                (true, false) => "NimbusRoman-Bold",
-                (false, true) => "NimbusRoman-Italic",
-                (false, false) => "NimbusRoman-Regular",
-            }
-        } else {
-            match (is_bold, is_italic) {
-                (true, true) => "NimbusSans-BoldItalic",
-                (true, false) => "NimbusSans-Bold",
-                (false, true) => "NimbusSans-Italic",
-                (false, false) => "NimbusSans-Regular",
-            }
-        };
-        if let Some(provider) = font_provider
-            && let Some(data) = provider(default_name)
-        {
-            return Some(data);
-        }
-        embedded_font(default_name)
-    })?;
+    let font_data =
+        font_data.or_else(|| default_substitute(clean_name, descriptor_flags, font_provider))?;
 
     let font = parse_type1(&font_data).ok()?;
     let fm = font.font_matrix;
@@ -1041,6 +1010,88 @@ fn substitute_font(
         weight_vector,
         per_char_width_scale: per_char_scale,
     }))
+}
+
+/// The machine's installed fonts, unless the document may read no file
+/// from the machine (`PdfDocument::set_host_files`). Asking for them the
+/// first time scans the font folders and writes the list it finds to
+/// `~/.cache/stet/system_fonts.json`, so with host files off this is never
+/// called at all.
+fn system_font_cache(
+    host_files: bool,
+) -> Result<&'static stet_fonts::system_fonts::SystemFontCache, PdfError> {
+    if host_files {
+        Ok(stet_fonts::system_fonts::get_system_font_cache())
+    } else {
+        Err(PdfError::Other(
+            "the machine's fonts are not read for this document".into(),
+        ))
+    }
+}
+
+/// The name a substitute is looked up by for `base_font`: the name as the
+/// document writes it, less any subset prefix and `*N` suffix, and the
+/// name of the font stet substitutes for it (that same name when it knows
+/// of none).
+fn substitute_names(base_font: &str) -> (&str, &str) {
+    use stet_fonts::FONT_SUBSTITUTIONS;
+
+    // Strip subset prefix (e.g. "ABCDEF+Times-Roman" → "Times-Roman")
+    let mut clean_name: &str = base_font;
+    if clean_name.len() > 7 && clean_name.as_bytes().get(6) == Some(&b'+') {
+        clean_name = &clean_name[7..];
+    }
+    // Strip trailing "*N" suffix (e.g. "ArialMT*1" → "ArialMT")
+    if let Some(star_pos) = clean_name.rfind('*') {
+        clean_name = &clean_name[..star_pos];
+    }
+
+    // Look up substitution (exact match first, then fuzzy family match)
+    let urw_name = FONT_SUBSTITUTIONS
+        .iter()
+        .find(|&&(ps, _)| ps == clean_name)
+        .map(|&(_, urw)| urw)
+        .or_else(|| fuzzy_font_match(clean_name));
+
+    (clean_name, urw_name.unwrap_or(clean_name))
+}
+
+/// The Nimbus Roman or Nimbus Sans that stands in for a font stet has no
+/// substitute for, by the descriptor's serif flag and the weight and slant
+/// the name says.
+fn default_substitute(
+    clean_name: &str,
+    descriptor_flags: u32,
+    font_provider: Option<&FontProvider>,
+) -> Option<Vec<u8>> {
+    let lower = clean_name.to_ascii_lowercase();
+    let is_bold = lower.contains("bold")
+        || lower.contains("demi")
+        || lower.contains("black")
+        || lower.contains("heavy");
+    let is_italic = lower.contains("italic") || lower.contains("oblique");
+    let is_serif = descriptor_flags & 2 != 0; // PDF flag bit 2 = Serif
+    let default_name = if is_serif {
+        match (is_bold, is_italic) {
+            (true, true) => "NimbusRoman-BoldItalic",
+            (true, false) => "NimbusRoman-Bold",
+            (false, true) => "NimbusRoman-Italic",
+            (false, false) => "NimbusRoman-Regular",
+        }
+    } else {
+        match (is_bold, is_italic) {
+            (true, true) => "NimbusSans-BoldItalic",
+            (true, false) => "NimbusSans-Bold",
+            (false, true) => "NimbusSans-Italic",
+            (false, false) => "NimbusSans-Regular",
+        }
+    };
+    if let Some(provider) = font_provider
+        && let Some(data) = provider(default_name)
+    {
+        return Some(data);
+    }
+    embedded_font(default_name)
 }
 
 /// Returns true if `name` (after normalizing commas to hyphens) is one of the
@@ -1724,6 +1775,148 @@ fn create_cid_from_type1(
     }))
 }
 
+/// A composite font the document does not carry, drawn with stet's own
+/// fonts, for a document that may read no file from the machine
+/// (`PdfDocument::set_host_files`) and so has no installed font to use.
+///
+/// The codes, CIDs and widths stay the document's, so its text reads as
+/// it is encoded. Each CID is drawn with the glyph for the character it
+/// stands for (by the `/ToUnicode` CMap, else by the Adobe collection
+/// the CIDSystemInfo names) from the Nimbus font that stands in for the
+/// font's name. Those fonts are Latin: a CID whose character they have no
+/// glyph for, as in Chinese, Japanese or Korean text, is not drawn.
+fn own_cid_font(
+    base_font: &str,
+    descriptor_flags: u32,
+    font_provider: Option<&FontProvider>,
+    metrics: CidMetrics,
+    ordering: &[u8],
+    to_unicode: &HashMap<u16, u32>,
+) -> Result<PdfFont, PdfError> {
+    let CidMetrics {
+        default_width,
+        cid_widths,
+        code_lengths,
+        code_to_cid,
+        wmode,
+        dw2,
+        w2,
+    } = metrics;
+    let (clean_name, font_file_name) = substitute_names(base_font);
+    let font_data = font_provider
+        .and_then(|provider| provider(font_file_name))
+        .or_else(|| embedded_font(font_file_name))
+        .or_else(|| default_substitute(clean_name, descriptor_flags, font_provider))
+        .ok_or_else(|| PdfError::Other(format!("no substitute for font '{clean_name}'")))?;
+    let font =
+        parse_type1(&font_data).map_err(|e| PdfError::Other(format!("Type1 parse error: {e}")))?;
+    let fm = font.font_matrix;
+    let font_matrix = Matrix::new(fm[0], fm[1], fm[2], fm[3], fm[4], fm[5]);
+
+    // The substitute's glyphs by the character each draws. Where two
+    // names draw one character, the first in order is taken, so that the
+    // same document always draws the same glyph.
+    let mut glyphs: HashMap<u32, &str> = HashMap::new();
+    for name in font.charstrings.keys() {
+        if let Some(unicode) = stet_fonts::agl::glyph_name_to_unicode(name) {
+            glyphs
+                .entry(u32::from(unicode))
+                .and_modify(|kept| {
+                    if name.as_str() < *kept {
+                        *kept = name.as_str();
+                    }
+                })
+                .or_insert(name.as_str());
+        }
+    }
+
+    // The character each CID stands for: the ToUnicode CMap's first, as it
+    // is the document's own word, then the Adobe collection's, for the
+    // CIDs the document names and for each character the substitute has.
+    let mut characters: HashMap<u16, u32> = HashMap::new();
+    for (&code, &unicode) in to_unicode {
+        let cid = code_to_cid
+            .get(&u32::from(code))
+            .copied()
+            .unwrap_or(u32::from(code));
+        if let Ok(cid) = u16::try_from(cid) {
+            characters.entry(cid).or_insert(unicode);
+        }
+    }
+    if !ordering.is_empty() && ordering != b"Identity" {
+        let cids = cid_widths.keys().copied().chain(
+            code_to_cid
+                .values()
+                .filter_map(|&cid| u16::try_from(cid).ok()),
+        );
+        for cid in cids {
+            if let Some(unicode) = stet_fonts::cid_unicode::cid_to_unicode(ordering, cid) {
+                characters.entry(cid).or_insert(unicode);
+            }
+        }
+        for &unicode in glyphs.keys() {
+            if let Some(cid) = stet_fonts::cid_unicode::unicode_to_cid(ordering, unicode) {
+                characters.entry(cid).or_insert(unicode);
+            }
+        }
+    }
+
+    let mut paths = HashMap::new();
+    for (&cid, unicode) in &characters {
+        if let Some(name) = glyphs.get(unicode)
+            && let Some(cs) = font.charstrings.get(*name)
+            && let Ok(result) = execute_charstring(cs, &font.subrs, font.len_iv, false)
+        {
+            paths.insert(cid, result.path.transform(&font_matrix));
+        }
+    }
+
+    // As for a Type 1 font used as a CIDFont: the paths stand in for the
+    // charstrings, and this font carries none.
+    let dummy_cff = stet_fonts::cff_parser::CffFont {
+        name: font.font_name.clone(),
+        font_matrix: fm,
+        font_bbox: [0.0; 4],
+        char_strings: Vec::new(),
+        global_subrs: Vec::new(),
+        local_subrs: Vec::new(),
+        charset: Vec::new(),
+        encoding: Vec::new(),
+        default_width_x: 0.0,
+        nominal_width_x: 0.0,
+        is_cid: false,
+        fd_array: Vec::new(),
+        fd_select: Vec::new(),
+        ros: None,
+        cid_to_gid: Vec::new(),
+    };
+
+    Ok(PdfFont::CidCff(CidCffPdfFont {
+        font: dummy_cff,
+        default_width,
+        cid_widths,
+        font_matrix,
+        cmap: None,
+        pdf_cid_to_gid: None,
+        identity_cid_to_gid: true,
+        ordering: ordering.to_vec(),
+        code_lengths,
+        code_to_cid,
+        wmode,
+        dw2,
+        w2,
+        type1_paths: Some(paths),
+    }))
+}
+
+/// A CIDFont's `/BaseFont`, as text.
+fn cid_base_font(cid_font_dict: &PdfDict) -> String {
+    cid_font_dict
+        .get_name(b"BaseFont")
+        .map(|n| String::from_utf8_lossy(n).into_owned())
+        .unwrap_or_default()
+}
+
 /// Fix malformed `head.indexToLocFormat` in embedded TrueType fonts.
 ///
 /// Some PDF generators write invalid values (e.g. 256 instead of 0 or 1).
@@ -1776,10 +1969,8 @@ fn sanitize_index_to_loc_format(font_data: &mut [u8]) {
 ///
 /// Used when a CIDFontType2 font is not embedded in the PDF (missing FontFile2).
 /// Falls back to substitution table and fuzzy name matching.
-fn load_system_truetype_font(base_font: &str) -> Result<Vec<u8>, PdfError> {
-    use stet_fonts::system_fonts::get_system_font_cache;
-
-    let cache = get_system_font_cache();
+fn load_system_truetype_font(base_font: &str, host_files: bool) -> Result<Vec<u8>, PdfError> {
+    let cache = system_font_cache(host_files)?;
 
     // Strip subset prefix (e.g. "ABCDEF+Calibri,Bold" → "Calibri,Bold")
     let mut clean_name = base_font;
@@ -1834,14 +2025,16 @@ fn load_system_truetype_font(base_font: &str) -> Result<Vec<u8>, PdfError> {
 /// native names like 黑体). Uses the CIDSystemInfo Ordering to select
 /// the appropriate Noto CJK regional variant. For non-CJK orderings
 /// (Identity), falls back to a Latin sans-serif font instead.
-fn load_cjk_fallback_font(ordering: &[u8], base_font: &str) -> Result<Vec<u8>, PdfError> {
-    use stet_fonts::system_fonts::get_system_font_cache;
-
+fn load_cjk_fallback_font(
+    ordering: &[u8],
+    base_font: &str,
+    host_files: bool,
+) -> Result<Vec<u8>, PdfError> {
     if ordering.is_empty() {
         return Err(PdfError::Other("no CJK ordering for fallback".into()));
     }
 
-    let cache = get_system_font_cache();
+    let cache = system_font_cache(host_files)?;
     let lower = base_font.to_ascii_lowercase();
     let is_bold = lower.contains("bold") || lower.contains("demi") || lower.contains("black");
 
@@ -2879,7 +3072,20 @@ fn build_cff_font(
 }
 
 /// Resolve a Type 0 composite font (CIDFontType2 descendant with TrueType outlines).
-fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, PdfError> {
+fn resolve_type0(
+    resolver: &Resolver,
+    font_dict: &PdfDict,
+    font_provider: Option<&FontProvider>,
+) -> Result<PdfFont, PdfError> {
+    // Whether the machine's fonts and CMap files may be read, or neither.
+    let host_files = resolver.host_files();
+    let load_cmap = |name: &[u8]| {
+        if host_files {
+            load_predefined_cmap(name)
+        } else {
+            None
+        }
+    };
     // Check if encoding is UCS2-based (character codes are Unicode, not CIDs).
     let encoding_obj = font_dict.get(b"Encoding");
     let encoding_name = font_dict.get_name(b"Encoding").unwrap_or(b"");
@@ -2894,18 +3100,12 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
     let (code_lengths, code_to_cid, mut wmode) = if let Some(enc_obj) = encoding_obj {
         if let Ok(cmap_data) = resolver.stream_data_from_obj(enc_obj) {
             // Embedded CMap stream
-            let cmap = super::cmap::CMap::parse_with_loader(
-                &cmap_data,
-                Some(&|name| load_predefined_cmap(name)),
-            );
+            let cmap = super::cmap::CMap::parse_with_loader(&cmap_data, Some(&load_cmap));
             (cmap.code_lengths, cmap.code_to_cid, cmap.wmode)
         } else if !encoding_name.is_empty() && !encoding_name.starts_with(b"Identity") {
             // Predefined CMap name (e.g. GBK-EUC-H) — load from system
-            if let Some(cmap_data) = load_predefined_cmap(encoding_name) {
-                let cmap = super::cmap::CMap::parse_with_loader(
-                    &cmap_data,
-                    Some(&|name| load_predefined_cmap(name)),
-                );
+            if let Some(cmap_data) = load_cmap(encoding_name) {
+                let cmap = super::cmap::CMap::parse_with_loader(&cmap_data, Some(&load_cmap));
                 (cmap.code_lengths, cmap.code_to_cid, cmap.wmode)
             } else {
                 resolver.warn_content(
@@ -2955,6 +3155,8 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
     let desc = descriptor
         .as_ref()
         .ok_or_else(|| PdfError::Other("CIDFont missing FontDescriptor".into()))?;
+    // The serif flag, for the substitute when the font is not carried.
+    let desc_flags = desc.get_int(b"Flags").unwrap_or(0) as u32;
 
     // Parse /DW (default width) — may be int or real
     let default_width = cid_font_dict.get_f64(b"DW").unwrap_or(1000.0) / 1000.0;
@@ -3142,6 +3344,24 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     }
                 }
                 font_data
+            } else if !host_files {
+                // Font not embedded, and the machine's may not be read.
+                return own_cid_font(
+                    &cid_base_font(cid_font_dict),
+                    desc_flags,
+                    font_provider,
+                    CidMetrics {
+                        default_width,
+                        cid_widths,
+                        code_lengths,
+                        code_to_cid,
+                        wmode,
+                        dw2,
+                        w2,
+                    },
+                    &ordering,
+                    &to_unicode,
+                );
             } else {
                 // Font not embedded — try system font lookup
                 substituted = true;
@@ -3156,8 +3376,8 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                         }
                     })
                     .unwrap_or_default();
-                let sys_data = load_system_truetype_font(&base_font)
-                    .or_else(|_| load_cjk_fallback_font(&ordering, &base_font))?;
+                let sys_data = load_system_truetype_font(&base_font, host_files)
+                    .or_else(|_| load_cjk_fallback_font(&ordering, &base_font, host_files))?;
                 // If the system font is OpenType/CFF, use CFF rendering path
                 if sys_data.len() > 4 && &sys_data[0..4] == b"OTTO" {
                     return create_cid_cff_from_otf(
@@ -3206,7 +3426,7 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                             }
                         })
                         .unwrap_or_default();
-                    if let Ok(sys_data) = load_system_truetype_font(&base_font) {
+                    if let Ok(sys_data) = load_system_truetype_font(&base_font, host_files) {
                         data = sys_data;
                         substituted = true;
                     }
@@ -3442,7 +3662,13 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     ordering.as_slice(),
                     b"GB1" | b"CNS1" | b"Japan1" | b"Japan2" | b"Korea1" | b"KR"
                 );
-                if cs_count > 0 && cid_widths.len() > cs_count * 4 && is_adobe_cjk_registry {
+                // Without the machine's fonts there is nothing better to
+                // fall through to, so the subset is kept.
+                if host_files
+                    && cs_count > 0
+                    && cid_widths.len() > cs_count * 4
+                    && is_adobe_cjk_registry
+                {
                     // Drop the parsed CFF and fall through to the system font path.
                 } else {
                     let fm = font.font_matrix;
@@ -3465,6 +3691,25 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     }));
                 }
             }
+            // Not embedded, and the machine's fonts may not be read.
+            if !host_files {
+                return own_cid_font(
+                    &cid_base_font(cid_font_dict),
+                    desc_flags,
+                    font_provider,
+                    CidMetrics {
+                        default_width,
+                        cid_widths,
+                        code_lengths,
+                        code_to_cid,
+                        wmode,
+                        dw2,
+                        w2,
+                    },
+                    &ordering,
+                    &to_unicode,
+                );
+            }
             // Not embedded or tiny subset — substitute with a system font
             {
                 let base_font = cid_font_dict
@@ -3479,14 +3724,14 @@ fn resolve_type0(resolver: &Resolver, font_dict: &PdfDict) -> Result<PdfFont, Pd
                     // bytes, producing doubled character spacing.
                     // Try CJK fallback before Latin fallback — UCS2-encoded CJK
                     // fonts (Adobe-Japan1 etc.) need a font with CJK glyphs.
-                    load_system_truetype_font(&base_font)
-                        .or_else(|_| load_cjk_fallback_font(&ordering, &base_font))
-                        .or_else(|_| load_system_truetype_font("DejaVuSans"))
-                        .or_else(|_| load_system_truetype_font("LiberationSans"))
-                        .or_else(|_| load_system_truetype_font("NimbusSans"))?
+                    load_system_truetype_font(&base_font, host_files)
+                        .or_else(|_| load_cjk_fallback_font(&ordering, &base_font, host_files))
+                        .or_else(|_| load_system_truetype_font("DejaVuSans", host_files))
+                        .or_else(|_| load_system_truetype_font("LiberationSans", host_files))
+                        .or_else(|_| load_system_truetype_font("NimbusSans", host_files))?
                 } else {
-                    load_system_truetype_font(&base_font)
-                        .or_else(|_| load_cjk_fallback_font(&ordering, &base_font))?
+                    load_system_truetype_font(&base_font, host_files)
+                        .or_else(|_| load_cjk_fallback_font(&ordering, &base_font, host_files))?
                 };
                 // For Identity ordering, CIDs are GIDs from the original font.
                 // When the substitute is the same font family, identity mapping

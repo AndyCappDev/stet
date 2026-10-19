@@ -272,6 +272,42 @@ fn default_icc_cache() -> IccCache {
         .clone()
 }
 
+/// stet's own CMYK profile, for a document that may read no file from the
+/// machine: CGATS001Compat-v2-micro, public domain (see
+/// `LICENSE-CMYK-PROFILE`), built from the CGATS TR 001 (SWOP) data.
+const OWN_CMYK_PROFILE: &[u8] = include_bytes!("default_cmyk.icc");
+
+/// [`default_icc_cache`] for a document that may read no file from the
+/// machine: stet's own CMYK profile in place of the system's. Prepared
+/// once per process in the same way.
+fn own_icc_cache() -> IccCache {
+    static TEMPLATE: std::sync::OnceLock<IccCache> = std::sync::OnceLock::new();
+    TEMPLATE
+        .get_or_init(|| {
+            let mut cache = IccCache::new();
+            cache.load_cmyk_profile_bytes(OWN_CMYK_PROFILE);
+            cache
+        })
+        .clone()
+}
+
+/// Where a document's color cache reports what it cannot use: into
+/// `pending`, for [`PdfDocument::note_icc_diagnostics`] to move into the
+/// document's warnings.
+fn icc_diagnostic_sink(
+    pending: &Arc<std::sync::Mutex<Vec<String>>>,
+) -> stet_graphics::icc::IccDiagnosticSink {
+    let pending = Arc::clone(pending);
+    Arc::new(move |message: &str| {
+        if let Ok(mut pending) = pending.lock()
+            && pending.len() < MAX_PENDING_ICC_DIAGNOSTICS
+            && !pending.iter().any(|m: &String| m == message)
+        {
+            pending.push(message.to_owned());
+        }
+    })
+}
+
 /// The most messages from a document's colour cache held between two
 /// readings of them. They are read at the end of every page, so this is
 /// reached only by a page with that many distinct failures.
@@ -313,7 +349,17 @@ pub enum ImageResolution {
 pub struct PdfDocument<'a> {
     resolver: Resolver<'a>,
     pages: Vec<PageInfo>,
-    icc_cache: IccCache,
+    /// The document's color cache: the caller's, or, for a document
+    /// opened without one, made from [`default_icc_cache`] or
+    /// [`own_icc_cache`] when it is first needed. See [`Self::icc`].
+    icc_cache: OnceCell<IccCache>,
+    /// The color cache is one the reader makes, and nothing has changed
+    /// it since: [`Self::set_host_files`] may then make it again.
+    icc_cache_is_default: bool,
+    /// Whether the reader may read files from the machine it runs on:
+    /// installed fonts, CMap files, color profiles. On by default. See
+    /// [`PdfDocument::set_host_files`].
+    host_files: bool,
     /// What `icc_cache`, and the copies of it pages are read with, have
     /// reported and [`Self::note_icc_diagnostics`] has not yet moved into
     /// the document's warnings.
@@ -404,11 +450,7 @@ impl PdfDocument<'static> {
     /// Everything else is as [`from_bytes`](Self::from_bytes), including
     /// the search for a system CMYK profile.
     pub fn from_owned(data: impl Into<PdfBytes>) -> Result<Self, PdfError> {
-        Self::open(
-            resolver::Source::Owned(data.into()),
-            default_icc_cache(),
-            b"",
-        )
+        Self::open(resolver::Source::Owned(data.into()), None, b"")
     }
 
     /// [`from_owned`](Self::from_owned) with a pre-loaded ICC cache, as
@@ -417,7 +459,7 @@ impl PdfDocument<'static> {
         data: impl Into<PdfBytes>,
         icc_cache: IccCache,
     ) -> Result<Self, PdfError> {
-        Self::open(resolver::Source::Owned(data.into()), icc_cache, b"")
+        Self::open(resolver::Source::Owned(data.into()), Some(icc_cache), b"")
     }
 
     /// [`from_owned`](Self::from_owned) with a password, as
@@ -427,14 +469,18 @@ impl PdfDocument<'static> {
         icc_cache: IccCache,
         password: &[u8],
     ) -> Result<Self, PdfError> {
-        Self::open(resolver::Source::Owned(data.into()), icc_cache, password)
+        Self::open(
+            resolver::Source::Owned(data.into()),
+            Some(icc_cache),
+            password,
+        )
     }
 }
 
 impl<'a> PdfDocument<'a> {
     /// Parse a PDF from bytes.
     pub fn from_bytes(data: &'a [u8]) -> Result<Self, PdfError> {
-        Self::from_bytes_inner(data, default_icc_cache(), b"")
+        Self::from_bytes_inner(data, None, b"")
     }
 
     /// Parse a PDF from bytes, using a pre-loaded ICC cache.
@@ -442,7 +488,7 @@ impl<'a> PdfDocument<'a> {
     /// Use this when the caller already has an `IccCache` with the system
     /// CMYK profile loaded (e.g., from the PostScript interpreter context).
     pub fn from_bytes_with_icc(data: &'a [u8], icc_cache: IccCache) -> Result<Self, PdfError> {
-        Self::from_bytes_inner(data, icc_cache, b"")
+        Self::from_bytes_inner(data, Some(icc_cache), b"")
     }
 
     /// Parse a PDF from bytes using a user-supplied password.
@@ -456,21 +502,23 @@ impl<'a> PdfDocument<'a> {
         icc_cache: IccCache,
         password: &[u8],
     ) -> Result<Self, PdfError> {
-        Self::from_bytes_inner(data, icc_cache, password)
+        Self::from_bytes_inner(data, Some(icc_cache), password)
     }
 
     fn from_bytes_inner(
         data: &'a [u8],
-        icc_cache: IccCache,
+        icc_cache: Option<IccCache>,
         password: &[u8],
     ) -> Result<Self, PdfError> {
         Self::open(resolver::Source::Borrowed(data), icc_cache, password)
     }
 
-    /// Open a document over bytes that are lent or owned.
+    /// Open a document over bytes that are lent or owned, with the
+    /// caller's color cache or, given none, the reader's own when it is
+    /// first needed.
     fn open(
         source: resolver::Source<'a>,
-        mut icc_cache: IccCache,
+        icc_cache: Option<IccCache>,
         password: &[u8],
     ) -> Result<Self, PdfError> {
         // The cache is this document's from here on, and what it cannot
@@ -480,15 +528,14 @@ impl<'a> PdfDocument<'a> {
         // whichever thread is converting, and moved across by
         // `note_icc_diagnostics`.
         let icc_diagnostics = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let pending = Arc::clone(&icc_diagnostics);
-        icc_cache.set_diagnostic_sink(Some(Arc::new(move |message: &str| {
-            if let Ok(mut pending) = pending.lock()
-                && pending.len() < MAX_PENDING_ICC_DIAGNOSTICS
-                && !pending.iter().any(|m: &String| m == message)
-            {
-                pending.push(message.to_owned());
+        let icc_cache_is_default = icc_cache.is_none();
+        let icc_cache = match icc_cache {
+            Some(mut cache) => {
+                cache.set_diagnostic_sink(Some(icc_diagnostic_sink(&icc_diagnostics)));
+                OnceCell::from(cache)
             }
-        })));
+            None => OnceCell::new(),
+        };
         let data: &[u8] = &source;
         // Validate header — PDF spec allows up to 1024 bytes before %PDF-
         if !has_pdf_header(data) {
@@ -546,6 +593,8 @@ impl<'a> PdfDocument<'a> {
             resolver,
             pages,
             icc_cache,
+            icc_cache_is_default,
+            host_files: true,
             icc_diagnostics,
             font_provider: None,
             overprint: true,
@@ -816,6 +865,63 @@ impl<'a> PdfDocument<'a> {
         self.resolver.fonts.borrow_mut().clear();
     }
 
+    /// Let the reader read files from the machine it runs on, or read
+    /// none but the document.
+    ///
+    /// On by default. A font the document names but does not carry is
+    /// then looked for among the fonts installed on the machine, which
+    /// are listed the first time and the list kept in
+    /// `~/.cache/stet/system_fonts.json`. A CMap it names and does not
+    /// carry is looked for in `STET_CMAP_DIR`, `~/.local/share/stet/CMap`
+    /// and the folders poppler and Ghostscript keep theirs in. And a
+    /// document opened without a color cache, by
+    /// [`from_bytes`](Self::from_bytes) or
+    /// [`from_owned`](PdfDocument::from_owned), takes the system's CMYK
+    /// profile from the ColorSync folders, `/usr/share/color/icc` or
+    /// Windows' spool color folder.
+    ///
+    /// Off, none of that is read, nor any other file: for an application
+    /// reading files it did not write, on a machine whose fonts and
+    /// settings are not the document's business. A font not carried is
+    /// drawn with stet's own fonts, the URW base 35, and its text is read
+    /// as the document encodes it. That holds for a composite font too,
+    /// though only the characters those Latin fonts have glyphs for are
+    /// drawn. A predefined CMap not carried is reported as not found, as
+    /// it is when no folder has it, and no name from the document becomes
+    /// a path. A document opened without a color cache takes stet's own
+    /// CMYK profile, and so does a cache given with no CMYK profile in it;
+    /// a cache given with one is used as it is.
+    ///
+    /// Set it before the first page is read. The fonts resolved so far are
+    /// resolved again, and a color cache the reader made is made again,
+    /// unless [`apply_output_intent_as_default_cmyk`](Self::apply_output_intent_as_default_cmyk)
+    /// has changed it; the system's profile is looked for only when the
+    /// cache is first needed, so a document switched off before then never
+    /// reads it. stet's profile, once put in a cache given, stays there.
+    pub fn set_host_files(&mut self, enabled: bool) {
+        if enabled == self.host_files {
+            return;
+        }
+        self.host_files = enabled;
+        self.resolver.set_host_files(enabled);
+        // What a font resolves to depends on what may be read.
+        self.resolver.fonts.borrow_mut().clear();
+        if self.icc_cache_is_default {
+            self.icc_cache = OnceCell::new();
+        } else if !enabled
+            && let Some(cache) = self.icc_cache.get_mut()
+            && cache.default_cmyk_hash().is_none()
+        {
+            cache.load_cmyk_profile_bytes(OWN_CMYK_PROFILE);
+        }
+    }
+
+    /// Whether the reader may read files from the machine: see
+    /// [`set_host_files`](Self::set_host_files).
+    pub fn host_files(&self) -> bool {
+        self.host_files
+    }
+
     /// Number of pages in the document.
     pub fn page_count(&self) -> usize {
         self.pages.len()
@@ -1018,7 +1124,7 @@ impl<'a> PdfDocument<'a> {
             &self.resolver,
             info.resources.clone(),
             ctm,
-            &self.icc_cache,
+            self.icc(),
             self.font_provider.clone(),
             self.overprint,
             &self.ocg_off,
@@ -1178,7 +1284,7 @@ impl<'a> PdfDocument<'a> {
             pixel_w,
             pixel_h,
             dpi,
-            Some(&self.icc_cache),
+            Some(self.icc()),
             false,
             layer_set,
             background,
@@ -1206,8 +1312,28 @@ impl<'a> PdfDocument<'a> {
     }
 
     /// Access the ICC color profile cache.
+    ///
+    /// For a document opened without one, the reader's own: with the
+    /// system's CMYK profile, or stet's when
+    /// [`set_host_files`](Self::set_host_files) is off.
     pub fn icc_cache(&self) -> &IccCache {
-        &self.icc_cache
+        self.icc()
+    }
+
+    /// The document's color cache, made when it is first needed for a
+    /// document opened without one. The system's CMYK profile is looked
+    /// for only then, so that a document told not to read the machine's
+    /// files before its first page never does.
+    fn icc(&self) -> &IccCache {
+        self.icc_cache.get_or_init(|| {
+            let mut cache = if self.host_files {
+                default_icc_cache()
+            } else {
+                own_icc_cache()
+            };
+            cache.set_diagnostic_sink(Some(icc_diagnostic_sink(&self.icc_diagnostics)));
+            cache
+        })
     }
 
     /// Decompressed ICC profile bytes from the PDF's OutputIntent, if any.
@@ -1224,7 +1350,16 @@ impl<'a> PdfDocument<'a> {
     /// `search_system_cmyk_profile`. Returns `true` when the profile was
     /// present and registered.
     pub fn apply_output_intent_as_default_cmyk(&mut self) -> bool {
-        let Some(bytes) = self.output_intent_icc.as_deref() else {
+        if self.output_intent_icc.is_none() {
+            return false;
+        }
+        // The cache is changed, so it is the document's from now on, and
+        // the reader does not make it again.
+        self.icc();
+        self.icc_cache_is_default = false;
+        let (Some(bytes), Some(icc_cache)) =
+            (self.output_intent_icc.as_deref(), self.icc_cache.get_mut())
+        else {
             return false;
         };
         // Compute the profile hash and install it as the default CMYK BEFORE
@@ -1235,12 +1370,12 @@ impl<'a> PdfDocument<'a> {
         // colours converge with DeviceCMYK paints at the final
         // `OutputIntent → sRGB` stage.
         let hash = stet_graphics::icc::IccCache::hash_profile(bytes);
-        self.icc_cache.set_system_cmyk(bytes, hash);
-        self.icc_cache.set_proofing_enabled(true);
-        if self.icc_cache.register_profile(bytes).is_none() {
+        icc_cache.set_system_cmyk(bytes, hash);
+        icc_cache.set_proofing_enabled(true);
+        if icc_cache.register_profile(bytes).is_none() {
             // Registration failed — undo the partial install so the cache
             // doesn't claim a profile it can't actually use.
-            self.icc_cache.set_proofing_enabled(false);
+            icc_cache.set_proofing_enabled(false);
             return false;
         }
         // Pre-warm the sRGB → CMYK reverse transform so band renderers, which
@@ -1253,12 +1388,12 @@ impl<'a> PdfDocument<'a> {
         // GWG 22.1's ColorBurn form over a Lab BG) reads from the buffer.
         // The viewer's `build_icc_cache_for_list` already calls this; doing
         // it here keeps the PNG path and the viewer in lockstep.
-        self.icc_cache.prepare_reverse_cmyk();
+        icc_cache.prepare_reverse_cmyk();
         // Also pre-build the `Lab → OI CMYK` samplers so Lab fills can take
         // a direct ACE-style path through the OI's B2A LUTs, instead of going
         // through Lab → sRGB → ICC reverse (which drifts under CMYK-group
         // blends — same GWG 22.1 ColorBurn pattern as above).
-        self.icc_cache.prepare_lab_to_oi_cmyk();
+        icc_cache.prepare_lab_to_oi_cmyk();
         true
     }
 

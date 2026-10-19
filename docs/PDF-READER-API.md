@@ -97,10 +97,11 @@ which a `Vec<u8>`, a `Box<[u8]>` and an `Arc<[u8]>` all are.
 
 The constructors that take no colour cache — `from_bytes` and
 `from_owned` — start from the system's CMYK profile when there is one.
-It is found and prepared once per process (about 30 ms) and each document
-takes its own copy, so opening a second document costs only its own
-parsing. A profile installed while the process runs is not picked up;
-build an `IccCache` and use a `_with_icc` constructor for that.
+It is found and prepared once per process (about 30 ms), when a document
+first needs its colors, and each document takes its own copy, so a
+second document costs only its own parsing. A profile installed while
+the process runs is not picked up; build an `IccCache` and use a
+`_with_icc` constructor for that.
 
 A document keeps the fonts its pages use. A font is resolved — its
 program read, its encoding, widths and character maps built — the first
@@ -112,6 +113,38 @@ going first, so a long document whose every page embeds fonts of its own
 does not hold them all; `set_font_provider` discards them, since what a
 font resolves to depends on the provider. A font that failed to resolve is
 not kept, and each page that uses it says so.
+
+### Reading no file from the machine
+
+By default the reader reads what a document needs from the machine it
+runs on: a font the document names and does not carry is looked for
+among the installed fonts (listed the first time, in
+`~/.cache/stet/system_fonts.json`), a predefined CMap in `STET_CMAP_DIR`,
+`~/.local/share/stet/CMap` and the poppler and Ghostscript folders, and
+the CMYK profile of a document opened without a color cache in the
+ColorSync folders, `/usr/share/color/icc` or the Windows spool color
+folder. An application reading files it did not write can turn all of
+that off:
+
+```rust
+# let mut doc: stet_pdf_reader::PdfDocument = unimplemented!();
+doc.set_host_files(false);
+```
+
+The reader then reads no file but the document. A font not carried is
+drawn with stet's own fonts, the URW base 35, and its text is read as the
+document encodes it; for a composite font only the characters those Latin
+fonts have glyphs for are drawn, so Chinese, Japanese or Korean text is
+read but not drawn. A predefined CMap not carried is reported as not
+found, the same `ParsePhase::Content` warning as when no folder has it,
+and no name from the document becomes a path. CMYK is drawn with stet's
+own profile (CGATS001Compat-v2-micro, public domain), both for a document
+opened without a color cache and for one given a cache with no CMYK
+profile; a cache given with one is used as it is.
+
+Set it before the first page is read. The system's profile is looked for
+only when a document first needs its colors, so a document switched off
+before then never reads it. Fonts already resolved are resolved again.
 
 ### Display lists and resolution
 
