@@ -2232,13 +2232,13 @@ fn scan_dir_for_cmyk_icc(dir: &std::path::Path) -> Option<Vec<u8>> {
     for entry in entries.flatten() {
         let path = entry.path();
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if ext.eq_ignore_ascii_case("icc") || ext.eq_ignore_ascii_case("icm") {
-            if let Ok(bytes) = std::fs::read(&path) {
-                // Check ICC header: color space at offset 16, 'CMYK' = 0x434D594B
-                if bytes.len() >= 20 && &bytes[16..20] == b"CMYK" {
-                    return Some(bytes);
-                }
-            }
+        // Check ICC header: color space at offset 16, 'CMYK' = 0x434D594B
+        if (ext.eq_ignore_ascii_case("icc") || ext.eq_ignore_ascii_case("icm"))
+            && let Ok(bytes) = std::fs::read(&path)
+            && bytes.len() >= 20
+            && &bytes[16..20] == b"CMYK"
+        {
+            return Some(bytes);
         }
     }
     None
