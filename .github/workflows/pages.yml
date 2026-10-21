@@ -30,9 +30,13 @@ jobs:
         with:
           key: wasm-pages
           workspaces: crates/stet-wasm
-      - uses: jetli/wasm-pack-action@v0.4.0
+      # jetli/wasm-pack-action (last release 2022) moves the binary with a
+      # plain rename, which fails with EXDEV on ubuntu-26.04, where /tmp
+      # and the home folder are separate filesystems. Pinned rather than
+      # `latest` so a wasm-pack release cannot change the deploy unannounced.
+      - uses: taiki-e/install-action@v2
         with:
-          version: latest
+          tool: wasm-pack@0.15.0
       - name: Build WASM bundle
         run: bash web/build.sh
       - uses: actions/configure-pages@v6
