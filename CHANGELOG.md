@@ -32,6 +32,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   opened.** The profile is the same and is still found once per process;
   opening costs that much less and the first page that much more.
 
+### Fixed
+
+- **A predefined CMap is looked for only under a name a CMap can have.**
+  The PDF reader takes the CMap name a document gives as a file name in
+  the folders CMaps are kept in. It is now used only if it is made of
+  letters, digits, `-` and `_`, as CMap names are, and anything else is
+  treated as not found. Before, a crafted name could make the reader open
+  a file outside those folders.
+
 ## [0.8.7] — 2026-10-14
 
 ### Fixed

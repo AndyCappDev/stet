@@ -790,7 +790,27 @@ pub(crate) fn fallback_font_with(
     )
 }
 
-/// Try to load a substitute font for a non-embedded font.
+/// The longest name a predefined CMap is looked for by: the 127 bytes
+/// ISO 32000-1 Annex C gives as the limit for a PDF name. Adobe's own run
+/// to 26.
+const MAX_CMAP_NAME: usize = 127;
+
+/// `name` as the file name of a predefined CMap, if it can be one.
+///
+/// The name is the document's, and it becomes a file name in each folder
+/// CMaps are looked for in, so it is held to what CMap names are made of:
+/// letters, digits, `-` and `_`. Anything else is not looked for. A `/`,
+/// a `\`, `..` or a drive would reach a file outside those folders, and an
+/// absolute path replaces the folder outright when joined to it; through
+/// either, a name such as `/dev/zero` names a file that never ends.
+fn cmap_file_name(name: &[u8]) -> Option<&str> {
+    let allowed = |b: &u8| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_');
+    if name.is_empty() || name.len() > MAX_CMAP_NAME || !name.iter().all(allowed) {
+        return None;
+    }
+    std::str::from_utf8(name).ok()
+}
+
 /// Load a predefined CMap file by searching multiple locations.
 ///
 /// Search order:
@@ -798,8 +818,10 @@ pub(crate) fn fallback_font_with(
 /// 2. `~/.local/share/stet/CMap/` (user-local conventional location)
 /// 3. System poppler-data directories (per-collection subdirs)
 /// 4. System GhostScript directories
+///
+/// A name that cannot be a CMap's ([`cmap_file_name`]) is not looked for.
 fn load_predefined_cmap(name: &[u8]) -> Option<Vec<u8>> {
-    let name_str = std::str::from_utf8(name).ok()?;
+    let name_str = cmap_file_name(name)?;
 
     // 1. User-specified directory via environment variable
     if let Ok(dir) = std::env::var("STET_CMAP_DIR") {
@@ -5400,5 +5422,56 @@ mod own_cid_font_tests {
             let font = helvetica(HashMap::new(), b"GB1", &HashMap::new());
             assert_eq!(drawn(&font, 99), expected);
         }
+    }
+}
+
+#[cfg(test)]
+mod cmap_file_name_tests {
+    use super::*;
+
+    /// The names of Adobe's predefined CMaps are looked for as they are.
+    #[test]
+    fn a_cmap_name_is_looked_for() {
+        for name in [
+            "GBK-EUC-H",
+            "90ms-RKSJ-H",
+            "UniJIS-UTF16-H",
+            "UniKS-UCS2-H",
+            "Adobe-Japan1-UCS2",
+            "Hankaku",
+            "WP-Symbol",
+            "Some_Name",
+        ] {
+            assert_eq!(cmap_file_name(name.as_bytes()), Some(name));
+        }
+        let longest = "A".repeat(MAX_CMAP_NAME);
+        assert!(cmap_file_name(longest.as_bytes()).is_some());
+    }
+
+    /// A name no CMap has, and in particular one that would reach a file
+    /// outside the CMap folders, is not looked for.
+    #[test]
+    fn a_name_that_is_not_a_cmaps_is_not_looked_for() {
+        let too_long = "A".repeat(MAX_CMAP_NAME + 1);
+        for name in [
+            "",
+            "..",
+            ".",
+            "../GBK-EUC-H",
+            "Adobe-GB1/GBK-EUC-H",
+            "/dev/zero",
+            "/etc/passwd",
+            r"..\GBK-EUC-H",
+            r"C:\Windows\win.ini",
+            "C:GBK-EUC-H",
+            "GBK-EUC-H\0",
+            "GBK EUC H",
+            "GBK.EUC.H",
+            "~",
+            too_long.as_str(),
+        ] {
+            assert_eq!(cmap_file_name(name.as_bytes()), None, "{name:?}");
+        }
+        assert_eq!(cmap_file_name(b"GBK-\xff"), None);
     }
 }
