@@ -96,6 +96,21 @@ doc.set_page_area(PageArea::ArtBox); // or a Rect([llx, lly, urx, ury])
 let (rgba, w, h) = doc.render_page_to_rgba(0, 300.0)?;
 ```
 
+### Reading no file from the machine
+
+For files the application did not write, read nothing but the document:
+no installed fonts, no CMap files, no system color profile. A font the
+document does not carry is drawn with stet's own fonts, and CMYK with
+stet's own profile:
+
+```rust
+use stet_pdf_reader::PdfDocument;
+
+let mut doc = PdfDocument::from_bytes(&data)?;
+doc.set_host_files(false); // before the first page is read
+let (rgba, w, h) = doc.render_page_to_rgba(0, 300.0)?;
+```
+
 ### Extracting text
 
 The assembly helpers live in `stet-graphics`, the display-list crate this
@@ -135,4 +150,5 @@ factoring them out as reusable crates.
 
 Apache-2.0 OR MIT, except the 35 embedded URW++ base 35 font programs,
 which are under the SIL Open Font License 1.1 — see
-[`LICENSE-URW-FONTS`](LICENSE-URW-FONTS).
+[`LICENSE-URW-FONTS`](LICENSE-URW-FONTS). The embedded CMYK ICC profile
+is public domain (CC0): see [`LICENSE-CMYK-PROFILE`](LICENSE-CMYK-PROFILE).
