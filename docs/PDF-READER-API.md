@@ -142,9 +142,17 @@ own profile (CGATS001Compat-v2-micro, public domain), both for a document
 opened without a color cache and for one given a cache with no CMYK
 profile; a cache given with one is used as it is.
 
-Set it before the first page is read. The system's profile is looked for
-only when a document first needs its colors, so a document switched off
-before then never reads it. Fonts already resolved are resolved again.
+**Turn it off before anything else is asked of the document**: before any
+page is read (every `render_page…` call, and every call that extracts
+text, reads one), and before `icc_cache()` or
+`apply_output_intent_as_default_cmyk()`. Opening a document reads nothing
+from the machine, so a document switched off straight after `from_bytes`
+or `from_owned` never reads a file but its own. Switched off later, what
+was read stops counting — fonts already resolved are resolved again, and
+a color cache the reader made is made again with stet's profile, unless
+`apply_output_intent_as_default_cmyk` has put the document's own
+OutputIntent profile in it — but the files were read, and that cannot be
+undone.
 
 ### Display lists and resolution
 

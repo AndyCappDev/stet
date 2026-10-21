@@ -892,12 +892,21 @@ impl<'a> PdfDocument<'a> {
     /// CMYK profile, and so does a cache given with no CMYK profile in it;
     /// a cache given with one is used as it is.
     ///
-    /// Set it before the first page is read. The fonts resolved so far are
-    /// resolved again, and a color cache the reader made is made again,
-    /// unless [`apply_output_intent_as_default_cmyk`](Self::apply_output_intent_as_default_cmyk)
-    /// has changed it; the system's profile is looked for only when the
-    /// cache is first needed, so a document switched off before then never
-    /// reads it. stet's profile, once put in a cache given, stays there.
+    /// **Turn it off before anything else is asked of the document**: before
+    /// any page is read (every `render_page…` call, and every call that
+    /// extracts text, reads one), and before
+    /// [`icc_cache`](Self::icc_cache) or
+    /// [`apply_output_intent_as_default_cmyk`](Self::apply_output_intent_as_default_cmyk).
+    /// Opening a document reads nothing from the machine, so a document
+    /// switched off straight after [`from_bytes`](Self::from_bytes) or
+    /// [`from_owned`](PdfDocument::from_owned) never reads a file but its
+    /// own. Switched off later, what has been read is not read again and
+    /// stops counting: the fonts resolved so far are resolved again, and a
+    /// color cache the reader made is made again with stet's profile,
+    /// unless `apply_output_intent_as_default_cmyk` has put the document's
+    /// own OutputIntent profile in it. But the files were read, and that
+    /// cannot be undone. stet's profile, once put in a cache given, stays
+    /// there.
     pub fn set_host_files(&mut self, enabled: bool) {
         if enabled == self.host_files {
             return;

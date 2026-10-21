@@ -1833,8 +1833,14 @@ fn own_cid_font(
     // The character each CID stands for: the ToUnicode CMap's first, as it
     // is the document's own word, then the Adobe collection's, for the
     // CIDs the document names and for each character the substitute has.
+    // Both maps are walked in order rather than by hash, so that where two
+    // codes, or two characters, come to one CID, the same one is drawn on
+    // every run: the lowest code's character, else the collection's own
+    // character for the CID, else the lowest character.
     let mut characters: HashMap<u16, u32> = HashMap::new();
-    for (&code, &unicode) in to_unicode {
+    let mut by_code: Vec<(u16, u32)> = to_unicode.iter().map(|(&c, &u)| (c, u)).collect();
+    by_code.sort_unstable();
+    for (code, unicode) in by_code {
         let cid = code_to_cid
             .get(&u32::from(code))
             .copied()
@@ -1854,9 +1860,13 @@ fn own_cid_font(
                 characters.entry(cid).or_insert(unicode);
             }
         }
-        for &unicode in glyphs.keys() {
+        let mut drawable: Vec<u32> = glyphs.keys().copied().collect();
+        drawable.sort_unstable();
+        for unicode in drawable {
             if let Some(cid) = stet_fonts::cid_unicode::unicode_to_cid(ordering, unicode) {
-                characters.entry(cid).or_insert(unicode);
+                let own = stet_fonts::cid_unicode::cid_to_unicode(ordering, cid)
+                    .filter(|own| glyphs.contains_key(own));
+                characters.entry(cid).or_insert(own.unwrap_or(unicode));
             }
         }
     }
@@ -5309,5 +5319,86 @@ mod document_fonts_tests {
             1,
             "the count of bytes started again from nothing"
         );
+    }
+}
+
+#[cfg(test)]
+mod own_cid_font_tests {
+    use super::*;
+
+    /// The outline `own_cid_font` draws for `cid`, as text to compare.
+    fn drawn(font: &PdfFont, cid: u16) -> String {
+        let PdfFont::CidCff(font) = font else {
+            panic!("own_cid_font makes a CidCff font");
+        };
+        let paths = font.type1_paths.as_ref().expect("own_cid_font draws paths");
+        format!("{:?}", paths.get(&cid).expect("the CID is drawn"))
+    }
+
+    /// The outline of the stand-in's glyph `name`, as `own_cid_font`
+    /// would draw it.
+    fn glyph(name: &str) -> String {
+        let data = embedded_font("NimbusSans-Regular").unwrap();
+        let font = parse_type1(&data).unwrap();
+        let fm = font.font_matrix;
+        let matrix = Matrix::new(fm[0], fm[1], fm[2], fm[3], fm[4], fm[5]);
+        let cs = &font.charstrings[name];
+        let path = execute_charstring(cs, &font.subrs, font.len_iv, false)
+            .unwrap()
+            .path;
+        format!("{:?}", path.transform(&matrix))
+    }
+
+    fn helvetica(
+        code_to_cid: HashMap<u32, u32>,
+        ordering: &[u8],
+        to_unicode: &HashMap<u16, u32>,
+    ) -> PdfFont {
+        let metrics = CidMetrics {
+            default_width: 1.0,
+            cid_widths: HashMap::new(),
+            code_lengths: [2; 256],
+            code_to_cid,
+            wmode: 0,
+            dw2: [0.88, -1.0],
+            w2: HashMap::new(),
+        };
+        own_cid_font("Helvetica", 32, None, metrics, ordering, to_unicode).unwrap()
+    }
+
+    /// Two codes the ToUnicode CMap gives different characters, for one
+    /// CID: the lowest code's character is drawn, every time. Each run
+    /// makes new maps, so an order that came from hashing would differ
+    /// between runs.
+    #[test]
+    fn two_codes_for_one_cid_draw_the_lowest_codes_character() {
+        let to_unicode = HashMap::from([(1u16, u32::from('B')), (2, u32::from('A'))]);
+        let expected = glyph("B");
+        for _ in 0..32 {
+            let font = helvetica(HashMap::from([(1, 5), (2, 5)]), b"Identity", &to_unicode);
+            assert_eq!(drawn(&font, 5), expected);
+        }
+    }
+
+    /// Adobe-GB1 maps both U+00B7 (middle dot) and U+2022 (bullet) to
+    /// CID 99, and the stand-in has a glyph for each, drawn differently.
+    /// The collection's own character for CID 99, the middle dot, is
+    /// drawn, every time.
+    #[test]
+    fn two_characters_for_one_cid_draw_the_collections_own() {
+        assert_eq!(
+            stet_fonts::cid_unicode::cid_to_unicode(b"GB1", 99),
+            Some(0xB7)
+        );
+        assert_eq!(
+            stet_fonts::cid_unicode::unicode_to_cid(b"GB1", 0x2022),
+            Some(99)
+        );
+        let expected = glyph("periodcentered");
+        assert_ne!(expected, glyph("bullet"));
+        for _ in 0..32 {
+            let font = helvetica(HashMap::new(), b"GB1", &HashMap::new());
+            assert_eq!(drawn(&font, 99), expected);
+        }
     }
 }
