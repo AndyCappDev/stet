@@ -302,7 +302,7 @@ fn a_page_list_found_by_scanning_is_a_page_tree_warning() {
 /// A tree listing a great many nodes twice lists the first 64 and then
 /// says the list is cut short, rather than one warning for each: every
 /// warning recorded is checked against those before it, and opening the
-/// file cannot be cancelled.
+/// file cannot be canceled.
 #[test]
 fn a_page_tree_lists_a_bounded_number_of_warnings() {
     let nodes: Vec<Vec<u8>> = (0..300)
