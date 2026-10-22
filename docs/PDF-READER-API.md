@@ -827,7 +827,19 @@ two ways a page tree can lose pages without the file failing to open: a
 branch nested more than 256 levels deep, whose pages are left out, and a
 node listed under more than one parent (which is how a loop appears),
 used the first time only and named in `location` as
-`LocationHint::Object`. When the tree cannot be followed at all, the
+`LocationHint::Object`. It is also recorded for a page the tree names
+that cannot be read, because the object is missing, damaged or not a
+dictionary. A blank page stands in its place, so the pages after it keep
+their numbers: it draws nothing, has no text, and has the MediaBox,
+CropBox and rotation it inherits from the tree, or US Letter when it
+inherits no MediaBox. The warning names that page in `location` as
+`LocationHint::Page`, counted from 0, and its message names the object.
+When what cannot be read is a branch of the tree, it stands for as many
+blank pages as its parent's `/Count` leaves once the parent's other kids
+are counted, each with its warning; when that cannot be told, because a
+count is missing, more than one kid is lost, or the count is more than
+the file has objects for, it is one blank page. When the tree cannot be
+followed at all, the
 pages are found by scanning the file for page objects, which may miss
 some or include ones an update replaced; that is a `PageTree` warning
 too. A document that opens with fewer pages than expected, or none, is
