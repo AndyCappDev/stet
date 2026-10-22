@@ -169,23 +169,6 @@ fn a_soft_mask_or_a_graphics_state_font_that_will_not_load_is_reported() {
 }
 
 #[test]
-fn a_predefined_cmap_that_is_not_installed_is_reported() {
-    let font = "/Font << /F1 << /Type /Font /Subtype /Type0 /BaseFont /X \
-        /Encoding /NoSuchCMap-H /DescendantFonts [<< /Type /Font \
-        /Subtype /CIDFontType2 /BaseFont /X /CIDSystemInfo \
-        << /Registry (Adobe) /Ordering (Japan1) /Supplement 0 >> >>] >> >>";
-    let pdf = two_pages(font, "BT /F1 12 Tf <0001> Tj ET", FINE, &[]);
-    let doc = PdfDocument::from_bytes(&pdf).unwrap();
-    doc.render_page(0, 72.0).unwrap();
-    let warnings = content_warnings(&doc);
-    assert!(
-        warnings.iter().any(|(page, _, message)| *page == Some(0)
-            && message.starts_with("predefined CMap 'NoSuchCMap-H' not found")),
-        "{warnings:?}"
-    );
-}
-
-#[test]
 fn an_image_that_needed_the_lenient_decoder_is_a_note_not_a_warning() {
     // Seven bytes that are not a Group 4 stream.
     let image = "BI /W 8 /H 8 /BPC 1 /CS /G /F /CCF /DP << /K -1 /Columns 8 >> ID \

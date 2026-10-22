@@ -136,7 +136,7 @@ drawn with stet's own fonts, the URW base 35, and its text is read as the
 document encodes it; for a composite font only the characters those Latin
 fonts have glyphs for are drawn, so Chinese, Japanese or Korean text is
 read but not drawn. A predefined CMap not carried is reported as not
-found, the same `ParsePhase::Content` warning as when no folder has it,
+found, the same `ParsePhase::MissingCMap` warning as when no folder has it,
 and no name from the document becomes a path. CMYK is drawn with stet's
 own profile (CGATS001Compat-v2-micro, public domain), both for a document
 opened without a color cache and for one given a cache with no CMYK
@@ -208,8 +208,11 @@ doc.set_max_image_pixels(Some(250_000_000)); // width x height, in samples
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-An image over it is left out of the page, with a `ParsePhase::Content`
-warning naming its size. `None`, the default, lifts it.
+An image over it is left out of the page, with a
+`ParsePhase::ImageLeftOut { width, height }` warning for that page, which
+carries the image's size as the file stores it (see
+[Images left out, fonts and CMaps missing](#images-left-out-fonts-and-cmaps-missing)).
+`None`, the default, lifts it.
 
 The reason to set one is JPEG 2000. Its decoder needs about 39 bytes of
 memory for each sample the image's header declares, however small the
@@ -767,7 +770,7 @@ rendered:
 | Severity | Examples |
 |---|---|
 | `Error` | a content stream, of the page or of a form, pattern or glyph it uses, that stops making sense part-way (what came before it is drawn); one of a page's content streams that cannot be decoded at all |
-| `Warning` | an operator that failed and was skipped — `operator Do: object 12 0 not found`, `operator sh: …`, `operator c: need 6 operands, have 4` — so an image that will not decode, a shading whose function is refused and a path with the wrong operand count all say so; a font, a soft mask or a predefined CMap that could not be loaded; an ICC profile that could not be used (`ICC profile: Failed to parse profile: …`), in which case the colour space's alternate is drawn; a page with more nested content than the reader will interpret; an image decoded only in part |
+| `Warning` | an operator that failed and was skipped — `operator Do: object 12 0 not found`, `operator sh: …`, `operator c: need 6 operands, have 4` — so an image that will not decode, a shading whose function is refused and a path with the wrong operand count all say so; a font or a soft mask that could not be loaded, an embedded font program or CMap that could not be read; an ICC profile that could not be used (`ICC profile: Failed to parse profile: …`), in which case the colour space's alternate is drawn; a page with more nested content than the reader will interpret; an image decoded only in part; a content stream, of the page or of a form, that the end of the file cuts short |
 | `Info` | an image stream that needed the more lenient of two decoders |
 
 The page is in `location`, as `LocationHint::Page`:
@@ -798,19 +801,50 @@ numbers from the file, so a hostile content stream can make every one
 different; past the limit the page gets one last warning, "further
 problems with this page's content are not listed".
 
-### Warnings from the page tree
+### Images left out, fonts and CMaps missing
+
+Three things a page can lose or read in part are reported as kinds of
+their own rather than as `ParsePhase::Content`, so that an application
+can tell them apart without reading messages. Each is recorded for the
+page, in `location` as `LocationHint::Page`, once for each page that has
+it:
+
+| Phase | What happened |
+|---|---|
+| `ImageLeftOut { width, height }` | an image has more samples than [`set_max_image_pixels`](#a-ceiling-on-image-size) allows and is left out. `width` and `height` are its size as the file stores it, which for a JPEG 2000 image drawn small is larger than the size it would have been decoded at; the message says what was over the limit, which may be the image's soft mask |
+| `MissingFont` | a font is not embedded and is not one of the standard 14, which the reader carries. A substitute is drawn, so its text is still read |
+| `MissingCMap` | a composite font names a predefined CMap that is not embedded and not found (see `STET_CMAP_DIR` in [ARCHITECTURE.md](ARCHITECTURE.md#cjk-cmap-files-pdf-reader)). The text in that font is still drawn and extracted, its codes read two bytes at a time and turned into text through the document's own `/ToUnicode` where it gives one, so it may not be right. The message names the CMap as the document gives it and says how to install CMaps. `Identity-H` and `Identity-V` need no file and are never reported |
+
+A page lists at most 64 warnings of each of these kinds. The
+`MissingFont` message does not name the font. A font or CMap that is
+embedded but cannot be read is a fault in the file, and is a
+`ParsePhase::Content` warning instead.
+
+### Warnings from opening the document
 
 `ParsePhase::PageTree` is recorded when the document is opened, for the
 two ways a page tree can lose pages without the file failing to open: a
 branch nested more than 256 levels deep, whose pages are left out, and a
 node listed under more than one parent (which is how a loop appears),
 used the first time only and named in `location` as
-`LocationHint::Object`. A document that opens with fewer pages than
-expected, or none, is worth checking for these.
+`LocationHint::Object`. When the tree cannot be followed at all, the
+pages are found by scanning the file for page objects, which may miss
+some or include ones an update replaced; that is a `PageTree` warning
+too. A document that opens with fewer pages than expected, or none, is
+worth checking for these. All are `Severity::Warning`. Opening lists at
+most 64 of them, then one last warning, "further problems with the page
+tree are not listed; more pages may be left out".
 
-The `stet` command line prints these as `warning:` lines, each distinct
-message once per run. That is its choice as an application; a GUI would
-do something else with them.
+`ParsePhase::CrossReference` is recorded, as `Severity::Info`, when the
+file's cross-reference table is missing or damaged and the reader
+rebuilds it by scanning the file for objects. The objects are then found
+where they are; what is still missing is reported where it is missed, as
+a `PageTree` or a `Content` warning.
+
+The `stet` command line prints content and page tree warnings, images
+left out and CMaps not found as `warning:` lines, each distinct message
+once per run. That is its choice as an application; a GUI would do
+something else with them.
 
 ### Holding the borrow
 

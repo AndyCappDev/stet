@@ -140,9 +140,11 @@ impl DecodeBudget {
 /// ceiling, [`PdfDocument::set_max_image_pixels`](crate::PdfDocument::set_max_image_pixels).
 pub(crate) fn check_image_pixels(width: u32, height: u32, max_pixels: u64) -> Result<(), PdfError> {
     if u64::from(width) * u64::from(height) > max_pixels {
-        return Err(PdfError::Other(format!(
-            "image of {width} x {height} samples is over the limit of {max_pixels} set for this document"
-        )));
+        return Err(PdfError::ImageOverLimit {
+            width,
+            height,
+            limit: max_pixels,
+        });
     }
     Ok(())
 }
