@@ -4,7 +4,7 @@
 
 //! Stream decode filter chain for PDF streams.
 
-use crate::error::PdfError;
+use crate::error::{ContentLimit, PdfError};
 use crate::objects::PdfDict;
 
 /// Ceiling on the decompressed size of a stream that declares nothing about
@@ -53,6 +53,10 @@ pub struct DecodeBudget {
     /// Most samples a filter that sizes its work from its own header may
     /// declare; see [`with_image_pixels`](Self::with_image_pixels).
     image_pixels: u64,
+    /// The ceiling is what is left of a page's content allowance, so
+    /// passing it is [`ContentLimit::ContentBytes`] rather than a
+    /// decompression error: see [`for_content`](Self::for_content).
+    content: bool,
 }
 
 impl Default for DecodeBudget {
@@ -67,7 +71,18 @@ impl DecodeBudget {
         Self {
             limit,
             image_pixels: stet_graphics::image_limits::MAX_IMAGE_PIXELS,
+            content: false,
         }
+    }
+
+    /// A budget of what is left of a page's content allowance, set with
+    /// [`PdfDocument::set_max_content_bytes`](crate::PdfDocument::set_max_content_bytes).
+    /// Passing it is [`ContentLimit::ContentBytes`], naming `limit`, so
+    /// that the page can be stopped rather than drawn without the stream.
+    pub(crate) const fn for_content(limit: usize) -> Self {
+        let mut budget = Self::new(limit);
+        budget.content = true;
+        budget
     }
 
     /// The same budget with a ceiling on the size of a JPEG 2000 image,
@@ -117,6 +132,11 @@ impl DecodeBudget {
     /// buffer: checking afterwards would mean the allocation the ceiling
     /// exists to prevent has already happened.
     fn check(&self, produced: usize) -> Result<(), PdfError> {
+        if produced > self.limit && self.content {
+            return Err(PdfError::ContentLimit(ContentLimit::ContentBytes(
+                self.limit as u64,
+            )));
+        }
         if produced > self.limit {
             return Err(PdfError::DecompressionError(format!(
                 "decompressed stream exceeds the {} byte limit",
@@ -538,11 +558,12 @@ fn decode_flate_inner(
         let consumed = decompressor.total_in() as usize - before_in;
         let produced = decompressor.total_out() as usize - before_out;
         input_offset += consumed;
-        output.extend_from_slice(&buf[..produced]);
-
-        if let Err(e) = budget.check(output.len()) {
+        // Checked before the bytes are added, so that the output never
+        // holds more than the ceiling.
+        if let Err(e) = budget.check(output.len() + produced) {
             return (Err(e), true, input_offset);
         }
+        output.extend_from_slice(&buf[..produced]);
 
         match result {
             Ok(status) => match status {
@@ -2405,6 +2426,23 @@ mod tests {
         let data = zlib(&vec![0u8; 4 << 20]);
         let err = decode_flate(&data, None, DecodeBudget::new(4096)).unwrap_err();
         assert!(matches!(err, PdfError::DecompressionError(ref m) if m.contains("exceeds")));
+    }
+
+    /// A page's content allowance decodes a stream exactly as long as it,
+    /// and stops one byte past it with the page's own kind of error.
+    #[test]
+    fn a_content_budget_is_its_own_error_and_decodes_up_to_it() {
+        let content = b"0 0 m ".repeat(100_000);
+        let data = zlib(&content);
+        let decoded = decode_flate(&data, None, DecodeBudget::for_content(content.len())).unwrap();
+        assert_eq!(decoded, content);
+
+        let err =
+            decode_flate(&data, None, DecodeBudget::for_content(content.len() - 1)).unwrap_err();
+        assert!(
+            matches!(err, PdfError::ContentLimit(ContentLimit::ContentBytes(l)) if l as usize == content.len() - 1),
+            "{err:?}"
+        );
     }
 
     #[test]
