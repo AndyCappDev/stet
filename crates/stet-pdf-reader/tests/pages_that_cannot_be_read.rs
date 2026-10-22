@@ -257,6 +257,30 @@ fn a_kid_whose_pages_cannot_be_told_is_one_blank_page() {
     }
 }
 
+/// A cross-reference subsection that starts at a very high object number
+/// raises the highest object number for a few bytes, but not the entries
+/// the file writes out. A count past those entries is not believed, so the
+/// branch that cannot be read is one blank page, not a million.
+#[test]
+fn a_count_past_the_entries_in_use_is_one_blank_page_whatever_the_object_numbers() {
+    let tree = "<< /Type /Pages /Kids [3 0 R 9 0 R 5 0 R] /Count 1000000 >>";
+    let mut pdf = pdf_from(&objects(tree, "first", "last", &[]));
+    let trailer = pdf
+        .windows(8)
+        .rposition(|w| w == b"trailer\n")
+        .expect("the file has a trailer");
+    pdf.splice(
+        trailer..trailer,
+        b"1000000 1\n0000000000 00000 f\r\n".iter().copied(),
+    );
+    let mut doc = PdfDocument::from_owned(pdf).expect("the document opens");
+    doc.set_text_extraction(TextExtraction::Runs);
+    assert_eq!(doc.page_count(), 3);
+    assert!(doc.render_page(1, 72.0).unwrap().is_empty());
+    assert_eq!(text_of(&doc, 2), ["last"]);
+    assert_eq!(kinds(&doc), [page_tree_warning_at(1)]);
+}
+
 /// An object that cannot be read listed twice is one blank page, as a
 /// node listed twice is used once.
 #[test]

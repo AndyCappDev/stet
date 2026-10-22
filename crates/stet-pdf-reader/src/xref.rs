@@ -44,6 +44,8 @@ pub struct XrefTable {
     /// Whether the table was rebuilt by scanning the file for objects,
     /// because the one the file gives is missing or damaged.
     rebuilt: bool,
+    /// How many entries are in use: objects the file says it carries.
+    in_use: usize,
 }
 
 impl XrefTable {
@@ -54,6 +56,26 @@ impl XrefTable {
             entries: Vec::new(),
             trailer: PdfDict::new(),
             rebuilt: false,
+            in_use: 0,
+        }
+    }
+
+    /// A table of `entries`, with its count of entries in use.
+    fn with_entries(entries: Vec<Option<XrefEntry>>, trailer: PdfDict, rebuilt: bool) -> Self {
+        let in_use = entries
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    Some(XrefEntry::InFile { .. } | XrefEntry::InStream { .. })
+                )
+            })
+            .count();
+        Self {
+            entries,
+            trailer,
+            rebuilt,
+            in_use,
         }
     }
 
@@ -70,6 +92,14 @@ impl XrefTable {
     /// Total number of entry slots (including None gaps).
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Number of entries in use: objects the file places at an offset or
+    /// in an object stream. Unlike [`len`](Self::len), which follows the
+    /// highest object number named, this grows only with entries the file
+    /// writes out.
+    pub(crate) fn in_use_len(&self) -> usize {
+        self.in_use
     }
 
     /// Whether the table is empty.
@@ -241,11 +271,11 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
     // or incremental updates without proper xref entries.
     supplement_xref_from_scan(data, &mut combined_entries);
 
-    Ok(XrefTable {
-        entries: combined_entries,
-        trailer: final_trailer,
-        rebuilt: false,
-    })
+    Ok(XrefTable::with_entries(
+        combined_entries,
+        final_trailer,
+        false,
+    ))
 }
 
 /// Scan all trailer dictionaries and startxref values in the file for xref
@@ -489,11 +519,7 @@ fn rebuild_xref_from_scan(data: &[u8]) -> Result<XrefTable, PdfError> {
                         }
                     }
                 }
-                return Ok(XrefTable {
-                    entries: merged,
-                    trailer: xref_trailer,
-                    rebuilt: true,
-                });
+                return Ok(XrefTable::with_entries(merged, xref_trailer, true));
             }
         }
     }
@@ -512,11 +538,7 @@ fn rebuild_xref_from_scan(data: &[u8]) -> Result<XrefTable, PdfError> {
         trailer
     };
 
-    Ok(XrefTable {
-        entries,
-        trailer,
-        rebuilt: true,
-    })
+    Ok(XrefTable::with_entries(entries, trailer, true))
 }
 
 /// Try to parse an object header "N G obj" at the given position.

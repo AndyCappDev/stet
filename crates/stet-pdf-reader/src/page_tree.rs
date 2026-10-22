@@ -615,10 +615,12 @@ fn kid_pages(resolver: &Resolver, kid: &PdfObj) -> KidPages {
 /// It cannot be told when `node` has no usable `/Count`, when one of its
 /// other kids is a branch with none, when more than one of its kids cannot
 /// be read, or when the count leaves nothing for it. Nor when the count
-/// would put more pages in the document than the file has object numbers:
-/// every page is an object of its own, so no lost branch held that many,
-/// and a count that says so is not believed. That also bounds the pages a
-/// file can make the reader hold.
+/// would put more pages in the document than the file has cross-reference
+/// entries in use: every page is an object of its own, so no lost branch
+/// held that many, and a count that says so is not believed. That also
+/// bounds the pages a file can make the reader hold by the entries it
+/// writes out, which the highest object number it names does not: one
+/// subsection header can raise that for a few bytes.
 fn pages_of_lost_kid(
     resolver: &Resolver,
     node: &PdfDict,
@@ -641,7 +643,7 @@ fn pages_of_lost_kid(
             }
         }
         let left = count.checked_sub(others)?;
-        let room = (resolver.xref_len() as u64).saturating_sub(pages_before as u64);
+        let room = (resolver.xref_in_use() as u64).saturating_sub(pages_before as u64);
         (lost == 1 && left >= 1 && left <= room).then_some(left)
     };
     told().map_or(1, |n| n as usize)
