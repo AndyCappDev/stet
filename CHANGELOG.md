@@ -82,6 +82,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A page the page tree names that cannot be read is a blank page in
+  its place.** Opening such a file failed with that object's error; an
+  object that is not a dictionary was passed over in silence. A blank
+  page now stands in for it, with the MediaBox it inherits or US Letter,
+  and a `PageTree` warning names the page as `LocationHint::Page`. A
+  branch of the tree that cannot be read is as many blank pages as its
+  parent's `/Count` leaves for it, or one when that cannot be told.
+  `page_count()` counts these pages, so for these files it and the
+  numbers of the pages after them change. See `docs/PDF-READER-API.md`,
+  "Warnings from opening the document".
+
 - **A document opened with `from_bytes` or `from_owned` looks for the
   system's CMYK profile when it first needs its colors, not as it is
   opened.** The profile is the same and is still found once per process;
