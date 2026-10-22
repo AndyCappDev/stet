@@ -20,6 +20,7 @@ fn a_document_kept_from_the_machines_files_reads_none() {
     let machine = Machine::new("off");
     fonts_not_carried_are_drawn_with_stets_own(&machine);
     no_cmap_file_is_read();
+    text_without_its_cmap_can_be_left_out();
     stets_cmyk_profile_stands_in_for_the_systems();
     assert!(
         !machine.font_cache_file().exists(),
@@ -67,16 +68,18 @@ fn fonts_not_carried_are_drawn_with_stets_own(machine: &Machine) {
 /// `~/.local/share/stet/CMap`, whether the document names it as its
 /// encoding or an embedded CMap names it with `usecmap`. Each of the four
 /// would make `<41424344>` four one-byte codes; without them it is two
-/// two-byte codes. A CMap named and not read is reported as not found, by
-/// name, for each page.
+/// two-byte codes, drawn and read as "ab". A CMap named and not read is
+/// reported as not found, by name, for each page.
 fn no_cmap_file_is_read() {
     let pdf = cmaps_not_carried();
     let mut doc = PdfDocument::from_bytes(&pdf).unwrap();
     doc.set_host_files(false);
+    assert!(!doc.leave_out_text_without_cmap());
 
     for page in 0..4 {
-        let (_, glyphs) = text_and_glyphs(&read(&mut doc, page));
+        let (text, glyphs) = text_and_glyphs(&read(&mut doc, page));
         assert_eq!(glyphs, 2, "page {page} read a CMap file");
+        assert_eq!(text, "ab", "page {page}");
     }
     let warnings = warnings(&doc);
     for name in [ENV_CMAP, HOME_CMAP] {
@@ -89,6 +92,38 @@ fn no_cmap_file_is_read() {
     assert_eq!(
         pages_warned(&doc, ParsePhase::MissingCMap),
         [0, 1, 2, 3],
+        "{warnings:#?}"
+    );
+}
+
+/// With the text of a font whose CMap is missing left out, the two pages
+/// whose encoding is a CMap not read draw and read nothing in that font.
+/// The two whose embedded CMap names a base with `usecmap` still read the
+/// codes, as before. No file is read either way, and the font, which the
+/// document embeds, is not reported missing.
+fn text_without_its_cmap_can_be_left_out() {
+    let pdf = cmaps_not_carried();
+    let mut doc = PdfDocument::from_bytes(&pdf).unwrap();
+    doc.set_host_files(false);
+    doc.set_leave_out_text_without_cmap(true);
+    assert!(doc.leave_out_text_without_cmap());
+
+    for (page, (expected_text, expected_glyphs)) in [("", 0), ("", 0), ("ab", 2), ("ab", 2)]
+        .into_iter()
+        .enumerate()
+    {
+        let (text, glyphs) = text_and_glyphs(&read(&mut doc, page));
+        assert_eq!(glyphs, expected_glyphs, "page {page}");
+        assert_eq!(text, expected_text, "page {page}");
+    }
+    let warnings = warnings(&doc);
+    assert_eq!(
+        pages_warned(&doc, ParsePhase::MissingCMap),
+        [0, 1, 2, 3],
+        "{warnings:#?}"
+    );
+    assert!(
+        pages_warned(&doc, ParsePhase::MissingFont).is_empty(),
         "{warnings:#?}"
     );
 }
