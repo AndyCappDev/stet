@@ -17,7 +17,7 @@ mod standard_fonts;
 mod text_extract;
 
 use crate::diagnostics::Severity;
-use crate::error::PdfError;
+use crate::error::{ContentLimit, PdfError};
 use crate::lexer::{Lexer, MAX_OBJECT_DEPTH, Token};
 use crate::objects::{PdfDict, PdfObj};
 use crate::resolver::Resolver;
@@ -103,6 +103,18 @@ const MAX_NESTED_WORK: u64 = 1_000_000;
 /// budget is at most 4 GB of nested content for a page, about a minute of
 /// interpreting — a 1 MB form stepped and repeated four thousand times.
 const NESTED_WORK_UNIT_BYTES: u64 = 4096;
+
+/// Most graphics states a page may have saved at once: `q` without its
+/// `Q`, and the state each form, pattern, glyph procedure and soft mask
+/// saves around its own content.
+///
+/// Every saved state is a copy of the whole graphics state, and nothing
+/// else bounds how many a content stream may ask for: 50 MB of `q`
+/// decoded from a 51 KB file took 17 seconds and 17 GB to read. ISO
+/// 32000-1 Annex C gives 28 levels as a typical limit, and this is 36
+/// times that. A `q` that would save one more ends the page with
+/// [`ContentLimit::SavedStates`].
+pub const MAX_SAVED_STATES: usize = 1024;
 
 /// Which nested content stream is being interpreted, for refusing to enter
 /// one that is already running.
@@ -511,6 +523,16 @@ pub struct ContentInterpreter<'a> {
     /// What this page's nested streams have cost so far, against
     /// [`MAX_NESTED_WORK`].
     nested_work: u64,
+    /// Most bytes of content the page may interpret, when the caller has
+    /// set a limit: see [`set_max_content_bytes`](Self::set_max_content_bytes).
+    max_content_bytes: Option<u64>,
+    /// The bytes of content interpreted so far, counting a nested stream
+    /// each time it runs.
+    content_bytes: u64,
+    /// The limit the page passed, once it has. Like `cancelled`, it is never
+    /// cleared: every stream ends at its next token and no nested stream is
+    /// entered.
+    content_limit: Option<ContentLimit>,
     /// The caller's request to stop, when the page is being read through
     /// [`PdfDocument::render_page_cancellable`](crate::PdfDocument::render_page_cancellable).
     cancel: Option<&'a AtomicBool>,
@@ -748,6 +770,9 @@ impl<'a> ContentInterpreter<'a> {
             depth: 0,
             executing: Vec::new(),
             nested_work: 0,
+            max_content_bytes: None,
+            content_bytes: 0,
+            content_limit: None,
             cancel: None,
             cancelled: false,
             nested_failure_reported: false,
@@ -799,6 +824,47 @@ impl<'a> ContentInterpreter<'a> {
     /// was seen set at any point.
     pub fn was_cancelled(&mut self) -> bool {
         self.cancel_requested()
+    }
+
+    /// Stop the page once it has interpreted more than `limit` bytes of
+    /// content, counting each nested stream every time it runs; `used`
+    /// is what the caller has already read for it, the page's own content.
+    /// A nested stream is decoded no further than what is left.
+    pub fn set_max_content_bytes(&mut self, limit: u64, used: u64) {
+        self.max_content_bytes = Some(limit);
+        self.content_bytes = used;
+    }
+
+    /// The limit the page passed, if it did: what was built is then not
+    /// the page, and the caller throws it away.
+    pub fn content_limit(&self) -> Option<ContentLimit> {
+        self.content_limit
+    }
+
+    /// Whether the page is to be left where it is: cancelled, or over a
+    /// limit.
+    #[inline]
+    fn halted(&mut self) -> bool {
+        self.content_limit.is_some() || self.cancel_requested()
+    }
+
+    /// The decoded bytes of a stream the page is about to interpret,
+    /// decoded no further than what is left of the limit set with
+    /// [`set_max_content_bytes`](Self::set_max_content_bytes). Past it, the
+    /// page is stopped and the stream is empty, so that the caller restores
+    /// what it saved and goes no further.
+    fn content_stream_data(&mut self, obj: &PdfObj) -> Result<Vec<u8>, PdfError> {
+        let Some(max) = self.max_content_bytes else {
+            return self.resolver.stream_data_from_obj(obj);
+        };
+        let left = usize::try_from(max.saturating_sub(self.content_bytes)).unwrap_or(usize::MAX);
+        match self.resolver.stream_data_from_obj_within(obj, left) {
+            Err(PdfError::ContentLimit(_)) => {
+                self.content_limit = Some(ContentLimit::ContentBytes(max));
+                Ok(Vec::new())
+            }
+            other => other,
+        }
     }
 
     /// Look at the caller's flag, and remember having seen it set.
@@ -936,8 +1002,16 @@ impl<'a> ContentInterpreter<'a> {
     /// The caller has already saved the state the nested stream may change,
     /// and restores it whether or not the stream ran.
     fn interpret_nested(&mut self, id: StreamId, data: &[u8]) -> Result<(), PdfError> {
-        if self.executing.contains(&id) || self.cancel_requested() {
+        if self.executing.contains(&id) || self.halted() {
             return Ok(());
+        }
+        if let Some(max) = self.max_content_bytes {
+            let total = self.content_bytes.saturating_add(data.len() as u64);
+            if total > max {
+                self.content_limit = Some(ContentLimit::ContentBytes(max));
+                return Ok(());
+            }
+            self.content_bytes = total;
         }
         let size = (data.len() as u64).div_ceil(NESTED_WORK_UNIT_BYTES).max(1);
         let cost = (u64::from(self.depth) + 1).saturating_mul(size);
@@ -1191,7 +1265,7 @@ impl<'a> ContentInterpreter<'a> {
         // Note: no BBox clip here — appearance streams do their own internal clipping.
 
         // Interpret the form content
-        let form_data = self.resolver.stream_data_from_obj(&n_ref)?;
+        let form_data = self.content_stream_data(&n_ref)?;
         let _ = self.interpret_nested(StreamId::of(&n_ref, &form_data), &form_data);
 
         // Restore state — truncate gstate stack to handle unbalanced q/Q in stream
@@ -1735,9 +1809,10 @@ impl<'a> ContentInterpreter<'a> {
         // Ocular, and Firefox all interpret these as `<number> <operator>`.
         let mut prev_token_was_glued_number = false;
         loop {
-            // A cancelled page is abandoned, not failed: the stream ends
+            // A cancelled page is abandoned, not failed, and a page over a
+            // limit is reported by the caller: either way the stream ends
             // here without an error, so nothing is reported as skipped.
-            if self.cancel_requested() {
+            if self.halted() {
                 return Ok(());
             }
             // Capture position before next_token so we can detect whether the
@@ -2239,6 +2314,10 @@ impl<'a> ContentInterpreter<'a> {
     // === Graphics state operators ===
 
     fn op_q(&mut self) -> Result<(), PdfError> {
+        if self.gstate_stack.len() >= MAX_SAVED_STATES {
+            self.content_limit = Some(ContentLimit::SavedStates(MAX_SAVED_STATES));
+            return Ok(());
+        }
         self.save_gstate();
         Ok(())
     }
@@ -6509,7 +6588,7 @@ impl<'a> ContentInterpreter<'a> {
         let is_transparency_group = self.is_transparency_group(dict);
 
         // Decompress form content stream
-        let form_data = self.resolver.stream_data_from_obj(obj)?;
+        let form_data = self.content_stream_data(obj)?;
 
         // Save state (including font cache — form XObjects may have different
         // font resources with different encodings for the same resource name)
@@ -7821,7 +7900,7 @@ impl<'a> ContentInterpreter<'a> {
         };
 
         // Render the form into a display list
-        let form_data = self.resolver.stream_data_from_obj(g_ref)?;
+        let form_data = self.content_stream_data(g_ref)?;
 
         // Save state and render (clear font cache — the mask form may have
         // different font resources with the same resource names as the parent)
@@ -8370,7 +8449,7 @@ impl<'a> ContentInterpreter<'a> {
             self.resources.clone()
         };
 
-        let pattern_data = self.resolver.stream_data_from_obj(pat_obj)?;
+        let pattern_data = self.content_stream_data(pat_obj)?;
 
         // Compute the combined pattern matrix (pattern space → device space).
         // PDF pattern Matrix maps pattern space → the default coordinate system

@@ -86,6 +86,34 @@ pub enum PdfError {
         page: usize,
     },
 
+    /// The page asked for more than the reader will interpret, and was
+    /// stopped: see [`ContentLimit`].
+    ///
+    /// The page is the one asked for. It is not drawn at all, rather than
+    /// drawn in part, and what was cut short is not repeated in
+    /// [`parse_warnings`](crate::PdfDocument::parse_warnings): this error
+    /// is the report. The document is unaffected, and its other pages can
+    /// be read as before.
+    #[error("page content over the reader's limit: {0}")]
+    ContentLimit(ContentLimit),
+
     #[error("{0}")]
     Other(String),
+}
+
+/// Which limit a page's content passed, carried by
+/// [`PdfError::ContentLimit`], with the limit that was in force.
+///
+/// Marked `#[non_exhaustive]` so new limits can land additively.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum ContentLimit {
+    /// More graphics states saved with `q` and not yet restored than
+    /// [`MAX_SAVED_STATES`](crate::MAX_SAVED_STATES).
+    #[error("more than {0} graphics states saved with q at once")]
+    SavedStates(usize),
+    /// More bytes of content than the limit set with
+    /// [`set_max_content_bytes`](crate::PdfDocument::set_max_content_bytes).
+    #[error("more than {0} bytes of content")]
+    ContentBytes(u64),
 }

@@ -25,6 +25,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   folder. On by default, and nothing changes then. See
   `docs/PDF-READER-API.md`, "Reading no file from the machine".
 
+- **A page whose content asks for too much is stopped, with an error of
+  its own kind.** Nothing bounded how many graphics states a page could
+  save: a 51 KB file whose Flate content stream decodes to 50 MB of `q`
+  took 17.7 s and 16.9 GB to read. A page now holds at most 1,024 saved
+  states at once (`MAX_SAVED_STATES`), counting the state each form,
+  pattern, glyph procedure and soft mask saves around its content; ISO
+  32000-1 gives 28 as a typical limit. New too is
+  `PdfDocument::set_max_content_bytes`, a ceiling on the decoded bytes
+  of content one page interprets, counting a form each time it is
+  drawn, and decoding no stream but a glyph procedure further than what
+  is left of it. Off by default, since a heavy page of vector art reaches
+  a hundred megabytes.
+  A page over either limit is not drawn: `render_page` returns the new
+  `PdfError::ContentLimit`, carrying a `ContentLimit` that names the
+  limit, and adds no parse warning for it, so a caller tells it apart
+  from a damaged page by kind. The other pages read as before. See
+  `docs/PDF-READER-API.md`, "A ceiling on page content".
+
 ### Changed
 
 - **A document opened with `from_bytes` or `from_owned` looks for the
