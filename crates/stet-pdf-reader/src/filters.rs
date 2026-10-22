@@ -466,6 +466,11 @@ fn decode_flate(
         let zlib_data = zlib_output.unwrap_or_default();
         if data.len() > 2 {
             let (raw_output, _, _) = decode_flate_inner(&data[2..], false, budget);
+            // A retry that runs into a page's content limit has reached
+            // that limit, whatever zlib made of the stream.
+            if let Err(e @ PdfError::ContentLimit(_)) = raw_output {
+                return Err(e);
+            }
             let raw_data = raw_output.unwrap_or_default();
             if raw_data.len() > zlib_data.len()
                 && raw_data[..zlib_data.len()] == zlib_data[..]
@@ -2432,6 +2437,32 @@ mod tests {
     fn a_content_budget_is_its_own_error_and_decodes_up_to_it() {
         let content = b"0 0 m ".repeat(100_000);
         let data = zlib(&content);
+        let decoded = decode_flate(&data, None, DecodeBudget::for_content(content.len())).unwrap();
+        assert_eq!(decoded, content);
+
+        let err =
+            decode_flate(&data, None, DecodeBudget::for_content(content.len() - 1)).unwrap_err();
+        assert!(
+            matches!(err, PdfError::ContentLimit(ContentLimit::ContentBytes(l)) if l as usize == content.len() - 1),
+            "{err:?}"
+        );
+    }
+
+    /// A stream whose zlib header is damaged is decoded again as raw
+    /// deflate. That retry is held to a page's content allowance as well,
+    /// and running into it is the page's own kind of error.
+    #[test]
+    fn a_raw_deflate_retry_at_the_content_budget_is_its_own_error() {
+        use std::io::Write;
+
+        let content = b"0 0 m ".repeat(100_000);
+        let mut encoder =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&content).unwrap();
+        // Two bytes no zlib header can be, then the raw deflate data.
+        let mut data = vec![0u8, 0u8];
+        data.extend(encoder.finish().unwrap());
+
         let decoded = decode_flate(&data, None, DecodeBudget::for_content(content.len())).unwrap();
         assert_eq!(decoded, content);
 

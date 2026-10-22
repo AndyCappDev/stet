@@ -112,8 +112,15 @@ const NESTED_WORK_UNIT_BYTES: u64 = 4096;
 /// else bounds how many a content stream may ask for: 50 MB of `q`
 /// decoded from a 51 KB file took 17 seconds and 17 GB to read. ISO
 /// 32000-1 Annex C gives 28 levels as a typical limit, and this is 36
-/// times that. A `q` that would save one more ends the page with
-/// [`ContentLimit::SavedStates`].
+/// times that.
+///
+/// A save past it is skipped, not made: a `q`, or the save around a form,
+/// pattern, glyph procedure or soft mask. Each skipped save is counted, so
+/// the `Q` that matches it restores nothing rather than an earlier state,
+/// and whatever the skipped scope changes in the graphics state stays
+/// changed after it. The page goes on drawing, and gets one
+/// [`ParsePhase::SavedStateLimit`](crate::ParsePhase::SavedStateLimit)
+/// warning.
 pub const MAX_SAVED_STATES: usize = 1024;
 
 /// Which nested content stream is being interpreted, for refusing to enter
@@ -483,6 +490,17 @@ struct SoftMaskScope {
     mask: graphics_state::SoftMask,
 }
 
+/// Where the graphics state stood when a nested stream's state was saved:
+/// see [`ContentInterpreter::save_for_nested`].
+struct NestedSave {
+    /// The states saved before this one.
+    depth: usize,
+    /// The saves skipped before this one.
+    skipped: usize,
+    /// Whether this one was saved, or skipped.
+    saved: bool,
+}
+
 /// PDF content stream interpreter.
 pub struct ContentInterpreter<'a> {
     resolver: &'a Resolver<'a>,
@@ -502,6 +520,12 @@ pub struct ContentInterpreter<'a> {
         reason = "a state moves between two lists on every q and Q"
     )]
     gstate_spare: Vec<Box<PdfGraphicsState>>,
+    /// Saves skipped because [`MAX_SAVED_STATES`] were saved already, and
+    /// not yet matched by a restore: each `Q` uses one up before it restores
+    /// anything.
+    skipped_saves: usize,
+    /// Set once the page has been warned that saves are being skipped.
+    saved_state_limit_warned: bool,
     gstate: PdfGraphicsState,
     current_path: PsPath,
     current_point: Option<(f64, f64)>,
@@ -758,6 +782,8 @@ impl<'a> ContentInterpreter<'a> {
             resources,
             gstate_stack: Vec::new(),
             gstate_spare: Vec::new(),
+            skipped_saves: 0,
+            saved_state_limit_warned: false,
             gstate: PdfGraphicsState::new(initial_ctm),
             current_path: PsPath::new(),
             current_point: None,
@@ -830,14 +856,14 @@ impl<'a> ContentInterpreter<'a> {
     /// content, counting each nested stream every time it runs; `used`
     /// is what the caller has already read for it, the page's own content.
     /// A nested stream is decoded no further than what is left.
-    pub fn set_max_content_bytes(&mut self, limit: u64, used: u64) {
+    pub(crate) fn set_max_content_bytes(&mut self, limit: u64, used: u64) {
         self.max_content_bytes = Some(limit);
         self.content_bytes = used;
     }
 
     /// The limit the page passed, if it did: what was built is then not
     /// the page, and the caller throws it away.
-    pub fn content_limit(&self) -> Option<ContentLimit> {
+    pub(crate) fn content_limit(&self) -> Option<ContentLimit> {
         self.content_limit
     }
 
@@ -846,6 +872,22 @@ impl<'a> ContentInterpreter<'a> {
     #[inline]
     fn halted(&mut self) -> bool {
         self.content_limit.is_some() || self.cancel_requested()
+    }
+
+    /// Deal with the error an operator ended with. A content limit stops
+    /// the page, wherever it was reached, decoding an image included: it
+    /// is reported by the page's own error, not as a warning. Any other
+    /// error skips the operator, and is a warning unless a nested stream
+    /// has reported it already.
+    fn operator_failed(&mut self, op: &[u8], error: PdfError) {
+        match error {
+            PdfError::ContentLimit(limit) => self.content_limit = Some(limit),
+            _ if self.nested_failure_reported => {}
+            e => self.resolver.warn_content(
+                Severity::Warning,
+                format!("operator {}: {e}", String::from_utf8_lossy(op)),
+            ),
+        }
     }
 
     /// The decoded bytes of a stream the page is about to interpret,
@@ -969,10 +1011,19 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     /// Interpret a content stream and return the display list.
+    ///
+    /// A stream that stops making sense part-way gives what was drawn
+    /// before that, with a [`ParsePhase::Content`](crate::ParsePhase::Content)
+    /// warning. A stream over a content limit gives
+    /// [`PdfError::ContentLimit`] rather than the part drawn before it, as
+    /// [`PdfDocument::render_page`](crate::PdfDocument::render_page) does.
     pub fn interpret(mut self, data: &[u8]) -> Result<DisplayList, PdfError> {
         if let Err(e) = self.interpret_stream(data) {
             self.resolver
                 .warn_content(Severity::Error, format!("content stream error: {e}"));
+        }
+        if let Some(limit) = self.content_limit {
+            return Err(PdfError::ContentLimit(limit));
         }
         // Flush any active soft mask scope
         self.flush_soft_mask();
@@ -1074,6 +1125,7 @@ impl<'a> ContentInterpreter<'a> {
     /// Some PDFs have more q's than Q's; pop each entry as if Q were called,
     /// restoring clip state at each level so display list clips are correct.
     pub fn unwind_gstate_stack(&mut self) {
+        self.skipped_saves = 0;
         while let Some(saved) = self.gstate_stack.pop() {
             let old_clip_version = self.gstate.clip_path_version;
             self.gstate = *saved;
@@ -1241,6 +1293,7 @@ impl<'a> ContentInterpreter<'a> {
         // Render as a Form XObject with the computed transform
         let saved_gstate = self.gstate.clone();
         let saved_stack_depth = self.gstate_stack.len();
+        let saved_skipped_saves = self.skipped_saves;
         let saved_resources = self.resources.clone();
         let saved_mc_stack = std::mem::take(&mut self.mc_stack);
         let in_actual_text = self.actual_text.is_some();
@@ -1270,6 +1323,7 @@ impl<'a> ContentInterpreter<'a> {
 
         // Restore state — truncate gstate stack to handle unbalanced q/Q in stream
         self.gstate_stack.truncate(saved_stack_depth);
+        self.skipped_saves = saved_skipped_saves;
         self.content_stream_ctm = saved_content_stream_ctm;
         self.resources = saved_resources;
         self.mc_stack = saved_mc_stack;
@@ -1797,6 +1851,12 @@ impl<'a> ContentInterpreter<'a> {
         let saved_operand_stack = std::mem::take(&mut self.operand_stack);
         let result = self.interpret_stream_inner(data);
         self.operand_stack = saved_operand_stack;
+        // A content limit stops the page rather than ending this stream
+        // with an error: it is reported by the page's own error.
+        if let Err(PdfError::ContentLimit(limit)) = result {
+            self.content_limit = Some(limit);
+            return Ok(());
+        }
         result
     }
 
@@ -1847,18 +1907,11 @@ impl<'a> ContentInterpreter<'a> {
                     self.handle_inline_image(&mut lexer)?;
                 } else {
                     self.nested_failure_reported = false;
-                    let result = self.dispatch_operator(op, glued_to_prev_number);
                     // The operator is skipped and the stream goes on;
                     // say so, or what it would have drawn is missing
-                    // with nothing to explain why. Unless the error is
-                    // a nested stream's, which has said so itself.
-                    if let Err(e) = result
-                        && !self.nested_failure_reported
-                    {
-                        self.resolver.warn_content(
-                            Severity::Warning,
-                            format!("operator {}: {e}", String::from_utf8_lossy(op)),
-                        );
+                    // with nothing to explain why.
+                    if let Err(e) = self.dispatch_operator(op, glued_to_prev_number) {
+                        self.operator_failed(op, e);
                     }
                 }
                 self.operand_stack.clear();
@@ -2314,16 +2367,25 @@ impl<'a> ContentInterpreter<'a> {
     // === Graphics state operators ===
 
     fn op_q(&mut self) -> Result<(), PdfError> {
-        if self.gstate_stack.len() >= MAX_SAVED_STATES {
-            self.content_limit = Some(ContentLimit::SavedStates(MAX_SAVED_STATES));
-            return Ok(());
-        }
         self.save_gstate();
         Ok(())
     }
 
-    /// Push a copy of the graphics state, as `q` does.
-    fn save_gstate(&mut self) {
+    /// Push a copy of the graphics state, as `q` does, and say whether it
+    /// was pushed.
+    ///
+    /// With [`MAX_SAVED_STATES`] saved already, nothing is: the save is
+    /// counted in `skipped_saves`, for the restore that matches it to use
+    /// up, and the page is warned, once.
+    fn save_gstate(&mut self) -> bool {
+        if self.gstate_stack.len() >= MAX_SAVED_STATES {
+            self.skipped_saves += 1;
+            if !self.saved_state_limit_warned {
+                self.saved_state_limit_warned = true;
+                self.resolver.warn_saved_state_limit(MAX_SAVED_STATES);
+            }
+            return false;
+        }
         let saved = match self.gstate_spare.pop() {
             Some(mut spare) => {
                 (*spare).clone_from(&self.gstate);
@@ -2332,6 +2394,34 @@ impl<'a> ContentInterpreter<'a> {
             None => Box::new(self.gstate.clone()),
         };
         self.gstate_stack.push(saved);
+        true
+    }
+
+    /// Save the graphics state around a nested stream: a form, a pattern
+    /// cell, a glyph procedure or a soft mask's group. The save is skipped
+    /// past [`MAX_SAVED_STATES`], as a `q` is.
+    fn save_for_nested(&mut self) -> NestedSave {
+        let depth = self.gstate_stack.len();
+        let skipped = self.skipped_saves;
+        let saved = self.save_gstate();
+        NestedSave {
+            depth,
+            skipped,
+            saved,
+        }
+    }
+
+    /// Take back the state [`save_for_nested`](Self::save_for_nested)
+    /// saved, or `None` when the save was skipped: the restore then uses
+    /// that up, and restores nothing. Saves the nested stream skipped and
+    /// left unmatched are forgotten.
+    fn take_nested_save(&mut self, save: NestedSave) -> Option<Box<PdfGraphicsState>> {
+        self.skipped_saves = save.skipped;
+        if save.saved {
+            self.gstate_stack.pop()
+        } else {
+            None
+        }
     }
 
     /// Keep a state that is done with for [`save_gstate`](Self::save_gstate)
@@ -2353,6 +2443,12 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     fn op_big_q(&mut self) -> Result<(), PdfError> {
+        // The `Q` of a `q` that was skipped restores nothing, rather than
+        // the state saved before it.
+        if self.skipped_saves > 0 {
+            self.skipped_saves -= 1;
+            return Ok(());
+        }
         if let Some(mut saved) = self.gstate_stack.pop() {
             // Flush soft mask scope if the SMask changed during this q/Q block.
             // Compare the smask_gen counter: if it changed, a new SMask was set
@@ -4378,8 +4474,7 @@ impl<'a> ContentInterpreter<'a> {
             .concat(&font_matrix);
         // Interpret the CharProc stream with TRM as the CTM.
         // Save current state and swap in a fresh display list.
-        let stack_depth_before = self.gstate_stack.len();
-        self.save_gstate();
+        let nested_save = self.save_for_nested();
         // Merge the Type 3 font's resources with the page resources: the font's
         // own entries take priority (e.g. XObjects for emoji glyphs), but missing
         // categories fall back to the page resources (e.g. fonts referenced by
@@ -4432,8 +4527,9 @@ impl<'a> ContentInterpreter<'a> {
         self.end_nested_actual_text(in_actual_text);
         // Restore state: truncate any extra gstate_stack entries left by
         // unmatched q/Q inside the CharProc (e.g., if the EI parser consumed Q).
-        self.gstate_stack.truncate(stack_depth_before + 1);
-        if let Some(saved) = self.gstate_stack.pop() {
+        self.gstate_stack
+            .truncate(nested_save.depth + usize::from(nested_save.saved));
+        if let Some(saved) = self.take_nested_save(nested_save) {
             self.gstate = *saved;
         }
 
@@ -6592,7 +6688,7 @@ impl<'a> ContentInterpreter<'a> {
 
         // Save state (including font cache — form XObjects may have different
         // font resources with different encodings for the same resource name)
-        self.save_gstate();
+        let nested_save = self.save_for_nested();
         let saved_stack_depth = self.gstate_stack.len();
         let saved_resources = std::mem::replace(&mut self.resources, form_resources);
         let saved_font_cache = std::mem::take(&mut self.font_cache);
@@ -6743,7 +6839,7 @@ impl<'a> ContentInterpreter<'a> {
         self.subpath_start = saved_subpath;
         self.mc_stack = saved_mc_stack;
         self.end_nested_actual_text(in_actual_text);
-        if let Some(saved) = self.gstate_stack.pop() {
+        if let Some(saved) = self.take_nested_save(nested_save) {
             let old_clip_version = self.gstate.clip_path_version;
             self.gstate = *saved;
             // For non-group forms, restore clip if it changed
@@ -7904,7 +8000,7 @@ impl<'a> ContentInterpreter<'a> {
 
         // Save state and render (clear font cache — the mask form may have
         // different font resources with the same resource names as the parent)
-        self.save_gstate();
+        let nested_save = self.save_for_nested();
         let saved_resources = std::mem::replace(&mut self.resources, form_resources);
         let saved_font_cache = std::mem::take(&mut self.font_cache);
         let saved_current_font2 = self.current_font.take();
@@ -7983,7 +8079,7 @@ impl<'a> ContentInterpreter<'a> {
         self.cs_resolved = saved_cs_resolved2;
         self.mc_stack = saved_mc_stack;
         self.end_nested_actual_text(in_actual_text);
-        if let Some(saved) = self.gstate_stack.pop() {
+        if let Some(saved) = self.take_nested_save(nested_save) {
             self.gstate = *saved;
         }
 
@@ -8461,7 +8557,7 @@ impl<'a> ContentInterpreter<'a> {
         // elements in pattern space.  The combined_matrix is stored in the
         // TilingPattern and applied per-element by the renderer (same approach
         // as PostScript op_makepattern).
-        self.save_gstate();
+        let nested_save = self.save_for_nested();
         let saved_resources = std::mem::replace(&mut self.resources, pattern_resources);
         let saved_display_list = std::mem::take(&mut self.display_list);
         let saved_content_stream_ctm = self.content_stream_ctm;
@@ -8511,7 +8607,7 @@ impl<'a> ContentInterpreter<'a> {
         self.subpath_start = saved_subpath;
         self.mc_stack = saved_mc_stack;
         self.end_nested_actual_text(in_actual_text);
-        if let Some(saved) = self.gstate_stack.pop() {
+        if let Some(saved) = self.take_nested_save(nested_save) {
             self.gstate = *saved;
         }
 
@@ -9160,5 +9256,99 @@ mod image_resolution_tests {
         assert_eq!(average_mask_down(&mask, 4, 4, 2, 2), [255, 255, 128, 128]);
         assert_eq!(average_mask_down(&[], 4, 4, 2, 2), [0, 0, 0, 0]);
         assert_eq!(average_mask_down(&[], 0, 0, 2, 2), [0, 0, 0, 0]);
+    }
+}
+
+#[cfg(test)]
+mod content_limit_tests {
+    use super::*;
+    use crate::diagnostics::ParsePhase;
+
+    /// A document of one empty page.
+    fn one_page() -> Vec<u8> {
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+        ];
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, body) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref = pdf.len();
+        pdf.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
+        for offset in offsets {
+            pdf.extend(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
+
+    /// An image whose decoding runs into a content limit ends its `Do` with
+    /// [`PdfError::ContentLimit`]. That stops the page, with no warning,
+    /// and `interpret` reports it rather than a display list cut short.
+    #[test]
+    fn a_content_limit_met_drawing_an_image_stops_the_page_without_a_warning() {
+        let pdf = one_page();
+        let doc = crate::PdfDocument::from_bytes(&pdf).unwrap();
+        let ocg_off = std::collections::HashSet::new();
+        let mut interpreter = ContentInterpreter::new(
+            &doc.resolver,
+            PdfDict::new(),
+            Matrix::identity(),
+            doc.icc(),
+            None,
+            false,
+            &ocg_off,
+        );
+        let limit = ContentLimit::ContentBytes(10);
+        interpreter.operator_failed(b"Do", PdfError::ContentLimit(limit));
+        assert_eq!(interpreter.content_limit(), Some(limit));
+
+        let result = interpreter.interpret(b"0 0 m 100 100 l S");
+        assert!(
+            matches!(result, Err(PdfError::ContentLimit(l)) if l == limit),
+            "{result:?}"
+        );
+        assert!(
+            doc.parse_warnings().is_empty(),
+            "{:?}",
+            doc.parse_warnings()
+        );
+    }
+
+    /// Any other error an image's `Do` ends with skips the image, says so
+    /// as a content warning, and leaves the page to go on.
+    #[test]
+    fn another_error_drawing_an_image_is_a_warning_and_the_page_goes_on() {
+        let pdf = one_page();
+        let doc = crate::PdfDocument::from_bytes(&pdf).unwrap();
+        let ocg_off = std::collections::HashSet::new();
+        let mut interpreter = ContentInterpreter::new(
+            &doc.resolver,
+            PdfDict::new(),
+            Matrix::identity(),
+            doc.icc(),
+            None,
+            false,
+            &ocg_off,
+        );
+        interpreter.operator_failed(b"Do", PdfError::DecompressionError("cut short".into()));
+        assert_eq!(interpreter.content_limit(), None);
+
+        let list = interpreter.interpret(b"0 0 m 100 100 l S").unwrap();
+        assert_eq!(list.elements().len(), 1);
+        let warnings = doc.parse_warnings();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].phase, ParsePhase::Content);
+        assert!(warnings[0].message.contains("operator Do"), "{warnings:?}");
     }
 }

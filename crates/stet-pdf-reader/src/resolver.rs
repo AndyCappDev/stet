@@ -250,6 +250,23 @@ impl<'a> Resolver<'a> {
         );
     }
 
+    /// Record that the page being rendered saved `limit` graphics states
+    /// and had further saves skipped, once for the page. See
+    /// [`ParsePhase::SavedStateLimit`](crate::diagnostics::ParsePhase::SavedStateLimit).
+    pub(crate) fn warn_saved_state_limit(&self, limit: usize) {
+        use crate::diagnostics::{LocationHint, ParsePhase, Severity};
+
+        self.warnings.record_once(
+            ParsePhase::SavedStateLimit,
+            self.content_page.get().map(LocationHint::Page),
+            Severity::Warning,
+            format!(
+                "more than {limit} graphics states saved at once; \
+                 the saves past that are skipped, and the restores that match them restore nothing"
+            ),
+        );
+    }
+
     /// Most samples an image may have and still be decoded.
     pub(crate) fn max_image_pixels(&self) -> u64 {
         self.max_image_pixels.get()
