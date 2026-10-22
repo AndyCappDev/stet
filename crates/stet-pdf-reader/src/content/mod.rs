@@ -873,7 +873,7 @@ impl<'a> ContentInterpreter<'a> {
         self.content_limit
     }
 
-    /// Whether the page is to be left where it is: cancelled, or over a
+    /// Whether the page is to be left where it is: canceled, or over a
     /// limit.
     #[inline]
     fn halted(&mut self) -> bool {
