@@ -96,7 +96,7 @@ pub enum ParsePhase {
     /// An image that cannot be drawn, left out of the page: its data
     /// cannot be decoded (a JPEG cut short, a stream its filter cannot
     /// read) or its dictionary cannot be used (no usable `/Width`, a
-    /// colour space that cannot be read). The rest of the page is drawn.
+    /// color space that cannot be read). The rest of the page is drawn.
     /// The page is in the warning's [`location`](ParseWarning::location);
     /// the message says what failed.
     ///

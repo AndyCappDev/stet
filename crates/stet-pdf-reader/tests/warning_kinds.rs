@@ -251,7 +251,7 @@ fn an_image_left_out_is_reported_at_its_stored_size() {
 
 // === Images that cannot be read ===========================================
 
-/// A 40 x 40 grey JPEG cut off after its first marker: its data cannot be
+/// A 40 x 40 gray JPEG cut off after its first marker: its data cannot be
 /// decoded.
 fn broken_jpeg() -> Vec<u8> {
     stream(
