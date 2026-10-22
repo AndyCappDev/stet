@@ -9,9 +9,11 @@
 //! Both count the forms the page draws and the appearances of its
 //! annotations and form fields.
 //!
-//! A save past [`MAX_SAVED_STATES`] is skipped and counted, so the restore
-//! that matches it restores nothing; the page is drawn on, with one
-//! `ParsePhase::SavedStateLimit` warning.
+//! A page's `q` past [`MAX_SAVED_STATES`] is skipped and counted, so the
+//! restore that matches it restores nothing; the page is drawn on, with one
+//! `ParsePhase::SavedStateLimit` warning. The saves around a form, pattern,
+//! glyph procedure or soft mask are always made, and count toward the
+//! limit.
 //!
 //! A page over the byte limit is not drawn. `render_page` returns
 //! `PdfError::ContentLimit`, which is its own kind of error, nothing is
@@ -249,10 +251,6 @@ fn stroke_colors(list: &DisplayList) -> Vec<[f64; 3]> {
     strokes(list).into_iter().map(|(color, _)| color).collect()
 }
 
-fn stroke_widths(list: &DisplayList) -> Vec<f64> {
-    strokes(list).into_iter().map(|(_, width)| width).collect()
-}
-
 const RED: [f64; 3] = [1.0, 0.0, 0.0];
 const BLUE: [f64; 3] = [0.0, 0.0, 1.0];
 
@@ -260,7 +258,7 @@ const BLUE: [f64; 3] = [0.0, 0.0, 1.0];
 /// red stroke 7 wide, sets a blue stroke 3 wide, runs `between`, and
 /// strokes a line.
 ///
-/// A save `between` makes past the limit is skipped, and its restore uses
+/// A `q` in `between` is past the limit and skipped, and its restore uses
 /// up the skip. Were it not counted, the restore would take the last saved
 /// state off the stack, and the line would be red and 7 wide.
 fn last_saved_red_then_blue(between: &[u8]) -> Vec<u8> {
@@ -315,41 +313,35 @@ fn page_with(content: &[u8], resources: &str, extra: Vec<Vec<u8>>) -> Vec<u8> {
     pdf_from(&objects)
 }
 
-/// The saves stet makes around a form, a pattern cell, a glyph procedure
-/// and a soft mask's group count against the same limit as `q`, and past
-/// it are skipped and counted as `q` is: each warns, and its restore
-/// leaves the state saved before it on the stack.
-///
-/// The line width tells: none of these changes it. The stroke color would
-/// not: a glyph procedure's `d1` sets it, and with the glyph's save
-/// skipped it stays set after the glyph.
-#[test]
-fn the_saves_around_nested_content_are_skipped_and_counted_as_q_is() {
-    /// What runs the nested content, and the objects it needs from 6 on.
-    struct Case {
-        what: &'static str,
-        between: &'static [u8],
-        resources: &'static str,
-        extra: Vec<Vec<u8>>,
-    }
-    let cases = [
-        Case {
+/// Nested content run by `between`, and the objects it needs from 6 on.
+struct Nested {
+    what: &'static str,
+    between: &'static [u8],
+    resources: &'static str,
+    extra: Vec<Vec<u8>>,
+}
+
+/// A form, a pattern cell, a glyph procedure and a soft mask's group, each
+/// running `inside` as its own content, after what it must begin with.
+fn nested_cases(inside: &str) -> [Nested; 4] {
+    [
+        Nested {
             what: "form",
             between: b"/Fm Do",
             resources: "/XObject << /Fm 6 0 R >>",
-            extra: vec![form(b"BT /F1 12 Tf 72 600 Td (form) Tj ET")],
+            extra: vec![form(inside.as_bytes())],
         },
-        Case {
+        Nested {
             what: "pattern",
             between: b"/Pattern cs /P1 scn 72 72 100 100 re f",
             resources: "/Pattern << /P1 6 0 R >>",
             extra: vec![stream(
                 "/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 \
                  /BBox [0 0 10 10] /XStep 10 /YStep 10 /Resources << >>",
-                b"0 0 5 5 re f",
+                format!("{inside} 0 0 5 5 re f").as_bytes(),
             )],
         },
-        Case {
+        Nested {
             what: "glyph procedure",
             between: b"BT /T3 12 Tf 72 600 Td (a) Tj ET",
             resources: "/Font << /F1 5 0 R /T3 6 0 R >>",
@@ -359,10 +351,13 @@ fn the_saves_around_nested_content_are_skipped_and_counted_as_q_is() {
                    /Encoding << /Type /Encoding /Differences [97 /a] >> \
                    /FirstChar 97 /LastChar 97 /Widths [1000] /Resources << >> >>"
                     .to_vec(),
-                stream("", b"1000 0 0 0 1000 1000 d1 0 0 1000 1000 re f"),
+                stream(
+                    "",
+                    format!("1000 0 0 0 1000 1000 d1 {inside} 0 0 1000 1000 re f").as_bytes(),
+                ),
             ],
         },
-        Case {
+        Nested {
             what: "soft mask",
             between: b"/GS1 gs",
             resources: "/ExtGState << /GS1 6 0 R >>",
@@ -371,25 +366,83 @@ fn the_saves_around_nested_content_are_skipped_and_counted_as_q_is() {
                 stream(
                     "/Type /XObject /Subtype /Form /BBox [0 0 612 792] \
                      /Group << /S /Transparency /CS /DeviceGray >>",
-                    b"1 g 0 0 612 792 re f",
+                    format!("{inside} 1 g 0 0 612 792 re f").as_bytes(),
                 ),
             ],
         },
-    ];
-    for case in cases {
+    ]
+}
+
+/// The state saved around a form, a pattern cell, a glyph procedure and a
+/// soft mask's group is saved even past the limit, so the page's state is
+/// back after each as it was before.
+///
+/// The page goes one `q` past the limit, sets a blue stroke 3 wide, runs
+/// the nested content, and strokes a line. The nested content sets a green
+/// stroke 9 wide without `q`; the glyph's `d1` also sets the stroke color to
+/// the fill color, black. Were the save around it skipped, the line would
+/// take what the nested content set.
+#[test]
+fn past_the_limit_nested_content_still_restores_the_page_state() {
+    let mut found = Vec::new();
+    for case in nested_cases("0 1 0 RG 9 w") {
         let what = case.what;
-        let pdf = page_with(
-            &last_saved_red_then_blue(case.between),
-            case.resources,
-            case.extra,
-        );
+        let mut content = b"q ".repeat(MAX_SAVED_STATES + 1);
+        content.extend(b"0 0 1 RG 3 w ");
+        content.extend(case.between);
+        content.extend(b" 72 72 m 300 300 l S");
+        let pdf = page_with(&content, case.resources, case.extra);
         let doc = open(&pdf);
         let list = doc
             .render_page(0, 72.0)
             .unwrap_or_else(|e| panic!("{what}: {e}"));
-        assert_eq!(stroke_widths(&list), [3.0], "{what}");
         assert_warned_once(&doc, 0);
+        found.push((what, strokes(&list)));
     }
+    let expected =
+        ["form", "pattern", "glyph procedure", "soft mask"].map(|what| (what, vec![(BLUE, 3.0)]));
+    assert_eq!(found, expected);
+}
+
+/// The state saved around a form, a pattern cell, a glyph procedure and a
+/// soft mask's group counts toward the limit. With the page one save short
+/// of it, the nested save is the last there is room for, and the nested
+/// content's own `q` is past it; two short, that `q` is still within it.
+#[test]
+fn the_saves_around_nested_content_count_toward_the_limit() {
+    let mut found = Vec::new();
+    for short in [1, 2] {
+        for case in nested_cases("q Q") {
+            let what = case.what;
+            let mut content = b"q ".repeat(MAX_SAVED_STATES - short);
+            content.extend(case.between);
+            content.extend(b" ");
+            content.extend(b"Q ".repeat(MAX_SAVED_STATES - short));
+            let pdf = page_with(&content, case.resources, case.extra);
+            let doc = open(&pdf);
+            doc.render_page(0, 72.0)
+                .unwrap_or_else(|e| panic!("{what}: {e}"));
+            let phases: Vec<_> = doc
+                .parse_warnings()
+                .iter()
+                .map(|w| (w.phase.clone(), w.severity, w.location.clone()))
+                .collect();
+            found.push((short, what, phases));
+        }
+    }
+    let warned = vec![(
+        ParsePhase::SavedStateLimit,
+        Severity::Warning,
+        Some(LocationHint::Page(0)),
+    )];
+    let expected: Vec<_> = [(1, warned), (2, Vec::new())]
+        .into_iter()
+        .flat_map(|(short, phases)| {
+            ["form", "pattern", "glyph procedure", "soft mask"]
+                .map(|what| (short, what, phases.clone()))
+        })
+        .collect();
+    assert_eq!(found, expected);
 }
 
 /// The state a form saves around its content counts with the page's own.

@@ -251,7 +251,7 @@ impl<'a> Resolver<'a> {
     }
 
     /// Record that the page being rendered saved `limit` graphics states
-    /// and had further saves skipped, once for the page. See
+    /// and had a `q` past that skipped, once for the page. See
     /// [`ParsePhase::SavedStateLimit`](crate::diagnostics::ParsePhase::SavedStateLimit).
     pub(crate) fn warn_saved_state_limit(&self, limit: usize) {
         use crate::diagnostics::{LocationHint, ParsePhase, Severity};
@@ -262,7 +262,7 @@ impl<'a> Resolver<'a> {
             Severity::Warning,
             format!(
                 "more than {limit} graphics states saved at once; \
-                 the saves past that are skipped, and the restores that match them restore nothing"
+                 a q past that is skipped, and the Q that matches it restores nothing"
             ),
         );
     }
