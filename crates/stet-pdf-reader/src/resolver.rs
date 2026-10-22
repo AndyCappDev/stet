@@ -84,6 +84,9 @@ pub struct Resolver<'a> {
     /// Whether fonts and CMaps may be read from the machine's files: see
     /// `PdfDocument::set_host_files`.
     host_files: std::cell::Cell<bool>,
+    /// Whether the text in a font whose CMap is missing is left out: see
+    /// `PdfDocument::set_leave_out_text_without_cmap`.
+    leave_out_text_without_cmap: std::cell::Cell<bool>,
     /// The fonts resolved so far, kept from one page to the next.
     pub(crate) fonts: RefCell<crate::content::font::DocumentFonts>,
     /// The ICC profile streams read so far, by object: the decoded bytes and
@@ -360,6 +363,16 @@ impl<'a> Resolver<'a> {
         self.host_files.set(enabled);
     }
 
+    /// Whether the text in a font whose CMap is missing is left out.
+    pub(crate) fn leave_out_text_without_cmap(&self) -> bool {
+        self.leave_out_text_without_cmap.get()
+    }
+
+    /// Set [`leave_out_text_without_cmap`](Self::leave_out_text_without_cmap).
+    pub(crate) fn set_leave_out_text_without_cmap(&self, enabled: bool) {
+        self.leave_out_text_without_cmap.set(enabled);
+    }
+
     /// Decode a stream's filters, recording what the decoders recovered
     /// from as content warnings.
     pub(crate) fn decode_filters(
@@ -414,6 +427,7 @@ impl<'a> Resolver<'a> {
             content_capture: RefCell::default(),
             max_image_pixels: std::cell::Cell::new(stet_graphics::image_limits::MAX_IMAGE_PIXELS),
             host_files: std::cell::Cell::new(true),
+            leave_out_text_without_cmap: std::cell::Cell::new(false),
         }
     }
 
@@ -453,6 +467,7 @@ impl<'a> Resolver<'a> {
             content_capture: RefCell::default(),
             max_image_pixels: std::cell::Cell::new(stet_graphics::image_limits::MAX_IMAGE_PIXELS),
             host_files: std::cell::Cell::new(true),
+            leave_out_text_without_cmap: std::cell::Cell::new(false),
         }
     }
 

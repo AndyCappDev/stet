@@ -942,6 +942,45 @@ impl<'a> PdfDocument<'a> {
         self.host_files
     }
 
+    /// Leave out the text in a font whose CMap is missing, or read it as
+    /// well as the reader can.
+    ///
+    /// Off by default. A composite font whose encoding is a predefined
+    /// CMap, such as `GBK-EUC-H`, that the document does not embed and the
+    /// reader does not find is reported as [`ParsePhase::MissingCMap`], and
+    /// its codes are then taken two bytes at a time: drawn with the glyphs
+    /// those codes give, and read through the document's own `/ToUnicode`
+    /// where it has one. Where that CMap gives some codes one byte, as
+    /// `GBK-EUC-H` does to ASCII, that is a guess, and the glyphs and text
+    /// may be wrong.
+    ///
+    /// On, nothing in that font is drawn or extracted, so no guessed text
+    /// reaches the page or its text, and the warning says so. The text of
+    /// the page's other fonts is drawn and read as before. Two cases keep
+    /// their text, since their codes do not depend on the missing CMap: a
+    /// UCS-2 CMap such as `UniGB-UCS2-H`, whose codes are Unicode, two
+    /// bytes each; and a CMap the document embeds whose `usecmap` base is
+    /// not found, which still reads the codes it maps itself. A font left
+    /// out this way that the document does not embed either is reported
+    /// as [`ParsePhase::MissingFont`] as well, with no substitute drawn.
+    ///
+    /// Set it before any page is read. Changed later, the fonts resolved so
+    /// far are resolved again.
+    pub fn set_leave_out_text_without_cmap(&mut self, enabled: bool) {
+        if enabled == self.resolver.leave_out_text_without_cmap() {
+            return;
+        }
+        self.resolver.set_leave_out_text_without_cmap(enabled);
+        // What a font resolves to depends on it.
+        self.resolver.fonts.borrow_mut().clear();
+    }
+
+    /// Whether the text in a font whose CMap is missing is left out: see
+    /// [`set_leave_out_text_without_cmap`](Self::set_leave_out_text_without_cmap).
+    pub fn leave_out_text_without_cmap(&self) -> bool {
+        self.resolver.leave_out_text_without_cmap()
+    }
+
     /// Number of pages in the document.
     pub fn page_count(&self) -> usize {
         self.pages.len()

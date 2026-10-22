@@ -154,6 +154,34 @@ a color cache the reader made is made again with stet's profile, unless
 OutputIntent profile in it — but the files were read, and that cannot be
 undone.
 
+### Leaving out text whose CMap is missing
+
+A composite font whose encoding is a predefined CMap, such as
+`GBK-EUC-H`, that the document does not embed and the reader does not
+find has its codes read two bytes at a time: drawn with the glyphs those
+codes give, and read through the document's own `/ToUnicode` where it has
+one. Where the CMap gives some codes a single byte, as `GBK-EUC-H` does to
+ASCII, that reading is a guess and its text may be wrong. An application
+that would rather have no text than a guess can leave it out:
+
+```rust
+# let mut doc: stet_pdf_reader::PdfDocument = unimplemented!();
+doc.set_leave_out_text_without_cmap(true);
+```
+
+Off by default. On, nothing in such a font is drawn or extracted, and the
+text of the page's other fonts is drawn and read as before. The
+`ParsePhase::MissingCMap` warning is still recorded for each page, and
+its message adds that the text in the font that uses the CMap is left
+out. A font left out this way that the document does not embed either is
+reported as `ParsePhase::MissingFont`, with no substitute said to be
+drawn. Two cases keep their text, since their codes do not depend on the
+missing CMap: a UCS-2 CMap, such as `UniGB-UCS2-H`, whose codes are
+Unicode, two bytes each; and a CMap the document embeds whose `usecmap`
+base is not found, which still reads the codes it maps itself. Set it
+before any page is read; changed later, the fonts resolved so far are
+resolved again. `leave_out_text_without_cmap()` says whether it is on.
+
 ### Display lists and resolution
 
 `render_page(page, dpi)` returns a display list in device space at `dpi`,
@@ -812,8 +840,8 @@ it:
 | Phase | What happened |
 |---|---|
 | `ImageLeftOut { width, height }` | an image has more samples than [`set_max_image_pixels`](#a-ceiling-on-image-size) allows and is left out. `width` and `height` are its size as the file stores it, which for a JPEG 2000 image drawn small is larger than the size it would have been decoded at; the message says what was over the limit, which may be the image's soft mask |
-| `MissingFont` | a font is not embedded and is not one of the standard 14, which the reader carries. A substitute is drawn, so its text is still read |
-| `MissingCMap` | a composite font names a predefined CMap that is not embedded and not found (see `STET_CMAP_DIR` in [ARCHITECTURE.md](ARCHITECTURE.md#cjk-cmap-files-pdf-reader)). The text in that font is still drawn and extracted, its codes read two bytes at a time and turned into text through the document's own `/ToUnicode` where it gives one, so it may not be right. The message names the CMap as the document gives it and says how to install CMaps. `Identity-H` and `Identity-V` need no file and are never reported |
+| `MissingFont` | a font is not embedded and is not one of the standard 14, which the reader carries. A substitute is drawn, so its text is still read, unless its CMap is missing too and its text is [left out](#leaving-out-text-whose-cmap-is-missing) |
+| `MissingCMap` | a composite font names a predefined CMap that is not embedded and not found (see `STET_CMAP_DIR` in [ARCHITECTURE.md](ARCHITECTURE.md#cjk-cmap-files-pdf-reader)). The text in that font is still drawn and extracted, its codes read two bytes at a time and turned into text through the document's own `/ToUnicode` where it gives one, so it may not be right; or, with [`set_leave_out_text_without_cmap`](#leaving-out-text-whose-cmap-is-missing), not at all. The message names the CMap as the document gives it and says how to install CMaps. `Identity-H` and `Identity-V` need no file and are never reported |
 
 A page lists at most 64 warnings of each of these kinds. The
 `MissingFont` message does not name the font. A font or CMap that is

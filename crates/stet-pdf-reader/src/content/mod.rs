@@ -3990,7 +3990,10 @@ impl<'a> ContentInterpreter<'a> {
             render_mode,
         };
 
-        if font.is_composite() {
+        if font.codes_unknown() {
+            // Its CMap is missing and the application asked for its text to
+            // be left out: anything drawn or read would be a guess.
+        } else if font.is_composite() {
             // Composite (CID) font: variable-width character codes
             // (most are 2-byte, but some CMaps define 1-byte codes for space etc.)
             let mut i = 0;
