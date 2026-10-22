@@ -54,23 +54,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before. An inline image that cannot be read is still a `Content`
   warning. See `docs/PDF-READER-API.md`, "Images left out, fonts and
   CMaps missing".
-- **A page whose content asks for too much is stopped, with an error of
-  its own kind.** Nothing bounded how many graphics states a page could
+- **A page saves at most 1,024 graphics states at once, and draws on
+  past that.** Nothing bounded how many graphics states a page could
   save: a 51 KB file whose Flate content stream decodes to 50 MB of `q`
-  took 17.7 s and 16.9 GB to read. A page now holds at most 1,024 saved
-  states at once (`MAX_SAVED_STATES`), counting the state each form,
-  pattern, glyph procedure and soft mask saves around its content; ISO
-  32000-1 gives 28 as a typical limit. New too is
-  `PdfDocument::set_max_content_bytes`, a ceiling on the decoded bytes
-  of content one page interprets, counting a form each time it is
-  drawn, and decoding no stream but a glyph procedure further than what
-  is left of it. Off by default, since a heavy page of vector art reaches
-  a hundred megabytes.
-  A page over either limit is not drawn: `render_page` returns the new
-  `PdfError::ContentLimit`, carrying a `ContentLimit` that names the
-  limit, and adds no parse warning for it, so a caller tells it apart
-  from a damaged page by kind. The other pages read as before. See
+  took 17.7 s and 16.9 GB to read. Past `MAX_SAVED_STATES` (1,024), a
+  `q`, or the save stet makes around a form, pattern, glyph procedure
+  or soft mask, is skipped. Skipped saves are counted, so the `Q` that
+  matches one restores nothing rather than an earlier state. The page is
+  drawn on, and gets one warning of the new kind
+  `ParsePhase::SavedStateLimit`, which `stet inspect` lists as
+  `saved-state limit`. A page that leaves more than 1,024 `q` unclosed
+  is still drawn. ISO 32000-1 gives 28 as a typical limit. See
   `docs/PDF-READER-API.md`, "A ceiling on page content".
+- **`PdfDocument::set_max_content_bytes`: a ceiling on a page's
+  content.** It counts the decoded bytes of content one page interprets,
+  a form each time it is drawn, and decodes no stream but a glyph
+  procedure further than what is left of it, a raw-deflate retry of a
+  stream with a damaged zlib header included. Off by default, since a
+  heavy page of vector art reaches a hundred megabytes. A page over it
+  is not drawn, wherever the limit is reached on it: `render_page`
+  returns the new `PdfError::ContentLimit`, carrying a `ContentLimit`
+  that names the limit, and adds no parse warning for it, so a caller
+  tells it apart from a damaged page by kind. The other pages read as
+  before. See `docs/PDF-READER-API.md`, "A ceiling on page content".
 
 ### Changed
 

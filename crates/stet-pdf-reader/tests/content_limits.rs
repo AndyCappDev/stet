@@ -9,7 +9,11 @@
 //! Both count the forms the page draws and the appearances of its
 //! annotations and form fields.
 //!
-//! A page over either is not drawn. `render_page` returns
+//! A save past [`MAX_SAVED_STATES`] is skipped and counted, so the restore
+//! that matches it restores nothing; the page is drawn on, with one
+//! `ParsePhase::SavedStateLimit` warning.
+//!
+//! A page over the byte limit is not drawn. `render_page` returns
 //! `PdfError::ContentLimit`, which is its own kind of error, nothing is
 //! added to the parse warnings for it, and the document's other pages read
 //! as before. A page within both reads exactly as it does with no limit.
@@ -18,10 +22,11 @@ use std::io::Write;
 
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
-use stet_graphics::display_list::DisplayList;
+use stet_graphics::display_list::{DisplayElement, DisplayList};
 use stet_graphics::text::{text_lines, text_runs};
 use stet_pdf_reader::{
-    ContentLimit, LayerSet, MAX_SAVED_STATES, PdfDocument, PdfError, TextExtraction,
+    ContentLimit, LayerSet, LocationHint, MAX_SAVED_STATES, ParsePhase, PdfDocument, PdfError,
+    Severity, TextExtraction,
 };
 
 /// A PDF of `objects`, numbered from 1, with a cross-reference table.
@@ -149,45 +154,242 @@ fn a_page_saving_as_many_states_as_the_limit_is_read() {
     assert!(doc.parse_warnings().is_empty());
 }
 
+/// `doc` warned once that page `page` went past the limit, at
+/// `Severity::Warning`, and gave no other warning.
+#[track_caller]
+fn assert_warned_once(doc: &PdfDocument, page: usize) {
+    let warnings = doc.parse_warnings().to_vec();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    let warning = &warnings[0];
+    assert_eq!(warning.phase, ParsePhase::SavedStateLimit);
+    assert_eq!(warning.severity, Severity::Warning);
+    assert_eq!(warning.location, Some(LocationHint::Page(page)));
+}
+
 #[test]
-fn a_page_saving_one_state_more_than_the_limit_is_stopped() {
+fn a_page_saving_past_the_limit_is_drawn_and_warned_once() {
     let pdf = one_page(&nested_saves(MAX_SAVED_STATES + 1));
     let doc = open(&pdf);
-    let err = doc.render_page(0, 72.0).unwrap_err();
-    assert!(
-        matches!(
-            err,
-            PdfError::ContentLimit(ContentLimit::SavedStates(MAX_SAVED_STATES))
-        ),
-        "{err:?}"
-    );
-    assert!(
-        doc.parse_warnings().is_empty(),
-        "{:?}",
-        doc.parse_warnings()
-    );
+    let list = doc.render_page(0, 72.0).unwrap();
+    assert_eq!(text_of(&list), ["inside"]);
+    assert_warned_once(&doc, 0);
+    // Drawing the page again adds nothing.
+    doc.render_page(0, 72.0).unwrap();
+    assert_warned_once(&doc, 0);
+}
+
+/// Some generators write `q` without its `Q`. A page with 1,100 of them and
+/// then a fill draws the fill, as it does with fewer, and is not failed.
+#[test]
+fn a_page_leaving_more_saves_unclosed_than_the_limit_draws_its_fill() {
+    let page = |saves: usize| {
+        let mut content = b"q ".repeat(saves);
+        content.extend(b"0 0 1 rg 72 72 200 100 re f");
+        one_page(&content)
+    };
+    let over = page(1100);
+    let doc = open(&over);
+    let list = doc.render_page(0, 72.0).unwrap();
+    let fills = list
+        .elements()
+        .iter()
+        .filter(|e| matches!(e, DisplayElement::Fill { .. }))
+        .count();
+    assert_eq!(fills, 1, "{list:?}");
+    assert_warned_once(&doc, 0);
+
+    // Drawn as the same page within the limit draws it.
+    let within = page(MAX_SAVED_STATES);
+    let doc_within = open(&within);
+    let list_within = doc_within.render_page(0, 72.0).unwrap();
+    assert_eq!(format!("{list:?}"), format!("{list_within:?}"));
+    assert!(doc_within.parse_warnings().is_empty());
 }
 
 /// The file that showed the need: a small Flate stream decoding to `q`
-/// after `q`, two million of them here. It ends at the limit, not at the
-/// end of the stream.
+/// after `q`, two million of them here. Past the limit nothing more is
+/// saved, so it is read to its end, and what follows is drawn.
 #[test]
-fn a_stream_of_unmatched_saves_is_stopped_at_the_limit() {
-    let content = deflate(&b"q ".repeat(2_000_000));
+fn a_stream_of_unmatched_saves_is_read_to_its_end() {
+    let mut saves = b"q ".repeat(2_000_000);
+    saves.extend(b"BT /F1 12 Tf 72 700 Td (after) Tj ET");
+    let content = deflate(&saves);
     let pdf = document(
         &[stream("/Filter /FlateDecode", &content)],
         form(b"BT /F1 12 Tf 72 600 Td (form) Tj ET"),
     );
     assert!(pdf.len() < 20_000, "{} bytes", pdf.len());
     let doc = open(&pdf);
-    let err = doc.render_page(0, 72.0).unwrap_err();
-    assert!(
-        matches!(
-            err,
-            PdfError::ContentLimit(ContentLimit::SavedStates(MAX_SAVED_STATES))
-        ),
-        "{err:?}"
+    let list = doc.render_page(0, 72.0).unwrap();
+    assert_eq!(text_of(&list), ["after"]);
+    assert_warned_once(&doc, 0);
+}
+
+/// The color and line width of the page's strokes, in paint order,
+/// through groups, but not in a soft mask's own drawing.
+fn strokes(list: &DisplayList) -> Vec<([f64; 3], f64)> {
+    let mut found = Vec::new();
+    for element in list.elements() {
+        match element {
+            DisplayElement::Stroke { params, .. } => found.push((
+                [params.color.r, params.color.g, params.color.b],
+                params.line_width,
+            )),
+            DisplayElement::Group { elements, .. } | DisplayElement::OcgGroup { elements, .. } => {
+                found.extend(strokes(elements));
+            }
+            DisplayElement::SoftMasked { content, .. } => found.extend(strokes(content)),
+            _ => {}
+        }
+    }
+    found
+}
+
+fn stroke_colors(list: &DisplayList) -> Vec<[f64; 3]> {
+    strokes(list).into_iter().map(|(color, _)| color).collect()
+}
+
+fn stroke_widths(list: &DisplayList) -> Vec<f64> {
+    strokes(list).into_iter().map(|(_, width)| width).collect()
+}
+
+const RED: [f64; 3] = [1.0, 0.0, 0.0];
+const BLUE: [f64; 3] = [0.0, 0.0, 1.0];
+
+/// A page that fills the stack to the limit, the last state saved with a
+/// red stroke 7 wide, sets a blue stroke 3 wide, runs `between`, and
+/// strokes a line.
+///
+/// A save `between` makes past the limit is skipped, and its restore uses
+/// up the skip. Were it not counted, the restore would take the last saved
+/// state off the stack, and the line would be red and 7 wide.
+fn last_saved_red_then_blue(between: &[u8]) -> Vec<u8> {
+    let mut content = b"q ".repeat(MAX_SAVED_STATES - 1);
+    content.extend(b"1 0 0 RG 7 w q 0 0 1 RG 3 w ");
+    content.extend(between);
+    content.extend(b" 72 72 m 300 300 l S");
+    content
+}
+
+/// A `Q` whose `q` was skipped restores nothing, rather than the state
+/// saved before it.
+#[test]
+fn the_restore_of_a_skipped_save_restores_nothing() {
+    let pdf = one_page(&last_saved_red_then_blue(b"q 0 1 0 RG Q q Q"));
+    let doc = open(&pdf);
+    let list = doc.render_page(0, 72.0).unwrap();
+    // The green set between the skipped `q` and its `Q` stays: there was
+    // nothing saved to go back to.
+    assert_eq!(stroke_colors(&list), [[0.0, 1.0, 0.0]]);
+    assert_warned_once(&doc, 0);
+
+    // The restores past the skipped ones still restore what was saved.
+    let mut content = last_saved_red_then_blue(b"q Q");
+    content.extend(b" Q");
+    content.extend(b" 72 72 m 300 300 l S");
+    let pdf = one_page(&content);
+    let doc = open(&pdf);
+    assert_eq!(
+        stroke_colors(&doc.render_page(0, 72.0).unwrap()),
+        [BLUE, RED]
     );
+}
+
+/// A page of objects 1 catalog, 2 pages, 3 the page, 4 its `content`,
+/// 5 its font `/F1`, then `extra` from 6 on, with `resources` added to
+/// the page's font.
+fn page_with(content: &[u8], resources: &str, extra: Vec<Vec<u8>>) -> Vec<u8> {
+    let mut objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R \
+             /Resources << /Font << /F1 5 0 R >> {resources} >> >>"
+        )
+        .into_bytes(),
+        stream("", content),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
+            .to_vec(),
+    ];
+    objects.extend(extra);
+    pdf_from(&objects)
+}
+
+/// The saves stet makes around a form, a pattern cell, a glyph procedure
+/// and a soft mask's group count against the same limit as `q`, and past
+/// it are skipped and counted as `q` is: each warns, and its restore
+/// leaves the state saved before it on the stack.
+///
+/// The line width tells: none of these changes it. The stroke color would
+/// not: a glyph procedure's `d1` sets it, and with the glyph's save
+/// skipped it stays set after the glyph.
+#[test]
+fn the_saves_around_nested_content_are_skipped_and_counted_as_q_is() {
+    /// What runs the nested content, and the objects it needs from 6 on.
+    struct Case {
+        what: &'static str,
+        between: &'static [u8],
+        resources: &'static str,
+        extra: Vec<Vec<u8>>,
+    }
+    let cases = [
+        Case {
+            what: "form",
+            between: b"/Fm Do",
+            resources: "/XObject << /Fm 6 0 R >>",
+            extra: vec![form(b"BT /F1 12 Tf 72 600 Td (form) Tj ET")],
+        },
+        Case {
+            what: "pattern",
+            between: b"/Pattern cs /P1 scn 72 72 100 100 re f",
+            resources: "/Pattern << /P1 6 0 R >>",
+            extra: vec![stream(
+                "/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 \
+                 /BBox [0 0 10 10] /XStep 10 /YStep 10 /Resources << >>",
+                b"0 0 5 5 re f",
+            )],
+        },
+        Case {
+            what: "glyph procedure",
+            between: b"BT /T3 12 Tf 72 600 Td (a) Tj ET",
+            resources: "/Font << /F1 5 0 R /T3 6 0 R >>",
+            extra: vec![
+                b"<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000] \
+                   /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /a 7 0 R >> \
+                   /Encoding << /Type /Encoding /Differences [97 /a] >> \
+                   /FirstChar 97 /LastChar 97 /Widths [1000] /Resources << >> >>"
+                    .to_vec(),
+                stream("", b"1000 0 0 0 1000 1000 d1 0 0 1000 1000 re f"),
+            ],
+        },
+        Case {
+            what: "soft mask",
+            between: b"/GS1 gs",
+            resources: "/ExtGState << /GS1 6 0 R >>",
+            extra: vec![
+                b"<< /Type /ExtGState /SMask << /Type /Mask /S /Luminosity /G 7 0 R >> >>".to_vec(),
+                stream(
+                    "/Type /XObject /Subtype /Form /BBox [0 0 612 792] \
+                     /Group << /S /Transparency /CS /DeviceGray >>",
+                    b"1 g 0 0 612 792 re f",
+                ),
+            ],
+        },
+    ];
+    for case in cases {
+        let what = case.what;
+        let pdf = page_with(
+            &last_saved_red_then_blue(case.between),
+            case.resources,
+            case.extra,
+        );
+        let doc = open(&pdf);
+        let list = doc
+            .render_page(0, 72.0)
+            .unwrap_or_else(|e| panic!("{what}: {e}"));
+        assert_eq!(stroke_widths(&list), [3.0], "{what}");
+        assert_warned_once(&doc, 0);
+    }
 }
 
 /// The state a form saves around its content counts with the page's own.
@@ -199,14 +401,14 @@ fn the_state_a_form_saves_counts_toward_the_limit() {
     content.extend(b"/Fm Do ");
     content.extend(b"Q ".repeat(MAX_SAVED_STATES - 2));
     let at_limit = document(&[stream("", &content)], form(b"q Q"));
-    open(&at_limit).render_page(0, 72.0).unwrap();
+    let doc = open(&at_limit);
+    doc.render_page(0, 72.0).unwrap();
+    assert!(doc.parse_warnings().is_empty());
 
     let over = document(&[stream("", &content)], form(b"q q Q Q"));
-    let err = open(&over).render_page(0, 72.0).unwrap_err();
-    assert!(
-        matches!(err, PdfError::ContentLimit(ContentLimit::SavedStates(_))),
-        "{err:?}"
-    );
+    let doc = open(&over);
+    doc.render_page(0, 72.0).unwrap();
+    assert_warned_once(&doc, 0);
 }
 
 #[test]
@@ -313,10 +515,8 @@ fn the_page_after_one_over_a_limit_is_read() {
         form(b"BT /F1 12 Tf 72 600 Td (form) Tj ET"),
     );
     let mut doc = open(&pdf);
-    assert!(matches!(
-        doc.render_page(0, 72.0),
-        Err(PdfError::ContentLimit(ContentLimit::SavedStates(_)))
-    ));
+    assert_eq!(text_of(&doc.render_page(0, 72.0).unwrap()), ["inside"]);
+    assert_warned_once(&doc, 0);
     doc.set_max_content_bytes(Some(1000));
     assert!(matches!(
         doc.render_page(1, 72.0),
@@ -325,11 +525,7 @@ fn the_page_after_one_over_a_limit_is_read() {
     assert_eq!(text_of(&doc.render_page(2, 72.0).unwrap()), ["next"]);
     doc.set_max_content_bytes(None);
     doc.render_page(1, 72.0).unwrap();
-    assert!(
-        doc.parse_warnings().is_empty(),
-        "{:?}",
-        doc.parse_warnings()
-    );
+    assert_warned_once(&doc, 0);
 }
 
 /// An ordinary page, nesting a few levels and drawing a form twice, reads
@@ -391,7 +587,8 @@ fn appearance_saving(count: usize) -> Vec<u8> {
 }
 
 /// The saves in the appearance of an annotation or a form field count
-/// toward the limit as the page's own do.
+/// toward the limit as the page's own do. Past it they are skipped, the
+/// appearances are drawn, and the page is warned once for both.
 #[test]
 fn the_states_an_appearance_saves_count_toward_the_limit() {
     let page = b"BT /F1 12 Tf 72 700 Td (page) Tj ET";
@@ -401,22 +598,15 @@ fn the_states_an_appearance_saves_count_toward_the_limit() {
         text_of(&doc.render_page(0, 72.0).unwrap()),
         ["page", "shown", "shown"]
     );
+    assert!(doc.parse_warnings().is_empty());
 
     let over = annotated(page, &appearance_saving(MAX_SAVED_STATES + 1));
     let doc = open(&over);
-    let err = doc.render_page(0, 72.0).unwrap_err();
-    assert!(
-        matches!(
-            err,
-            PdfError::ContentLimit(ContentLimit::SavedStates(MAX_SAVED_STATES))
-        ),
-        "{err:?}"
+    assert_eq!(
+        text_of(&doc.render_page(0, 72.0).unwrap()),
+        ["page", "shown", "shown"]
     );
-    assert!(
-        doc.parse_warnings().is_empty(),
-        "{:?}",
-        doc.parse_warnings()
-    );
+    assert_warned_once(&doc, 0);
 }
 
 /// The appearance of a form field and of an annotation count toward the

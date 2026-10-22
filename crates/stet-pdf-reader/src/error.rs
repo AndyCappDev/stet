@@ -125,10 +125,6 @@ pub enum PdfError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum ContentLimit {
-    /// More graphics states saved with `q` and not yet restored than
-    /// [`MAX_SAVED_STATES`](crate::MAX_SAVED_STATES).
-    #[error("more than {0} graphics states saved with q at once")]
-    SavedStates(usize),
     /// More bytes of content than the limit set with
     /// [`set_max_content_bytes`](crate::PdfDocument::set_max_content_bytes).
     #[error("more than {0} bytes of content")]

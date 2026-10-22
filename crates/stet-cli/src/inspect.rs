@@ -400,6 +400,7 @@ fn format_phase(phase: &ParsePhase) -> String {
         ParsePhase::ImageUnreadable => "image unreadable".to_string(),
         ParsePhase::MissingFont => "missing font".to_string(),
         ParsePhase::MissingCMap => "missing CMap".to_string(),
+        ParsePhase::SavedStateLimit => "saved-state limit".to_string(),
         _ => "other".to_string(),
     }
 }
