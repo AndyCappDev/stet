@@ -132,11 +132,11 @@ pub enum ParsePhase {
     /// found is reported the same way, naming the one not found; the
     /// codes the embedded CMap maps itself are read as before.
     MissingCMap,
-    /// A page saved more graphics states at once than
-    /// [`MAX_SAVED_STATES`](crate::MAX_SAVED_STATES), with `q` or around
-    /// the forms, patterns, glyph procedures and soft masks it draws. The
-    /// saves past the limit were skipped, and the restores that match them
-    /// restored nothing; the page was drawn on. Recorded once for the page,
+    /// A page asked to save more graphics states at once than
+    /// [`MAX_SAVED_STATES`](crate::MAX_SAVED_STATES), counting those saved
+    /// around the forms, patterns, glyph procedures and soft masks it
+    /// draws. The page's `q` past the limit were skipped, and the `Q` that
+    /// match them restored nothing; the page was drawn on. Recorded once for the page,
     /// with [`LocationHint::Page`] when the render was of a page, at
     /// [`Severity::Warning`].
     SavedStateLimit,

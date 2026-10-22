@@ -104,9 +104,9 @@ const MAX_NESTED_WORK: u64 = 1_000_000;
 /// interpreting — a 1 MB form stepped and repeated four thousand times.
 const NESTED_WORK_UNIT_BYTES: u64 = 4096;
 
-/// Most graphics states a page may have saved at once: `q` without its
-/// `Q`, and the state each form, pattern, glyph procedure and soft mask
-/// saves around its own content.
+/// How many graphics states a page may have saved at once before its `q`
+/// is skipped: `q` without its `Q`, and the state each form, pattern,
+/// glyph procedure and soft mask saves around its own content.
 ///
 /// Every saved state is a copy of the whole graphics state, and nothing
 /// else bounds how many a content stream may ask for: 50 MB of `q`
@@ -114,11 +114,11 @@ const NESTED_WORK_UNIT_BYTES: u64 = 4096;
 /// 32000-1 Annex C gives 28 levels as a typical limit, and this is 36
 /// times that.
 ///
-/// A save past it is skipped, not made: a `q`, or the save around a form,
-/// pattern, glyph procedure or soft mask. Each skipped save is counted, so
-/// the `Q` that matches it restores nothing rather than an earlier state,
-/// and whatever the skipped scope changes in the graphics state stays
-/// changed after it. The page goes on drawing, and gets one
+/// The states saved around a form, pattern, glyph procedure or soft mask
+/// count toward it, and are always saved, so the page's state is back as
+/// it was after them. Only a page's own `q` past it is skipped, not made.
+/// Each skipped `q` is counted, so the `Q` that matches it restores nothing
+/// rather than an earlier state. The page goes on drawing, and gets one
 /// [`ParsePhase::SavedStateLimit`](crate::ParsePhase::SavedStateLimit)
 /// warning.
 pub const MAX_SAVED_STATES: usize = 1024;
@@ -505,8 +505,6 @@ struct NestedSave {
     depth: usize,
     /// The saves skipped before this one.
     skipped: usize,
-    /// Whether this one was saved, or skipped.
-    saved: bool,
 }
 
 /// PDF content stream interpreter.
@@ -528,7 +526,7 @@ pub struct ContentInterpreter<'a> {
         reason = "a state moves between two lists on every q and Q"
     )]
     gstate_spare: Vec<Box<PdfGraphicsState>>,
-    /// Saves skipped because [`MAX_SAVED_STATES`] were saved already, and
+    /// `q` skipped because [`MAX_SAVED_STATES`] were saved already, and
     /// not yet matched by a restore: each `Q` uses one up before it restores
     /// anything.
     skipped_saves: usize,
@@ -2374,26 +2372,26 @@ impl<'a> ContentInterpreter<'a> {
 
     // === Graphics state operators ===
 
-    fn op_q(&mut self) -> Result<(), PdfError> {
-        self.save_gstate();
-        Ok(())
-    }
-
-    /// Push a copy of the graphics state, as `q` does, and say whether it
-    /// was pushed.
+    /// Save the graphics state.
     ///
     /// With [`MAX_SAVED_STATES`] saved already, nothing is: the save is
     /// counted in `skipped_saves`, for the restore that matches it to use
     /// up, and the page is warned, once.
-    fn save_gstate(&mut self) -> bool {
+    fn op_q(&mut self) -> Result<(), PdfError> {
         if self.gstate_stack.len() >= MAX_SAVED_STATES {
             self.skipped_saves += 1;
             if !self.saved_state_limit_warned {
                 self.saved_state_limit_warned = true;
                 self.resolver.warn_saved_state_limit(MAX_SAVED_STATES);
             }
-            return false;
+            return Ok(());
         }
+        self.save_gstate();
+        Ok(())
+    }
+
+    /// Push a copy of the graphics state.
+    fn save_gstate(&mut self) {
         let saved = match self.gstate_spare.pop() {
             Some(mut spare) => {
                 (*spare).clone_from(&self.gstate);
@@ -2402,34 +2400,28 @@ impl<'a> ContentInterpreter<'a> {
             None => Box::new(self.gstate.clone()),
         };
         self.gstate_stack.push(saved);
-        true
     }
 
     /// Save the graphics state around a nested stream: a form, a pattern
-    /// cell, a glyph procedure or a soft mask's group. The save is skipped
-    /// past [`MAX_SAVED_STATES`], as a `q` is.
+    /// cell, a glyph procedure or a soft mask's group.
+    ///
+    /// The save is made even past [`MAX_SAVED_STATES`], so the page's state
+    /// is restored after the nested stream; it lasts only while that stream
+    /// runs, and nesting is bounded. It counts toward the limit, so a `q`
+    /// in the nested stream is skipped sooner.
     fn save_for_nested(&mut self) -> NestedSave {
         let depth = self.gstate_stack.len();
         let skipped = self.skipped_saves;
-        let saved = self.save_gstate();
-        NestedSave {
-            depth,
-            skipped,
-            saved,
-        }
+        self.save_gstate();
+        NestedSave { depth, skipped }
     }
 
     /// Take back the state [`save_for_nested`](Self::save_for_nested)
-    /// saved, or `None` when the save was skipped: the restore then uses
-    /// that up, and restores nothing. Saves the nested stream skipped and
-    /// left unmatched are forgotten.
+    /// saved. `q` the nested stream skipped and left unmatched are
+    /// forgotten.
     fn take_nested_save(&mut self, save: NestedSave) -> Option<Box<PdfGraphicsState>> {
         self.skipped_saves = save.skipped;
-        if save.saved {
-            self.gstate_stack.pop()
-        } else {
-            None
-        }
+        self.gstate_stack.pop()
     }
 
     /// Keep a state that is done with for [`save_gstate`](Self::save_gstate)
@@ -4552,8 +4544,7 @@ impl<'a> ContentInterpreter<'a> {
         self.end_nested_actual_text(in_actual_text);
         // Restore state: truncate any extra gstate_stack entries left by
         // unmatched q/Q inside the CharProc (e.g., if the EI parser consumed Q).
-        self.gstate_stack
-            .truncate(nested_save.depth + usize::from(nested_save.saved));
+        self.gstate_stack.truncate(nested_save.depth + 1);
         if let Some(saved) = self.take_nested_save(nested_save) {
             self.gstate = *saved;
         }

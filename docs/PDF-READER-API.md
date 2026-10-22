@@ -240,14 +240,16 @@ suggests: a few kilobytes of Flate decode to hundreds of megabytes of
 operators. Two limits bound what one page may ask for.
 
 The graphics states saved at once, by `q` and by each form, pattern,
-glyph procedure and soft mask around its own content, are held to
+glyph procedure and soft mask around its own content, count toward
 `MAX_SAVED_STATES`, 1,024. That is always on: ISO 32000-1 Annex C gives
 28 as a typical limit for a reader, and before it, 50 MB of `q` from a
-51 KB file took 17 seconds and 17 GB to read. A save past the limit is
-skipped, and counted, so the `Q` that matches it restores nothing rather
-than an earlier state; whatever the skipped scope changes in the
-graphics state stays changed after it. The page is drawn on, and gets
-one `ParsePhase::SavedStateLimit` warning (see "Warnings from
+51 KB file took 17 seconds and 17 GB to read. The states saved around a
+form, pattern, glyph procedure or soft mask are always saved, even past
+the limit, so the page's state is restored after them: they last only
+while that content runs, and its nesting is bounded. Only a page's own
+`q` past the limit is skipped, and counted, so the `Q` that matches
+it restores nothing rather than an earlier state. The page is drawn on,
+and gets one `ParsePhase::SavedStateLimit` warning (see "Warnings from
 rendering"). Some files leave `q` unclosed, and a page that leaves more
 than 1,024 of them is still drawn.
 
@@ -868,13 +870,13 @@ numbers from the file, so a hostile content stream can make every one
 different; past the limit the page gets one last warning, "further
 problems with this page's content are not listed".
 
-A page that saves more than `MAX_SAVED_STATES` graphics states at once
-gets one warning of its own kind, `ParsePhase::SavedStateLimit`, at
-`Severity::Warning` and with the page in `location` as
-`LocationHint::Page`. The saves past the limit were skipped and the page
-was drawn on (see "A ceiling on page content"); what it drew after the
-first skipped save may not be what the file meant. `stet inspect` lists
-it as `saved-state limit`.
+A page that asks to save more than `MAX_SAVED_STATES` graphics states
+at once gets one warning of its own kind, `ParsePhase::SavedStateLimit`,
+at `Severity::Warning` and with the page in `location` as
+`LocationHint::Page`. The page's `q` past the limit were skipped and the
+page was drawn on (see "A ceiling on page content"); what it drew after
+the first skipped `q` may not be what the file meant. `stet inspect`
+lists it as `saved-state limit`.
 
 ### Images left out, fonts and CMaps missing
 

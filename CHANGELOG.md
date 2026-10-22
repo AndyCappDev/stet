@@ -54,15 +54,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before. An inline image that cannot be read is still a `Content`
   warning. See `docs/PDF-READER-API.md`, "Images left out, fonts and
   CMaps missing".
-- **A page saves at most 1,024 graphics states at once, and draws on
-  past that.** Nothing bounded how many graphics states a page could
+- **Past 1,024 saved graphics states, a page's `q` is skipped, and the
+  page draws on.** Nothing bounded how many graphics states a page could
   save: a 51 KB file whose Flate content stream decodes to 50 MB of `q`
-  took 17.7 s and 16.9 GB to read. Past `MAX_SAVED_STATES` (1,024), a
-  `q`, or the save stet makes around a form, pattern, glyph procedure
-  or soft mask, is skipped. Skipped saves are counted, so the `Q` that
-  matches one restores nothing rather than an earlier state. The page is
-  drawn on, and gets one warning of the new kind
-  `ParsePhase::SavedStateLimit`, which `stet inspect` lists as
+  took 17.7 s and 16.9 GB to read. The states stet saves around a form,
+  pattern, glyph procedure or soft mask count toward `MAX_SAVED_STATES`
+  (1,024), and are always saved, so the page's state is restored after
+  them. Past the limit, a page's own `q` is skipped. Skipped `q` are
+  counted, so the `Q` that matches one restores nothing rather than an
+  earlier state. The page is drawn on, and gets one warning of the new
+  kind `ParsePhase::SavedStateLimit`, which `stet inspect` lists as
   `saved-state limit`. A page that leaves more than 1,024 `q` unclosed
   is still drawn. ISO 32000-1 gives 28 as a typical limit. See
   `docs/PDF-READER-API.md`, "A ceiling on page content".
