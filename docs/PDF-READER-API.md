@@ -837,15 +837,16 @@ inherits no MediaBox. The warning names that page in `location` as
 When what cannot be read is a branch of the tree, it stands for as many
 blank pages as its parent's `/Count` leaves once the parent's other kids
 are counted, each with its warning; when that cannot be told, because a
-count is missing, more than one kid is lost, or the count is more than
-the file has objects for, it is one blank page. When the tree cannot be
-followed at all, the
-pages are found by scanning the file for page objects, which may miss
-some or include ones an update replaced; that is a `PageTree` warning
-too. A document that opens with fewer pages than expected, or none, is
-worth checking for these. All are `Severity::Warning`. Opening lists at
-most 64 of them, then one last warning, "further problems with the page
-tree are not listed; more pages may be left out".
+count is missing, more than one kid is lost, or the count is more pages
+than the file has cross-reference entries in use (objects it writes out,
+not the highest object number it names), it is one blank page. When the
+tree cannot be followed at all, the pages are found by scanning the file
+for page objects, which may miss some or include ones an update
+replaced; that is a `PageTree` warning too. A document that opens with
+fewer pages than expected, or none, is worth checking for these. All are
+`Severity::Warning`. Opening lists at most 64 of them, then one last
+warning, "further problems with the page tree are not listed; more pages
+may be left out".
 
 `ParsePhase::CrossReference` is recorded, as `Severity::Info`, when the
 file's cross-reference table is missing or damaged and the reader

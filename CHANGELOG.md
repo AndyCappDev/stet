@@ -54,7 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   page now stands in for it, with the MediaBox it inherits or US Letter,
   and a `PageTree` warning names the page as `LocationHint::Page`. A
   branch of the tree that cannot be read is as many blank pages as its
-  parent's `/Count` leaves for it, or one when that cannot be told.
+  parent's `/Count` leaves for it, or one when that cannot be told or
+  when the count is more pages than the file has cross-reference entries
+  in use.
   `page_count()` counts these pages, so for these files it and the
   numbers of the pages after them change. See `docs/PDF-READER-API.md`,
   "Warnings from opening the document".
