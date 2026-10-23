@@ -10,7 +10,7 @@
 mod host_machine;
 
 use host_machine::*;
-use stet_pdf_reader::PdfDocument;
+use stet_pdf_reader::{ParsePhase, PdfDocument};
 
 #[test]
 fn a_document_reads_the_machines_files_by_default() {
@@ -46,7 +46,7 @@ fn cmap_files_are_read() {
         assert_eq!(glyphs, 4, "page {page} did not read its CMap");
     }
     assert!(
-        !warnings(&doc).iter().any(|w| w.contains("predefined CMap")),
+        pages_warned(&doc, ParsePhase::MissingCMap).is_empty(),
         "{:#?}",
         warnings(&doc)
     );

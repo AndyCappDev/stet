@@ -2563,10 +2563,16 @@ pub(crate) fn print_content_warnings(doc: &PdfDocument) {
     };
     let printed = printed.get_or_insert_with(HashSet::new);
     for warning in doc.parse_warnings().iter() {
-        // Content problems, and a page tree that lost pages: the two that
-        // mean the output is not the whole document.
-        if matches!(warning.phase, ParsePhase::Content | ParsePhase::PageTree)
-            && printed.insert(warning.message.clone())
+        // Content problems, a page tree that lost pages, an image left
+        // out for its size and text read without its CMap: the ones that
+        // mean the output may not be the whole document as it is.
+        if matches!(
+            warning.phase,
+            ParsePhase::Content
+                | ParsePhase::PageTree
+                | ParsePhase::ImageLeftOut { .. }
+                | ParsePhase::MissingCMap
+        ) && printed.insert(warning.message.clone())
         {
             eprintln!("warning: {}", warning.message);
         }

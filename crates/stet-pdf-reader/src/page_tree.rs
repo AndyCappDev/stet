@@ -53,6 +53,42 @@ pub(crate) type PageBoxNotes = Vec<(usize, String)>;
 struct Collected {
     pages: Vec<PageInfo>,
     notes: PageBoxNotes,
+    /// How many page tree warnings the walk has given: see
+    /// [`MAX_PAGE_TREE_WARNINGS`].
+    warnings: usize,
+}
+
+/// Most page tree warnings one walk of the tree records.
+///
+/// A tree can hold any number of nodes listed twice or nested too deeply,
+/// each a warning of its own, and every warning recorded is checked
+/// against those before it. Past this many the tree gets one last warning
+/// saying the list is cut short.
+const MAX_PAGE_TREE_WARNINGS: usize = 64;
+
+impl Collected {
+    /// Record a page tree warning, unless the walk has given its share. A
+    /// warning given already, such as a node listed many times, does not
+    /// count again.
+    fn warn(&mut self, resolver: &Resolver, location: Option<LocationHint>, message: &str) {
+        let (location, message) = match self.warnings {
+            n if n < MAX_PAGE_TREE_WARNINGS => (location, message),
+            n if n == MAX_PAGE_TREE_WARNINGS => (
+                None,
+                "further problems with the page tree are not listed; \
+                 more pages may be left out",
+            ),
+            _ => return,
+        };
+        if resolver.warnings().record_if_new(
+            ParsePhase::PageTree,
+            location,
+            Severity::Warning,
+            message.to_string(),
+        ) {
+            self.warnings += 1;
+        }
+    }
 }
 
 /// US Letter, the size a page with no usable MediaBox is given.
@@ -186,6 +222,9 @@ fn collect_pages_via_catalog_scan(
     resolver: &Resolver,
 ) -> Result<(Vec<PageInfo>, PageBoxNotes), PdfError> {
     let xref_len = resolver.xref_len();
+    // The trees tried share one count of warnings, so that a file of many
+    // catalogs cannot multiply it.
+    let mut warned = 0;
     for obj_num in 0..xref_len as u32 {
         if let Ok(obj) = resolver.resolve(obj_num, 0)
             && let Some(dict) = obj.as_dict()
@@ -194,7 +233,10 @@ fn collect_pages_via_catalog_scan(
             && let Ok(pages_obj) = resolver.deref(pages_ref)
             && let Some(pages_dict) = pages_obj.as_dict()
         {
-            let mut found = Collected::default();
+            let mut found = Collected {
+                warnings: warned,
+                ..Collected::default()
+            };
             let inherited = Inherited::default();
             let mut visited: HashSet<u32> = HashSet::new();
             if collect_pages_recursive(
@@ -209,8 +251,16 @@ fn collect_pages_via_catalog_scan(
             .is_ok()
                 && !found.pages.is_empty()
             {
+                resolver.warnings().record_once(
+                    ParsePhase::PageTree,
+                    None,
+                    Severity::Warning,
+                    "the catalog has no page tree; the pages are those of a catalog \
+                     found by scanning the file, which may be from an earlier revision",
+                );
                 return Ok((found.pages, found.notes));
             }
+            warned = found.warnings;
         }
     }
     collect_pages_by_scan(resolver)
@@ -256,6 +306,13 @@ fn collect_pages_by_scan(resolver: &Resolver) -> Result<(Vec<PageInfo>, PageBoxN
         return Err(PdfError::MissingKey("Pages"));
     }
 
+    resolver.warnings().record_once(
+        ParsePhase::PageTree,
+        None,
+        Severity::Warning,
+        "the page tree cannot be followed; the pages are those found by scanning \
+         the file, which may miss some or include pages from an earlier revision",
+    );
     Ok((pages, notes))
 }
 
@@ -311,11 +368,10 @@ fn collect_pages_recursive(
     // pathologically deep. Without this, a kid that points back to an ancestor
     // would recurse forever and overflow the stack.
     if depth >= MAX_PAGE_TREE_DEPTH {
-        resolver.warnings().record_once(
-            ParsePhase::PageTree,
+        found.warn(
+            resolver,
             None,
-            Severity::Warning,
-            format!(
+            &format!(
                 "page tree is nested more than {MAX_PAGE_TREE_DEPTH} levels deep; \
                  the pages below that are left out"
             ),
@@ -323,13 +379,12 @@ fn collect_pages_recursive(
         return Ok(());
     }
     if obj_num != 0 && !visited.insert(obj_num) {
-        resolver.warnings().record_once(
-            ParsePhase::PageTree,
+        found.warn(
+            resolver,
             Some(LocationHint::Object {
                 obj_num,
                 gen_num: 0,
             }),
-            Severity::Warning,
             "page tree node is listed more than once; it is used the first time only",
         );
         return Ok(());

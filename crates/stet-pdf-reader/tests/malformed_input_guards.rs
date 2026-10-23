@@ -1459,11 +1459,13 @@ fn jpeg2000_within_the_built_in_limits_is_held_to_the_applications_ceiling() {
     doc.set_max_image_pixels(Some(250_000_000));
     let _ = doc.render_page(0, 72.0);
     assert!(
-        doc.parse_warnings()
-            .iter()
-            .any(|w| w.phase == ParsePhase::Content
-                && w.message.contains("60000 x 60000")
-                && w.message.contains("limit of 250000000")),
+        doc.parse_warnings().iter().any(|w| w.phase
+            == ParsePhase::ImageLeftOut {
+                width: 512,
+                height: 384
+            }
+            && w.message.contains("60000 x 60000")
+            && w.message.contains("limit of 250000000")),
         "{:?}",
         doc.parse_warnings()
     );

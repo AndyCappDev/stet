@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use stet_graphics::display_list::{DisplayElement, DisplayList};
 use stet_graphics::text::text_runs;
+use stet_pdf_reader::diagnostics::{LocationHint, ParsePhase};
 use stet_pdf_reader::{LayerSet, PdfDocument, TextExtraction};
 
 /// A CMap only `STET_CMAP_DIR` has, named as a document's encoding.
@@ -298,7 +299,8 @@ pub fn fonts_not_carried() -> (Vec<u8>, [&'static str; 4]) {
 /// encoding is a CMap the document does not carry, in turn: [`ENV_CMAP`]
 /// and [`HOME_CMAP`] by name, and [`ENV_BASE_CMAP`] and
 /// [`HOME_BASE_CMAP`] through `usecmap` in an embedded CMap. The CIDFont
-/// is embedded, so nothing about the font depends on the machine.
+/// is embedded, so nothing about the font depends on the machine. Its
+/// `/ToUnicode` gives the two two-byte codes the text "ab".
 pub fn cmaps_not_carried() -> Vec<u8> {
     let x = first_extra(4);
     let embedded_using = |base: &str| {
@@ -316,7 +318,8 @@ pub fn cmaps_not_carried() -> Vec<u8> {
     let type0 = |encoding: String| {
         format!(
             "<< /Type /Font /Subtype /Type0 /BaseFont /Dingbats /Encoding {encoding} \
-             /DescendantFonts [{x} 0 R] >>"
+             /DescendantFonts [{x} 0 R] /ToUnicode {} 0 R >>",
+            x + 9
         )
         .into_bytes()
     };
@@ -343,6 +346,7 @@ pub fn cmaps_not_carried() -> Vec<u8> {
         type0(format!("/{HOME_CMAP}")),
         type0(format!("{} 0 R", x + 3)),
         type0(format!("{} 0 R", x + 4)),
+        stream("", to_unicode(&[(0x4142, 'a'), (0x4344, 'b')])),
     ];
     let fonts: Vec<String> = (0..4).map(|i| format!("{} 0 R", x + 5 + i)).collect();
     let content = "BT /F1 12 Tf 10 50 Td <41424344> Tj ET";
@@ -383,5 +387,17 @@ pub fn warnings(doc: &PdfDocument) -> Vec<String> {
     doc.parse_warnings()
         .iter()
         .map(|w| format!("{:?} {:?}: {}", w.location, w.severity, w.message))
+        .collect()
+}
+
+/// The pages `doc` has given a warning of `phase` for, in order.
+pub fn pages_warned(doc: &PdfDocument, phase: ParsePhase) -> Vec<usize> {
+    doc.parse_warnings()
+        .iter()
+        .filter(|w| w.phase == phase)
+        .filter_map(|w| match w.location {
+            Some(LocationHint::Page(page)) => Some(page),
+            _ => None,
+        })
         .collect()
 }

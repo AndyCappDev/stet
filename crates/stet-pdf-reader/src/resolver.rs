@@ -16,6 +16,14 @@ use crate::xref::{XrefEntry, XrefTable};
 /// A decoded ICC profile stream and its hash.
 pub(crate) type IccProfileStream = (std::sync::Arc<Vec<u8>>, stet_graphics::icc::ProfileHash);
 
+/// A warning raised for the page being rendered: its phase, its severity
+/// and its message. See [`Resolver::warn_page`].
+pub(crate) type PageWarning = (
+    crate::diagnostics::ParsePhase,
+    crate::diagnostics::Severity,
+    String,
+);
+
 /// Cached decompressed ObjStm data + parsed header.
 struct ObjStmCache {
     data: Vec<u8>,
@@ -51,6 +59,10 @@ pub struct Resolver<'a> {
     /// Cached scan map: obj_num → file offset of last `N 0 obj` marker.
     /// Built once on first xref miss, then reused for all subsequent lookups.
     scan_map: RefCell<Option<HashMap<u32, usize>>>,
+    /// Streams whose `/Length` runs past the end of the file, by object
+    /// number: the file was cut short, and what is left of them is all
+    /// there is. See [`stream_cut_short`](Self::stream_cut_short).
+    cut_streams: RefCell<HashSet<u32>>,
     /// Non-fatal problems found in this document. It lives here because
     /// the resolver is the one thing every parser, the content interpreter
     /// and the font loader are all handed.
@@ -62,12 +74,19 @@ pub struct Resolver<'a> {
     /// their messages. It is what makes a repeated warning cheap, and what
     /// [`MAX_CONTENT_WARNINGS_PER_PAGE`] counts.
     content_seen: RefCell<(Option<usize>, HashSet<String>)>,
+    /// The same for the page warnings of other kinds: which page, and the
+    /// warnings it has given of each, counted by kind for
+    /// [`MAX_WARNINGS_OF_A_KIND_PER_PAGE`].
+    kinds_seen: RefCell<PageKindsSeen>,
     /// Most samples an image may have and still be decoded: the
     /// application's ceiling, or the built-in one.
     max_image_pixels: std::cell::Cell<u64>,
     /// Whether fonts and CMaps may be read from the machine's files: see
     /// `PdfDocument::set_host_files`.
     host_files: std::cell::Cell<bool>,
+    /// Whether the text in a font whose CMap is missing is left out: see
+    /// `PdfDocument::set_leave_out_text_without_cmap`.
+    leave_out_text_without_cmap: std::cell::Cell<bool>,
     /// The fonts resolved so far, kept from one page to the next.
     pub(crate) fonts: RefCell<crate::content::font::DocumentFonts>,
     /// The ICC profile streams read so far, by object: the decoded bytes and
@@ -76,11 +95,28 @@ pub struct Resolver<'a> {
     /// colour space that uses it, so without this each of them decoded,
     /// hashed and kept its own copy.
     pub(crate) icc_profiles: RefCell<HashMap<(u32, u16), Option<IccProfileStream>>>,
-    /// The content warnings raised while
-    /// [`capturing_content_warnings`](Self::capturing_content_warnings) is
+    /// The page warnings raised while
+    /// [`capturing_page_warnings`](Self::capturing_page_warnings) is
     /// running, innermost last.
-    content_capture: RefCell<Vec<Vec<(crate::diagnostics::Severity, String)>>>,
+    content_capture: RefCell<Vec<Vec<PageWarning>>>,
 }
+
+/// The page warnings other than content warnings one page has given: see
+/// [`Resolver::warn_page`].
+#[derive(Default)]
+struct PageKindsSeen {
+    page: Option<usize>,
+    warnings: HashSet<(crate::diagnostics::ParsePhase, String)>,
+    per_kind: HashMap<std::mem::Discriminant<crate::diagnostics::ParsePhase>, usize>,
+}
+
+/// Most distinct warnings of one kind other than
+/// [`Content`](crate::diagnostics::ParsePhase::Content) kept for one page.
+///
+/// An image left out carries its size, so a hostile content stream can
+/// make every one of those different too. Past this many the rest are not
+/// recorded: the page has already said it lost images.
+const MAX_WARNINGS_OF_A_KIND_PER_PAGE: usize = 64;
 
 /// Most distinct content warnings kept for one page.
 ///
@@ -186,21 +222,65 @@ impl<'a> Resolver<'a> {
         severity: crate::diagnostics::Severity,
         message: impl Into<String>,
     ) {
-        let message = message.into();
-        if let Some(captured) = self.content_capture.borrow_mut().last_mut() {
-            captured.push((severity, message.clone()));
-        }
-        self.warn_content_on(self.content_page.get(), severity, message);
+        self.warn_page(crate::diagnostics::ParsePhase::Content, severity, message);
     }
 
-    /// Run `work`, and return with its result the content warnings it
+    /// Record a problem found while rendering a page, once, for that page:
+    /// a [`Content`](crate::diagnostics::ParsePhase::Content) warning, or
+    /// one of the kinds that are told apart from it, such as an image left
+    /// out or a font not embedded.
+    pub(crate) fn warn_page(
+        &self,
+        phase: crate::diagnostics::ParsePhase,
+        severity: crate::diagnostics::Severity,
+        message: impl Into<String>,
+    ) {
+        use crate::diagnostics::{LocationHint, ParsePhase};
+
+        let message = message.into();
+        if let Some(captured) = self.content_capture.borrow_mut().last_mut() {
+            captured.push((phase.clone(), severity, message.clone()));
+        }
+        let page = self.content_page.get();
+        if phase == ParsePhase::Content {
+            self.warn_content_on(page, severity, message);
+            return;
+        }
+        // As for content warnings: a repeat is found without searching the
+        // document's whole list, and a page keeps a bounded number.
+        let mut seen = self.kinds_seen.borrow_mut();
+        if seen.page != page {
+            *seen = PageKindsSeen {
+                page,
+                ..PageKindsSeen::default()
+            };
+        }
+        let key = (phase, message);
+        if seen.warnings.contains(&key) {
+            return;
+        }
+        let count = seen
+            .per_kind
+            .entry(std::mem::discriminant(&key.0))
+            .or_default();
+        if *count >= MAX_WARNINGS_OF_A_KIND_PER_PAGE {
+            return;
+        }
+        *count += 1;
+        seen.warnings.insert(key.clone());
+        let (phase, message) = key;
+        self.warnings
+            .record_if_new(phase, page.map(LocationHint::Page), severity, message);
+    }
+
+    /// Run `work`, and return with its result the page warnings it
     /// raised. They are recorded as usual as well; this is for work whose
     /// result is kept and used again where the work is not redone, so that
     /// the warnings can be raised again there.
-    pub(crate) fn capturing_content_warnings<T>(
+    pub(crate) fn capturing_page_warnings<T>(
         &self,
         work: impl FnOnce() -> T,
-    ) -> (T, Vec<(crate::diagnostics::Severity, String)>) {
+    ) -> (T, Vec<PageWarning>) {
         self.content_capture.borrow_mut().push(Vec::new());
         let result = work();
         let captured = self.content_capture.borrow_mut().pop().unwrap_or_default();
@@ -250,6 +330,17 @@ impl<'a> Resolver<'a> {
         );
     }
 
+    /// Whether the stream `obj` refers to is cut short by the end of the
+    /// file: its `/Length` runs past the last byte, so its data stops
+    /// part-way and nothing marks where. Known once the object has been
+    /// read.
+    pub(crate) fn stream_cut_short(&self, obj: &PdfObj) -> bool {
+        match obj {
+            PdfObj::Ref(num, _) => self.cut_streams.borrow().contains(num),
+            _ => false,
+        }
+    }
+
     /// Most samples an image may have and still be decoded.
     pub(crate) fn max_image_pixels(&self) -> u64 {
         self.max_image_pixels.get()
@@ -270,6 +361,16 @@ impl<'a> Resolver<'a> {
     /// Set [`host_files`](Self::host_files).
     pub(crate) fn set_host_files(&self, enabled: bool) {
         self.host_files.set(enabled);
+    }
+
+    /// Whether the text in a font whose CMap is missing is left out.
+    pub(crate) fn leave_out_text_without_cmap(&self) -> bool {
+        self.leave_out_text_without_cmap.get()
+    }
+
+    /// Set [`leave_out_text_without_cmap`](Self::leave_out_text_without_cmap).
+    pub(crate) fn set_leave_out_text_without_cmap(&self, enabled: bool) {
+        self.leave_out_text_without_cmap.set(enabled);
     }
 
     /// Decode a stream's filters, recording what the decoders recovered
@@ -316,14 +417,17 @@ impl<'a> Resolver<'a> {
             objstm_cache: RefCell::new(HashMap::new()),
             objstm_failed: RefCell::new(HashSet::new()),
             scan_map: RefCell::new(None),
+            cut_streams: RefCell::default(),
             warnings: crate::diagnostics::WarningSink::new(),
             content_page: std::cell::Cell::new(None),
             content_seen: RefCell::new((None, HashSet::new())),
+            kinds_seen: RefCell::default(),
             fonts: RefCell::default(),
             icc_profiles: RefCell::new(HashMap::new()),
             content_capture: RefCell::default(),
             max_image_pixels: std::cell::Cell::new(stet_graphics::image_limits::MAX_IMAGE_PIXELS),
             host_files: std::cell::Cell::new(true),
+            leave_out_text_without_cmap: std::cell::Cell::new(false),
         }
     }
 
@@ -353,14 +457,17 @@ impl<'a> Resolver<'a> {
             objstm_cache: RefCell::new(HashMap::new()),
             objstm_failed: RefCell::new(HashSet::new()),
             scan_map: RefCell::new(None),
+            cut_streams: RefCell::default(),
             warnings: crate::diagnostics::WarningSink::new(),
             content_page: std::cell::Cell::new(None),
             content_seen: RefCell::new((None, HashSet::new())),
+            kinds_seen: RefCell::default(),
             fonts: RefCell::default(),
             icc_profiles: RefCell::new(HashMap::new()),
             content_capture: RefCell::default(),
             max_image_pixels: std::cell::Cell::new(stet_graphics::image_limits::MAX_IMAGE_PIXELS),
             host_files: std::cell::Cell::new(true),
+            leave_out_text_without_cmap: std::cell::Cell::new(false),
         }
     }
 
@@ -864,6 +971,9 @@ impl<'a> Resolver<'a> {
                     Err(_) => self.recover_stream_length(data_start)?,
                 };
                 let data_end = std::cmp::min(data_start + length, self.data.len());
+                if data_start.saturating_add(length) > self.data.len() {
+                    self.cut_streams.borrow_mut().insert(parsed_num);
+                }
 
                 return Ok(PdfObj::Stream {
                     dict,
