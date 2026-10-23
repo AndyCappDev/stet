@@ -722,6 +722,12 @@ impl<'a> Resolver<'a> {
         self.xref.len()
     }
 
+    /// Number of cross-reference entries in use: objects the file places
+    /// at an offset or in an object stream, not the highest object number.
+    pub(crate) fn xref_in_use(&self) -> usize {
+        self.xref.in_use_len()
+    }
+
     /// Decrypt all strings within a parsed object tree.
     /// Stream data is NOT decrypted here (handled in stream_data()).
     fn decrypt_object(&self, obj: PdfObj, obj_num: u32, gen_num: u16) -> PdfObj {
