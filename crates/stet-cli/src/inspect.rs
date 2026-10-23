@@ -397,6 +397,7 @@ fn format_phase(phase: &ParsePhase) -> String {
         ParsePhase::PageTree => "page tree".to_string(),
         ParsePhase::CrossReference => "cross-reference".to_string(),
         ParsePhase::ImageLeftOut { .. } => "image left out".to_string(),
+        ParsePhase::ImageUnreadable => "image unreadable".to_string(),
         ParsePhase::MissingFont => "missing font".to_string(),
         ParsePhase::MissingCMap => "missing CMap".to_string(),
         _ => "other".to_string(),

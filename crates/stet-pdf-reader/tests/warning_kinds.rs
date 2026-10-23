@@ -4,10 +4,11 @@
 
 //! What the reader repaired, and what it had to leave out, is told apart in
 //! `PdfDocument::parse_warnings` by kind, so that an application can act on
-//! it without reading messages: an image left out for its size, a
-//! cross-reference table rebuilt, a page tree that could not be followed, a
-//! content stream the end of the file cuts short.
+//! it without reading messages: an image left out for its size, an image
+//! that cannot be read, a cross-reference table rebuilt, a page tree that
+//! could not be followed, a content stream the end of the file cuts short.
 
+use stet_graphics::display_list::DisplayElement;
 use stet_pdf_reader::{LocationHint, ParsePhase, ParseWarning, PdfDocument, Severity};
 
 /// A PDF of `objects`, numbered from 1, with a cross-reference table.
@@ -246,6 +247,53 @@ fn an_image_left_out_is_reported_at_its_stored_size() {
         "the message says what was over the limit: {:?}",
         doc.parse_warnings()
     );
+}
+
+// === Images that cannot be read ===========================================
+
+/// A 40 x 40 gray JPEG cut off after its first marker: its data cannot be
+/// decoded.
+fn broken_jpeg() -> Vec<u8> {
+    stream(
+        "/Type /XObject /Subtype /Image /Width 40 /Height 40 \
+         /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /DCTDecode",
+        b"\xff\xd8\xff\xe0 cut short",
+    )
+}
+
+/// An image whose data cannot be decoded is its own kind, for the page that
+/// draws it, and none of it is a content warning: the image is left out and
+/// the rest of the page is drawn.
+#[test]
+fn an_image_that_cannot_be_read_is_its_own_kind_and_the_rest_of_the_page_is_drawn() {
+    let draw = "q 100 0 0 100 0 0 cm /J Do Q 1 0 0 rg 10 10 50 50 re f";
+    let pdf = pdf_from(&two_page_objects(
+        "/XObject << /J 7 0 R >>",
+        draw,
+        FINE,
+        vec![broken_jpeg()],
+    ));
+    let doc = PdfDocument::from_bytes(&pdf).unwrap();
+    let list = doc.render_page(0, 72.0).unwrap();
+    doc.render_page(1, 72.0).unwrap();
+    assert_eq!(
+        kinds(&doc),
+        [(
+            ParsePhase::ImageUnreadable,
+            Some(LocationHint::Page(0)),
+            Severity::Warning
+        )]
+    );
+    let drawn: Vec<&str> = list
+        .elements()
+        .iter()
+        .map(|element| match element {
+            DisplayElement::Image { .. } => "image",
+            DisplayElement::Fill { .. } => "fill",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(drawn, ["fill"], "the image is left out, the rest is drawn");
 }
 
 // === The cross-reference table ============================================
