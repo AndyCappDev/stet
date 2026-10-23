@@ -1409,7 +1409,8 @@ fn jpeg2000_codestream_claiming_an_absurd_size_is_refused() {
             assert!(
                 doc.parse_warnings()
                     .iter()
-                    .any(|w| w.phase == ParsePhase::Content && w.message.contains("too large")),
+                    .any(|w| w.phase == ParsePhase::ImageUnreadable
+                        && w.message.contains("too large")),
                 "{width} x {height}: {:?}",
                 doc.parse_warnings()
             );

@@ -93,6 +93,19 @@ pub enum ParsePhase {
         width: u32,
         height: u32,
     },
+    /// An image that cannot be drawn, left out of the page: its data
+    /// cannot be decoded (a JPEG cut short, a stream its filter cannot
+    /// read) or its dictionary cannot be used (no usable `/Width`, a
+    /// colour space that cannot be read). The rest of the page is drawn.
+    /// The page is in the warning's [`location`](ParseWarning::location);
+    /// the message says what failed.
+    ///
+    /// Only an image XObject is reported this way. An inline image that
+    /// cannot be read is a [`Content`](Self::Content) warning, as are an
+    /// image's data that a filter reads only in part, where the reader
+    /// can tell, and an image over the limit, which is
+    /// [`ImageLeftOut`](Self::ImageLeftOut).
+    ImageUnreadable,
     /// A font the document uses without embedding its program, that is
     /// not one of the standard 14 fonts the reader carries. A substitute is
     /// drawn in its place, so its text is still read, but its glyphs may
