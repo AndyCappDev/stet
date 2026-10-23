@@ -250,6 +250,23 @@ impl<'a> Resolver<'a> {
         );
     }
 
+    /// Record that the page being rendered saved `limit` graphics states
+    /// and had a `q` past that skipped, once for the page. See
+    /// [`ParsePhase::SavedStateLimit`](crate::diagnostics::ParsePhase::SavedStateLimit).
+    pub(crate) fn warn_saved_state_limit(&self, limit: usize) {
+        use crate::diagnostics::{LocationHint, ParsePhase, Severity};
+
+        self.warnings.record_once(
+            ParsePhase::SavedStateLimit,
+            self.content_page.get().map(LocationHint::Page),
+            Severity::Warning,
+            format!(
+                "more than {limit} graphics states saved at once; \
+                 a q past that is skipped, and the Q that matches it restores nothing"
+            ),
+        );
+    }
+
     /// Most samples an image may have and still be decoded.
     pub(crate) fn max_image_pixels(&self) -> u64 {
         self.max_image_pixels.get()
@@ -479,8 +496,30 @@ impl<'a> Resolver<'a> {
 
     /// Resolve an object and return its decompressed stream data.
     pub fn stream_data(&self, obj_num: u32, gen_num: u16) -> Result<Vec<u8>, PdfError> {
+        self.stream_data_within(obj_num, gen_num, None)
+    }
+
+    /// [`stream_data`](Self::stream_data), for content a page interprets:
+    /// with `allowance` set, a stream that decodes to more than that many
+    /// bytes is [`ContentLimit::ContentBytes`](crate::error::ContentLimit::ContentBytes),
+    /// and decoding stops there rather than at the end of the stream.
+    pub(crate) fn stream_data_within(
+        &self,
+        obj_num: u32,
+        gen_num: u16,
+        allowance: Option<usize>,
+    ) -> Result<Vec<u8>, PdfError> {
+        let over = |len: usize| allowance.is_some_and(|max| len > max);
+        let over_error = || {
+            PdfError::ContentLimit(crate::error::ContentLimit::ContentBytes(
+                allowance.unwrap_or_default() as u64,
+            ))
+        };
         // Check stream cache first
         if let Some(cached) = self.stream_cache.borrow().get(&obj_num) {
+            if over(cached.len()) {
+                return Err(over_error());
+            }
             return Ok(cached.clone());
         }
 
@@ -500,15 +539,24 @@ impl<'a> Resolver<'a> {
                 };
                 let (filter_list, parms) = filters::parse_filters(&dict, Some(self))?;
                 let result = if filter_list.is_empty() {
+                    if over(raw.len()) {
+                        return Err(over_error());
+                    }
                     Ok(raw)
                 } else {
                     let jbig2_globals = self.resolve_jbig2_globals(&filter_list, &parms)?;
+                    let budget = match (filters::DecodeBudget::for_stream(&dict), allowance) {
+                        (budget, Some(max)) if max < budget.limit() => {
+                            filters::DecodeBudget::for_content(max)
+                        }
+                        (budget, _) => budget,
+                    };
                     self.decode_filters(
                         &raw,
                         &filter_list,
                         &parms,
                         jbig2_globals.as_deref(),
-                        filters::DecodeBudget::for_stream(&dict),
+                        budget,
                     )
                 }?;
 
@@ -592,6 +640,28 @@ impl<'a> Resolver<'a> {
             }
             _ => Err(PdfError::Other("expected a stream object".into())),
         }
+    }
+
+    /// [`stream_data_from_obj`](Self::stream_data_from_obj), decoding no
+    /// more than `allowance` bytes: see
+    /// [`stream_data_within`](Self::stream_data_within).
+    pub(crate) fn stream_data_from_obj_within(
+        &self,
+        obj: &PdfObj,
+        allowance: usize,
+    ) -> Result<Vec<u8>, PdfError> {
+        if let PdfObj::Ref(n, g) = obj {
+            return self.stream_data_within(*n, *g, Some(allowance));
+        }
+        // A stream held directly, not by reference, is not something a page
+        // draws; it is read as it always was, and then measured.
+        let data = self.stream_data_from_obj(obj)?;
+        if data.len() > allowance {
+            return Err(PdfError::ContentLimit(
+                crate::error::ContentLimit::ContentBytes(allowance as u64),
+            ));
+        }
+        Ok(data)
     }
 
     /// Return the raw (undecoded, possibly encrypted) stream bytes for an

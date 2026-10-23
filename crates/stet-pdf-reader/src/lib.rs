@@ -212,10 +212,11 @@ pub use annotations::{
     MarkupAnnotation, PolygonAnnotation, PopupAnnotation, ShapeAnnotation, StampAnnotation,
     TextAnnotation,
 };
+pub use content::MAX_SAVED_STATES;
 pub use destination::{Action, Destination, ViewSpec};
 pub use diagnostics::{LocationHint, ParsePhase, ParseWarning, Severity, WarningSink};
 pub use embedded_files::{AfRelationship, EmbeddedFile};
-pub use error::PdfError;
+pub use error::{ContentLimit, PdfError};
 pub use form_fields::{
     ButtonField, ButtonType, ChoiceField, ChoiceOption, FieldFlags, FieldKind, FieldValue,
     FormCatalog, FormField, SigFlags, SignatureField, TextField,
@@ -383,6 +384,9 @@ pub struct PdfDocument<'a> {
     /// Whether rendered pages carry images at full resolution. See
     /// [`PdfDocument::set_image_resolution`].
     image_resolution: ImageResolution,
+    /// Most bytes of content a page may interpret, if a limit is set. See
+    /// [`PdfDocument::set_max_content_bytes`].
+    max_content_bytes: Option<u64>,
     /// Which annotations are drawn when any are. See
     /// [`PdfDocument::set_annotation_filter`].
     annotation_filter: AnnotationFilter,
@@ -601,6 +605,7 @@ impl<'a> PdfDocument<'a> {
             render_annotations: true,
             annotation_filter: AnnotationFilter::default(),
             image_resolution: ImageResolution::Full,
+            max_content_bytes: None,
             text_extraction: TextExtraction::Off,
             page_area: PageArea::CropBox,
             default_rendering_intent: RenderingIntent::RelativeColorimetric,
@@ -709,6 +714,44 @@ impl<'a> PdfDocument<'a> {
     pub fn max_image_pixels(&self) -> Option<u64> {
         let limit = self.resolver.max_image_pixels();
         (limit < stet_graphics::image_limits::MAX_IMAGE_PIXELS).then_some(limit)
+    }
+
+    /// Stop any page that interprets more than `limit` bytes of content,
+    /// or lift that with `None`.
+    ///
+    /// Nothing is stopped by default: a page's content streams are held
+    /// only to the limit every stream is (512 MiB decoded, more when its
+    /// dictionary says so), and what its forms, patterns and glyph
+    /// procedures run to only to the bound on nested work, because a
+    /// heavy page of vector art legitimately reaches a hundred megabytes.
+    /// An application that reads files it did not write can set something
+    /// lower, so that what a page costs to read is bounded by what it
+    /// allows, however small the file: a few kilobytes of Flate can
+    /// decode to hundreds of megabytes of operators.
+    ///
+    /// What is counted is the decoded bytes of the page's content streams,
+    /// joined, then of every form, pattern cell, soft-mask group, Type 3
+    /// glyph procedure and annotation appearance the page runs, each time
+    /// it runs: a form drawn ten times counts ten times. Every one of
+    /// them but a glyph procedure is decoded no further than what is
+    /// left, so the limit bounds the memory decoding takes as well as the
+    /// time interpreting does. A Type 3 font's glyph procedures are
+    /// decoded in full when the font is loaded, held only to the limit
+    /// every stream is, and count toward this one each time they run.
+    ///
+    /// A page that passes it is not drawn: [`render_page`](Self::render_page)
+    /// returns [`PdfError::ContentLimit`] with
+    /// [`ContentLimit::ContentBytes`], and nothing is added to
+    /// [`parse_warnings`](Self::parse_warnings) for it. The other pages are
+    /// read as before.
+    pub fn set_max_content_bytes(&mut self, limit: Option<u64>) {
+        self.max_content_bytes = limit;
+    }
+
+    /// The limit set by
+    /// [`set_max_content_bytes`](Self::set_max_content_bytes), if one is.
+    pub fn max_content_bytes(&self) -> Option<u64> {
+        self.max_content_bytes
     }
 
     /// Choose which annotations rendered pages draw, by purpose and by
@@ -965,6 +1008,13 @@ impl<'a> PdfDocument<'a> {
     /// If the page has multiple content streams, they are concatenated
     /// with a newline separator.
     pub fn page_contents(&self, page: usize) -> Result<Vec<u8>, PdfError> {
+        self.page_contents_within(page, None)
+    }
+
+    /// [`page_contents`](Self::page_contents), no longer than `limit`
+    /// bytes when one is given: past it, decoding stops and the result is
+    /// [`ContentLimit::ContentBytes`].
+    fn page_contents_within(&self, page: usize, limit: Option<u64>) -> Result<Vec<u8>, PdfError> {
         let info = self
             .pages
             .get(page)
@@ -976,14 +1026,28 @@ impl<'a> PdfDocument<'a> {
 
         let mut result = Vec::new();
         for (i, &(obj_num, gen_num)) in info.contents.iter().enumerate() {
+            let separator = usize::from(i > 0 && !result.is_empty());
+            let allowance = limit.map(|max| {
+                usize::try_from(max.saturating_sub((result.len() + separator) as u64))
+                    .unwrap_or(usize::MAX)
+            });
             // Skip content stream refs that fail (e.g., dict without stream body
             // in malformed PDFs). Continue with remaining streams.
-            match self.resolver.stream_data(obj_num, gen_num) {
+            match self
+                .resolver
+                .stream_data_within(obj_num, gen_num, allowance)
+            {
+                Ok(data) if result.is_empty() => result = data,
                 Ok(data) => {
-                    if i > 0 && !result.is_empty() {
+                    if separator == 1 {
                         result.push(b'\n');
                     }
                     result.extend_from_slice(&data);
+                }
+                Err(PdfError::ContentLimit(_)) => {
+                    return Err(PdfError::ContentLimit(ContentLimit::ContentBytes(
+                        limit.unwrap_or_default(),
+                    )));
                 }
                 Err(e) => self.resolver.warn_content_on(
                     Some(page),
@@ -1126,7 +1190,7 @@ impl<'a> PdfDocument<'a> {
         if cancel_requested() {
             return Ok(None);
         }
-        let content_data = self.page_contents(page)?;
+        let content_data = self.page_contents_within(page, self.max_content_bytes)?;
 
         // Interpret content stream
         let mut interpreter = ContentInterpreter::new(
@@ -1198,6 +1262,9 @@ impl<'a> PdfDocument<'a> {
         if let Some(cancel) = cancel {
             interpreter.set_cancel_flag(cancel);
         }
+        if let Some(limit) = self.max_content_bytes {
+            interpreter.set_max_content_bytes(limit, content_data.len() as u64);
+        }
 
         // Render page content
         if let Err(e) = interpreter.interpret_stream_public(&content_data) {
@@ -1211,7 +1278,7 @@ impl<'a> PdfDocument<'a> {
         if self.render_annotations && !info.annots.is_empty() {
             interpreter.reset_clip_for_annotations();
             for &(n, g) in &info.annots {
-                if interpreter.was_cancelled() {
+                if interpreter.was_cancelled() || interpreter.content_limit().is_some() {
                     break;
                 }
                 let _ = interpreter.render_annotation(n, g);
@@ -1220,6 +1287,9 @@ impl<'a> PdfDocument<'a> {
 
         // Still within the page, so that these are reported for it.
         self.note_icc_diagnostics(Some(page));
+        if let Some(limit) = interpreter.content_limit() {
+            return Err(PdfError::ContentLimit(limit));
+        }
         if interpreter.was_cancelled() {
             return Ok(None);
         }

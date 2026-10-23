@@ -230,6 +230,75 @@ What is counted is the size decoded:
   in its dictionary. A soft mask over the ceiling takes its image with
   it: the image without its mask would be the wrong picture.
 
+### A ceiling on page content
+
+A page's content can ask for far more than its size in the file
+suggests: a few kilobytes of Flate decode to hundreds of megabytes of
+operators. Two limits bound what one page may ask for.
+
+The graphics states saved at once, by `q` and by each form, pattern,
+glyph procedure and soft mask around its own content, count toward
+`MAX_SAVED_STATES`, 1,024. That is always on: ISO 32000-1 Annex C gives
+28 as a typical limit for a reader, and before it, 50 MB of `q` from a
+51 KB file took 17 seconds and 17 GB to read. The states saved around a
+form, pattern, glyph procedure or soft mask are always saved, even past
+the limit, so the page's state is restored after them: they last only
+while that content runs, and its nesting is bounded. Only a page's own
+`q` past the limit is skipped, and counted, so the `Q` that matches
+it restores nothing rather than an earlier state. The page is drawn on,
+and gets one `ParsePhase::SavedStateLimit` warning (see "Warnings from
+rendering"). Some files leave `q` unclosed, and a page that leaves more
+than 1,024 of them is still drawn.
+
+The bytes of content a page interprets have no limit of their own by
+default, because a heavy page of vector art legitimately reaches a
+hundred megabytes. An application that reads files it did not write can
+set one:
+
+```rust
+# let mut doc: stet_pdf_reader::PdfDocument = unimplemented!();
+doc.set_max_content_bytes(Some(64 << 20)); // decoded bytes per page
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+What is counted is the decoded bytes of the page's content streams,
+joined, and of every form, pattern cell, soft-mask group, Type 3 glyph
+procedure and annotation appearance the page runs, each time it runs: a
+form drawn ten times counts ten times. Every one of them but a glyph
+procedure is decoded no further than what is left of the limit. A Type 3
+font's glyph procedures are decoded in full when the font is loaded,
+held only to the limit every stream is, and count toward this one each
+time they run. A stream whose zlib header is damaged is decoded again
+as raw deflate, and that second decoding is held to what is left too.
+`None`, the default, lifts it.
+
+A page over this limit is not drawn, rather than drawn in part, wherever
+on the page the limit is reached.
+`render_page` returns `PdfError::ContentLimit`, whose `ContentLimit`
+says which limit it was and what it was set to:
+
+```rust
+# use stet_pdf_reader::{ContentLimit, PdfError};
+# let doc: stet_pdf_reader::PdfDocument = unimplemented!();
+match doc.render_page(0, 150.0) {
+    Ok(list) => { /* the whole page */ }
+    Err(PdfError::ContentLimit(ContentLimit::ContentBytes(n))) => { /* more than n bytes */ }
+    Err(PdfError::ContentLimit(limit)) => { /* over another limit */ }
+    Err(e) => { /* the page could not be read */ }
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+That error is the report: nothing is added to `parse_warnings` for what
+was not drawn, so a page stopped by a limit is told apart from a damaged
+one by the error's kind. The document is unaffected, and its other pages
+are read as before.
+
+The limit is set on the document, and applies to the pages it renders.
+`ContentInterpreter`, the interpreter `render_page` uses, is public too,
+but has no setting for it: a stream it interprets on its own is held
+only to the limit every stream is.
+
 ### Giving up on a page
 
 A viewer whose user has scrolled on, or a service with a deadline, can
@@ -797,6 +866,14 @@ A page lists at most 64 distinct content problems. A message can carry
 numbers from the file, so a hostile content stream can make every one
 different; past the limit the page gets one last warning, "further
 problems with this page's content are not listed".
+
+A page that asks to save more than `MAX_SAVED_STATES` graphics states
+at once gets one warning of its own kind, `ParsePhase::SavedStateLimit`,
+at `Severity::Warning` and with the page in `location` as
+`LocationHint::Page`. The page's `q` past the limit were skipped and the
+page was drawn on (see "A ceiling on page content"); what it drew after
+the first skipped `q` may not be what the file meant. `stet inspect`
+lists it as `saved-state limit`.
 
 ### Warnings from the page tree
 

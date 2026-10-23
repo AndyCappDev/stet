@@ -395,6 +395,7 @@ fn format_phase(phase: &ParsePhase) -> String {
         ParsePhase::Layers => "layers".to_string(),
         ParsePhase::Content => "content".to_string(),
         ParsePhase::PageTree => "page tree".to_string(),
+        ParsePhase::SavedStateLimit => "saved-state limit".to_string(),
         _ => "other".to_string(),
     }
 }
