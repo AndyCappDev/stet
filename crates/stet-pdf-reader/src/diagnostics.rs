@@ -101,17 +101,18 @@ pub enum ParsePhase {
     /// the message says what failed.
     ///
     /// Only an image XObject is reported this way. An inline image that
-    /// cannot be read is a [`Content`](Self::Content) warning, as are an
-    /// image's data that a filter reads only in part, where the reader
-    /// can tell, and an image over the limit, which is
+    /// cannot be read is a [`Content`](Self::Content) warning, and so is an
+    /// image's data that a filter reads only in part, where the reader can
+    /// tell. An image over the limit is
     /// [`ImageLeftOut`](Self::ImageLeftOut).
     ImageUnreadable,
     /// A font the document uses without embedding its program, that is
     /// not one of the standard 14 fonts the reader carries. A substitute is
     /// drawn in its place, so its text is still read, but its glyphs may
     /// not look as they should. The page is in the warning's
-    /// [`location`](ParseWarning::location); the message does not name the
-    /// font.
+    /// [`location`](ParseWarning::location); the message names the font as
+    /// the document gives it (its `/BaseFont`), cut to 127 bytes, so a page
+    /// with several such fonts has a warning for each.
     ///
     /// An embedded font program that cannot be read is a
     /// [`Content`](Self::Content) warning instead.
@@ -125,7 +126,7 @@ pub enum ParsePhase {
     /// treat it as not to be trusted. `Identity-H` and `Identity-V` need
     /// no file and are never reported. The page is in the warning's
     /// [`location`](ParseWarning::location); the message names the CMap as
-    /// the document gives it.
+    /// the document gives it, cut to 127 bytes.
     ///
     /// An embedded CMap that names another with `usecmap` that cannot be
     /// found is reported the same way, naming the one not found; the

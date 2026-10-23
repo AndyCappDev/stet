@@ -526,7 +526,7 @@ pub fn resolve_font(
             || d.get(b"FontFile3").is_some()
     });
     if !embedded && !is_standard_14_alias(without_subset_prefix(&base_font_name)) {
-        report_font_not_embedded(resolver);
+        report_font_not_embedded(resolver, &base_font_name);
     }
     if let Some(font) = substitute_font(
         &base_font_name,
@@ -598,14 +598,41 @@ pub fn resolve_font(
 }
 
 /// Say that the page uses a font the document does not embed and the
-/// reader does not carry, so a substitute is drawn: see
+/// reader does not carry, `name` as the document gives it, so a substitute
+/// is drawn: see
 /// [`ParsePhase::MissingFont`](crate::diagnostics::ParsePhase::MissingFont).
-fn report_font_not_embedded(resolver: &Resolver) {
+fn report_font_not_embedded(resolver: &Resolver, name: &str) {
+    let message = if name.is_empty() {
+        "a font with no name is not embedded in the document; \
+         a substitute is drawn in its place"
+            .to_string()
+    } else {
+        format!(
+            "font '{}' is not embedded in the document; a substitute is drawn in its place",
+            name_for_message(name.as_bytes())
+        )
+    };
     resolver.warn_page(
         crate::diagnostics::ParsePhase::MissingFont,
         crate::diagnostics::Severity::Warning,
-        "a font is not embedded in the document; a substitute is drawn in its place",
+        message,
     );
+}
+
+/// The longest name, in bytes, a warning repeats as the document gives it.
+/// A warning is kept for every page that raises it, so a long name in a
+/// font every page shares would otherwise be copied once for each page.
+const MAX_NAME_IN_MESSAGE: usize = 127;
+
+/// `name`, from the document, as a warning shows it: as text, and cut to
+/// [`MAX_NAME_IN_MESSAGE`] bytes, with `…` to say so.
+fn name_for_message(name: &[u8]) -> String {
+    match name.get(..MAX_NAME_IN_MESSAGE) {
+        Some(head) if name.len() > MAX_NAME_IN_MESSAGE => {
+            format!("{}…", String::from_utf8_lossy(head))
+        }
+        _ => String::from_utf8_lossy(name).into_owned(),
+    }
 }
 
 /// Say that a font program the document embeds could not be read, so a
@@ -3154,7 +3181,7 @@ fn report_cmap_not_found(resolver: &Resolver, name: &[u8]) {
         format!(
             "predefined CMap '{}' not found; \
              set STET_CMAP_DIR or install poppler-data for CJK support",
-            String::from_utf8_lossy(name)
+            name_for_message(name)
         ),
     );
 }
@@ -3452,7 +3479,7 @@ fn resolve_type0(
                 font_data
             } else if !host_files {
                 // Font not embedded, and the machine's may not be read.
-                report_font_not_embedded(resolver);
+                report_font_not_embedded(resolver, &cid_base_font(cid_font_dict));
                 return own_cid_font(
                     &cid_base_font(cid_font_dict),
                     desc_flags,
@@ -3471,7 +3498,7 @@ fn resolve_type0(
                 );
             } else {
                 // Font not embedded — try system font lookup
-                report_font_not_embedded(resolver);
+                report_font_not_embedded(resolver, &cid_base_font(cid_font_dict));
                 substituted = true;
                 let base_font = cid_font_dict
                     .get_name(b"BaseFont")
@@ -3800,7 +3827,7 @@ fn resolve_type0(
                 }
             }
             if desc.get(b"FontFile3").is_none() && desc.get(b"FontFile").is_none() {
-                report_font_not_embedded(resolver);
+                report_font_not_embedded(resolver, &cid_base_font(cid_font_dict));
             }
             // Not embedded, and the machine's fonts may not be read.
             if !host_files {

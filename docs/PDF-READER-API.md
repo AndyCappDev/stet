@@ -817,7 +817,9 @@ it:
 | `MissingCMap` | a composite font names a predefined CMap that is not embedded and not found (see `STET_CMAP_DIR` in [ARCHITECTURE.md](ARCHITECTURE.md#cjk-cmap-files-pdf-reader)). The text in that font is still drawn and extracted, its codes read two bytes at a time and turned into text through the document's own `/ToUnicode` where it gives one, so it may not be right. The message names the CMap as the document gives it and says how to install CMaps. `Identity-H` and `Identity-V` need no file and are never reported |
 
 A page lists at most 64 warnings of each of these kinds. The
-`MissingFont` message does not name the font. A font or CMap that is
+`MissingFont` message names the font, by its `/BaseFont`, so a page with
+several such fonts has a warning for each; a font or CMap name is cut to
+127 bytes in a message. A font or CMap that is
 embedded but cannot be read is a fault in the file, and is a
 `ParsePhase::Content` warning instead.
 

@@ -278,8 +278,7 @@ fn identity_h_is_never_reported_as_missing() {
 }
 
 /// A simple font that is not embedded is drawn with a substitute, and its
-/// text is read. It is reported for each page as a missing font, and not
-/// by name.
+/// text is read. It is reported for each page as a missing font, by name.
 #[test]
 fn a_font_that_is_not_embedded_is_its_own_kind_and_its_text_is_read() {
     let font = "<< /Type /Font /Subtype /TrueType /BaseFont /Arial,Bold \
@@ -297,9 +296,32 @@ fn a_font_that_is_not_embedded_is_its_own_kind_and_its_text_is_read() {
     assert_eq!(of_kind(&warnings, ParsePhase::MissingFont), both_pages());
     assert_eq!(of_kind(&warnings, ParsePhase::Content), []);
     assert_eq!(texts, ["Account 1234", "Account 1234"]);
-    for w in &warnings {
-        assert!(!w.message.contains("Arial"), "{w:?}");
+    for w in warnings
+        .iter()
+        .filter(|w| w.phase == ParsePhase::MissingFont)
+    {
+        assert!(w.message.contains("'Arial,Bold'"), "{w:?}");
     }
+}
+
+/// A font's name is repeated in its warning only up to 127 bytes, since
+/// the warning is kept for every page that uses the font.
+#[test]
+fn a_long_font_name_is_cut_in_the_warning() {
+    let name = "A".repeat(300);
+    let font = format!(
+        "<< /Type /Font /Subtype /TrueType /BaseFont /{name} \
+         /FirstChar 32 /LastChar 126 /Encoding /WinAnsiEncoding >>"
+    );
+    let (_, warnings) = read(&two_pages(&font, "BT /F2 12 Tf 10 30 Td (x) Tj ET", &[]));
+    let missing: Vec<&str> = warnings
+        .iter()
+        .filter(|w| w.phase == ParsePhase::MissingFont)
+        .map(|w| w.message.as_str())
+        .collect();
+    assert_eq!(missing.len(), 2, "{warnings:#?}");
+    let cut = format!("'{}…'", "A".repeat(127));
+    assert!(missing.iter().all(|m| m.contains(&cut)), "{missing:#?}");
 }
 
 /// The standard 14 fonts are the reader's own, and a subset tag does not

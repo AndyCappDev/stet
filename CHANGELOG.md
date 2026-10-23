@@ -32,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   page it is on, with its size as the file stores it rather than the
   reduced size a JPEG 2000 image is measured at. `MissingFont` is a font
   that is not embedded and is not one of the standard 14, drawn with a
-  substitute; this was not reported at all. `MissingCMap` is a predefined
+  substitute, named in the message; this was not reported at all. `MissingCMap` is a predefined
   CMap that is neither embedded nor found; the text in its font is still
   drawn and read as before, and the message still names the CMap and says
   how to install CMaps. `CrossReference`, at `Severity::Info`, is a
@@ -70,6 +70,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   looks for it under `ParsePhase::Content` no longer finds it there.
 - **An image refused for its size is `PdfError::ImageOverLimit`, where it
   was `PdfError::Other`.** The message is the same.
+- **An image XObject that cannot be read is an `ImageUnreadable` warning,
+  where it was a `Content` warning.** That includes a JPEG 2000 image
+  refused because its codestream claims an absurd size. An inline image
+  that cannot be read is still a `Content` warning. A caller that looks for
+  these under `ParsePhase::Content` no longer finds them there.
+- **A font that is not embedded and cannot be stood in for is reported
+  only as `MissingFont`.** It also gave a `Content` warning naming the
+  font resource and the error; that warning is no longer given.
 
 ### Fixed
 
