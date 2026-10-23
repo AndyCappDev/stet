@@ -16,7 +16,7 @@ pub mod graphics_state;
 mod standard_fonts;
 mod text_extract;
 
-use crate::diagnostics::Severity;
+use crate::diagnostics::{ParsePhase, Severity};
 use crate::error::PdfError;
 use crate::lexer::{Lexer, MAX_OBJECT_DEPTH, Token};
 use crate::objects::{PdfDict, PdfObj};
@@ -469,6 +469,14 @@ struct SoftMaskScope {
     start_index: usize,
     /// The resolved soft mask (mask display list + params).
     mask: graphics_state::SoftMask,
+}
+
+/// A font that could not be resolved: why, and whether it is one the
+/// document does not embed, which has been reported as
+/// [`ParsePhase::MissingFont`] already.
+struct UnresolvedFont {
+    error: PdfError,
+    not_embedded: bool,
 }
 
 /// PDF content stream interpreter.
@@ -3459,23 +3467,36 @@ impl<'a> ContentInterpreter<'a> {
     ///
     /// Only a font that resolved is kept: one that failed is resolved again
     /// by each page that asks, so that each reports the failure.
-    fn resolve_document_font(&mut self, font_ref: &PdfObj) -> Result<Arc<PdfFont>, PdfError> {
-        let PdfObj::Ref(num, generation) = *font_ref else {
-            return font::resolve_font(self.resolver, font_ref, self.font_provider.as_ref())
-                .map(Arc::new);
+    fn resolve_document_font(&mut self, font_ref: &PdfObj) -> Result<Arc<PdfFont>, UnresolvedFont> {
+        let key = match *font_ref {
+            PdfObj::Ref(num, generation) => Some((num, generation)),
+            _ => None,
         };
-        let key = (num, generation);
-        let kept = self.resolver.fonts.borrow_mut().get(key);
+        let kept = key.and_then(|key| self.resolver.fonts.borrow_mut().get(key));
         if let Some((font, warnings)) = kept {
-            for (severity, message) in warnings {
-                self.resolver.warn_content(severity, message);
+            for (phase, severity, message) in warnings {
+                self.resolver.warn_page(phase, severity, message);
             }
             return Ok(font);
         }
-        let (font, warnings) = self.resolver.capturing_content_warnings(|| {
+        let (font, warnings) = self.resolver.capturing_page_warnings(|| {
             font::resolve_font(self.resolver, font_ref, self.font_provider.as_ref())
         });
-        let font = Arc::new(font?);
+        let font = match font {
+            Ok(font) => Arc::new(font),
+            Err(error) => {
+                let not_embedded = warnings
+                    .iter()
+                    .any(|(phase, ..)| *phase == ParsePhase::MissingFont);
+                return Err(UnresolvedFont {
+                    error,
+                    not_embedded,
+                });
+            }
+        };
+        let Some(key) = key else {
+            return Ok(font);
+        };
         self.resolver
             .fonts
             .borrow_mut()
@@ -3553,10 +3574,14 @@ impl<'a> ContentInterpreter<'a> {
                 self.current_font = Some(arc);
             }
             Err(e) => {
-                self.resolver.warn_content(
-                    Severity::Warning,
-                    format!("font /{}: {}", String::from_utf8_lossy(name), e),
-                );
+                // A font the document does not embed, that no substitute
+                // was found for, has been reported as missing already.
+                if !e.not_embedded {
+                    self.resolver.warn_content(
+                        Severity::Warning,
+                        format!("font /{}: {}", String::from_utf8_lossy(name), e.error),
+                    );
+                }
                 // Try fallback font on resolution failure too
                 if let Some(fallback) = font::fallback_font_with(
                     self.font_provider.as_ref(),
@@ -4785,7 +4810,21 @@ impl<'a> ContentInterpreter<'a> {
 
         let subtype = dict.get_name(b"Subtype").unwrap_or(b"");
         match subtype {
-            b"Image" => self.handle_image_xobject(&xobj_ref_clone, dict)?,
+            b"Image" => match self.handle_image_xobject(&xobj_ref_clone, dict) {
+                Err(e @ PdfError::ImageOverLimit { width, height, .. }) => {
+                    // The size the file gives the image, which need not be
+                    // the size that was checked: a JPEG 2000 image may have
+                    // been measured at a reduced size, and the one over the
+                    // limit may be the image's soft mask.
+                    let stored = |key: &[u8]| dict.get_int(key).and_then(|v| u32::try_from(v).ok());
+                    self.report_image_left_out(
+                        stored(b"Width").unwrap_or(width),
+                        stored(b"Height").unwrap_or(height),
+                        &e,
+                    );
+                }
+                other => other?,
+            },
             b"Form" => self.handle_form_xobject(&xobj_ref_clone, dict)?,
             _ => {}
         }
@@ -5120,6 +5159,18 @@ impl<'a> ContentInterpreter<'a> {
             transfer: self.gstate.transfer.clone(),
         };
         (samples, params)
+    }
+
+    /// Say that an image of `width` x `height` samples, as the file
+    /// stores it, is left out of the page for being over the limit set
+    /// with [`PdfDocument::set_max_image_pixels`](crate::PdfDocument::set_max_image_pixels);
+    /// `refusal` says what was over it.
+    fn report_image_left_out(&self, width: u32, height: u32, refusal: &PdfError) {
+        self.resolver.warn_page(
+            ParsePhase::ImageLeftOut { width, height },
+            Severity::Warning,
+            format!("{refusal}; the image is left out"),
+        );
     }
 
     /// Handle an Image XObject.
@@ -6510,6 +6561,12 @@ impl<'a> ContentInterpreter<'a> {
 
         // Decompress form content stream
         let form_data = self.resolver.stream_data_from_obj(obj)?;
+        if self.resolver.stream_cut_short(obj) {
+            self.resolver.warn_content(
+                Severity::Warning,
+                "form content is cut short by the end of the file; what it holds past that is missing",
+            );
+        }
 
         // Save state (including font cache — form XObjects may have different
         // font resources with different encodings for the same resource name)
@@ -6960,7 +7017,16 @@ impl<'a> ContentInterpreter<'a> {
         // zero-dimension paths below already treat as "no image".
         let (width, height) = match validate_image_size(width, height) {
             Some(pixels) if pixels as u64 <= self.resolver.max_image_pixels() => (width, height),
-            _ => (0, 0),
+            Some(_) => {
+                let refusal = PdfError::ImageOverLimit {
+                    width,
+                    height,
+                    limit: self.resolver.max_image_pixels(),
+                };
+                self.report_image_left_out(width, height, &refusal);
+                (0, 0)
+            }
+            None => (0, 0),
         };
         let is_image_mask = matches!(dict.get(b"ImageMask"), Some(PdfObj::Bool(true)));
         // As for image XObjects (ISO 32000 §11.3.4), the image's own
@@ -7483,8 +7549,12 @@ impl<'a> ContentInterpreter<'a> {
                         self.current_font = Some(arc);
                     }
                     Err(e) => {
-                        self.resolver
-                            .warn_content(Severity::Warning, format!("ExtGState Font: {e}"));
+                        if !e.not_embedded {
+                            self.resolver.warn_content(
+                                Severity::Warning,
+                                format!("ExtGState Font: {}", e.error),
+                            );
+                        }
                     }
                 }
             }

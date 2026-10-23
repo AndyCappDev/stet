@@ -25,12 +25,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   folder. On by default, and nothing changes then. See
   `docs/PDF-READER-API.md`, "Reading no file from the machine".
 
+- **What the PDF reader repaired or left out is reported by its kind.**
+  Four new `ParsePhase` variants let an application tell these apart in
+  `parse_warnings` without reading messages. `ImageLeftOut { width,
+  height }` is an image over the `set_max_image_pixels` ceiling, for the
+  page it is on, with its size as the file stores it rather than the
+  reduced size a JPEG 2000 image is measured at. `MissingFont` is a font
+  that is not embedded and is not one of the standard 14, drawn with a
+  substitute; this was not reported at all. `MissingCMap` is a predefined
+  CMap that is neither embedded nor found; the text in its font is still
+  drawn and read as before, and the message still names the CMap and says
+  how to install CMaps. `CrossReference`, at `Severity::Info`, is a
+  cross-reference table rebuilt by scanning the file, which was silent.
+  A page lists at most 64 warnings of each of the new kinds. An image
+  left out is also the new error `PdfError::ImageOverLimit`. See
+  `docs/PDF-READER-API.md`, "Images left out, fonts and CMaps missing".
+- **A page list found by scanning the file is a `PageTree` warning.**
+  When the page tree cannot be followed, the pages are found by scanning
+  for page objects, which may miss some or include ones an update
+  replaced; that was silent. Opening lists at most 64 page tree warnings,
+  then one saying the rest are not listed.
+
 ### Changed
 
 - **A document opened with `from_bytes` or `from_owned` looks for the
   system's CMYK profile when it first needs its colors, not as it is
   opened.** The profile is the same and is still found once per process;
   opening costs that much less and the first page that much more.
+
+- **An image over `set_max_image_pixels` is an `ImageLeftOut` warning,
+  where it was a `Content` warning.** A caller that looks for it under
+  `ParsePhase::Content` no longer finds it there.
+- **A predefined CMap that is not found is a `MissingCMap` warning, where
+  it was a `Content` warning.** The message is the same. A caller that
+  looks for it under `ParsePhase::Content` no longer finds it there.
+- **An image refused for its size is `PdfError::ImageOverLimit`, where it
+  was `PdfError::Other`.** The message is the same.
 
 ### Fixed
 
@@ -40,6 +70,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   letters, digits, `-` and `_`, as CMap names are, and anything else is
   treated as not found. Before, a crafted name could make the reader open
   a file outside those folders.
+- **A content stream cut short by the end of the file says so.** A
+  truncated file's last content stream, of a page or of a form, was read
+  as far as the file went with nothing to say that the rest was missing.
+  It is now a `Content` warning for the page.
+- **An embedded font program or CMap that cannot be read is a `Content`
+  warning.** A substitute font, or two-byte codes, were used in their
+  place without a word.
 
 ## [0.8.7] — 2026-10-14
 

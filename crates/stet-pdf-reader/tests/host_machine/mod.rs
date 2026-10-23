@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use stet_graphics::display_list::{DisplayElement, DisplayList};
 use stet_graphics::text::text_runs;
+use stet_pdf_reader::diagnostics::{LocationHint, ParsePhase};
 use stet_pdf_reader::{LayerSet, PdfDocument, TextExtraction};
 
 /// A CMap only `STET_CMAP_DIR` has, named as a document's encoding.
@@ -383,5 +384,17 @@ pub fn warnings(doc: &PdfDocument) -> Vec<String> {
     doc.parse_warnings()
         .iter()
         .map(|w| format!("{:?} {:?}: {}", w.location, w.severity, w.message))
+        .collect()
+}
+
+/// The pages `doc` has given a warning of `phase` for, in order.
+pub fn pages_warned(doc: &PdfDocument, phase: ParsePhase) -> Vec<usize> {
+    doc.parse_warnings()
+        .iter()
+        .filter(|w| w.phase == phase)
+        .filter_map(|w| match w.location {
+            Some(LocationHint::Page(page)) => Some(page),
+            _ => None,
+        })
         .collect()
 }

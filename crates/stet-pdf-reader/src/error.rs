@@ -76,6 +76,23 @@ pub enum PdfError {
     #[error("PDF requires a password")]
     PasswordRequired,
 
+    /// An image has more samples than
+    /// [`PdfDocument::set_max_image_pixels`](crate::PdfDocument::set_max_image_pixels)
+    /// allows, so it is not decoded. A page leaves such an image out and
+    /// reports it as
+    /// [`ParsePhase::ImageLeftOut`](crate::ParsePhase::ImageLeftOut).
+    #[error(
+        "image of {width} x {height} samples is over the limit of {limit} set for this document"
+    )]
+    ImageOverLimit {
+        /// The size that was checked: for a JPEG 2000 image the one it
+        /// would be decoded at.
+        width: u32,
+        height: u32,
+        /// The limit in force.
+        limit: u64,
+    },
+
     /// The [`PageArea`](crate::PageArea) chosen with
     /// [`PdfDocument::set_page_area`](crate::PdfDocument::set_page_area)
     /// does not overlap the page's MediaBox, or is not a finite rectangle,

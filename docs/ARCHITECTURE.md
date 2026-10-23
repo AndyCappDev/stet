@@ -733,8 +733,12 @@ Search order:
   [Adobe CMap resources](https://github.com/nicferrier/python-ghostscript/tree/master/ghostscript/CMap)
   and either set `STET_CMAP_DIR` or place them in `~/.local/share/stet/CMap/`
 
-If a required CMap is not found, a warning is printed and CJK text in the
-affected font will not render correctly.
+If a required CMap is not found, the page reports it as
+`ParsePhase::MissingCMap`, with the CMap's name and the remedy above. The
+text in the affected font is still drawn and extracted: its codes are
+read two bytes at a time, and turned into text through the document's
+own `/ToUnicode` where it gives one. CJK text in that font may not render
+correctly, and a one-byte code in it is not read as one.
 
 ## Crate Dependency Graph
 

@@ -41,6 +41,9 @@ pub struct XrefTable {
     entries: Vec<Option<XrefEntry>>,
     /// Trailer dictionary (from the most recent trailer/xref stream).
     pub trailer: PdfDict,
+    /// Whether the table was rebuilt by scanning the file for objects,
+    /// because the one the file gives is missing or damaged.
+    rebuilt: bool,
 }
 
 impl XrefTable {
@@ -50,6 +53,7 @@ impl XrefTable {
         Self {
             entries: Vec::new(),
             trailer: PdfDict::new(),
+            rebuilt: false,
         }
     }
 
@@ -71,6 +75,13 @@ impl XrefTable {
     /// Whether the table is empty.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Whether the table was rebuilt by scanning the file for objects,
+    /// because the cross-reference data the file gives is missing or
+    /// damaged.
+    pub fn rebuilt_by_scan(&self) -> bool {
+        self.rebuilt
     }
 }
 
@@ -233,6 +244,7 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
     Ok(XrefTable {
         entries: combined_entries,
         trailer: final_trailer,
+        rebuilt: false,
     })
 }
 
@@ -480,6 +492,7 @@ fn rebuild_xref_from_scan(data: &[u8]) -> Result<XrefTable, PdfError> {
                 return Ok(XrefTable {
                     entries: merged,
                     trailer: xref_trailer,
+                    rebuilt: true,
                 });
             }
         }
@@ -499,7 +512,11 @@ fn rebuild_xref_from_scan(data: &[u8]) -> Result<XrefTable, PdfError> {
         trailer
     };
 
-    Ok(XrefTable { entries, trailer })
+    Ok(XrefTable {
+        entries,
+        trailer,
+        rebuilt: true,
+    })
 }
 
 /// Try to parse an object header "N G obj" at the given position.

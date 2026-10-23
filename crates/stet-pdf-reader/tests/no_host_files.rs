@@ -13,7 +13,7 @@ mod host_machine;
 
 use host_machine::*;
 use stet_graphics::icc::IccCache;
-use stet_pdf_reader::PdfDocument;
+use stet_pdf_reader::{ParsePhase, PdfDocument};
 
 #[test]
 fn a_document_kept_from_the_machines_files_reads_none() {
@@ -29,8 +29,9 @@ fn a_document_kept_from_the_machines_files_reads_none() {
 
 /// No font the document lacks is looked for among the machine's: not a
 /// simple font, not a CID TrueType font, and not a CJK one. Each is drawn
-/// with stet's own fonts and its text is read. Looking for any of them
-/// would have listed the machine's fonts in `~/.cache/stet`.
+/// with stet's own fonts and its text is read, and each is reported as a
+/// font not embedded, which is all that is reported. Looking for any of
+/// them would have listed the machine's fonts in `~/.cache/stet`.
 fn fonts_not_carried_are_drawn_with_stets_own(machine: &Machine) {
     let (pdf, texts) = fonts_not_carried();
     let mut doc = PdfDocument::from_bytes(&pdf).unwrap();
@@ -49,7 +50,13 @@ fn fonts_not_carried_are_drawn_with_stets_own(machine: &Machine) {
             "page {page}: a glyph drawn for each"
         );
     }
-    assert!(doc.parse_warnings().is_empty(), "{:#?}", warnings(&doc));
+    assert_eq!(
+        pages_warned(&doc, ParsePhase::MissingFont),
+        [0, 1, 2, 3],
+        "{:#?}",
+        warnings(&doc)
+    );
+    assert_eq!(doc.parse_warnings().len(), 4, "{:#?}", warnings(&doc));
     assert!(
         !machine.font_cache_file().exists(),
         "the machine's fonts were listed"
@@ -60,7 +67,8 @@ fn fonts_not_carried_are_drawn_with_stets_own(machine: &Machine) {
 /// `~/.local/share/stet/CMap`, whether the document names it as its
 /// encoding or an embedded CMap names it with `usecmap`. Each of the four
 /// would make `<41424344>` four one-byte codes; without them it is two
-/// two-byte codes. A CMap named and not read is reported as not found.
+/// two-byte codes. A CMap named and not read is reported as not found, by
+/// name, for each page.
 fn no_cmap_file_is_read() {
     let pdf = cmaps_not_carried();
     let mut doc = PdfDocument::from_bytes(&pdf).unwrap();
@@ -78,6 +86,11 @@ fn no_cmap_file_is_read() {
             "{name}: {warnings:#?}"
         );
     }
+    assert_eq!(
+        pages_warned(&doc, ParsePhase::MissingCMap),
+        [0, 1, 2, 3],
+        "{warnings:#?}"
+    );
 }
 
 /// A document opened without a color cache takes stet's own CMYK profile,
