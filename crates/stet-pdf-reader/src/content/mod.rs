@@ -4976,22 +4976,10 @@ impl<'a> ContentInterpreter<'a> {
 
         let subtype = dict.get_name(b"Subtype").unwrap_or(b"");
         match subtype {
-            b"Image" => match self.handle_image_xobject(&xobj_ref_clone, dict) {
-                Err(e @ PdfError::ImageOverLimit { width, height, .. }) => {
-                    // The size the file gives the image, which need not be
-                    // the size that was checked: a JPEG 2000 image may have
-                    // been measured at a reduced size, and the one over the
-                    // limit may be the image's soft mask.
-                    let stored = |key: &[u8]| dict.get_int(key).and_then(|v| u32::try_from(v).ok());
-                    self.report_image_left_out(
-                        stored(b"Width").unwrap_or(width),
-                        stored(b"Height").unwrap_or(height),
-                        &e,
-                    );
-                }
-                Err(e) => self.report_image_unreadable(&e),
-                Ok(()) => {}
-            },
+            b"Image" => {
+                let drawn = self.handle_image_xobject(&xobj_ref_clone, dict);
+                self.image_drawn(dict, drawn)?
+            }
             b"Form" => self.handle_form_xobject(&xobj_ref_clone, dict)?,
             _ => {}
         }
@@ -5010,6 +4998,32 @@ impl<'a> ContentInterpreter<'a> {
             });
         }
 
+        Ok(())
+    }
+
+    /// Deal with how drawing the image XObject `dict` ended. A content
+    /// limit reached on the way stops the page: it is returned, for
+    /// [`operator_failed`](Self::operator_failed). An image over the pixel
+    /// limit, or one that cannot be read, is left out with a warning, and
+    /// the page goes on.
+    fn image_drawn(&self, dict: &PdfDict, drawn: Result<(), PdfError>) -> Result<(), PdfError> {
+        match drawn {
+            Err(e @ PdfError::ContentLimit(_)) => return Err(e),
+            Err(e @ PdfError::ImageOverLimit { width, height, .. }) => {
+                // The size the file gives the image, which need not be
+                // the size that was checked: a JPEG 2000 image may have
+                // been measured at a reduced size, and the one over the
+                // limit may be the image's soft mask.
+                let stored = |key: &[u8]| dict.get_int(key).and_then(|v| u32::try_from(v).ok());
+                self.report_image_left_out(
+                    stored(b"Width").unwrap_or(width),
+                    stored(b"Height").unwrap_or(height),
+                    &e,
+                );
+            }
+            Err(e) => self.report_image_unreadable(&e),
+            Ok(()) => {}
+        }
         Ok(())
     }
 
@@ -9365,8 +9379,9 @@ mod content_limit_tests {
     }
 
     /// An image whose decoding runs into a content limit ends its `Do` with
-    /// [`PdfError::ContentLimit`]. That stops the page, with no warning,
-    /// and `interpret` reports it rather than a display list cut short.
+    /// [`PdfError::ContentLimit`], not with an unreadable image. That stops
+    /// the page, with no warning, and `interpret` reports it rather than a
+    /// display list cut short.
     #[test]
     fn a_content_limit_met_drawing_an_image_stops_the_page_without_a_warning() {
         let pdf = one_page();
@@ -9382,7 +9397,12 @@ mod content_limit_tests {
             &ocg_off,
         );
         let limit = ContentLimit::ContentBytes(10);
-        interpreter.operator_failed(b"Do", PdfError::ContentLimit(limit));
+        let drawn = interpreter.image_drawn(&PdfDict::new(), Err(PdfError::ContentLimit(limit)));
+        assert!(
+            matches!(drawn, Err(PdfError::ContentLimit(l)) if l == limit),
+            "{drawn:?}"
+        );
+        interpreter.operator_failed(b"Do", drawn.unwrap_err());
         assert_eq!(interpreter.content_limit(), Some(limit));
 
         let result = interpreter.interpret(b"0 0 m 100 100 l S");
@@ -9397,8 +9417,8 @@ mod content_limit_tests {
         );
     }
 
-    /// Any other error an image's `Do` ends with skips the image, says so
-    /// as a content warning, and leaves the page to go on.
+    /// Any other error drawing an image leaves the image out, says so as an
+    /// unreadable image, and leaves the page to go on.
     #[test]
     fn another_error_drawing_an_image_is_a_warning_and_the_page_goes_on() {
         let pdf = one_page();
@@ -9413,14 +9433,16 @@ mod content_limit_tests {
             false,
             &ocg_off,
         );
-        interpreter.operator_failed(b"Do", PdfError::DecompressionError("cut short".into()));
+        let failure = PdfError::DecompressionError("cut short".into());
+        let drawn = interpreter.image_drawn(&PdfDict::new(), Err(failure));
+        assert!(drawn.is_ok(), "{drawn:?}");
         assert_eq!(interpreter.content_limit(), None);
 
         let list = interpreter.interpret(b"0 0 m 100 100 l S").unwrap();
         assert_eq!(list.elements().len(), 1);
         let warnings = doc.parse_warnings();
         assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert_eq!(warnings[0].phase, ParsePhase::Content);
-        assert!(warnings[0].message.contains("operator Do"), "{warnings:?}");
+        assert_eq!(warnings[0].phase, ParsePhase::ImageUnreadable);
+        assert!(warnings[0].message.contains("cut short"), "{warnings:?}");
     }
 }
