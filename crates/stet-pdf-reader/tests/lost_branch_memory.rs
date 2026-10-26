@@ -151,15 +151,12 @@ fn with_stream_of(objects: &[Vec<u8>], entries: u32) -> Vec<u8> {
     pdf
 }
 
+/// What a warning is, without its message.
+type Kind = (ParsePhase, Option<LocationHint>, Severity);
+
 /// Opens `pdf`: its page count, its warnings, and the most memory live
 /// while it was opened.
-fn open(
-    pdf: Vec<u8>,
-) -> (
-    usize,
-    Vec<(ParsePhase, Option<LocationHint>, Severity)>,
-    usize,
-) {
+fn open(pdf: Vec<u8>) -> (usize, Vec<Kind>, usize) {
     let (doc, peak) =
         peak_during(move || PdfDocument::from_owned(pdf).expect("the document opens"));
     let warnings = doc
@@ -171,7 +168,7 @@ fn open(
 }
 
 /// What a page tree warning at `page` looks like.
-fn lost_page_at(page: usize) -> (ParsePhase, Option<LocationHint>, Severity) {
+fn lost_page_at(page: usize) -> Kind {
     (
         ParsePhase::PageTree,
         Some(LocationHint::Page(page)),
