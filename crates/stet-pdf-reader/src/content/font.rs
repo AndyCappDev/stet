@@ -3196,16 +3196,27 @@ fn report_cmap_not_found(resolver: &Resolver, name: &[u8], left_out: bool) {
     );
 }
 
-/// Say that the page uses a font the document does not embed, whose text
-/// is left out since its CMap is missing too: see
+/// Say that the page uses a font the document does not embed, `name` as
+/// the document gives it, whose text is left out since its CMap is missing
+/// too: see
 /// [`ParsePhase::MissingFont`](crate::diagnostics::ParsePhase::MissingFont).
 /// Nothing is drawn in its place.
-fn report_font_left_out(resolver: &Resolver) {
+fn report_font_left_out(resolver: &Resolver, name: &str) {
+    let message = if name.is_empty() {
+        "a font with no name is not embedded in the document; \
+         its CMap is missing too, so its text is left out"
+            .to_string()
+    } else {
+        format!(
+            "font '{}' is not embedded in the document; \
+             its CMap is missing too, so its text is left out",
+            name_for_message(name.as_bytes())
+        )
+    };
     resolver.warn_page(
         crate::diagnostics::ParsePhase::MissingFont,
         crate::diagnostics::Severity::Warning,
-        "a font is not embedded in the document; its CMap is missing too, \
-         so its text is left out",
+        message,
     );
 }
 
@@ -3353,7 +3364,7 @@ fn resolve_type0(
         // needed; whether the document carries it is still worth saying.
         // Its widths are kept, so the text after it still moves on.
         if !cid_font_is_embedded(resolver, cid_font_dict) {
-            report_font_left_out(resolver);
+            report_font_left_out(resolver, &cid_base_font(cid_font_dict));
         }
         return Ok(PdfFont::CidTrueType(CidTrueTypePdfFont {
             data: Vec::new(),

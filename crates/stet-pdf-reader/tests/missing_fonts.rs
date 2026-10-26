@@ -449,8 +449,8 @@ fn text_in_a_font_whose_utf16_cmap_is_missing_can_be_left_out() {
 }
 
 /// A font left out for its missing CMap, and not embedded either, is
-/// reported as a missing font with no substitute said to be drawn in its
-/// place; read as before, it is said to be drawn with one.
+/// reported as a missing font by name, with no substitute said to be drawn
+/// in its place; read as before, it is said to be drawn with one.
 #[test]
 fn a_font_left_out_is_not_said_to_be_drawn_with_a_substitute() {
     let (font, extra) = composite_font("GBK-EUC-H");
@@ -458,12 +458,9 @@ fn a_font_left_out_is_not_said_to_be_drawn_with_a_substitute() {
     let substitute = "a substitute is drawn in its place";
 
     let (_, _, warnings) = read_left_out(&pdf);
-    let messages = font_messages(&warnings);
-    assert_eq!(messages.len(), 2, "{warnings:#?}");
-    for message in messages {
-        assert!(!message.contains(substitute), "{message}");
-        assert!(message.contains("left out"), "{message}");
-    }
+    let left_out = "font 'SimSun' is not embedded in the document; \
+                    its CMap is missing too, so its text is left out";
+    assert_eq!(font_messages(&warnings), [left_out, left_out]);
 
     let (_, _, warnings) = read_glyphs(&pdf);
     let messages = font_messages(&warnings);

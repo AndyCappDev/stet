@@ -88,8 +88,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it would have been. A UCS-2 CMap keeps its
   text, and so does a CMap the document embeds whose `usecmap` base is
   missing. The `MissingCMap` message then says the text is left out, and
-  the `MissingFont` message for such a font does not say a substitute is
-  drawn. Off by default, and nothing changes then. See
+  the `MissingFont` message for such a font names it and says its text
+  is left out, not that a substitute is drawn. Off by default, and nothing changes then. See
   `docs/PDF-READER-API.md`, "Leaving out text whose CMap is missing".
 
 ### Changed
