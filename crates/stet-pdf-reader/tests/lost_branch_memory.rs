@@ -185,10 +185,11 @@ fn lost_page_at(page: usize) -> Kind {
 fn a_count_past_the_file_length_is_one_blank_page_whatever_the_xref_stream_declares() {
     let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     const ENTRIES: u32 = 2_000_000;
-    // The lost kid is the object after the last the stream declares.
+    // The lost kid is the object after the last the stream declares, and
+    // the count claims a page for every entry the stream declares.
     let tree =
         |count: u32| format!("<< /Type /Pages /Kids [3 0 R {ENTRIES} 0 R 5 0 R] /Count {count} >>");
-    let claimed = with_stream_of(&objects(&tree(ENTRIES + 2)), ENTRIES);
+    let claimed = with_stream_of(&objects(&tree(ENTRIES)), ENTRIES);
     assert!(
         claimed.len() < 32 * 1024,
         "the file is {} bytes",
