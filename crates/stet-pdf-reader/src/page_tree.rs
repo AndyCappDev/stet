@@ -53,24 +53,50 @@ pub(crate) type PageBoxNotes = Vec<(usize, String)>;
 struct Collected {
     pages: Vec<PageInfo>,
     notes: PageBoxNotes,
-    /// The blank pages standing in for pages the tree names but that cannot
-    /// be read: each one's index, and the object the tree names there.
-    /// They are warned of by [`warn_of_stand_ins`](Self::warn_of_stand_ins)
-    /// once the walk's pages are known to be the document's.
-    stand_ins: Vec<(usize, u32, u16)>,
+    /// The blank pages standing in for kids the tree names but that cannot
+    /// be read, one entry for each such kid. They are warned of by
+    /// [`warn_of_stand_ins`](Self::warn_of_stand_ins) once the walk's pages
+    /// are known to be the document's.
+    stand_ins: Vec<StandIn>,
+    /// Pages counted by the trees tried before this one, when trees are
+    /// tried one after another: blank pages a file can claim are bounded by
+    /// its length across all of them, not for each.
+    counted_before: usize,
     /// How many page tree warnings the walk has given: see
     /// [`MAX_PAGE_TREE_WARNINGS`].
     warnings: usize,
 }
 
+/// Blank pages standing in for one kid of the tree that cannot be read.
+struct StandIn {
+    /// The first of them, counted from 0.
+    first: usize,
+    /// How many: one for a page, more for a branch.
+    count: usize,
+    /// The object the tree names there.
+    obj_num: u32,
+    gen_num: u16,
+}
+
 /// Most page tree warnings one walk of the tree records.
 ///
 /// A tree can hold any number of nodes listed twice or nested too deeply,
-/// and name any number of pages that cannot be read, each a warning of its
+/// and name any number of kids that cannot be read, each a warning of its
 /// own, and every warning recorded is checked against those before it.
 /// Past this many the tree gets one last warning saying the list is cut
 /// short.
 const MAX_PAGE_TREE_WARNINGS: usize = 64;
+
+/// Bytes of the file each blank page standing in for a lost branch needs.
+///
+/// A branch that cannot be read is believed to hold as many pages as its
+/// parent's `/Count` leaves for it only while the file is at least this
+/// many bytes for each page in the document. A real page costs about ten:
+/// two million of them take a 19 MB file, as a `/Kids` array compresses
+/// little. Cross-reference entries are no measure, because a compressed
+/// cross-reference stream makes them nearly free: 18 KB of one can declare
+/// two million.
+const FILE_BYTES_PER_BLANK_PAGE: usize = 4;
 
 impl Collected {
     /// Record a page tree warning, unless the walk has given its share. A
@@ -79,11 +105,9 @@ impl Collected {
     fn warn(&mut self, resolver: &Resolver, location: Option<LocationHint>, message: &str) {
         let (location, message) = match self.warnings {
             n if n < MAX_PAGE_TREE_WARNINGS => (location, message),
-            n if n == MAX_PAGE_TREE_WARNINGS => (
-                None,
-                "further problems with the page tree are not listed; \
-                 more pages may be left out",
-            ),
+            n if n == MAX_PAGE_TREE_WARNINGS => {
+                (None, "further problems with the page tree are not listed")
+            }
             _ => return,
         };
         if resolver.warnings().record_if_new(
@@ -100,6 +124,12 @@ impl Collected {
     /// cannot be read, so that the pages after it keep their numbers. Each
     /// has the boxes and rotation it inherits, and no content.
     fn stand_in(&mut self, obj_num: u32, gen_num: u16, inherited: &Inherited, count: usize) {
+        self.stand_ins.push(StandIn {
+            first: self.pages.len(),
+            count,
+            obj_num,
+            gen_num,
+        });
         for _ in 0..count {
             let page = self.pages.len();
             let (media_box, crop_box) = usable_page_boxes(
@@ -108,7 +138,6 @@ impl Collected {
                 page,
                 &mut self.notes,
             );
-            self.stand_ins.push((page, obj_num, gen_num));
             self.pages.push(PageInfo {
                 obj_num,
                 media_box,
@@ -121,19 +150,36 @@ impl Collected {
         }
     }
 
-    /// Warn of each blank page standing in for one the tree names but that
-    /// cannot be read, at that page.
+    /// How many of the pages found are blank pages standing in for kids
+    /// that cannot be read.
+    fn stand_in_pages(&self) -> usize {
+        self.stand_ins.iter().map(|s| s.count).sum()
+    }
+
+    /// Warn once of each kid the tree names but that cannot be read, at the
+    /// first of the blank pages standing in for it, naming them all.
     fn warn_of_stand_ins(&mut self, resolver: &Resolver) {
-        for (page, obj_num, gen_num) in std::mem::take(&mut self.stand_ins) {
+        for stand_in in std::mem::take(&mut self.stand_ins) {
             if self.warnings > MAX_PAGE_TREE_WARNINGS {
                 break;
             }
+            let StandIn {
+                first,
+                count,
+                obj_num,
+                gen_num,
+            } = stand_in;
+            // Counted from 1 here, as a reader counts pages.
+            let pages = match count {
+                1 => format!("page {} is blank", first + 1),
+                _ => format!("pages {} to {} are blank", first + 1, first + count),
+            };
             self.warn(
                 resolver,
-                Some(LocationHint::Page(page)),
+                Some(LocationHint::Page(first)),
                 &format!(
                     "object {obj_num} {gen_num}, which the page tree names here, \
-                     cannot be read; a blank page stands in for it"
+                     cannot be read; {pages} in its place"
                 ),
             );
         }
@@ -272,9 +318,10 @@ fn collect_pages_via_catalog_scan(
     resolver: &Resolver,
 ) -> Result<(Vec<PageInfo>, PageBoxNotes), PdfError> {
     let xref_len = resolver.xref_len();
-    // The trees tried share one count of warnings, so that a file of many
-    // catalogs cannot multiply it.
+    // The trees tried share one count of warnings, and one count of pages,
+    // so that a file of many catalogs cannot multiply either.
     let mut warned = 0;
+    let mut counted: usize = 0;
     for obj_num in 0..xref_len as u32 {
         if let Ok(obj) = resolver.resolve(obj_num, 0)
             && let Some(dict) = obj.as_dict()
@@ -285,6 +332,7 @@ fn collect_pages_via_catalog_scan(
         {
             let mut found = Collected {
                 warnings: warned,
+                counted_before: counted,
                 ..Collected::default()
             };
             let inherited = Inherited::default();
@@ -299,7 +347,7 @@ fn collect_pages_via_catalog_scan(
                 0,
             )
             .is_ok()
-                && found.pages.len() > found.stand_ins.len()
+                && found.pages.len() > found.stand_in_pages()
             {
                 found.warn_of_stand_ins(resolver);
                 resolver.warnings().record_once(
@@ -312,6 +360,7 @@ fn collect_pages_via_catalog_scan(
                 return Ok((found.pages, found.notes));
             }
             warned = found.warnings;
+            counted = counted.saturating_add(found.pages.len());
         }
     }
     collect_pages_by_scan(resolver)
@@ -542,7 +591,12 @@ fn collect_pages_recursive(
                         // pages stand in for it, so that the pages after it
                         // keep their numbers.
                         let count = *lost_kid_pages.get_or_insert_with(|| {
-                            pages_of_lost_kid(resolver, node_dict, kids, found.pages.len())
+                            pages_of_lost_kid(
+                                resolver,
+                                node_dict,
+                                kids,
+                                found.counted_before.saturating_add(found.pages.len()),
+                            )
                         });
                         found.stand_in(*n, *g, &inherited, count);
                     }
@@ -615,12 +669,12 @@ fn kid_pages(resolver: &Resolver, kid: &PdfObj) -> KidPages {
 /// It cannot be told when `node` has no usable `/Count`, when one of its
 /// other kids is a branch with none, when more than one of its kids cannot
 /// be read, or when the count leaves nothing for it. Nor when the count
-/// would put more pages in the document than the file has cross-reference
-/// entries in use: every page is an object of its own, so no lost branch
-/// held that many, and a count that says so is not believed. That also
-/// bounds the pages a file can make the reader hold by the entries it
-/// writes out, which the highest object number it names does not: one
-/// subsection header can raise that for a few bytes.
+/// would put more pages in the document, `pages_before` of them counted
+/// already, than the file has [`FILE_BYTES_PER_BLANK_PAGE`] bytes for: no
+/// file that small held that many pages, and a count that says so is not
+/// believed. That bounds the pages a file can make the reader hold by its
+/// length, which neither the highest object number it names nor the
+/// cross-reference entries it declares do.
 fn pages_of_lost_kid(
     resolver: &Resolver,
     node: &PdfDict,
@@ -643,7 +697,8 @@ fn pages_of_lost_kid(
             }
         }
         let left = count.checked_sub(others)?;
-        let room = (resolver.xref_in_use() as u64).saturating_sub(pages_before as u64);
+        let room =
+            (resolver.data().len() / FILE_BYTES_PER_BLANK_PAGE).saturating_sub(pages_before) as u64;
         (lost == 1 && left >= 1 && left <= room).then_some(left)
     };
     told().map_or(1, |n| n as usize)

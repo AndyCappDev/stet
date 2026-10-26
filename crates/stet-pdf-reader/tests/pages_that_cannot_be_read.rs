@@ -5,6 +5,9 @@
 //! A page the page tree names but that cannot be read is a blank page in
 //! its place, so that the pages after it keep their numbers, and a
 //! `PageTree` warning names it by its page number.
+//!
+//! A branch that cannot be read claiming more pages than the file is long
+//! enough for is one blank page: see `lost_branch_memory.rs`.
 
 use stet_graphics::text::{text_lines, text_runs};
 use stet_pdf_reader::{LayerSet, LocationHint, ParsePhase, PdfDocument, Severity, TextExtraction};
@@ -119,7 +122,8 @@ fn the_blank_page_draws_nothing_and_has_no_text() {
 }
 
 /// The page lost is reported once, as a page tree warning at the page
-/// standing in for it, counted from 0, and the message names the object.
+/// standing in for it, counted from 0, and the message names the object
+/// and the page, counted from 1.
 #[test]
 fn the_page_lost_is_a_page_tree_warning_at_its_page() {
     let doc = open(&objects(NINE_MISSING, "first", "third", &[]));
@@ -129,6 +133,7 @@ fn the_page_lost_is_a_page_tree_warning_at_its_page() {
     assert_eq!(kinds(&doc), [page_tree_warning_at(1)]);
     let message = doc.parse_warnings()[0].message.clone();
     assert!(message.contains("object 9 0"), "{message}");
+    assert!(message.contains("page 2 is blank"), "{message}");
 }
 
 /// The blank page has the MediaBox, CropBox and rotation the tree gives
@@ -184,14 +189,9 @@ fn a_branch_that_cannot_be_read_is_as_many_blank_pages_as_the_count_leaves() {
         );
     }
     assert_eq!(text_of(&doc, 4), ["fifth"]);
-    assert_eq!(
-        kinds(&doc),
-        [
-            page_tree_warning_at(1),
-            page_tree_warning_at(2),
-            page_tree_warning_at(3)
-        ]
-    );
+    assert_eq!(kinds(&doc), [page_tree_warning_at(1)]);
+    let message = doc.parse_warnings()[0].message.clone();
+    assert!(message.contains("pages 2 to 4 are blank"), "{message}");
 
     // The other kid is a branch of two pages: the four the root counts
     // leave two for the branch that cannot be read.
@@ -202,10 +202,24 @@ fn a_branch_that_cannot_be_read_is_as_many_blank_pages_as_the_count_leaves() {
     assert_eq!(text_of(&doc, 1), ["second"]);
     assert!(doc.render_page(2, 72.0).unwrap().is_empty());
     assert!(doc.render_page(3, 72.0).unwrap().is_empty());
-    assert_eq!(
-        kinds(&doc),
-        [page_tree_warning_at(2), page_tree_warning_at(3)]
-    );
+    assert_eq!(kinds(&doc), [page_tree_warning_at(2)]);
+    let message = doc.parse_warnings()[0].message.clone();
+    assert!(message.contains("pages 3 to 4 are blank"), "{message}");
+}
+
+/// A branch that cannot be read standing for more pages than the warnings
+/// a tree lists is still one warning, naming them all, and no note says
+/// the list is cut short.
+#[test]
+fn a_branch_of_many_blank_pages_is_one_warning() {
+    let tree = "<< /Type /Pages /Kids [3 0 R 9 0 R 5 0 R] /Count 102 >>";
+    let doc = open(&objects(tree, "first", "last", &[]));
+    assert_eq!(doc.page_count(), 102);
+    assert!(doc.render_page(100, 72.0).unwrap().is_empty());
+    assert_eq!(text_of(&doc, 101), ["last"]);
+    assert_eq!(kinds(&doc), [page_tree_warning_at(1)]);
+    let message = doc.parse_warnings()[0].message.clone();
+    assert!(message.contains("pages 2 to 101 are blank"), "{message}");
 }
 
 /// When the counts cannot tell how many pages a kid stood for, it is one
@@ -233,7 +247,7 @@ fn a_kid_whose_pages_cannot_be_told_is_one_blank_page() {
             "<< /Type /Pages /Kids [3 0 R 9 0 R 10 0 R 5 0 R] /Count 7 >>",
             vec![first, None, None, last],
         ),
-        // The count is more pages than the file has objects.
+        // The count is more pages than the file is long enough for.
         (
             "<< /Type /Pages /Kids [3 0 R 9 0 R 5 0 R] /Count 1000000 >>",
             vec![first, None, last],
@@ -255,30 +269,6 @@ fn a_kid_whose_pages_cannot_be_told_is_one_blank_page() {
             }
         }
     }
-}
-
-/// A cross-reference subsection that starts at a very high object number
-/// raises the highest object number for a few bytes, but not the entries
-/// the file writes out. A count past those entries is not believed, so the
-/// branch that cannot be read is one blank page, not a million.
-#[test]
-fn a_count_past_the_entries_in_use_is_one_blank_page_whatever_the_object_numbers() {
-    let tree = "<< /Type /Pages /Kids [3 0 R 9 0 R 5 0 R] /Count 1000000 >>";
-    let mut pdf = pdf_from(&objects(tree, "first", "last", &[]));
-    let trailer = pdf
-        .windows(8)
-        .rposition(|w| w == b"trailer\n")
-        .expect("the file has a trailer");
-    pdf.splice(
-        trailer..trailer,
-        b"1000000 1\n0000000000 00000 f\r\n".iter().copied(),
-    );
-    let mut doc = PdfDocument::from_owned(pdf).expect("the document opens");
-    doc.set_text_extraction(TextExtraction::Runs);
-    assert_eq!(doc.page_count(), 3);
-    assert!(doc.render_page(1, 72.0).unwrap().is_empty());
-    assert_eq!(text_of(&doc, 2), ["last"]);
-    assert_eq!(kinds(&doc), [page_tree_warning_at(1)]);
 }
 
 /// An object that cannot be read listed twice is one blank page, as a
@@ -308,7 +298,8 @@ fn a_kid_that_cannot_be_read_listed_twice_is_one_blank_page() {
 /// A tree naming a great many objects that are not in the file has a
 /// blank page for each, and lists the first 64 and then says the list is
 /// cut short: every warning recorded is checked against those before it,
-/// and opening the file cannot be canceled.
+/// and opening the file cannot be canceled. The page count is known, so
+/// the note does not say more pages may be left out.
 #[test]
 fn many_pages_that_cannot_be_read_list_a_bounded_number_of_warnings() {
     let missing: String = (100..400).map(|n| format!("{n} 0 R ")).collect();
@@ -323,6 +314,11 @@ fn many_pages_that_cannot_be_read_list_a_bounded_number_of_warnings() {
     assert_eq!(warnings[64].location, None);
     assert!(
         warnings[64].message.contains("not listed"),
+        "{:?}",
+        warnings[64]
+    );
+    assert!(
+        !warnings[64].message.contains("left out"),
         "{:?}",
         warnings[64]
     );
@@ -365,4 +361,38 @@ fn a_page_tree_found_by_scanning_with_nothing_readable_is_passed_over() {
         kinds(&doc),
         [(ParsePhase::PageTree, None, Severity::Warning)]
     );
+}
+
+/// The page trees of catalogs found by scanning are tried one after
+/// another, and the blank pages a file's length allows are shared between
+/// them, not given to each: otherwise a file of many catalogs naming one
+/// lost branch would have the reader build its blank pages again for each.
+/// Here a first tree, passed over, has used most of them, so the lost
+/// branch of the tree taken is one blank page.
+#[test]
+fn trees_tried_one_after_another_share_the_blank_pages_the_file_allows() {
+    const CLAIMED: usize = 200;
+    let tree = format!(
+        "<< /Type /Pages /Kids [3 0 R 9 0 R 5 0 R] /Count {} >>",
+        CLAIMED + 2
+    );
+    let mut objects = objects(&tree, "first", "last", &[]);
+    objects[0] = b"<< /Type /Catalog >>".to_vec();
+    // Objects 7 and 8: a catalog tried first, whose tree is nothing but the
+    // lost branch, and 10, the catalog whose tree is taken.
+    objects.push(b"<< /Type /Catalog /Pages 8 0 R >>".to_vec());
+    objects.push(format!("<< /Type /Pages /Kids [9 0 R] /Count {CLAIMED} >>").into_bytes());
+    objects.push(b"null".to_vec());
+    objects.push(b"<< /Type /Catalog /Pages 2 0 R >>".to_vec());
+    // Long enough for the pages either tree claims, not for both.
+    let length = pdf_from(&objects).len();
+    assert!(
+        (CLAIMED * 4..CLAIMED * 8).contains(&length),
+        "{length} bytes"
+    );
+
+    let doc = open(&objects);
+    assert_eq!(doc.page_count(), 3);
+    assert!(doc.render_page(1, 72.0).unwrap().is_empty());
+    assert_eq!(text_of(&doc, 2), ["last"]);
 }
