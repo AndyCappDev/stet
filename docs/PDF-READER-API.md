@@ -876,7 +876,8 @@ at `Severity::Warning` and with the page in `location` as
 `LocationHint::Page`. The page's `q` past the limit were skipped and the
 page was drawn on (see "A ceiling on page content"); what it drew after
 the first skipped `q` may not be what the file meant. `stet inspect`
-lists it as `saved-state limit`.
+lists it as `saved-state limit`, and `stet` prints it when it renders
+the page.
 
 ### Images left out, fonts and CMaps missing
 

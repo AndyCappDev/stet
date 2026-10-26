@@ -64,8 +64,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counted, so the `Q` that matches one restores nothing rather than an
   earlier state. The page is drawn on, and gets one warning of the new
   kind `ParsePhase::SavedStateLimit`, which `stet inspect` lists as
-  `saved-state limit`. A page that leaves more than 1,024 `q` unclosed
-  is still drawn. ISO 32000-1 gives 28 as a typical limit. See
+  `saved-state limit` and `stet` prints when it renders the page. A page
+  that leaves more than 1,024 `q` unclosed is still drawn. ISO 32000-1
+  gives 28 as a typical limit. See
   `docs/PDF-READER-API.md`, "A ceiling on page content".
 - **`PdfDocument::set_max_content_bytes`: a ceiling on a page's
   content.** It counts the decoded bytes of content one page interprets,
