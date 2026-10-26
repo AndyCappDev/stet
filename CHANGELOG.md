@@ -103,6 +103,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A font that is not embedded and cannot be stood in for is reported
   only as `MissingFont`.** It also gave a `Content` warning naming the
   font resource and the error; that warning is no longer given.
+- **Past 1,024 graphics states saved at once, a page's `q` saves
+  nothing.** Every `q` saved the state and its `Q` restored it, however
+  many were open. Now a page's `q` past `MAX_SAVED_STATES` is skipped,
+  and the `Q` that matches it restores nothing, so a page that changes
+  the state inside those levels and relies on `Q` to undo it is drawn
+  differently. Such a page has a `SavedStateLimit` warning. A page
+  within the limit draws as before.
 
 ### Fixed
 
