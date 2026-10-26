@@ -554,3 +554,50 @@ fn the_setting_holds_once_a_page_is_read() {
     doc.set_leave_out_text_without_cmap(false);
     assert_eq!(text(&doc), MIXED_TEXT);
 }
+
+/// Where `after`, in Helvetica, starts on the first page of `pdf`: the x
+/// of its first glyph's origin, read with `leave_out` given to
+/// `set_leave_out_text_without_cmap`.
+fn x_of_after(pdf: &[u8], leave_out: bool) -> f64 {
+    let mut doc = PdfDocument::from_bytes(pdf).unwrap();
+    doc.set_host_files(false);
+    doc.set_leave_out_text_without_cmap(leave_out);
+    doc.set_text_extraction(TextExtraction::Glyphs);
+    let list = doc.render_page(0, 72.0).unwrap();
+    let runs = text_runs(&list, &LayerSet::new());
+    let run = runs
+        .iter()
+        .find(|run| run.text.ends_with("after"))
+        .unwrap_or_else(|| panic!("no run ends with `after`: {runs:#?}"));
+    let first = run.text.len() - "after".len();
+    run.glyphs
+        .iter()
+        .find(|glyph| glyph.text_range.start as usize == first)
+        .expect("a glyph for the `a` of `after`")
+        .origin
+        .0
+}
+
+/// Text left out still takes its space: the codes of a font left out for
+/// its missing CMap are read two bytes at a time and move the text
+/// position on by the font's widths, so what follows in the same text
+/// object is drawn where it is with the text kept. Two codes at the
+/// font's `/DW` of 1000, in 12 points, from x = 10, put `after` at x = 34;
+/// with `/W` giving those codes 500 and 700, at x = 24.4.
+#[test]
+fn text_after_a_font_left_out_still_moves_on() {
+    let content = "BT /F2 12 Tf 10 30 Td <B0A1B0A2> Tj /F1 12 Tf (after) Tj ET";
+    let (font, extra) = composite_font("GBK-EUC-H");
+    let pdf = two_pages(&font, content, &extra);
+    let (texts, _, _) = read_left_out(&pdf);
+    assert_eq!(texts, ["after", "after"]);
+    assert!((x_of_after(&pdf, true) - 34.0).abs() < 1e-6);
+    assert!((x_of_after(&pdf, false) - 34.0).abs() < 1e-6);
+
+    // 0xB0A1 is 45217.
+    let (font, mut extra) = composite_font("GBK-EUC-H");
+    extra[0] = extra[0].replace("/DW 1000", "/DW 1000 /W [45217 [500 700]]");
+    let pdf = two_pages(&font, content, &extra);
+    assert!((x_of_after(&pdf, true) - 24.4).abs() < 1e-6);
+    assert!((x_of_after(&pdf, false) - 24.4).abs() < 1e-6);
+}

@@ -83,7 +83,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of a font whose CMap is missing.** On, nothing is drawn or extracted
   in a composite font whose predefined CMap is neither embedded nor
   found, where its codes would otherwise be read two bytes at a time, a
-  guess when the CMap gives some codes one byte. A UCS-2 CMap keeps its
+  guess when the CMap gives some codes one byte. The text position still
+  moves on by the font's widths, so the text that follows is drawn where
+  it would have been. A UCS-2 CMap keeps its
   text, and so does a CMap the document embeds whose `usecmap` base is
   missing. The `MissingCMap` message then says the text is left out, and
   the `MissingFont` message for such a font does not say a substitute is

@@ -4157,7 +4157,26 @@ impl<'a> ContentInterpreter<'a> {
 
         if font.codes_unknown() {
             // Its CMap is missing and the application asked for its text to
-            // be left out: anything drawn or read would be a guess.
+            // be left out: anything drawn or read would be a guess. Its codes
+            // are still read as with the text kept, two bytes at a time, and
+            // move the text position on by the font's widths, so the text
+            // that follows is drawn where it would have been.
+            let mut i = 0;
+            while i < text.len() {
+                let width = font.code_width(text[i]).min(text.len() - i);
+                let mut code = 0u32;
+                for b in &text[i..i + width] {
+                    code = (code << 8) | u32::from(*b);
+                }
+                let extra = if width == 1 && text[i] == 0x20 {
+                    word_spacing
+                } else {
+                    0.0
+                };
+                i += width;
+                let cid = font.resolve_code_to_cid(code) as u16;
+                self.move_past_cid_glyph(&font, cid, text_state, extra);
+            }
         } else if font.is_composite() {
             // Composite (CID) font: variable-width character codes
             // (most are 2-byte, but some CMaps define 1-byte codes for space etc.)
@@ -4351,6 +4370,32 @@ impl<'a> ContentInterpreter<'a> {
             let advance = Matrix::translate(tx, 0.0);
             self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
         }
+    }
+
+    /// Move the text position past a CID glyph that is not drawn and whose
+    /// text is not read, by the same advance
+    /// [`render_cid_glyph`](Self::render_cid_glyph) gives it.
+    fn move_past_cid_glyph(
+        &mut self,
+        font: &PdfFont,
+        cid: u16,
+        text: TextDrawState<'_>,
+        extra_advance: f64,
+    ) {
+        let TextDrawState {
+            font_size,
+            char_spacing,
+            th,
+            ..
+        } = text;
+        let advance = if font.wmode() == 1 {
+            let [w1, _vx, _vy] = font.vertical_metrics_cid(cid);
+            Matrix::translate(0.0, w1 / 1000.0 * font_size + char_spacing + extra_advance)
+        } else {
+            let w0 = font.glyph_width_cid(cid);
+            Matrix::translate((w0 * font_size + char_spacing + extra_advance) * th, 0.0)
+        };
+        self.gstate.text_matrix = self.gstate.text_matrix.concat(&advance);
     }
 
     /// Render a CID glyph using Unicode→cmap for the glyph shape but the CID

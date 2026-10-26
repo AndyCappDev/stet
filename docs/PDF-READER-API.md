@@ -170,7 +170,10 @@ doc.set_leave_out_text_without_cmap(true);
 ```
 
 Off by default. On, nothing in such a font is drawn or extracted, and the
-text of the page's other fonts is drawn and read as before. The
+text of the page's other fonts is drawn and read as before. The font's
+codes are still read two bytes at a time and move the text position on
+by its widths (`/DW` and `/W`), so the text that follows is drawn where
+it would have been. The
 `ParsePhase::MissingCMap` warning is still recorded for each page, and
 its message adds that the text in the font that uses the CMap is left
 out. A font left out this way that the document does not embed either is

@@ -134,8 +134,9 @@ pub struct CidTrueTypePdfFont {
     /// The font's hinting state, set up the first time an outline is asked
     /// for: see [`TrueTypeHinting`].
     hinting: TrueTypeHinting,
-    /// The font's CMap was not found and its text is left out: nothing is
-    /// drawn or read in it. See
+    /// The font's CMap was not found and its text is left out: no glyph is
+    /// drawn and no text read in it, though the text position still moves
+    /// on by its widths. See
     /// [`PdfDocument::set_leave_out_text_without_cmap`](crate::PdfDocument::set_leave_out_text_without_cmap).
     pub(crate) codes_unknown: bool,
 }
@@ -3208,19 +3209,11 @@ fn report_font_left_out(resolver: &Resolver) {
     );
 }
 
-/// Whether the descendant of a Type 0 font embeds its font program. Taken
-/// to be so when the font cannot be followed as far as its descriptor,
-/// since that is a fault of its own rather than a font left out.
-fn type0_font_is_embedded(resolver: &Resolver, font_dict: &PdfDict) -> bool {
-    let descendant = font_dict
-        .get(b"DescendantFonts")
-        .and_then(|obj| resolver.deref(obj).ok())
-        .and_then(|obj| obj.as_array()?.first().cloned())
-        .and_then(|obj| resolver.deref(&obj).ok());
-    let Some(descendant) = descendant.as_ref().and_then(PdfObj::as_dict) else {
-        return true;
-    };
-    match get_font_descriptor(descendant, resolver) {
+/// Whether a CIDFont embeds its font program. Taken to be so when its
+/// descriptor cannot be read, since that is a fault of its own rather than
+/// a font left out.
+fn cid_font_is_embedded(resolver: &Resolver, cid_font_dict: &PdfDict) -> bool {
+    match get_font_descriptor(cid_font_dict, resolver) {
         Ok(Some(desc)) => {
             desc.get(b"FontFile").is_some()
                 || desc.get(b"FontFile2").is_some()
@@ -3312,33 +3305,6 @@ fn resolve_type0(
     } else if encoding_name.ends_with(b"-H") {
         wmode = 0;
     }
-    if codes_unknown {
-        // Nothing is drawn or read in this font, so its program is not
-        // needed; whether the document carries it is still worth saying.
-        if !type0_font_is_embedded(resolver, font_dict) {
-            report_font_left_out(resolver);
-        }
-        return Ok(PdfFont::CidTrueType(CidTrueTypePdfFont {
-            data: Vec::new(),
-            default_width: 0.0,
-            cid_widths: HashMap::new(),
-            cmap: HashMap::new(),
-            units_per_em: 1000.0,
-            identity_cid_to_gid: false,
-            substituted: true,
-            cid_to_gid_map: None,
-            to_unicode: HashMap::new(),
-            ordering: Vec::new(),
-            ucs2_encoding,
-            code_lengths,
-            code_to_cid,
-            wmode,
-            dw2: [880.0, -1000.0],
-            w2: HashMap::new(),
-            hinting: TrueTypeHinting::default(),
-            codes_unknown: true,
-        }));
-    }
 
     // Get DescendantFonts array (must have exactly one entry).
     // May be a direct array or an indirect reference to one.
@@ -3358,14 +3324,6 @@ fn resolve_type0(
         .ok_or_else(|| PdfError::Other("CIDFont is not a dict".into()))?;
 
     let cid_subtype = cid_font_dict.get_name(b"Subtype").unwrap_or(b"");
-
-    // Get FontDescriptor from the CIDFont
-    let descriptor = get_font_descriptor(cid_font_dict, resolver)?;
-    let desc = descriptor
-        .as_ref()
-        .ok_or_else(|| PdfError::Other("CIDFont missing FontDescriptor".into()))?;
-    // The serif flag, for the substitute when the font is not carried.
-    let desc_flags = desc.get_int(b"Flags").unwrap_or(0) as u32;
 
     // Parse /DW (default width) — may be int or real
     let default_width = cid_font_dict.get_f64(b"DW").unwrap_or(1000.0) / 1000.0;
@@ -3389,6 +3347,43 @@ fn resolve_type0(
 
     // Parse /W2 array (per-CID vertical metrics)
     let w2 = parse_cid_w2(cid_font_dict, resolver);
+
+    if codes_unknown {
+        // Nothing is drawn or read in this font, so its program is not
+        // needed; whether the document carries it is still worth saying.
+        // Its widths are kept, so the text after it still moves on.
+        if !cid_font_is_embedded(resolver, cid_font_dict) {
+            report_font_left_out(resolver);
+        }
+        return Ok(PdfFont::CidTrueType(CidTrueTypePdfFont {
+            data: Vec::new(),
+            default_width,
+            cid_widths,
+            cmap: HashMap::new(),
+            units_per_em: 1000.0,
+            identity_cid_to_gid: false,
+            substituted: true,
+            cid_to_gid_map: None,
+            to_unicode: HashMap::new(),
+            ordering: Vec::new(),
+            ucs2_encoding,
+            code_lengths,
+            code_to_cid,
+            wmode,
+            dw2,
+            w2,
+            hinting: TrueTypeHinting::default(),
+            codes_unknown: true,
+        }));
+    }
+
+    // Get FontDescriptor from the CIDFont
+    let descriptor = get_font_descriptor(cid_font_dict, resolver)?;
+    let desc = descriptor
+        .as_ref()
+        .ok_or_else(|| PdfError::Other("CIDFont missing FontDescriptor".into()))?;
+    // The serif flag, for the substitute when the font is not carried.
+    let desc_flags = desc.get_int(b"Flags").unwrap_or(0) as u32;
 
     // When a UCS2-based CMap (e.g. UniJIS-UCS2-H) couldn't be loaded from
     // disk, build a basic Latin fallback mapping. All Adobe CID collections
@@ -4395,7 +4390,8 @@ impl PdfFont {
     }
 
     /// Whether the font's text is left out, because its CMap was not
-    /// found: text in it is neither drawn nor extracted.
+    /// found: text in it is neither drawn nor extracted, though it still
+    /// moves the text position on by its widths.
     pub(crate) fn codes_unknown(&self) -> bool {
         matches!(self, PdfFont::CidTrueType(f) if f.codes_unknown)
     }

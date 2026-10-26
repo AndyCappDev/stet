@@ -998,8 +998,11 @@ impl<'a> PdfDocument<'a> {
     /// may be wrong.
     ///
     /// On, nothing in that font is drawn or extracted, so no guessed text
-    /// reaches the page or its text, and the warning says so. The text of
-    /// the page's other fonts is drawn and read as before. Two cases keep
+    /// reaches the page or its text, and the warning says so. Its codes are
+    /// still read two bytes at a time and move the text position on by the
+    /// font's widths (`/DW` and `/W`), so the text that follows is drawn
+    /// where it would have been. The text of the page's other fonts is
+    /// drawn and read as before. Two cases keep
     /// their text, since their codes do not depend on the missing CMap: a
     /// UCS-2 CMap such as `UniGB-UCS2-H`, whose codes are Unicode, two
     /// bytes each; and a CMap the document embeds whose `usecmap` base is
