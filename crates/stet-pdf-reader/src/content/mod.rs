@@ -119,8 +119,7 @@ const NESTED_WORK_UNIT_BYTES: u64 = 4096;
 /// it was after them. Only a page's own `q` past it is skipped, not made.
 /// Each skipped `q` is counted, so the `Q` that matches it restores nothing
 /// rather than an earlier state. The page goes on drawing, and gets one
-/// [`ParsePhase::SavedStateLimit`](crate::ParsePhase::SavedStateLimit)
-/// warning.
+/// [`ParsePhase::SavedStateLimit`] warning.
 pub const MAX_SAVED_STATES: usize = 1024;
 
 /// Which nested content stream is being interpreted, for refusing to enter
@@ -1019,8 +1018,7 @@ impl<'a> ContentInterpreter<'a> {
     /// Interpret a content stream and return the display list.
     ///
     /// A stream that stops making sense part-way gives what was drawn
-    /// before that, with a [`ParsePhase::Content`](crate::ParsePhase::Content)
-    /// warning. A stream over a content limit gives
+    /// before that, with a [`ParsePhase::Content`] warning. A stream over a content limit gives
     /// [`PdfError::ContentLimit`] rather than the part drawn before it, as
     /// [`PdfDocument::render_page`](crate::PdfDocument::render_page) does.
     pub fn interpret(mut self, data: &[u8]) -> Result<DisplayList, PdfError> {
@@ -9424,7 +9422,7 @@ mod content_limit_tests {
         let pdf = one_page();
         let doc = crate::PdfDocument::from_bytes(&pdf).unwrap();
         let ocg_off = std::collections::HashSet::new();
-        let mut interpreter = ContentInterpreter::new(
+        let interpreter = ContentInterpreter::new(
             &doc.resolver,
             PdfDict::new(),
             Matrix::identity(),
