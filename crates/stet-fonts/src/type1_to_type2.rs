@@ -38,7 +38,7 @@
 //! error: it builds accented characters from StandardEncoding codes, which
 //! mean nothing in a CIDFont, and CIDFonts are what this conversion serves.
 
-use crate::charstring::decrypt_charstring;
+use crate::charstring::{MAX_CHARSTRING_BYTES, decrypt_charstring};
 use crate::geometry::Matrix;
 
 /// Deepest subroutine nesting allowed ("Adobe Type 1 Font Format" §6.4:
@@ -165,7 +165,9 @@ pub fn convert_charstring_transformed(
         hints_changed: false,
         groups: Vec::new(),
         cmds: Vec::new(),
+        bytes_run: 0,
     };
+    interp.charge(charstring.len())?;
     interp.run(&decrypt_charstring(charstring, len_iv), 0)?;
 
     let identity = [matrix.a, matrix.b, matrix.c, matrix.d, matrix.tx, matrix.ty]
@@ -291,9 +293,23 @@ struct Interp<'a> {
     hints_changed: bool,
     groups: Vec<Vec<Stem>>,
     cmds: Vec<Cmd>,
+    /// Bytes of charstring run so far, each subroutine counted every time
+    /// it is called: see [`MAX_CHARSTRING_BYTES`].
+    bytes_run: usize,
 }
 
 impl Interp<'_> {
+    /// Count `bytes` of charstring toward [`MAX_CHARSTRING_BYTES`], before
+    /// they are decrypted and run, as the interpreter that draws Type 1
+    /// glyphs counts them.
+    fn charge(&mut self, bytes: usize) -> Result<(), String> {
+        self.bytes_run = self.bytes_run.saturating_add(bytes);
+        if self.bytes_run > MAX_CHARSTRING_BYTES {
+            return Err("Type 1: charstring runs too long".into());
+        }
+        Ok(())
+    }
+
     fn run(&mut self, data: &[u8], depth: usize) -> Result<Flow, String> {
         if depth > MAX_SUBR_DEPTH {
             return Err("Type 1: subroutines nested too deeply".into());
@@ -400,6 +416,7 @@ impl Interp<'_> {
                     .then(|| self.subrs.get(idx as usize))
                     .flatten()
                     .ok_or_else(|| format!("Type 1: callsubr: no subr {idx}"))?;
+                self.charge(subr.len())?;
                 let subr = decrypt_charstring(subr, self.len_iv);
                 return self.run(&subr, depth + 1);
             }

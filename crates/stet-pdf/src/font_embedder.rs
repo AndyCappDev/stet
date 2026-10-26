@@ -91,22 +91,71 @@ fn charstring_encrypt(plaintext: &[u8], len_iv: usize) -> Vec<u8> {
     result
 }
 
+/// Deepest subroutine nesting the scans below follow, as the Type 1
+/// interpreter allows ("Adobe Type 1 Font Format" §6.4).
+const MAX_SUBR_DEPTH: u32 = 10;
+
+/// What one glyph's scan may still read of
+/// [`MAX_CHARSTRING_BYTES`](stet_fonts::charstring::MAX_CHARSTRING_BYTES),
+/// each subroutine counted every time it is entered, as the interpreter
+/// that draws the glyph counts them. Depth alone does not bound a scan: a
+/// subroutine entered several times at each of ten levels is entered that
+/// many to the tenth power times.
+struct ScanBudget(usize);
+
+impl ScanBudget {
+    fn new() -> Self {
+        Self(stet_fonts::charstring::MAX_CHARSTRING_BYTES)
+    }
+
+    /// Take `bytes` from what is left; false, leaving nothing, when there
+    /// is not that much.
+    fn spend(&mut self, bytes: usize) -> bool {
+        match self.0.checked_sub(bytes) {
+            Some(left) => {
+                self.0 = left;
+                true
+            }
+            None => {
+                self.0 = 0;
+                false
+            }
+        }
+    }
+}
+
 /// Find all Subr indices transitively referenced by a charstring, simulating
 /// the stack across `callsubr` boundaries so that dynamically-determined indices
 /// (e.g. hint-replacement wrappers: `<N> 4 callsubr` where Subr 4 does
 /// `1 3 callothersubr pop callsubr`) are correctly detected.
-fn find_subr_refs_deep(decrypted: &[u8], subrs: &[Vec<u8>], found: &mut HashSet<usize>) {
+///
+/// False when the scan ran past its [`ScanBudget`], so `found` may lack
+/// some of them.
+fn find_subr_refs_deep(decrypted: &[u8], subrs: &[Vec<u8>], found: &mut HashSet<usize>) -> bool {
     let mut stack: Vec<f64> = Vec::new();
     let mut ps_stack: Vec<f64> = Vec::new();
-    scan_charstring(decrypted, subrs, found, &mut stack, &mut ps_stack, 0);
+    let mut budget = ScanBudget::new();
+    budget.spend(decrypted.len())
+        && scan_charstring(
+            decrypted,
+            subrs,
+            found,
+            &mut stack,
+            &mut ps_stack,
+            0,
+            &mut budget,
+        )
 }
 
 /// Recursive charstring scanner with stack simulation. `depth` limits recursion
-/// to prevent infinite loops in mutually-recursive Subrs.
+/// to prevent infinite loops in mutually-recursive Subrs, and `budget` the
+/// work the Subrs it enters may take.
 ///
 /// Always re-enters a Subr even if already found, because the caller's stack
 /// may provide different dynamically-determined Subr indices each time (e.g.
 /// hint-replacement wrapper called as `<N> 4 callsubr`).
+///
+/// False when it ran past `budget`, and stopped.
 fn scan_charstring(
     data: &[u8],
     subrs: &[Vec<u8>],
@@ -114,9 +163,10 @@ fn scan_charstring(
     stack: &mut Vec<f64>,
     ps_stack: &mut Vec<f64>,
     depth: u32,
-) {
-    if depth > 10 {
-        return;
+    budget: &mut ScanBudget,
+) -> bool {
+    if depth > MAX_SUBR_DEPTH {
+        return true;
     }
     let mut i = 0;
     while i < data.len() {
@@ -160,8 +210,8 @@ fn scan_charstring(
                     }
                 }
             }
-            11 => return,        // return from Subr
-            14 => return,        // endchar
+            11 => return true,   // return from Subr
+            14 => return true,   // endchar
             13 => stack.clear(), // hsbw
             10 => {
                 // callsubr: pop index, record it, then inline the Subr to
@@ -172,7 +222,19 @@ fn scan_charstring(
                         let idx = idx as usize;
                         if idx < subrs.len() {
                             found.insert(idx);
-                            scan_charstring(&subrs[idx], subrs, found, stack, ps_stack, depth + 1);
+                            if !budget.spend(subrs[idx].len())
+                                || !scan_charstring(
+                                    &subrs[idx],
+                                    subrs,
+                                    found,
+                                    stack,
+                                    ps_stack,
+                                    depth + 1,
+                                    budget,
+                                )
+                            {
+                                return false;
+                            }
                         }
                     }
                 }
@@ -203,15 +265,22 @@ fn scan_charstring(
             _ => stack.clear(),
         }
     }
+    true
 }
 
 /// Compute the set of Subr indices transitively referenced by the given charstrings.
 /// Uses stack simulation across `callsubr` boundaries to detect dynamically-determined
 /// Subr indices (e.g. hint-replacement wrappers).
+///
+/// Every Subr, when a glyph's scan runs past its [`ScanBudget`]: the ones
+/// it names cannot all be known, and a Subr kept that no glyph needs costs
+/// only its bytes, where one dropped that a glyph needs breaks the glyph.
 fn compute_used_subrs(glyph_charstrings: &[Vec<u8>], subrs: &[Vec<u8>]) -> HashSet<usize> {
     let mut needed: HashSet<usize> = HashSet::new();
     for cs in glyph_charstrings {
-        find_subr_refs_deep(cs, subrs, &mut needed);
+        if !find_subr_refs_deep(cs, subrs, &mut needed) {
+            return (0..subrs.len()).collect();
+        }
     }
     needed
 }
@@ -718,6 +787,25 @@ fn format_float(v: f64) -> String {
 /// Extract width from a decrypted Type 1 charstring.
 /// Parses until hsbw (opcode 13) or sbw (12,7) to get the advance width.
 fn extract_charstring_width(decrypted: &[u8], subrs: &[Vec<u8>]) -> Option<f64> {
+    let mut budget = ScanBudget::new();
+    if !budget.spend(decrypted.len()) {
+        return None;
+    }
+    width_in(decrypted, subrs, 0, &mut budget)
+}
+
+/// [`extract_charstring_width`] for a charstring or a Subr it calls,
+/// `depth` calls down, following no Subr past [`MAX_SUBR_DEPTH`] or
+/// `budget`.
+fn width_in(
+    decrypted: &[u8],
+    subrs: &[Vec<u8>],
+    depth: u32,
+    budget: &mut ScanBudget,
+) -> Option<f64> {
+    if depth > MAX_SUBR_DEPTH {
+        return None;
+    }
     let mut stack: Vec<f64> = Vec::new();
     let mut i = 0;
     while i < decrypted.len() {
@@ -754,10 +842,13 @@ fn extract_charstring_width(decrypted: &[u8], subrs: &[Vec<u8>]) -> Option<f64> 
                 // callsubr: index on stack → follow into subr
                 if let Some(idx) = stack.pop() {
                     let idx = idx as usize;
-                    if idx < subrs.len()
-                        && let Some(w) = extract_charstring_width(&subrs[idx], subrs)
-                    {
-                        return Some(w);
+                    if idx < subrs.len() {
+                        if !budget.spend(subrs[idx].len()) {
+                            return None;
+                        }
+                        if let Some(w) = width_in(&subrs[idx], subrs, depth + 1, budget) {
+                            return Some(w);
+                        }
                     }
                 }
             }
@@ -2638,4 +2729,59 @@ fn type2_widths(
         }
     }
     widths
+}
+
+#[cfg(test)]
+mod subr_scan_tests {
+    use super::*;
+
+    /// Subr 0 of `subrs_calling_themselves`: `0 callsubr`, `times` times,
+    /// then `return`. Type 1 encodes 0 as the byte 139.
+    fn calling_itself(times: usize) -> Vec<Vec<u8>> {
+        let mut subr = [139u8, 10].repeat(times);
+        subr.push(11);
+        vec![subr]
+    }
+
+    /// Before the width scan had a depth limit, a Subr that calls itself
+    /// recursed until the stack was gone, which aborts the process.
+    #[test]
+    fn a_width_scan_through_a_subr_calling_itself_ends() {
+        let glyph = [139u8, 10, 139, 139, 13, 14]; // 0 callsubr, 0 0 hsbw, endchar
+        assert_eq!(
+            extract_charstring_width(&glyph, &calling_itself(1)),
+            Some(0.0)
+        );
+    }
+
+    /// A Subr that calls itself twenty times, ten deep, is 20^10 calls:
+    /// the width scan gives up, rather than running them.
+    #[test]
+    fn a_width_scan_through_a_subr_fan_out_is_bounded() {
+        let glyph = [139u8, 10, 139, 139, 13, 14];
+        let start = std::time::Instant::now();
+        let _ = extract_charstring_width(&glyph, &calling_itself(20));
+        assert!(start.elapsed().as_secs() < 5, "took {:?}", start.elapsed());
+    }
+
+    /// The scan for the Subrs a subset keeps gives up on the same glyph,
+    /// and then keeps every Subr, since it cannot know which are needed.
+    #[test]
+    fn a_subr_scan_through_a_fan_out_keeps_every_subr() {
+        let mut subrs = calling_itself(20);
+        subrs.push(vec![11]);
+        let glyph = vec![139u8, 139, 13, 139, 10, 14];
+        let start = std::time::Instant::now();
+        let used = compute_used_subrs(&[glyph], &subrs);
+        assert!(start.elapsed().as_secs() < 5, "took {:?}", start.elapsed());
+        assert_eq!(used, HashSet::from([0, 1]));
+    }
+
+    /// An ordinary glyph's scan still finds only the Subrs it calls.
+    #[test]
+    fn a_subr_scan_finds_the_subrs_called() {
+        let subrs = vec![vec![11u8], vec![139 + 2, 10, 11], vec![11]];
+        let glyph = vec![139u8, 139, 13, 139 + 1, 10, 14]; // 1 callsubr
+        assert_eq!(compute_used_subrs(&[glyph], &subrs), HashSet::from([1, 2]));
+    }
 }

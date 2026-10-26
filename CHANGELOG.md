@@ -94,6 +94,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **An embedded font program or CMap that cannot be read is a `Content`
   warning.** A substitute font, or two-byte codes, were used in their
   place without a word.
+- **A Type 1 or CFF glyph stops once it has run 1 MiB of charstring.**
+  Subroutine calls were limited only in how deep they nest, so a small
+  font whose subroutines call one another many times over could keep a
+  glyph running for hours, in PDF and PostScript input alike. A glyph now
+  runs at most `stet_fonts::charstring::MAX_CHARSTRING_BYTES`, counting a
+  subroutine each time it is called; past that it is left undrawn, as a
+  glyph nested too deep is. That is sixteen times the largest charstring
+  Type 2 allows, and no glyph in our test files comes near it. Found by
+  the weekly fuzzing run.
+- **Writing a PostScript font into a PDF follows its subroutines within
+  the same limits.** Finding a glyph's width followed subroutine calls
+  with no depth limit, so a subroutine that called itself exhausted the
+  stack, and the scan for the subroutines a subset keeps had only the
+  depth limit. When that scan gives up, every subroutine is kept.
 
 ## [0.8.7] — 2026-10-14
 

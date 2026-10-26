@@ -10,6 +10,22 @@
 use crate::encoding::STANDARD_ENCODING;
 use crate::geometry::{PathSegment, PsPath};
 
+/// The most charstring bytes one glyph may run, each subroutine counted
+/// every time it is called, in a Type 1 or a Type 2 charstring.
+///
+/// Subroutine calls nest at most ten deep, but that alone does not bound
+/// the work: a chain of subroutines each calling the next several times
+/// runs the last that many to the ninth power times, and a font of a few
+/// hundred bytes can keep a glyph running for hours. A glyph that runs
+/// past this is an error, as a call nested too deep is.
+///
+/// A Type 2 charstring is at most 65,535 bytes (Adobe TN#5177, Appendix
+/// B), and subroutines only share pieces of glyphs that were each within
+/// that, so a real glyph runs about that much at most. This is sixteen
+/// times as much. The most any glyph ran in the PDF and PostScript test
+/// corpora, about 2,200 files, was 29,750 bytes.
+pub const MAX_CHARSTRING_BYTES: usize = 1 << 20;
+
 /// Result of executing a charstring: the glyph path and advance width.
 pub struct CharstringResult {
     pub path: PsPath,
@@ -158,6 +174,9 @@ struct CharstringInterp<'a> {
     // hsbw/sbw adds this offset to the sidebearing instead of resetting
     // the current point to zero.
     seac_accent_offset: Option<(f64, f64)>,
+    /// Bytes of charstring run so far, each subroutine counted every time
+    /// it is called: see [`MAX_CHARSTRING_BYTES`].
+    bytes_run: usize,
 }
 
 impl<'a> CharstringInterp<'a> {
@@ -186,6 +205,7 @@ impl<'a> CharstringInterp<'a> {
             cs_lookup,
             weight_vector: None,
             seac_accent_offset: None,
+            bytes_run: 0,
         }
     }
 
@@ -211,7 +231,20 @@ impl<'a> CharstringInterp<'a> {
     }
 
     fn execute(&mut self, data: &[u8]) -> Result<(), String> {
+        self.charge(data.len())?;
         self.execute_inner(data, 0)
+    }
+
+    /// Count `bytes` of charstring toward [`MAX_CHARSTRING_BYTES`], before
+    /// they are decrypted and run. A subroutine is counted whole, as it is
+    /// stored, each time it is called: it is decrypted in full however soon
+    /// it returns, and however much of it `lenIV` skips.
+    fn charge(&mut self, bytes: usize) -> Result<(), String> {
+        self.bytes_run = self.bytes_run.saturating_add(bytes);
+        if self.bytes_run > MAX_CHARSTRING_BYTES {
+            return Err("Charstring runs too long".to_string());
+        }
+        Ok(())
     }
 
     fn execute_inner(&mut self, data: &[u8], depth: usize) -> Result<(), String> {
@@ -338,6 +371,7 @@ impl<'a> CharstringInterp<'a> {
                     if idx >= self.subrs.len() {
                         return Err(format!("callsubr: index {} out of range", idx));
                     }
+                    self.charge(self.subrs[idx].len())?;
                     let subr_data = decrypt_charstring(&self.subrs[idx], self.len_iv);
                     self.execute_inner(&subr_data, depth + 1)?;
                 }
@@ -567,6 +601,7 @@ impl<'a> CharstringInterp<'a> {
                     // counter at 0, so the depth guard above never fires and a
                     // seac naming its own glyph recurses until the native stack
                     // is gone — an abort rather than a panic.
+                    self.charge(bchar_data.len())?;
                     let decrypted = decrypt_charstring(&bchar_data, self.len_iv);
                     self.x = 0.0;
                     self.y = 0.0;
@@ -581,6 +616,7 @@ impl<'a> CharstringInterp<'a> {
                     // coordinate system.  hsbw/sbw adds this translation to
                     // the accent's sidebearing so all path elements shift.
                     if let Some(achar_data) = achar_data {
+                        self.charge(achar_data.len())?;
                         let decrypted = decrypt_charstring(&achar_data, self.len_iv);
                         self.seac_accent_offset = Some((adx - asb + base_lsb, ady));
                         // Threaded, for the same reason as the base above.

@@ -17,7 +17,7 @@
 //! - 16.16 fixed-point numbers (byte 255)
 //! - Transient array (32 entries) for arithmetic ops
 
-use crate::charstring::CharstringResult;
+use crate::charstring::{CharstringResult, MAX_CHARSTRING_BYTES};
 use crate::geometry::{PathSegment, PsPath};
 
 /// Calculate subroutine bias per Type 2 spec.
@@ -59,6 +59,7 @@ pub fn execute_type2_charstring(
         width_only,
         has_path: false,
         seac: None,
+        bytes_run: 0,
     };
 
     execute_bytes(&mut state, data, local_subrs, global_subrs, 0)?;
@@ -91,6 +92,9 @@ struct T2State {
     has_path: bool,
     /// Deprecated seac from endchar with 4 args: (adx, ady, bchar, achar).
     seac: Option<(f64, f64, u8, u8)>,
+    /// Bytes of charstring run so far, each subroutine counted every time
+    /// it is called: see [`MAX_CHARSTRING_BYTES`].
+    bytes_run: usize,
 }
 
 /// Execute a charstring byte stream (recursive for subroutine calls).
@@ -103,6 +107,10 @@ fn execute_bytes(
 ) -> Result<(), String> {
     if depth > 10 {
         return Err("Type 2 subroutine call stack overflow".into());
+    }
+    state.bytes_run = state.bytes_run.saturating_add(data.len());
+    if state.bytes_run > MAX_CHARSTRING_BYTES {
+        return Err("Type 2 charstring runs too long".into());
     }
 
     let mut i = 0;
@@ -643,8 +651,13 @@ fn op_callsubr(
     };
     let biased = biased as usize;
     if biased < local_subrs.len() {
-        let subr_data = local_subrs[biased].clone();
-        execute_bytes(state, &subr_data, local_subrs, global_subrs, depth + 1)?;
+        execute_bytes(
+            state,
+            &local_subrs[biased],
+            local_subrs,
+            global_subrs,
+            depth + 1,
+        )?;
     }
     Ok(())
 }
@@ -666,8 +679,13 @@ fn op_callgsubr(
     };
     let biased = biased as usize;
     if biased < global_subrs.len() {
-        let subr_data = global_subrs[biased].clone();
-        execute_bytes(state, &subr_data, local_subrs, global_subrs, depth + 1)?;
+        execute_bytes(
+            state,
+            &global_subrs[biased],
+            local_subrs,
+            global_subrs,
+            depth + 1,
+        )?;
     }
     Ok(())
 }

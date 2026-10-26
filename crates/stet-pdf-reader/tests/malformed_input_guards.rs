@@ -1877,3 +1877,68 @@ fn small_nested_content_costs_what_it_did() {
         doc.parse_warnings()
     );
 }
+
+/// An embedded CFF font whose glyph calls a chain of ten subroutines, each
+/// calling the next twenty times. Calls nest at most ten deep, and only
+/// that was limited, so this 1 KB file held the page for longer than anyone
+/// would wait: 20^9 calls. The glyph is now left undrawn once it has run as
+/// much as any real glyph needs, many times over.
+#[test]
+fn an_embedded_font_whose_glyph_fans_out_is_bounded() {
+    use stet_fonts::cff_writer::{CidFont, FontDict, Glyph, write_cid_font};
+    // `i + 32, 29` is `callgsubr i`: `i + 32` is `i - 107`, and the bias
+    // of a short list of subroutines is 107.
+    let mut subrs: Vec<Vec<u8>> = (1..10u8)
+        .map(|next| {
+            let mut subr = [next + 32, 29].repeat(20);
+            subr.push(11);
+            subr
+        })
+        .collect();
+    subrs.push(vec![11]);
+    let mut font = CidFont::new("FanOut", "Adobe", "Identity", 0);
+    font.cid_count = 2;
+    font.font_bbox = [0.0, 0.0, 1000.0, 1000.0];
+    font.global_subrs = subrs;
+    font.font_dicts = vec![FontDict::default()];
+    font.glyphs = vec![
+        Glyph::new(0, 0, vec![14]),
+        Glyph::new(1, 0, vec![32, 29, 14]),
+    ];
+    let cff = write_cid_font(&font).unwrap();
+
+    let mut file =
+        format!("<</Subtype/CIDFontType0C/Length {}>>\nstream\n", cff.len()).into_bytes();
+    file.extend_from_slice(&cff);
+    file.extend_from_slice(b"\nendstream");
+    let doc = one_page_doc(
+        b"/Resources<</Font<</F1 5 0 R>>>>",
+        b"BT /F1 24 Tf 10 40 Td <0001> Tj ET",
+        &[
+            (
+                5,
+                b"<</Type/Font/Subtype/Type0/BaseFont/FanOut/Encoding/Identity-H\
+                  /DescendantFonts[6 0 R]>>"
+                    .to_vec(),
+            ),
+            (
+                6,
+                b"<</Type/Font/Subtype/CIDFontType0/BaseFont/FanOut\
+                  /CIDSystemInfo<</Registry(Adobe)/Ordering(Identity)/Supplement 0>>\
+                  /FontDescriptor 7 0 R/DW 1000>>"
+                    .to_vec(),
+            ),
+            (
+                7,
+                b"<</Type/FontDescriptor/FontName/FanOut/Flags 4/FontBBox[0 0 1000 1000]\
+                  /ItalicAngle 0/Ascent 900/Descent -200/CapHeight 700/StemV 80\
+                  /FontFile3 8 0 R>>"
+                    .to_vec(),
+            ),
+            (8, file),
+        ],
+    );
+    let start = std::time::Instant::now();
+    load_and_render(&doc);
+    assert!(start.elapsed().as_secs() < 10, "took {:?}", start.elapsed());
+}

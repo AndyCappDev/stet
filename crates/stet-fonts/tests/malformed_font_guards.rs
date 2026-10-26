@@ -544,3 +544,129 @@ fn a_table_is_returned_only_as_far_as_the_data_goes() {
     assert_eq!(table_data(&font_with(u32::MAX, u32::MAX), b"CFF "), None);
     assert_eq!(table_data(&font_with(28, 4), b"glyf"), None);
 }
+
+// === Subroutine fan-out ===================================================
+
+/// Found by the weekly `fuzz_font_cff` run of 2026-10-26: a CFF font of 195
+/// bytes whose one glyph calls its one global subroutine, which calls itself
+/// over and over. Calls nest at most ten deep, but each level calls the next
+/// many times, so the glyph ran for 135 seconds in a release build. Drawn in
+/// a PDF it held the page that long.
+#[test]
+fn cff_fuzz_subroutine_fan_out_is_bounded() {
+    use stet_fonts::cff_parser::parse_cff;
+    const FONT: &[u8] = &[
+        0x01, 0x00, 0x01, 0x01, 0x00, 0x01, 0x00, 0x01, 0x01, 0x00, 0x88, 0x7a, 0x40, 0xf9, 0x36,
+        0x2f, 0x25, 0xff, 0xff, 0xf9, 0xff, 0x3d, 0x00, 0x00, 0x00, 0x00, 0x7e, 0x01, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x35,
+        0x00, 0x01, 0x01, 0x00, 0x01, 0x00, 0x01, 0x01, 0x00, 0x1e, 0x00, 0x00, 0x6d, 0xff, 0xff,
+        0x11, 0x15, 0x64, 0x55, 0x55, 0x60, 0x55, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+        0x1d, 0x1d, 0x1d, 0x1d, 0x26, 0x1d, 0x1d, 0x1d, 0x1d, 0x1d, 0xc7, 0x1d, 0x1d, 0x1d, 0x1d,
+        0x1d, 0x9d, 0x1d, 0x1d, 0x19, 0x1d, 0x1d, 0x1d, 0x1d, 0x1d, 0x1d, 0x00, 0x34, 0xf9, 0xff,
+        0x3d, 0x00, 0x00, 0x01, 0x01, 0x00, 0x88, 0x7a, 0x40, 0xf9, 0x35, 0xe4, 0xff, 0xff, 0xff,
+        0xf9, 0xff, 0x3d, 0x00, 0x00, 0x00, 0x00, 0x7e, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x41, 0x00, 0x00, 0x00, 0x00, 0x00, 0x35, 0x00, 0x01, 0x01, 0x00,
+        0x01, 0x00, 0x01, 0x01, 0x00, 0x1d, 0x1d, 0x1d, 0x1d, 0x26, 0x1d, 0x1d, 0x1d, 0x1d, 0x1d,
+        0x1d, 0x1d, 0x1d, 0x9d, 0x1d, 0x1d, 0x1d, 0x1d, 0x1d, 0x1d, 0x1d, 0xff, 0x7f, 0x1d, 0x1d,
+        0x20, 0x20, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x6d, 0x01, 0x01,
+    ];
+    let fonts = parse_cff(FONT).expect("the reproducer parses");
+    let font = &fonts[0];
+    let start = std::time::Instant::now();
+    let result = execute_type2_charstring(
+        &font.char_strings[0],
+        &font.local_subrs,
+        &font.global_subrs,
+        0.0,
+        0.0,
+        false,
+    );
+    assert!(result.is_err(), "the glyph should run past the limit");
+    assert!(start.elapsed().as_secs() < 5, "took {:?}", start.elapsed());
+}
+
+/// Ten subroutines in a chain, each calling the next `times` times, the
+/// last only returning: `call(i)` is the charstring that calls subroutine
+/// `i`. The chain stays within the ten levels calls may nest, so the depth
+/// limit never fires, but a glyph that calls the first runs the last
+/// `times` to the ninth power times.
+fn subroutine_chain(times: usize, call: impl Fn(u8) -> Vec<u8>) -> Vec<Vec<u8>> {
+    let mut subrs: Vec<Vec<u8>> = (1..10u8)
+        .map(|next| {
+            let mut subr = call(next).repeat(times);
+            subr.push(11); // return
+            subr
+        })
+        .collect();
+    subrs.push(vec![11]);
+    subrs
+}
+
+/// Type 2: `callgsubr i` is `i - 107` and 29, since the bias of a short
+/// list of subroutines is 107, and `i - 107` is the byte `i + 32`.
+fn type2_call(i: u8) -> Vec<u8> {
+    vec![i + 32, 29]
+}
+
+/// Type 1: `callsubr i` is `i` and 10, and `i` is the byte `i + 139`.
+fn type1_call(i: u8) -> Vec<u8> {
+    vec![i + 139, 10]
+}
+
+/// Type 2: a chain of global subroutines twenty wide, 20^9 calls.
+#[test]
+fn type2_subroutine_fan_out_is_bounded() {
+    let subrs = subroutine_chain(20, type2_call);
+    let mut glyph = type2_call(0);
+    glyph.push(14); // endchar
+    let start = std::time::Instant::now();
+    let result = execute_type2_charstring(&glyph, &[], &subrs, 0.0, 0.0, false);
+    assert!(result.is_err());
+    assert!(start.elapsed().as_secs() < 5, "took {:?}", start.elapsed());
+}
+
+/// Type 1: the same chain. `/lenIV -1` (the `usize::MAX` sentinel) keeps
+/// the bytes as written.
+#[test]
+fn type1_subroutine_fan_out_is_bounded() {
+    let subrs = subroutine_chain(20, type1_call);
+    let mut glyph = vec![139, 139, 13]; // 0 0 hsbw
+    glyph.extend(type1_call(0));
+    glyph.push(14);
+    let start = std::time::Instant::now();
+    let result = execute_charstring_ex(&glyph, &subrs, usize::MAX, false, None);
+    assert!(result.is_err());
+    assert!(start.elapsed().as_secs() < 5, "took {:?}", start.elapsed());
+}
+
+/// The same Type 1 glyph converted to Type 2, as PDF output does to embed a
+/// PostScript font.
+#[test]
+fn type1_to_type2_subroutine_fan_out_is_bounded() {
+    use stet_fonts::type1_to_type2::convert_charstring;
+    let subrs = subroutine_chain(20, type1_call);
+    let mut glyph = vec![139, 139, 13];
+    glyph.extend(type1_call(0));
+    glyph.push(14);
+    let start = std::time::Instant::now();
+    assert!(convert_charstring(&glyph, &subrs, usize::MAX).is_err());
+    assert!(start.elapsed().as_secs() < 5, "took {:?}", start.elapsed());
+}
+
+/// The limit counts each subroutine every time it is called, and a glyph
+/// that runs exactly as much as it allows is drawn. Subroutine 0 is just
+/// `return`, one byte, and the glyph calls it `n` times: the glyph's own
+/// `2n + 1` bytes and `n` calls of one byte are `3n + 1`.
+#[test]
+fn a_glyph_at_the_charstring_limit_is_drawn() {
+    use stet_fonts::charstring::MAX_CHARSTRING_BYTES;
+    let glyph = |n: usize| {
+        let mut cs = [32u8, 29].repeat(n);
+        cs.push(14);
+        cs
+    };
+    let subrs = [vec![11u8]];
+    let n = (MAX_CHARSTRING_BYTES - 1) / 3;
+    assert!(execute_type2_charstring(&glyph(n), &[], &subrs, 0.0, 0.0, false).is_ok());
+    assert!(execute_type2_charstring(&glyph(n + 1), &[], &subrs, 0.0, 0.0, false).is_err());
+}
