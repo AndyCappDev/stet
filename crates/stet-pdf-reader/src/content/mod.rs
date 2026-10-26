@@ -1873,7 +1873,7 @@ impl<'a> ContentInterpreter<'a> {
         // Ocular, and Firefox all interpret these as `<number> <operator>`.
         let mut prev_token_was_glued_number = false;
         loop {
-            // A cancelled page is abandoned, not failed, and a page over a
+            // A canceled page is abandoned, not failed, and a page over a
             // limit is reported by the caller: either way the stream ends
             // here without an error, so nothing is reported as skipped.
             if self.halted() {
