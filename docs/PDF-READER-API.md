@@ -173,17 +173,26 @@ Off by default. On, nothing in such a font is drawn or extracted, and the
 text of the page's other fonts is drawn and read as before. The font's
 codes are still read two bytes at a time and move the text position on
 by its widths (`/DW` and `/W`), so the text that follows is drawn where
-it would have been. The
-`ParsePhase::MissingCMap` warning is still recorded for each page, and
-its message adds that the text in the font that uses the CMap is left
-out. A font left out this way that the document does not embed either is
-reported as `ParsePhase::MissingFont`, with no substitute said to be
-drawn. Two cases keep their text, since their codes do not depend on the
-missing CMap: a UCS-2 CMap, such as `UniGB-UCS2-H`, whose codes are
-Unicode, two bytes each; and a CMap the document embeds whose `usecmap`
-base is not found, which still reads the codes it maps itself. Set it
-before any page is read; changed later, the fonts resolved so far are
-resolved again. `leave_out_text_without_cmap()` says whether it is on.
+it would have been. The `ParsePhase::MissingCMap` warning is still
+recorded for each page, and its message adds that the text in the font
+that uses the CMap is left out. A font left out this way that the
+document does not embed either is reported as `ParsePhase::MissingFont`,
+by name, with no substitute said to be drawn. Two cases keep their text,
+since their codes do not depend on the missing CMap: a UCS-2 CMap, such
+as `UniGB-UCS2-H`, whose codes are Unicode, two bytes each; and a CMap
+the document embeds whose `usecmap` base is not found, which still reads
+the codes it maps itself.
+
+With [`set_host_files(false)`](#reading-no-file-from-the-machine) no CMap
+file is read, so every predefined CMap the document does not embed counts
+as missing. With both on, all CJK text in a predefined CMap other than a
+UCS-2 one is left out, even on a machine that has the CMaps installed.
+`Identity-H`, `Identity-V` and a CMap the document embeds need no file
+and keep their text.
+
+Set it before any page is read; changed later, the fonts resolved so far
+are resolved again. `leave_out_text_without_cmap()` says whether it is
+on.
 
 ### Display lists and resolution
 

@@ -1010,6 +1010,13 @@ impl<'a> PdfDocument<'a> {
     /// out this way that the document does not embed either is reported
     /// as [`ParsePhase::MissingFont`] as well, with no substitute drawn.
     ///
+    /// With [`set_host_files(false)`](Self::set_host_files) no CMap file is
+    /// read, so every predefined CMap the document does not embed counts
+    /// as missing. With both on, all CJK text in a predefined CMap other
+    /// than a UCS-2 one is left out, even on a machine that has the CMaps
+    /// installed. `Identity-H`, `Identity-V` and a CMap the document embeds
+    /// need no file and keep their text.
+    ///
     /// Set it before any page is read. Changed later, the fonts resolved so
     /// far are resolved again.
     pub fn set_leave_out_text_without_cmap(&mut self, enabled: bool) {
