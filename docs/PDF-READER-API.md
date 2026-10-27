@@ -921,15 +921,21 @@ leaves once the parent's other kids are counted, with one warning at the
 first of them whose message names them all, "pages 2 to 5" for example.
 When that cannot be told, because a count is missing or more than one
 kid is lost, it is one blank page; so it is when the count would put
-more pages in the document than one for every 4 bytes of the file. A
-real page takes about 10 bytes of file, so no real file comes near that,
-and a small file cannot make the reader hold millions of pages. When the
-tree cannot be followed at all, the pages are found by scanning the file
-for page objects, which may miss some or include ones an update
-replaced; that is a `PageTree` warning too. A document that opens with
-fewer pages than expected, or none, is worth checking for these. All are `Severity::Warning`. Opening lists at most 64 of them,
-then one last warning, "further problems with the page tree are not
-listed".
+more pages in the document than one for every 4 bytes of the file. Every
+blank page counts against that: once the pages found reach one for every
+4 bytes of the file, a kid that cannot be read has no blank page, and
+its warning says the file's length allows no more. A kid `0 0 R` is
+never a blank page, however many times the tree lists it, since object 0
+can never be a page; one warning names it, at the page it comes before,
+or with no `location` when it comes after the last. A real page takes
+about 10 bytes of file, so no real file comes near that, and a small
+file cannot make the reader hold millions of pages. When the tree cannot
+be followed at all, the pages are found by scanning the file for page
+objects, which may miss some or include ones an update replaced; that is
+a `PageTree` warning too. A document that opens with fewer pages than
+expected, or none, is worth checking for these. All are
+`Severity::Warning`. Opening lists at most 64 of them, then one last
+warning, "further problems with the page tree are not listed".
 
 `ParsePhase::CrossReference` is recorded, as `Severity::Info`, when the
 file's cross-reference table is missing or damaged and the reader

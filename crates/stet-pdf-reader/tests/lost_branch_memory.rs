@@ -10,7 +10,10 @@
 //! Neither the object numbers a file names nor the cross-reference entries
 //! it declares are a measure of its pages: one subsection header can name
 //! a very high object number, and a compressed cross-reference stream
-//! declares millions of entries in a few kilobytes.
+//! declares millions of entries in a few kilobytes. Nor are the kids a
+//! tree lists, as a compressed object stream lists a million in a few
+//! kilobytes too: a kid naming object 0 is no page at all, and every blank
+//! page counts against the file's length.
 //!
 //! This file has its own allocator, which records the most memory live at
 //! once, so that each test can show that a count claiming millions of
@@ -151,6 +154,76 @@ fn with_stream_of(objects: &[Vec<u8>], entries: u32) -> Vec<u8> {
     pdf
 }
 
+/// `bytes` compressed as a `/FlateDecode` stream.
+fn deflated(bytes: &[u8]) -> Vec<u8> {
+    let mut packed = ZlibEncoder::new(Vec::new(), Compression::best());
+    packed.write_all(bytes).unwrap();
+    packed.finish().unwrap()
+}
+
+/// A PDF of `objects` whose page tree, object 2, is written compressed in
+/// an object stream, object 7, as a `/Kids` array of many kids can be. Its
+/// cross-reference stream is object 8.
+fn with_tree_compressed(objects: &[Vec<u8>]) -> Vec<u8> {
+    let header = b"2 0 ";
+    let packed = deflated(&[&header[..], &objects[1]].concat());
+    let mut object_stream = format!(
+        "<< /Type /ObjStm /N 1 /First {} /Filter /FlateDecode /Length {} >>\nstream\n",
+        header.len(),
+        packed.len()
+    )
+    .into_bytes();
+    object_stream.extend(&packed);
+    object_stream.extend(b"\nendstream");
+
+    let mut pdf = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    let written = [
+        (1, &objects[0]),
+        (3, &objects[2]),
+        (4, &objects[3]),
+        (5, &objects[4]),
+        (6, &objects[5]),
+        (7, &object_stream),
+    ];
+    for (number, object) in written {
+        offsets.push(pdf.len());
+        pdf.extend(format!("{number} 0 obj\n").as_bytes());
+        pdf.extend(object);
+        pdf.extend(b"\nendobj\n");
+    }
+    let xref = pdf.len();
+
+    // Each entry is its type, a four-byte offset or object stream number,
+    // and a two-byte generation or index.
+    let entry = |kind: u8, field: usize| {
+        let mut e = vec![kind];
+        e.extend((field as u32).to_be_bytes());
+        e.extend([0, 0]);
+        e
+    };
+    let mut table = vec![0u8; 7];
+    table.extend(entry(1, offsets[0]));
+    // Object 2 is the first object of object stream 7.
+    table.extend(entry(2, 7));
+    for &offset in &offsets[1..] {
+        table.extend(entry(1, offset));
+    }
+    table.extend(entry(1, xref));
+    let packed = deflated(&table);
+    pdf.extend(
+        format!(
+            "8 0 obj\n<< /Type /XRef /Size 9 /W [1 4 2] /Root 1 0 R \
+             /Filter /FlateDecode /Length {} >>\nstream\n",
+            packed.len()
+        )
+        .as_bytes(),
+    );
+    pdf.extend(&packed);
+    pdf.extend(format!("\nendstream\nendobj\nstartxref\n{xref}\n%%EOF\n").as_bytes());
+    pdf
+}
+
 /// What a warning is, without its message.
 type Kind = (ParsePhase, Option<LocationHint>, Severity);
 
@@ -225,4 +298,56 @@ fn a_count_past_the_file_length_is_one_blank_page_whatever_the_object_numbers() 
         claimed_peak <= honest_peak + (1 << 20),
         "{claimed_peak} bytes live at most, against {honest_peak} for a count of 3"
     );
+}
+
+/// Object 0 is never a page, however many times a tree lists it. A
+/// million kids `0 0 R` in a compressed object stream take a few
+/// kilobytes: they are no pages, one warning names them, and opening the
+/// file holds no more memory than with a million kids of the same length
+/// that are not references, which the walk passes over.
+#[test]
+fn a_million_kids_naming_object_0_are_no_pages() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    const KIDS: usize = 1_000_000;
+    let tree = |kid: &str| {
+        format!(
+            "<< /Type /Pages /Kids [3 0 R {}5 0 R] /Count {} >>",
+            kid.repeat(KIDS),
+            KIDS + 2
+        )
+    };
+    let named = with_tree_compressed(&objects(&tree("0 0 R ")));
+    assert!(named.len() < 32 * 1024, "the file is {} bytes", named.len());
+
+    let (_, _, passed_over_peak) = open(with_tree_compressed(&objects(&tree("false "))));
+    let (pages, warnings, named_peak) = open(named);
+    assert_eq!(pages, 2);
+    assert_eq!(warnings, [lost_page_at(1)]);
+    assert!(
+        named_peak <= passed_over_peak + (1 << 20),
+        "{named_peak} bytes live at most, against {passed_over_peak} for kids passed over"
+    );
+}
+
+/// A compressed object stream can list distinct objects that are not in
+/// the file for a few bytes each, more of them than the file's length
+/// allows blank pages for. Each is one blank page while the length allows
+/// one more, the pages before them counted, and no page after that.
+#[test]
+fn many_kids_that_cannot_be_read_have_no_more_blank_pages_than_the_file_allows() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    const KIDS: u32 = 200_000;
+    let missing: String = (1000..1000 + KIDS).map(|n| format!("{n} 0 R ")).collect();
+    let tree = format!("<< /Type /Pages /Kids [3 0 R {missing}5 0 R] >>");
+    let pdf = with_tree_compressed(&objects(&tree));
+    let allowed = pdf.len() / 4;
+    assert!(allowed < KIDS as usize, "the file is {} bytes", pdf.len());
+
+    let (pages, warnings, _) = open(pdf);
+    // The first page and the blank pages are as many as the file allows,
+    // and the last page is still there.
+    assert_eq!(pages, allowed + 1);
+    // As many warnings as a tree lists, and the note that the list is cut
+    // short.
+    assert_eq!(warnings.len(), 65);
 }

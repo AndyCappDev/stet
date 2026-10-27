@@ -90,11 +90,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   branch of the tree that cannot be read is as many blank pages as its
   parent's `/Count` leaves for it, with one warning naming them all, or
   one blank page when that cannot be told or when the count is more
-  pages than one for every 4 bytes of the file. When page tree warnings
-  are cut short, the last one no longer says more pages may be left out.
-  `page_count()` counts these pages, so for these files it and the
-  numbers of the pages after them change. See `docs/PDF-READER-API.md`,
-  "Warnings from opening the document".
+  pages than one for every 4 bytes of the file. Every blank page counts
+  against that bound: past it, a kid that cannot be read has no blank
+  page, and its warning says so. A kid `0 0 R` is no page at all,
+  however many times it is listed, as object 0 can never be a page. When
+  page tree warnings are cut short, the last one no longer says more
+  pages may be left out. `page_count()` counts these pages, so for these
+  files it and the numbers of the pages after them change. See
+  `docs/PDF-READER-API.md`, "Warnings from opening the document".
 
 - **A document opened with `from_bytes` or `from_owned` looks for the
   system's CMYK profile when it first needs its colors, not as it is

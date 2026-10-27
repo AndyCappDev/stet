@@ -53,11 +53,17 @@ pub(crate) type PageBoxNotes = Vec<(usize, String)>;
 struct Collected {
     pages: Vec<PageInfo>,
     notes: PageBoxNotes,
-    /// The blank pages standing in for kids the tree names but that cannot
-    /// be read, one entry for each such kid. They are warned of by
+    /// The kids the tree names but that cannot be read, one entry for each,
+    /// with the blank pages standing in for it. They are warned of by
     /// [`warn_of_stand_ins`](Self::warn_of_stand_ins) once the walk's pages
-    /// are known to be the document's.
+    /// are known to be the document's. Only the first
+    /// `MAX_PAGE_TREE_WARNINGS + 1` are kept, as no more can be warned of.
     stand_ins: Vec<StandIn>,
+    /// How many of the pages found are blank pages standing in for kids
+    /// that cannot be read.
+    stand_in_pages: usize,
+    /// Whether a kid `0 0 R` has been met, which is warned of once.
+    object_zero_named: bool,
     /// Pages counted by the trees tried before this one, when trees are
     /// tried one after another: blank pages a file can claim are bounded by
     /// its length across all of them, not for each.
@@ -69,9 +75,11 @@ struct Collected {
 
 /// Blank pages standing in for one kid of the tree that cannot be read.
 struct StandIn {
-    /// The first of them, counted from 0.
+    /// The first of them, counted from 0: the page the kid would have come
+    /// before when there are none.
     first: usize,
-    /// How many: one for a page, more for a branch.
+    /// How many: one for a page, more for a branch, none for object 0 or
+    /// once the file's length allows no more.
     count: usize,
     /// The object the tree names there.
     obj_num: u32,
@@ -87,15 +95,19 @@ struct StandIn {
 /// short.
 const MAX_PAGE_TREE_WARNINGS: usize = 64;
 
-/// Bytes of the file each blank page standing in for a lost branch needs.
+/// Bytes of the file each blank page standing in for a kid that cannot be
+/// read needs.
 ///
-/// A branch that cannot be read is believed to hold as many pages as its
-/// parent's `/Count` leaves for it only while the file is at least this
-/// many bytes for each page in the document. A real page costs about ten:
-/// two million of them take a 19 MB file, as a `/Kids` array compresses
-/// little. Cross-reference entries are no measure, because a compressed
-/// cross-reference stream makes them nearly free: 18 KB of one can declare
-/// two million.
+/// A blank page is put in the document only while the file is at least
+/// this many bytes for each page in it, the blank page included: a branch
+/// that cannot be read is believed to hold as many pages as its parent's
+/// `/Count` leaves for it only within that, and past it no blank page is
+/// put in at all. A real page costs about ten: two million of them take a
+/// 19 MB file, as a `/Kids` array compresses little. Cross-reference
+/// entries are no measure, because a compressed cross-reference stream
+/// makes them nearly free: 18 KB of one can declare two million. Nor are
+/// the kids a tree lists, as a compressed object stream can list a million
+/// in a few kilobytes.
 const FILE_BYTES_PER_BLANK_PAGE: usize = 4;
 
 impl Collected {
@@ -124,12 +136,15 @@ impl Collected {
     /// cannot be read, so that the pages after it keep their numbers. Each
     /// has the boxes and rotation it inherits, and no content.
     fn stand_in(&mut self, obj_num: u32, gen_num: u16, inherited: &Inherited, count: usize) {
-        self.stand_ins.push(StandIn {
-            first: self.pages.len(),
-            count,
-            obj_num,
-            gen_num,
-        });
+        if self.stand_ins.len() <= MAX_PAGE_TREE_WARNINGS {
+            self.stand_ins.push(StandIn {
+                first: self.pages.len(),
+                count,
+                obj_num,
+                gen_num,
+            });
+        }
+        self.stand_in_pages += count;
         for _ in 0..count {
             let page = self.pages.len();
             let (media_box, crop_box) = usable_page_boxes(
@@ -150,14 +165,18 @@ impl Collected {
         }
     }
 
-    /// How many of the pages found are blank pages standing in for kids
-    /// that cannot be read.
-    fn stand_in_pages(&self) -> usize {
-        self.stand_ins.iter().map(|s| s.count).sum()
+    /// How many more blank pages the file's length allows: one for every
+    /// [`FILE_BYTES_PER_BLANK_PAGE`] bytes, less the pages counted so far,
+    /// those of trees tried before this one included.
+    fn blank_pages_left(&self, resolver: &Resolver) -> usize {
+        (resolver.data().len() / FILE_BYTES_PER_BLANK_PAGE)
+            .saturating_sub(self.counted_before.saturating_add(self.pages.len()))
     }
 
     /// Warn once of each kid the tree names but that cannot be read, at the
-    /// first of the blank pages standing in for it, naming them all.
+    /// first of the blank pages standing in for it, naming them all. A kid
+    /// with none is warned of at the page it would have come before, or
+    /// with no page when it comes after the last.
     fn warn_of_stand_ins(&mut self, resolver: &Resolver) {
         for stand_in in std::mem::take(&mut self.stand_ins) {
             if self.warnings > MAX_PAGE_TREE_WARNINGS {
@@ -170,18 +189,30 @@ impl Collected {
                 gen_num,
             } = stand_in;
             // Counted from 1 here, as a reader counts pages.
-            let pages = match count {
-                1 => format!("page {} is blank", first + 1),
-                _ => format!("pages {} to {} are blank", first + 1, first + count),
-            };
-            self.warn(
-                resolver,
-                Some(LocationHint::Page(first)),
-                &format!(
-                    "object {obj_num} {gen_num}, which the page tree names here, \
-                     cannot be read; {pages} in its place"
+            let message = match (obj_num, count) {
+                (0, _) => format!(
+                    "object 0 {gen_num}, which the page tree names here, \
+                     can never be a page; no page is in its place"
                 ),
-            );
+                (_, 0) => format!(
+                    "object {obj_num} {gen_num}, which the page tree names here, \
+                     cannot be read; the file's length allows no more blank pages, \
+                     so no page is in its place"
+                ),
+                (_, 1) => format!(
+                    "object {obj_num} {gen_num}, which the page tree names here, \
+                     cannot be read; page {} is blank in its place",
+                    first + 1
+                ),
+                _ => format!(
+                    "object {obj_num} {gen_num}, which the page tree names here, \
+                     cannot be read; pages {} to {} are blank in its place",
+                    first + 1,
+                    first + count
+                ),
+            };
+            let location = (first < self.pages.len()).then_some(LocationHint::Page(first));
+            self.warn(resolver, location, &message);
         }
     }
 }
@@ -347,7 +378,7 @@ fn collect_pages_via_catalog_scan(
                 0,
             )
             .is_ok()
-                && found.pages.len() > found.stand_in_pages()
+                && found.pages.len() > found.stand_in_pages
             {
                 found.warn_of_stand_ins(resolver);
                 resolver.warnings().record_once(
@@ -577,7 +608,15 @@ fn collect_pages_recursive(
                             visited,
                             depth + 1,
                         )?;
-                    } else if *n != 0 && !visited.insert(*n) {
+                    } else if *n == 0 {
+                        // Object 0 is never an object of the file, let
+                        // alone a page: no page stands in for it, however
+                        // many times it is listed, and it is warned of once.
+                        if !found.object_zero_named {
+                            found.object_zero_named = true;
+                            found.stand_in(0, *g, &inherited, 0);
+                        }
+                    } else if !visited.insert(*n) {
                         found.warn(
                             resolver,
                             Some(LocationHint::Object {
@@ -589,15 +628,15 @@ fn collect_pages_recursive(
                     } else {
                         // Missing, unreadable, or not a dictionary: blank
                         // pages stand in for it, so that the pages after it
-                        // keep their numbers.
-                        let count = *lost_kid_pages.get_or_insert_with(|| {
-                            pages_of_lost_kid(
-                                resolver,
-                                node_dict,
-                                kids,
-                                found.counted_before.saturating_add(found.pages.len()),
-                            )
-                        });
+                        // keep their numbers, as many as the file's length
+                        // allows.
+                        let told = *lost_kid_pages
+                            .get_or_insert_with(|| pages_of_lost_kid(resolver, node_dict, kids));
+                        let room = found.blank_pages_left(resolver);
+                        let count = match told {
+                            Some(pages) if pages <= room as u64 => pages as usize,
+                            _ => room.min(1),
+                        };
                         found.stand_in(*n, *g, &inherited, count);
                     }
                 }
@@ -642,6 +681,8 @@ fn kid_pages(resolver: &Resolver, kid: &PdfObj) -> KidPages {
     };
     let Some(type_entry) = entry(b"Type") else {
         return match kid {
+            // Object 0 is never a page: the walk puts none in its place.
+            PdfObj::Ref(0, _) => KidPages::Known(0),
             PdfObj::Ref(..) => KidPages::Lost,
             // Neither a reference nor a dictionary: the walk passes over it.
             _ => KidPages::Known(0),
@@ -662,46 +703,50 @@ fn kid_pages(resolver: &Resolver, kid: &PdfObj) -> KidPages {
     }
 }
 
-/// How many blank pages stand in for the kid of `node` that cannot be
-/// read: as many as `node`'s `/Count` leaves for it once its other kids are
-/// counted, when that can be told, and otherwise one.
+/// How many blank pages the kid of `node` that cannot be read stands for,
+/// when that can be told: as many as `node`'s `/Count` leaves for it once
+/// its other kids are counted, each counted once however many times it is
+/// listed, as the walk follows it once.
 ///
 /// It cannot be told when `node` has no usable `/Count`, when one of its
 /// other kids is a branch with none, when more than one of its kids cannot
-/// be read, or when the count leaves nothing for it. Nor when the count
-/// would put more pages in the document, `pages_before` of them counted
-/// already, than the file has [`FILE_BYTES_PER_BLANK_PAGE`] bytes for: no
-/// file that small held that many pages, and a count that says so is not
-/// believed. That bounds the pages a file can make the reader hold by its
-/// length, which neither the highest object number it names nor the
-/// cross-reference entries it declares do.
-fn pages_of_lost_kid(
-    resolver: &Resolver,
-    node: &PdfDict,
-    kids: &[PdfObj],
-    pages_before: usize,
-) -> usize {
-    let told = || -> Option<u64> {
-        let count = node
-            .get(b"Count")
-            .and_then(|c| resolver.deref(c).ok())
-            .and_then(|c| c.as_int())
-            .and_then(|c| u64::try_from(c).ok())?;
-        let mut others: u64 = 0;
-        let mut lost = 0;
-        for kid in kids {
-            match kid_pages(resolver, kid) {
-                KidPages::Lost => lost += 1,
-                KidPages::Known(n) => others = others.checked_add(n)?,
-                KidPages::Unknown => return None,
-            }
+/// be read, or when the count leaves nothing for it. The caller then puts
+/// one blank page in its place. It also puts one, not the count, when the
+/// count is more pages than the file's length allows: no file that small
+/// held that many pages, and a count that says so is not believed. And it
+/// puts none once the file's length allows no more. That bounds the pages
+/// a file can make the reader hold by its length, which neither the
+/// highest object number it names, nor the cross-reference entries it
+/// declares, nor the kids it lists do.
+fn pages_of_lost_kid(resolver: &Resolver, node: &PdfDict, kids: &[PdfObj]) -> Option<u64> {
+    let count = node
+        .get(b"Count")
+        .and_then(|c| resolver.deref(c).ok())
+        .and_then(|c| c.as_int())
+        .and_then(|c| u64::try_from(c).ok())?;
+    let mut others: u64 = 0;
+    let mut lost = 0;
+    let mut listed = HashSet::new();
+    for kid in kids {
+        if let PdfObj::Ref(n, _) = kid
+            && *n != 0
+            && !listed.insert(*n)
+        {
+            continue;
         }
-        let left = count.checked_sub(others)?;
-        let room =
-            (resolver.data().len() / FILE_BYTES_PER_BLANK_PAGE).saturating_sub(pages_before) as u64;
-        (lost == 1 && left >= 1 && left <= room).then_some(left)
-    };
-    told().map_or(1, |n| n as usize)
+        match kid_pages(resolver, kid) {
+            KidPages::Lost => {
+                lost += 1;
+                if lost > 1 {
+                    return None;
+                }
+            }
+            KidPages::Known(n) => others = others.checked_add(n)?,
+            KidPages::Unknown => return None,
+        }
+    }
+    let left = count.checked_sub(others)?;
+    (lost == 1 && left >= 1).then_some(left)
 }
 
 /// Clamp a box to fit within the media box (intersection).

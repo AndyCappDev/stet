@@ -396,3 +396,114 @@ fn trees_tried_one_after_another_share_the_blank_pages_the_file_allows() {
     assert!(doc.render_page(1, 72.0).unwrap().is_empty());
     assert_eq!(text_of(&doc, 2), ["last"]);
 }
+
+/// Object 0 is never a page: a kid `0 0 R` is no page, however many times
+/// it is listed, and is not counted as a kid that cannot be read. One
+/// warning names it at the page it comes before, with no page range, and
+/// with no page when it comes after the last.
+#[test]
+fn a_kid_naming_object_0_is_no_page() {
+    let tree = "<< /Type /Pages /Kids [3 0 R 0 0 R 0 0 R 5 0 R] /Count 2 >>";
+    let doc = open(&objects(tree, "first", "second", &[]));
+    assert_eq!(doc.page_count(), 2);
+    assert_eq!(text_of(&doc, 1), ["second"]);
+    assert_eq!(kinds(&doc), [page_tree_warning_at(1)]);
+    let message = doc.parse_warnings()[0].message.clone();
+    assert!(message.contains("object 0 0"), "{message}");
+    assert!(message.contains("can never be a page"), "{message}");
+    assert!(!message.contains("blank"), "{message}");
+
+    let tree = "<< /Type /Pages /Kids [3 0 R 5 0 R 0 0 R] /Count 2 >>";
+    let doc = open(&objects(tree, "first", "second", &[]));
+    assert_eq!(doc.page_count(), 2);
+    assert_eq!(
+        kinds(&doc),
+        [(ParsePhase::PageTree, None, Severity::Warning)]
+    );
+
+    // Beside a branch that cannot be read, the branch is still the one kid
+    // lost, and has the pages the count leaves for it.
+    let tree = "<< /Type /Pages /Kids [3 0 R 0 0 R 9 0 R 5 0 R] /Count 5 >>";
+    let doc = open(&objects(tree, "first", "fifth", &[]));
+    assert_eq!(doc.page_count(), 5);
+    assert_eq!(text_of(&doc, 4), ["fifth"]);
+    let messages: Vec<_> = doc
+        .parse_warnings()
+        .iter()
+        .map(|w| w.message.clone())
+        .collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("pages 2 to 4 are blank")),
+        "{messages:?}"
+    );
+}
+
+/// Every blank page counts against the pages the file's length allows.
+/// Here a branch that cannot be read has used them all, so the next kid
+/// that cannot be read has no blank page, and its warning says why.
+#[test]
+fn a_kid_that_cannot_be_read_once_the_file_allows_no_more_blank_pages_is_no_page() {
+    // The counts are padded, so that the file's length does not depend on
+    // them.
+    let objects_for = |count: usize| {
+        let tree = format!(
+            "<< /Type /Pages /Kids [7 0 R 9 0 R 5 0 R] /Count {:<8} >>",
+            count + 2
+        );
+        let branch =
+            format!("<< /Type /Pages /Parent 2 0 R /Kids [3 0 R 8 0 R] /Count {count:<8} >>");
+        objects(&tree, "first", "last", &[&branch])
+    };
+    // The branch, its page 3 and the missing object 8, claims every page
+    // the file's length allows.
+    let allowed = pdf_from(&objects_for(0)).len() / 4;
+    let doc = open(&objects_for(allowed));
+    assert_eq!(doc.page_count(), allowed + 1);
+    assert_eq!(text_of(&doc, 0), ["first"]);
+    assert!(doc.render_page(allowed - 1, 72.0).unwrap().is_empty());
+    assert_eq!(text_of(&doc, allowed), ["last"]);
+    assert_eq!(
+        kinds(&doc),
+        [page_tree_warning_at(1), page_tree_warning_at(allowed)]
+    );
+    let message = doc.parse_warnings()[1].message.clone();
+    assert!(message.contains("object 9 0"), "{message}");
+    assert!(
+        message.contains("the file's length allows no more blank pages"),
+        "{message}"
+    );
+}
+
+/// A kid listed twice is counted once, as it is walked once, so a branch
+/// that cannot be read beside it has every page the count leaves for it.
+#[test]
+fn a_kid_listed_twice_is_counted_once_for_the_branch_beside_it() {
+    let tree = "<< /Type /Pages /Kids [3 0 R 9 0 R 3 0 R] /Count 4 >>";
+    let doc = open(&objects(tree, "first", "unused", &[]));
+    assert_eq!(doc.page_count(), 4);
+    assert_eq!(text_of(&doc, 0), ["first"]);
+    for page in 1..=3 {
+        assert!(
+            doc.render_page(page, 72.0).unwrap().is_empty(),
+            "page {page}"
+        );
+    }
+    assert_eq!(
+        kinds(&doc),
+        [
+            (
+                ParsePhase::PageTree,
+                Some(LocationHint::Object {
+                    obj_num: 3,
+                    gen_num: 0
+                }),
+                Severity::Warning
+            ),
+            page_tree_warning_at(1)
+        ]
+    );
+    let message = doc.parse_warnings()[1].message.clone();
+    assert!(message.contains("pages 2 to 4 are blank"), "{message}");
+}
