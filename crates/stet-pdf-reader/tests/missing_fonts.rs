@@ -14,6 +14,8 @@
 //! or font the machine has installed is looked for, and the tests give the
 //! same result on any machine.
 
+use stet_fonts::geometry::{PathSegment, PsPath};
+use stet_graphics::display_list::DisplayElement;
 use stet_graphics::text::text_runs;
 use stet_pdf_reader::{
     LayerSet, LocationHint, ParsePhase, ParseWarning, PdfDocument, Severity, TextExtraction,
@@ -597,4 +599,112 @@ fn text_after_a_font_left_out_still_moves_on() {
     let pdf = two_pages(&font, content, &extra);
     assert!((x_of_after(&pdf, true) - 24.4).abs() < 1e-6);
     assert!((x_of_after(&pdf, false) - 24.4).abs() < 1e-6);
+}
+
+/// One page that runs `content`, with the font `/F2` (object 7, `font`),
+/// `extra` objects from 8 up, and `/Im`, a one-pixel gray image.
+fn page_with_image(font: &str, content: &str, extra: &[String]) -> Vec<u8> {
+    let mut objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 100] \
+         /Resources 6 0 R /Contents 4 0 R >>"
+            .to_string(),
+        stream("", content),
+        stream(
+            "/Type /XObject /Subtype /Image /Width 1 /Height 1 \
+             /ColorSpace /DeviceGray /BitsPerComponent 8",
+            "0",
+        ),
+        "<< /Font << /F2 7 0 R >> /XObject << /Im 5 0 R >> >>".to_string(),
+        font.to_string(),
+    ];
+    objects.extend_from_slice(extra);
+    pdf_from(&objects)
+}
+
+/// The kind of each element of the first page's display list, read with
+/// `leave_out` given to `set_leave_out_text_without_cmap`, and the clip
+/// paths among them.
+fn element_kinds(pdf: &[u8], leave_out: bool) -> (Vec<&'static str>, Vec<PsPath>) {
+    let mut doc = PdfDocument::from_bytes(pdf).unwrap();
+    doc.set_host_files(false);
+    doc.set_leave_out_text_without_cmap(leave_out);
+    let list = doc.render_page(0, 72.0).unwrap();
+    let mut kinds = Vec::new();
+    let mut clips = Vec::new();
+    for element in list.elements() {
+        kinds.push(match element {
+            DisplayElement::Clip { path, .. } => {
+                clips.push(path.clone());
+                "Clip"
+            }
+            DisplayElement::Image { .. } => "Image",
+            DisplayElement::Fill { .. } => "Fill",
+            DisplayElement::Stroke { .. } => "Stroke",
+            _ => "other",
+        });
+    }
+    (kinds, clips)
+}
+
+/// Whether `path` has a point other than its first, so that it can
+/// enclose an area.
+fn has_area(path: &PsPath) -> bool {
+    let mut points = path.segments.iter().filter_map(|segment| match *segment {
+        PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => Some((x, y)),
+        PathSegment::CurveTo { x3, y3, .. } => Some((x3, y3)),
+        PathSegment::ClosePath => None,
+    });
+    let Some(first) = points.next() else {
+        return false;
+    };
+    points.any(|point| point != first)
+}
+
+/// The darkest red value on the first page of `pdf`, rendered with
+/// `leave_out` given to `set_leave_out_text_without_cmap`: 255 where the
+/// page is left white.
+fn darkest(pdf: &[u8], leave_out: bool) -> u8 {
+    let mut doc = PdfDocument::from_bytes(pdf).unwrap();
+    doc.set_host_files(false);
+    doc.set_leave_out_text_without_cmap(leave_out);
+    let (pixels, _, _) = doc.render_page_to_rgba(0, 72.0).unwrap();
+    pixels.chunks(4).map(|pixel| pixel[0]).min().unwrap()
+}
+
+/// Text left out in a text rendering mode that clips (here 7, invisible
+/// and added to the clip) still makes `ET` set the text clip: one that
+/// lets nothing through, since no glyph is added to it, so the image drawn
+/// after it is clipped away as the text would have hidden it. With the
+/// text kept, the clip is made of its glyphs.
+#[test]
+fn text_left_out_in_a_clipping_mode_still_clips() {
+    let content = "BT 7 Tr /F2 40 Tf 10 30 Td <00410042> Tj ET \
+                   q 300 0 0 100 0 0 cm /Im Do Q";
+    for cmap in ["GBK-EUC-H", "UniGB-UTF16-H"] {
+        let (font, extra) = composite_font(cmap);
+        let pdf = page_with_image(&font, content, &extra);
+
+        let (kinds, clips) = element_kinds(&pdf, true);
+        assert_eq!(kinds, ["Clip", "Image"], "{cmap}, text left out");
+        assert!(!clips[0].is_empty(), "{cmap}: the clip has a path");
+        assert!(
+            !has_area(&clips[0]),
+            "{cmap}: the clip lets nothing through"
+        );
+        assert_eq!(
+            darkest(&pdf, true),
+            255,
+            "{cmap}: the image is clipped away"
+        );
+
+        let (kinds, clips) = element_kinds(&pdf, false);
+        assert_eq!(kinds, ["Clip", "Image"], "{cmap}, text kept");
+        assert!(has_area(&clips[0]), "{cmap}: the clip is the glyphs");
+        assert!(
+            darkest(&pdf, false) < 255,
+            "{cmap}: the image shows in the glyphs"
+        );
+    }
 }

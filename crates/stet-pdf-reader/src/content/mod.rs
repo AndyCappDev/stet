@@ -4158,9 +4158,23 @@ impl<'a> ContentInterpreter<'a> {
         if font.codes_unknown() {
             // Its CMap is missing and the application asked for its text to
             // be left out: anything drawn or read would be a guess. Its codes
-            // are still read as with the text kept, two bytes at a time, and
-            // move the text position on by the font's widths, so the text
-            // that follows is drawn where it would have been.
+            // are still read as with the text kept, and the text position is
+            // advanced as if every code were two bytes, so the text that
+            // follows is placed right when the font's codes are all two
+            // bytes. Each code advances it by the font's width for it.
+            if render_mode & 4 != 0 && !text.is_empty() {
+                // Shown in a mode that clips, the text would have added its
+                // glyphs to the clip `ET` sets. With no glyph to add, a path
+                // of no area goes in instead, as in `apply_pending_clip`, so
+                // `ET` still sets a clip and it lets nothing through. `ET`
+                // sets no clip for a text clip path with no segments.
+                let clip = self.text_clip_path.get_or_insert_with(PsPath::new);
+                if clip.is_empty() {
+                    clip.segments.push(PathSegment::MoveTo(0.0, 0.0));
+                    clip.segments.push(PathSegment::LineTo(0.0, 0.0));
+                    clip.segments.push(PathSegment::ClosePath);
+                }
+            }
             let mut i = 0;
             while i < text.len() {
                 let width = font.code_width(text[i]).min(text.len() - i);
