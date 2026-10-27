@@ -83,14 +83,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of a font whose CMap is missing.** On, nothing is drawn or extracted
   in a composite font whose predefined CMap is neither embedded nor
   found, where its codes would otherwise be read two bytes at a time, a
-  guess when the CMap gives some codes one byte. The text position still
-  moves on by the font's widths, so the text that follows is drawn where
-  it would have been. A UCS-2 CMap keeps its
-  text, and so does a CMap the document embeds whose `usecmap` base is
-  missing. The `MissingCMap` message then says the text is left out, and
-  the `MissingFont` message for such a font names it and says its text
-  is left out, not that a substitute is drawn. Off by default, and nothing changes then. See
-  `docs/PDF-READER-API.md`, "Leaving out text whose CMap is missing".
+  guess when the CMap gives some codes one byte. The text position is
+  still advanced as if every code were two bytes, so the text that
+  follows is placed right when the font's codes are all two bytes, and
+  text in a text rendering mode that clips still makes `ET` set a clip,
+  one that lets nothing through. A UCS-2 CMap keeps its text, and so
+  does a CMap the document embeds whose `usecmap` base is missing. The
+  `MissingCMap` message then says the text is left out, and the
+  `MissingFont` message for such a font names it and says its text is
+  left out, not that a substitute is drawn. Off by default, and nothing
+  changes then. See `docs/PDF-READER-API.md`, "Leaving out text whose
+  CMap is missing".
 
 ### Changed
 

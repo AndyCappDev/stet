@@ -170,12 +170,15 @@ doc.set_leave_out_text_without_cmap(true);
 ```
 
 Off by default. On, nothing in such a font is drawn or extracted, and the
-text of the page's other fonts is drawn and read as before. The font's
-codes are still read two bytes at a time and move the text position on
-by its widths (`/DW` and `/W`), so the text that follows is drawn where
-it would have been. The `ParsePhase::MissingCMap` warning is still
-recorded for each page, and its message adds that the text in the font
-that uses the CMap is left out. A font left out this way that the
+text of the page's other fonts is drawn and read as before. The text
+position is still advanced as if every code were two bytes, so the text
+that follows is placed right when the font's codes are all two bytes;
+each code advances it by the font's width for it (`/DW` and `/W`).
+Shown in a text rendering mode that clips (4 to 7), the text still makes
+`ET` set a clip, one that lets nothing through. The
+`ParsePhase::MissingCMap` warning is still recorded for each page, and
+its message adds that the text in the font that uses the CMap is left
+out. A font left out this way that the
 document does not embed either is reported as `ParsePhase::MissingFont`,
 by name, with no substitute said to be drawn. Two cases keep their text,
 since their codes do not depend on the missing CMap: a UCS-2 CMap, such
