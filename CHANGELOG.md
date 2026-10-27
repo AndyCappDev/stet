@@ -54,6 +54,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before. An inline image that cannot be read is still a `Content`
   warning. See `docs/PDF-READER-API.md`, "Images left out, fonts and
   CMaps missing".
+- **Past 1,024 saved graphics states, a page's `q` is skipped, and the
+  page draws on.** Nothing bounded how many graphics states a page could
+  save: a 51 KB file whose Flate content stream decodes to 50 MB of `q`
+  took 17.7 s and 16.9 GB to read. The states stet saves around a form,
+  pattern, glyph procedure or soft mask count toward `MAX_SAVED_STATES`
+  (1,024), and are always saved, so the page's state is restored after
+  them. Past the limit, a page's own `q` is skipped. Skipped `q` are
+  counted, so the `Q` that matches one restores nothing rather than an
+  earlier state. The page is drawn on, and gets one warning of the new
+  kind `ParsePhase::SavedStateLimit`, which `stet inspect` lists as
+  `saved-state limit` and `stet` prints when it renders the page. A page
+  that leaves more than 1,024 `q` unclosed is still drawn. ISO 32000-1
+  gives 28 as a typical limit. See
+  `docs/PDF-READER-API.md`, "A ceiling on page content".
+- **`PdfDocument::set_max_content_bytes`: a ceiling on a page's
+  content.** It counts the decoded bytes of content one page interprets,
+  a form each time it is drawn, and decodes no stream but a glyph
+  procedure further than what is left of it, a raw-deflate retry of a
+  stream with a damaged zlib header included. Off by default, since a
+  heavy page of vector art reaches a hundred megabytes. A page over it
+  is not drawn, wherever the limit is reached on it: `render_page`
+  returns the new `PdfError::ContentLimit`, carrying a `ContentLimit`
+  that names the limit, and adds no parse warning for it, so a caller
+  tells it apart from a damaged page by kind. The other pages read as
+  before. See `docs/PDF-READER-API.md`, "A ceiling on page content".
 
 ### Changed
 
@@ -78,6 +103,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A font that is not embedded and cannot be stood in for is reported
   only as `MissingFont`.** It also gave a `Content` warning naming the
   font resource and the error; that warning is no longer given.
+- **Past 1,024 graphics states saved at once, a page's `q` saves
+  nothing.** Every `q` saved the state and its `Q` restored it, however
+  many were open. Now a page's `q` past `MAX_SAVED_STATES` is skipped,
+  and the `Q` that matches it restores nothing, so a page that changes
+  the state inside those levels and relies on `Q` to undo it is drawn
+  differently. Such a page has a `SavedStateLimit` warning. A page
+  within the limit draws as before.
 
 ### Fixed
 
