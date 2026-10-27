@@ -502,8 +502,6 @@ struct UnresolvedFont {
 struct NestedSave {
     /// The states saved before this one.
     depth: usize,
-    /// The saves skipped before this one.
-    skipped: usize,
 }
 
 /// PDF content stream interpreter.
@@ -529,6 +527,13 @@ pub struct ContentInterpreter<'a> {
     /// not yet matched by a restore: each `Q` uses one up before it restores
     /// anything.
     skipped_saves: usize,
+    /// The states saved before the stream being read began: the page's,
+    /// and those of the streams it is nested in. Its `Q` cannot restore
+    /// them, since `q` and `Q` balance within a content stream (ISO
+    /// 32000-1 §8.4.2), so a `Q` with nothing of its own stream's to
+    /// restore restores nothing. See
+    /// [`interpret_nested`](Self::interpret_nested).
+    restore_floor: usize,
     /// Set once the page has been warned that saves are being skipped.
     saved_state_limit_warned: bool,
     gstate: PdfGraphicsState,
@@ -788,6 +793,7 @@ impl<'a> ContentInterpreter<'a> {
             gstate_stack: Vec::new(),
             gstate_spare: Vec::new(),
             skipped_saves: 0,
+            restore_floor: 0,
             saved_state_limit_warned: false,
             gstate: PdfGraphicsState::new(initial_ctm),
             current_path: PsPath::new(),
@@ -1055,7 +1061,11 @@ impl<'a> ContentInterpreter<'a> {
     ///   stream that asked wherever the caller propagates it.
     ///
     /// The caller has already saved the state the nested stream may change,
-    /// and restores it whether or not the stream ran.
+    /// and restores it whether or not the stream ran. The states saved
+    /// before the stream began are out of its reach: a `Q` it has no `q` of
+    /// its own for restores nothing, a `q` it leaves open ends with it, and
+    /// so do saves it skipped past [`MAX_SAVED_STATES`]
+    /// ([`restore_floor`](Self::restore_floor)).
     fn interpret_nested(&mut self, id: StreamId, data: &[u8]) -> Result<(), PdfError> {
         if self.executing.contains(&id) || self.halted() {
             return Ok(());
@@ -1087,7 +1097,16 @@ impl<'a> ContentInterpreter<'a> {
         self.nested_work += cost;
         self.executing.push(id);
         self.depth += 1;
+        let outer_floor = std::mem::replace(&mut self.restore_floor, self.gstate_stack.len());
+        let outer_skipped = std::mem::take(&mut self.skipped_saves);
         let result = self.interpret_stream(data);
+        while self.gstate_stack.len() > self.restore_floor {
+            if let Some(left_open) = self.gstate_stack.pop() {
+                self.recycle_gstate(left_open);
+            }
+        }
+        self.restore_floor = outer_floor;
+        self.skipped_saves = outer_skipped;
         self.depth -= 1;
         self.executing.pop();
         // Callers carry on with the page whatever happened in here, so this
@@ -1296,8 +1315,6 @@ impl<'a> ContentInterpreter<'a> {
 
         // Render as a Form XObject with the computed transform
         let saved_gstate = self.gstate.clone();
-        let saved_stack_depth = self.gstate_stack.len();
-        let saved_skipped_saves = self.skipped_saves;
         let saved_resources = self.resources.clone();
         let saved_mc_stack = std::mem::take(&mut self.mc_stack);
         let in_actual_text = self.actual_text.is_some();
@@ -1325,9 +1342,8 @@ impl<'a> ContentInterpreter<'a> {
         let form_data = self.content_stream_data(&n_ref)?;
         let _ = self.interpret_nested(StreamId::of(&n_ref, &form_data), &form_data);
 
-        // Restore state — truncate gstate stack to handle unbalanced q/Q in stream
-        self.gstate_stack.truncate(saved_stack_depth);
-        self.skipped_saves = saved_skipped_saves;
+        // Restore state. The appearance's unbalanced `q`/`Q` were dealt with
+        // by `interpret_nested`.
         self.content_stream_ctm = saved_content_stream_ctm;
         self.resources = saved_resources;
         self.mc_stack = saved_mc_stack;
@@ -2409,16 +2425,16 @@ impl<'a> ContentInterpreter<'a> {
     /// in the nested stream is skipped sooner.
     fn save_for_nested(&mut self) -> NestedSave {
         let depth = self.gstate_stack.len();
-        let skipped = self.skipped_saves;
         self.save_gstate();
-        NestedSave { depth, skipped }
+        NestedSave { depth }
     }
 
     /// Take back the state [`save_for_nested`](Self::save_for_nested)
-    /// saved. `q` the nested stream skipped and left unmatched are
-    /// forgotten.
+    /// saved. It is on top: the nested stream's `Q` could not reach it, and
+    /// [`interpret_nested`](Self::interpret_nested) closed what the stream
+    /// left open.
     fn take_nested_save(&mut self, save: NestedSave) -> Option<Box<PdfGraphicsState>> {
-        self.skipped_saves = save.skipped;
+        debug_assert_eq!(self.gstate_stack.len(), save.depth + 1);
         self.gstate_stack.pop()
     }
 
@@ -2445,6 +2461,10 @@ impl<'a> ContentInterpreter<'a> {
         // the state saved before it.
         if self.skipped_saves > 0 {
             self.skipped_saves -= 1;
+            return Ok(());
+        }
+        // Nor does one with no `q` of its own stream's to match.
+        if self.gstate_stack.len() <= self.restore_floor {
             return Ok(());
         }
         if let Some(mut saved) = self.gstate_stack.pop() {
@@ -4540,9 +4560,6 @@ impl<'a> ContentInterpreter<'a> {
         self.content_stream_ctm = saved_content_stream_ctm;
         self.mc_stack = saved_mc_stack;
         self.end_nested_actual_text(in_actual_text);
-        // Restore state: truncate any extra gstate_stack entries left by
-        // unmatched q/Q inside the CharProc (e.g., if the EI parser consumed Q).
-        self.gstate_stack.truncate(nested_save.depth + 1);
         if let Some(saved) = self.take_nested_save(nested_save) {
             self.gstate = *saved;
         }
@@ -6760,7 +6777,6 @@ impl<'a> ContentInterpreter<'a> {
         // Save state (including font cache — form XObjects may have different
         // font resources with different encodings for the same resource name)
         let nested_save = self.save_for_nested();
-        let saved_stack_depth = self.gstate_stack.len();
         let saved_resources = std::mem::replace(&mut self.resources, form_resources);
         let saved_font_cache = std::mem::take(&mut self.font_cache);
         let saved_current_font = self.current_font.take();
@@ -6887,15 +6903,6 @@ impl<'a> ContentInterpreter<'a> {
             form_result = self.interpret_nested(StreamId::of(obj, &form_data), &form_data);
 
             self.form_cull_y = saved_cull;
-        }
-
-        // Unwind any unbalanced q's the form content left on the stack.
-        // Form content streams often have q without matching Q (the end of
-        // the stream implicitly unwinds).  Without this, the extra stack
-        // entries cause our own pop below to restore the wrong gstate,
-        // leaking state (e.g. alpha from ExtGState) into the parent scope.
-        while self.gstate_stack.len() > saved_stack_depth {
-            self.gstate_stack.pop();
         }
 
         // Restore state — check if clip needs resetting

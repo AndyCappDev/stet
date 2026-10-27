@@ -404,6 +404,56 @@ fn past_the_limit_nested_content_still_restores_the_page_state() {
     assert_eq!(found, expected);
 }
 
+const BLACK: [f64; 3] = [0.0, 0.0, 0.0];
+
+/// A page that saves, sets a blue stroke 3 wide, runs `case`'s nested
+/// content, strokes a line, restores, and strokes another.
+fn around_nested(case: Nested) -> Vec<([f64; 3], f64)> {
+    let what = case.what;
+    let mut content = b"q 0 0 1 RG 3 w ".to_vec();
+    content.extend(case.between);
+    content.extend(b" 72 72 m 300 300 l S Q 72 72 m 300 300 l S");
+    let pdf = page_with(&content, case.resources, case.extra);
+    let doc = open(&pdf);
+    let list = doc
+        .render_page(0, 72.0)
+        .unwrap_or_else(|e| panic!("{what}: {e}"));
+    strokes(&list)
+}
+
+/// An extra `Q` in a form, a pattern cell, a glyph procedure or a soft
+/// mask's group restores nothing: `q` and `Q` balance within a content
+/// stream (ISO 32000-1 §8.4.2), so the states the page saved are not the
+/// nested stream's to restore. Were they, the first line would take the
+/// green the nested content sets after its `Q`, and the page's own `Q`
+/// would have nothing left to restore.
+#[test]
+fn an_extra_restore_in_nested_content_leaves_the_page_state() {
+    let found: Vec<_> = nested_cases("Q Q 0 1 0 RG 9 w")
+        .into_iter()
+        .map(|case| (case.what, around_nested(case)))
+        .collect();
+    let expected = ["form", "pattern", "glyph procedure", "soft mask"]
+        .map(|what| (what, vec![(BLUE, 3.0), (BLACK, 1.0)]));
+    assert_eq!(found, expected);
+}
+
+/// A `q` that nested content leaves open is closed by the end of its
+/// stream, so the state restored after it is the page's, and the page's
+/// own `Q` restores what the page saved. Were it left open, the page's
+/// `Q` would restore the state saved around the nested content, and the
+/// second line would be blue.
+#[test]
+fn a_save_left_open_in_nested_content_ends_with_it() {
+    let found: Vec<_> = nested_cases("q 0 1 0 RG 9 w")
+        .into_iter()
+        .map(|case| (case.what, around_nested(case)))
+        .collect();
+    let expected = ["form", "pattern", "glyph procedure", "soft mask"]
+        .map(|what| (what, vec![(BLUE, 3.0), (BLACK, 1.0)]));
+    assert_eq!(found, expected);
+}
+
 /// The state saved around a form, a pattern cell, a glyph procedure and a
 /// soft mask's group counts toward the limit. With the page one save short
 /// of it, the nested save is the last there is room for, and the nested

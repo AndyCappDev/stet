@@ -140,6 +140,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with no depth limit, so a subroutine that called itself exhausted the
   stack, and the scan for the subroutines a subset keeps had only the
   depth limit. When that scan gives up, every subroutine is kept.
+- **Unbalanced `q` and `Q` in a form, pattern, soft mask or Type 3 glyph
+  no longer change the page's graphics state.** An extra `Q` restored a
+  state the page had saved, so what the page drew next lost its
+  transformation, colour or clip, and the page's own `Q` came up short.
+  A `q` left open in a pattern or soft mask also kept the page from
+  restoring what it had saved. `q` and `Q` balance within each content
+  stream (ISO 32000-1 §8.4.2): a `Q` with no `q` of its own stream to
+  match now restores nothing, and a `q` left open is closed when its
+  stream ends.
 
 ## [0.8.7] — 2026-10-14
 
