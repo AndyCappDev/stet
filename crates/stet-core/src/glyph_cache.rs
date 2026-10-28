@@ -24,6 +24,7 @@ pub struct CachedGlyph {
 
 /// Cached Type 3 glyph: display list elements + origin for translation.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct CachedType3Glyph {
     pub elements: Vec<DisplayElement>,
     pub origin_dev_x: f64,
@@ -32,6 +33,29 @@ pub struct CachedType3Glyph {
     /// The glyph's `setcachedevice` bounding box `[llx, lly, urx, ury]`, in
     /// glyph space.
     pub bbox: Option<[f64; 4]>,
+}
+
+impl CachedType3Glyph {
+    /// A cached glyph of `elements`, drawn with its origin at
+    /// (`origin_dev_x`, `origin_dev_y`) in device space, advancing by
+    /// `width`, with the `setcachedevice` bounding box `bbox` if it has one.
+    /// The struct is `#[non_exhaustive]`, so outside this crate it is made
+    /// here.
+    pub fn new(
+        elements: Vec<DisplayElement>,
+        origin_dev_x: f64,
+        origin_dev_y: f64,
+        width: (f64, f64),
+        bbox: Option<[f64; 4]>,
+    ) -> Self {
+        Self {
+            elements,
+            origin_dev_x,
+            origin_dev_y,
+            width,
+            bbox,
+        }
+    }
 }
 
 /// Cache mode set by setcachedevice/setcharwidth during Type 3 BuildChar.

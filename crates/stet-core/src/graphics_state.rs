@@ -371,6 +371,7 @@ fn rect_path(r: [f64; 4]) -> PsPath {
 
 /// Complete graphics state (cloned for gsave/grestore).
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct GraphicsState {
     pub ctm: Matrix,
     pub color: DeviceColor,

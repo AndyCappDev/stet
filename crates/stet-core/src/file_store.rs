@@ -165,6 +165,7 @@ pub enum FilterKind {
 }
 
 /// Decoded-data buffer state for a filter file.
+#[non_exhaustive]
 pub struct FilterState {
     pub kind: FilterKind,
     pub source: EntityId,
@@ -230,6 +231,7 @@ fn rle_emit_repeat(byte: u8, count: usize) -> [u8; 2] {
 }
 
 /// Metadata and handle for one open file.
+#[non_exhaustive]
 pub struct FileEntry {
     pub handle: FileHandle,
     pub name: String,

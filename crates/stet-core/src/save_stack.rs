@@ -35,6 +35,7 @@ pub struct SaveRecord {
 /// makes the memory a save level allocated actually available again. Global VM
 /// is never affected by save/restore, so it has no marks here.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct VmMarks {
     pub string_data: usize,
     pub string_entities: usize,

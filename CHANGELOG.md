@@ -18,6 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still one more than the highest object number, not the count of
   entries, as is `Resolver::xref_len`. Code indexing the slice by object
   number should call `get`.
+- **Seven public structs are `#[non_exhaustive]`, as earlier releases
+  said they would be:** `stet_core`'s `GraphicsState`, `FileEntry`,
+  `FilterState`, `VmMarks`, `NameCache` and `CachedType3Glyph`, and
+  `stet_pdf_reader`'s `PdfGraphicsState`. Each gained a field in a patch
+  release (0.8.2, 0.8.3, 0.8.4 and 0.8.7), which broke a struct literal
+  outside its crate; now none can be written there, so a field added
+  later breaks nothing. Read their fields as before, or match them with
+  `..`. `CachedType3Glyph::new` makes one.
 
 ### Added
 

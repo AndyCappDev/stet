@@ -27,6 +27,7 @@ pub struct OpEntry {
 }
 
 /// Pre-interned `NameId`s for frequently-used names in hot paths.
+#[non_exhaustive]
 pub struct NameCache {
     pub n_def: NameId,
     pub n_true: NameId,

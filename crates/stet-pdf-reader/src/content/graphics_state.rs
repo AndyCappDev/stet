@@ -182,6 +182,7 @@ impl ColorSpaceRef {
 /// colour components — where `clone` allocates each of them. The
 /// interpreter saves the state for every `q`, into a state a `Q` gave back.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct PdfGraphicsState {
     pub ctm: Matrix,
     pub fill_color: DeviceColor,

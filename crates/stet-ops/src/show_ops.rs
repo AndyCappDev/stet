@@ -3517,13 +3517,7 @@ fn build_type3_glyph(
             ctx,
             font_entity,
             key,
-            CachedType3Glyph {
-                elements,
-                origin_dev_x,
-                origin_dev_y,
-                width: char_width,
-                bbox,
-            },
+            CachedType3Glyph::new(elements, origin_dev_x, origin_dev_y, char_width, bbox),
         );
     }
 
