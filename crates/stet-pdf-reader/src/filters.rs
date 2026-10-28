@@ -57,6 +57,10 @@ pub struct DecodeBudget {
     /// passing it is [`ContentLimit::ContentBytes`] rather than a
     /// decompression error: see [`for_content`](Self::for_content).
     content: bool,
+    /// The ceiling is what is left of the document's object budget, so
+    /// passing it is [`PdfError::ObjectMemoryLimit`]: see
+    /// [`for_objects`](Self::for_objects).
+    objects: bool,
 }
 
 impl Default for DecodeBudget {
@@ -72,7 +76,17 @@ impl DecodeBudget {
             limit,
             image_pixels: stet_graphics::image_limits::MAX_IMAGE_PIXELS,
             content: false,
+            objects: false,
         }
+    }
+
+    /// A budget of what is left of the memory the objects read from the
+    /// document may take, for an object stream, whose decoded text is held
+    /// as long as they are. Passing it is [`PdfError::ObjectMemoryLimit`].
+    pub(crate) const fn for_objects(limit: usize) -> Self {
+        let mut budget = Self::new(limit);
+        budget.objects = true;
+        budget
     }
 
     /// A budget of what is left of a page's content allowance, set with
@@ -132,6 +146,9 @@ impl DecodeBudget {
     /// buffer: checking afterwards would mean the allocation the ceiling
     /// exists to prevent has already happened.
     fn check(&self, produced: usize) -> Result<(), PdfError> {
+        if produced > self.limit && self.objects {
+            return Err(PdfError::ObjectMemoryLimit);
+        }
         if produced > self.limit && self.content {
             return Err(PdfError::ContentLimit(ContentLimit::ContentBytes(
                 self.limit as u64,
@@ -144,6 +161,23 @@ impl DecodeBudget {
             )));
         }
         Ok(())
+    }
+
+    /// Make room in `output` for `more` bytes, growing it by doubling as
+    /// a `Vec` would, but never past the ceiling, which the output cannot
+    /// pass. A `Vec` left to grow itself doubles past it: near a 16 MiB
+    /// ceiling it asked for 32 MiB while still holding the 16 it had, three
+    /// times the ceiling at once, where this holds at most one and a half.
+    fn grow(&self, output: &mut Vec<u8>, more: usize) {
+        let needed = output.len() + more;
+        if needed > output.capacity() {
+            let target = output
+                .capacity()
+                .saturating_mul(2)
+                .min(self.limit)
+                .max(needed);
+            output.reserve_exact(target - output.len());
+        }
     }
 
     /// Clamp a `Vec::with_capacity` hint to the ceiling.
@@ -568,6 +602,7 @@ fn decode_flate_inner(
         if let Err(e) = budget.check(output.len() + produced) {
             return (Err(e), true, input_offset);
         }
+        budget.grow(&mut output, produced);
         output.extend_from_slice(&buf[..produced]);
 
         match result {

@@ -73,6 +73,12 @@ pub enum PdfError {
         limit: u32,
     },
 
+    /// An object was not read because the objects read from the file
+    /// would take more memory than the file's length allows: see
+    /// [`ParsePhase::ObjectMemoryLimit`](crate::ParsePhase::ObjectMemoryLimit).
+    #[error("the objects read from this file would take more memory than its length allows")]
+    ObjectMemoryLimit,
+
     #[error("PDF requires a password")]
     PasswordRequired,
 

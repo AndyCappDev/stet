@@ -993,9 +993,25 @@ rebuilds it by scanning the file for objects. The objects are then found
 where they are; what is still missing is reported where it is missed, as
 a `PageTree` or a `Content` warning.
 
+`ParsePhase::ObjectMemoryLimit` is recorded, once for the document and
+naming the first such object as `LocationHint::Object`, when an object
+is not read because the objects read from the file would take more
+memory than its length allows: 256 bytes for each byte of the file, and
+never less than 16 MiB. Every object read is kept until the document is
+dropped, and is charged what it holds once parsed; an object stream is
+also charged its decoded text, which is kept as long. An object that
+would pass the allowance is treated as missing, so what needs it reports
+it the way it reports a missing object, and asking for it again fails
+at once with `PdfError::ObjectMemoryLimit`. No real file comes near
+this: with every object read, none of 717 test files holds more than 5.5
+bytes of objects for each byte of the file, nor more than 6.5 MB in all.
+What meets it is a file a few kilobytes long whose compressed object
+streams decode to millions of objects, which took hundreds of megabytes
+to open before; such a file now takes at most a few tens of megabytes.
+
 The `stet` command line prints content and page tree warnings, images
-left out and CMaps not found as `warning:` lines, each distinct message
-once per run. That is its choice as an application; a GUI would do
+left out, CMaps not found and objects not read for their memory as
+`warning:` lines, each distinct message once per run. That is its choice as an application; a GUI would do
 something else with them.
 
 ### Holding the borrow

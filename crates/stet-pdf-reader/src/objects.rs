@@ -177,6 +177,12 @@ impl PdfDict {
     }
 
     /// Insert or replace a key-value pair.
+    /// Give up the room for entries the dictionary does not hold, once
+    /// it is built.
+    pub(crate) fn shrink_to_fit(&mut self) {
+        self.0.shrink_to_fit();
+    }
+
     pub fn insert(&mut self, key: Vec<u8>, val: PdfObj) {
         // For small dicts, check for duplicates (PDF spec says keys should be
         // unique, but malformed files exist). For large dicts, skip the O(n)

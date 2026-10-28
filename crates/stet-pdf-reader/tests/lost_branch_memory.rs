@@ -319,15 +319,17 @@ fn a_count_past_the_file_length_is_one_blank_page_whatever_the_object_numbers() 
     );
 }
 
-/// Object 0 is never a page, however many times a tree lists it. A
-/// million kids `0 0 R` in a compressed object stream take a few
+/// Object 0 is never a page, however many times a tree lists it. Two
+/// hundred thousand kids `0 0 R` in a compressed object stream take a few
 /// kilobytes: they are no pages, one warning names them, and opening the
-/// file holds no more memory than with a million kids of the same length
-/// that are not references, which the walk passes over.
+/// file holds no more memory than with as many kids of the same length
+/// that are not references, which the walk passes over. (A million would
+/// be more than the objects read from so short a file may hold: see
+/// `object_memory.rs`.)
 #[test]
-fn a_million_kids_naming_object_0_are_no_pages() {
+fn many_kids_naming_object_0_are_no_pages() {
     let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
-    const KIDS: usize = 1_000_000;
+    const KIDS: usize = 200_000;
     let tree = |kid: &str| {
         format!(
             "<< /Type /Pages /Kids [3 0 R {}5 0 R] /Count {} >>",
@@ -397,13 +399,13 @@ fn pages_found_by_scanning_are_found_whatever_the_highest_object_number() {
 
 /// A page tree can list page dictionaries in its `/Kids` array itself,
 /// though the kids should be references: such a page is no object of the
-/// file, and a compressed object stream holds a million of them in 44 KB.
-/// They are pages while the file's length allows one more, as blank pages
-/// are, and the rest are left out, with one warning.
+/// file, and a compressed object stream holds a hundred thousand of them
+/// in a few kilobytes. They are pages while the file's length allows one
+/// more, as blank pages are, and the rest are left out, with one warning.
 #[test]
-fn a_million_page_dictionaries_listed_as_kids_are_as_many_pages_as_the_file_allows() {
+fn many_page_dictionaries_listed_as_kids_are_as_many_pages_as_the_file_allows() {
     let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
-    const KIDS: usize = 1_000_000;
+    const KIDS: usize = 100_000;
     let tree = format!(
         "<< /Type /Pages /Kids [3 0 R {}] /Count {} >>",
         "<< /Type /Page >> ".repeat(KIDS),
@@ -419,12 +421,12 @@ fn a_million_page_dictionaries_listed_as_kids_are_as_many_pages_as_the_file_allo
 }
 
 /// Object 0 is no page even where the file gives it an entry in use and
-/// it reads as one: a million kids naming it are no pages, as when it is
-/// free, and a `/Pages` node there is not followed.
+/// it reads as one: two hundred thousand kids naming it are no pages, as
+/// when it is free, and a `/Pages` node there is not followed.
 #[test]
 fn a_kid_naming_object_0_is_no_page_even_when_object_0_is_in_use() {
     let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
-    const KIDS: usize = 1_000_000;
+    const KIDS: usize = 200_000;
     let tree = format!(
         "<< /Type /Pages /Kids [3 0 R {}5 0 R] /Count {} >>",
         "0 0 R ".repeat(KIDS),

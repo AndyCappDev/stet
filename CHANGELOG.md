@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`ParsePhase::ObjectMemoryLimit` and `PdfError::ObjectMemoryLimit`:
+  objects not read for the memory they would take.** See "Fixed" below.
+- **`Resolver::object_numbers`: each object number the cross-reference
+  table gives a place for, lowest first.** Counting up to
+  `Resolver::xref_len` is not a way to visit the objects: one entry can
+  name object 4,294,967,294.
+
 - **`PdfDocument::set_host_files`: read no file but the document.** Off,
   the PDF reader reads nothing from the machine it runs on, for an
   application reading files it did not write. A font the document does not
@@ -169,6 +176,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   4,294,967,295 asked for about 69 GB and took the process, and on a
   machine with swap much else, down with it. Only the entries the file
   gives are kept now.
+- **The objects read from a file take at most 256 bytes of memory for
+  each byte of it, and never less than 16 MiB.** A few kilobytes of
+  compressed object stream decode to megabytes of object text, and each
+  two bytes of that can be a 40-byte object: a 44 KB file of a million
+  page dictionaries took 441 MB to open, and one of a million integers
+  2.4 KB took 81 MB. Every object read is now charged what it holds, and
+  an object stream its decoded text, against an allowance set by the
+  file's length; an object that would pass it is not read, as if it were
+  missing, with one `ParsePhase::ObjectMemoryLimit` warning naming it.
+  Such files now take at most a few tens of megabytes. No real file comes
+  near the allowance: with every object read, none of 717 test files
+  holds more than 5.5 bytes for each of its bytes. Parsed arrays and
+  dictionaries also no longer keep room for entries they do not hold,
+  which made a one-entry dictionary 324 bytes where it needs about 100,
+  and a Flate stream's decoded buffer no longer grows past the most it
+  may hold, which made decoding up to three times as costly as that at
+  its peak. `stet` prints the new warning, and `stet inspect` lists it as
+  `object memory limit`.
 - **An object numbered 100,000 or more is found when the file is
   scanned for objects.** When the cross-reference table is missing or
   damaged, or leaves objects out, the reader scans the file for them, and

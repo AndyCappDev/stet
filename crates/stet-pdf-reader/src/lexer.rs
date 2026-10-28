@@ -36,16 +36,54 @@ pub enum Token {
 pub struct Lexer<'a> {
     data: &'a [u8],
     pos: usize,
+    /// Bytes of memory the objects parsed from here may still take: see
+    /// [`with_budget`](Self::with_budget).
+    budget: usize,
 }
 
 impl<'a> Lexer<'a> {
     pub fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
+        Self::at(data, 0)
     }
 
     /// Create a lexer starting at a given offset.
     pub fn at(data: &'a [u8], pos: usize) -> Self {
-        Self { data, pos }
+        Self {
+            data,
+            pos,
+            budget: usize::MAX,
+        }
+    }
+
+    /// The same lexer, with the objects it parses allowed `bytes` of
+    /// memory between them. Each object is charged what it holds once
+    /// parsed — the object itself, and its share of the array or
+    /// dictionary holding it, its name, string or key bytes — and a parse
+    /// that would pass the budget fails with
+    /// [`PdfError::ObjectMemoryLimit`], however the object is nested. A
+    /// lexer has no budget, nothing is ever refused, unless one is given.
+    ///
+    /// A budget bounds what text costs to parse, which the text's length
+    /// does not: two bytes, `1 `, are a 40-byte object, and a few
+    /// kilobytes of compressed object stream decode to megabytes of them.
+    pub fn with_budget(mut self, bytes: usize) -> Self {
+        self.budget = bytes;
+        self
+    }
+
+    /// What is left of the budget given with
+    /// [`with_budget`](Self::with_budget), less the objects parsed so far.
+    pub fn budget(&self) -> usize {
+        self.budget
+    }
+
+    /// Take `bytes` from the budget, or fail if it does not hold them.
+    fn charge(&mut self, bytes: usize) -> Result<(), PdfError> {
+        self.budget = self
+            .budget
+            .checked_sub(bytes)
+            .ok_or(PdfError::ObjectMemoryLimit)?;
+        Ok(())
     }
 
     /// Current byte offset.
@@ -562,6 +600,15 @@ pub fn parse_object_from_token_at_depth(
             limit: MAX_OBJECT_DEPTH,
         });
     }
+    // Every object is charged the place it takes, in its array, its
+    // dictionary or the cache, and the bytes of a name or string it holds.
+    // An array or dictionary is charged for its elements as they are
+    // parsed, so a large one stops part way.
+    let held = match &tok {
+        Token::Name(bytes) | Token::LitString(bytes) | Token::HexString(bytes) => bytes.len(),
+        _ => 0,
+    };
+    lexer.charge(std::mem::size_of::<PdfObj>() + held)?;
     match tok {
         Token::Bool(b) => Ok(PdfObj::Bool(b)),
         Token::Real(f) => Ok(PdfObj::Real(f)),
@@ -602,11 +649,17 @@ pub fn parse_object_from_token_at_depth(
                     break;
                 }
                 // Skip unparseable tokens in arrays (corrupt PDF), and skip a
-                // container that would exceed the depth cap.
-                if let Ok(obj) = parse_object_from_token_at_depth(lexer, t, depth + 1) {
-                    elems.push(obj);
+                // container that would exceed the depth cap; but an array
+                // past the memory budget is not read at all.
+                match parse_object_from_token_at_depth(lexer, t, depth + 1) {
+                    Ok(obj) => elems.push(obj),
+                    Err(PdfError::ObjectMemoryLimit) => return Err(PdfError::ObjectMemoryLimit),
+                    Err(_) => {}
                 }
             }
+            // Charged for its elements, not for the room left over as the
+            // array grew.
+            elems.shrink_to_fit();
             Ok(PdfObj::Array(elems))
         }
         Token::DictBegin => {
@@ -645,15 +698,20 @@ pub fn parse_dict_body_at_depth(lexer: &mut Lexer, depth: u32) -> Result<PdfDict
         match t {
             Token::DictEnd | Token::Eof => break,
             Token::Name(key) => {
+                // The entry's key, beside the value, which is charged as
+                // it is parsed.
+                lexer.charge(std::mem::size_of::<Vec<u8>>() + key.len())?;
                 // Parse the value. On a value-level parse error (e.g. a garbage
                 // byte inside the value slot), insert /Null and resync on the
                 // next token rather than discarding the whole dict. Keeping
                 // already-parsed entries is what lets the Times-Roman /BaseFont
-                // survive a later /Encoding parse failure.
+                // survive a later /Encoding parse failure. A dictionary past
+                // the memory budget is not read at all.
                 match parse_object_at_depth(lexer, depth) {
                     Ok(val) => {
                         dict.insert(key, val);
                     }
+                    Err(PdfError::ObjectMemoryLimit) => return Err(PdfError::ObjectMemoryLimit),
                     Err(_) => {
                         dict.insert(key, PdfObj::Null);
                     }
@@ -665,6 +723,7 @@ pub fn parse_dict_body_at_depth(lexer: &mut Lexer, depth: u32) -> Result<PdfDict
             }
         }
     }
+    dict.shrink_to_fit();
     Ok(dict)
 }
 

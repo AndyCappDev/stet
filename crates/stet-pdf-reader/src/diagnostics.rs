@@ -145,6 +145,20 @@ pub enum ParsePhase {
     /// with [`LocationHint::Page`] when the render was of a page, at
     /// [`Severity::Warning`].
     SavedStateLimit,
+    /// An object was not read, because the objects read from the file
+    /// would have taken more memory than its length allows: 256 bytes for
+    /// each byte of the file, and never less than 16 MiB. Every object read
+    /// is held until the document is dropped, and charged what it holds;
+    /// one that would pass the allowance is not read, as if it were
+    /// missing, and what needs it reports it so, a page tree node as a page
+    /// that cannot be read, for example. No real file comes near it: the
+    /// most any of 717 test files takes, every object read, is 5.5 bytes
+    /// for each byte of the file. It is what a few kilobytes of compressed
+    /// object stream decoding to millions of objects meet. Recorded once
+    /// for the document, naming the first such object in
+    /// [`location`](ParseWarning::location) as [`LocationHint::Object`], at
+    /// [`Severity::Warning`].
+    ObjectMemoryLimit,
 }
 
 /// Where in the document a problem occurred.

@@ -401,6 +401,7 @@ fn format_phase(phase: &ParsePhase) -> String {
         ParsePhase::MissingFont => "missing font".to_string(),
         ParsePhase::MissingCMap => "missing CMap".to_string(),
         ParsePhase::SavedStateLimit => "saved-state limit".to_string(),
+        ParsePhase::ObjectMemoryLimit => "object memory limit".to_string(),
         _ => "other".to_string(),
     }
 }

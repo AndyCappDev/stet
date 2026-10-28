@@ -2565,8 +2565,9 @@ pub(crate) fn print_content_warnings(doc: &PdfDocument) {
     for warning in doc.parse_warnings().iter() {
         // Content problems, a page tree that lost pages, an image left
         // out for its size or because it cannot be read, text read without
-        // its CMap, and saves skipped past the saved-state limit: the ones
-        // that mean the output may not be the whole document as it is.
+        // its CMap, saves skipped past the saved-state limit, and objects
+        // not read for the memory they would take: the ones that mean the
+        // output may not be the whole document as it is.
         if matches!(
             warning.phase,
             ParsePhase::Content
@@ -2575,6 +2576,7 @@ pub(crate) fn print_content_warnings(doc: &PdfDocument) {
                 | ParsePhase::ImageUnreadable
                 | ParsePhase::MissingCMap
                 | ParsePhase::SavedStateLimit
+                | ParsePhase::ObjectMemoryLimit
         ) && printed.insert(warning.message.clone())
         {
             eprintln!("warning: {}", warning.message);

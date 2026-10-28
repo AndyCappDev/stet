@@ -4,7 +4,7 @@
 
 //! Indirect object resolution with lazy caching and stream decompression.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 
 use crate::error::PdfError;
@@ -35,6 +35,35 @@ struct ObjStmCache {
     by_number: HashMap<u32, usize>,
 }
 
+/// Bytes of memory the objects read from a file may take, for each byte of
+/// the file.
+///
+/// Every object read stays in the cache until the document is dropped, so
+/// this bounds what reading a file can hold by its length, as the decoded
+/// length of its object streams does not: a few kilobytes of Flate decode
+/// to megabytes of object text, and each two bytes of that, `1 `, is a
+/// 40-byte object. A million page dictionaries in a 44 KB file took 441 MB
+/// to open.
+///
+/// The most any of 717 test files holds with every object read is 5.5
+/// bytes for each of its bytes, 10.7 at the peak of reading them; the most
+/// in all is 6.5 MB, for a 10 MB file. The most a real file could plausibly
+/// hold is about a hundred: every object in object streams compressed as
+/// far as the test files' best, 19 to 1, and each byte of object text
+/// becoming five bytes of objects. This is more than twice that.
+const OBJECT_BYTES_PER_FILE_BYTE: usize = 256;
+
+/// The least memory the objects read from a file may take, however short
+/// the file: no small file is refused for its objects, and none can take
+/// more than this.
+const MIN_OBJECT_BYTES: usize = 16 << 20;
+
+/// The memory the objects read from a file of `len` bytes may take.
+fn object_budget_for(len: usize) -> usize {
+    len.saturating_mul(OBJECT_BYTES_PER_FILE_BYTE)
+        .max(MIN_OBJECT_BYTES)
+}
+
 /// Resolves indirect object references, caching parsed objects.
 pub struct Resolver<'a> {
     data: Source<'a>,
@@ -55,6 +84,13 @@ pub struct Resolver<'a> {
     /// Cache of decompressed object streams (ObjStm).
     /// Avoids re-decompressing the same ObjStm for every object within it.
     objstm_cache: RefCell<HashMap<u32, ObjStmCache>>,
+    /// Bytes of memory the objects read from the file may still take: see
+    /// [`ParsePhase::ObjectMemoryLimit`](crate::diagnostics::ParsePhase::ObjectMemoryLimit).
+    object_budget: Cell<usize>,
+    /// Objects not read because they would have passed `object_budget`.
+    /// Each is refused at once after that, rather than parsed again up to
+    /// what is left of the budget each time it is asked for.
+    over_budget: RefCell<HashSet<u32>>,
     /// Object streams that could not be read. Every object the
     /// cross-reference table places in such a stream fails the same way,
     /// and without this each one decoded the stream again to find that out:
@@ -428,6 +464,8 @@ impl<'a> Resolver<'a> {
     /// Encrypt dict before encryption state is known).
     pub(crate) fn new(data: &'a [u8], xref: &XrefTable) -> Self {
         Self {
+            object_budget: Cell::new(object_budget_for(data.len())),
+            over_budget: RefCell::default(),
             data: Source::Borrowed(data),
             xref: xref.clone(),
             cache: RefCell::new(HashMap::new()),
@@ -468,6 +506,8 @@ impl<'a> Resolver<'a> {
         encryption: Option<crate::crypto::EncryptionState>,
     ) -> Self {
         Self {
+            object_budget: Cell::new(object_budget_for(data.len())),
+            over_budget: RefCell::default(),
             data,
             xref,
             cache: RefCell::new(HashMap::new()),
@@ -517,9 +557,12 @@ impl<'a> Resolver<'a> {
                         if let Some(c) = stm.get(&stm_num)
                             && abs < c.data.len()
                         {
-                            let mut l = Lexer::new(&c.data[abs..]);
+                            let mut l =
+                                Lexer::new(&c.data[abs..]).with_budget(self.object_budget.get());
                             if let Ok(o) = parse_object(&mut l) {
+                                let left = l.budget();
                                 drop(stm);
+                                self.object_budget.set(left);
                                 self.cache.borrow_mut().insert(num, o);
                             }
                         }
@@ -530,10 +573,39 @@ impl<'a> Resolver<'a> {
     }
 
     /// Resolve an indirect reference to its parsed object.
+    /// Refuse object `obj_num` from now on, as reading it would pass the
+    /// document's object budget, and warn of the first such object.
+    fn refuse_over_budget(&self, obj_num: u32, gen_num: u16) {
+        use crate::diagnostics::{LocationHint, ParsePhase, Severity};
+
+        let first = {
+            let mut refused = self.over_budget.borrow_mut();
+            refused.insert(obj_num);
+            refused.len() == 1
+        };
+        if !first {
+            return;
+        }
+        let limit = object_budget_for(self.data.len());
+        self.warnings.record_once(
+            ParsePhase::ObjectMemoryLimit,
+            Some(LocationHint::Object { obj_num, gen_num }),
+            Severity::Warning,
+            format!(
+                "object {obj_num} {gen_num} is not read: the objects read from this file \
+                 would take more than {limit} bytes of memory, which is more than its \
+                 length allows; other objects may be left out the same way"
+            ),
+        );
+    }
+
     pub fn resolve(&self, obj_num: u32, _gen_num: u16) -> Result<PdfObj, PdfError> {
         // Check cache first
         if let Some(obj) = self.cache.borrow().get(&obj_num) {
             return Ok(obj.clone());
+        }
+        if self.over_budget.borrow().contains(&obj_num) {
+            return Err(PdfError::ObjectMemoryLimit);
         }
 
         // Circular reference guard
@@ -545,6 +617,9 @@ impl<'a> Resolver<'a> {
 
         self.resolving.borrow_mut().remove(&obj_num);
 
+        if let Err(PdfError::ObjectMemoryLimit) = result {
+            self.refuse_over_budget(obj_num, _gen_num);
+        }
         let obj = result?;
         self.cache.borrow_mut().insert(obj_num, obj.clone());
         Ok(obj)
@@ -580,6 +655,9 @@ impl<'a> Resolver<'a> {
                 // for the real "N G obj" header.
                 match self.parse_object_at(offset, Some(obj_num)) {
                     Ok(obj) => obj,
+                    // Found, and too large: the same object found again by
+                    // scanning would be too.
+                    Err(PdfError::ObjectMemoryLimit) => return Err(PdfError::ObjectMemoryLimit),
                     Err(_) => self.scan_for_object(obj_num)?,
                 }
             }
@@ -1008,7 +1086,9 @@ impl<'a> Resolver<'a> {
             })
             .ok_or(PdfError::InvalidObject(offset))?;
 
-        let mut lexer = Lexer::at(&self.data, actual_offset);
+        // The object is charged against the document's budget only once it
+        // is read: one that fails is dropped, and holds nothing.
+        let mut lexer = Lexer::at(&self.data, actual_offset).with_budget(self.object_budget.get());
 
         // Parse the "N G obj" header and verify the object number
         let parsed_num = match lexer.next_token()? {
@@ -1026,6 +1106,7 @@ impl<'a> Resolver<'a> {
 
         // Parse the object value
         let obj = parse_object(&mut lexer)?;
+        self.object_budget.set(lexer.budget());
 
         // Check if this is a stream (dict followed by "stream" keyword)
         if let PdfObj::Dict(dict) = obj {
@@ -1208,17 +1289,25 @@ impl<'a> Resolver<'a> {
             raw_slice.to_vec()
         };
         let (filter_list, parms) = filters::parse_filters(&dict, Some(self))?;
+        // The decoded text is held as long as the objects read from it, so
+        // it is charged against the document's object budget, and decoded
+        // no further than what is left of that.
+        let left = self.object_budget.get();
+        let general = filters::DecodeBudget::for_stream(&dict);
+        let budget = if left < general.limit() {
+            filters::DecodeBudget::for_objects(left)
+        } else {
+            general
+        };
         let stream_data = if filter_list.is_empty() {
             raw
         } else {
-            self.decode_filters(
-                &raw,
-                &filter_list,
-                &parms,
-                None,
-                filters::DecodeBudget::for_stream(&dict),
-            )?
+            self.decode_filters(&raw, &filter_list, &parms, None, budget)?
         };
+        let left = left
+            .checked_sub(stream_data.len())
+            .ok_or(PdfError::ObjectMemoryLimit)?;
+        self.object_budget.set(left);
 
         // `/N` and `/First` come from the file: neither may size an
         // allocation, and one that is negative is not a count or a place.
@@ -1323,8 +1412,11 @@ impl<'a> Resolver<'a> {
                 ))
             })?;
 
-        let mut obj_lexer = Lexer::new(&cached.data[abs_offset..]);
-        parse_object(&mut obj_lexer)
+        let mut obj_lexer =
+            Lexer::new(&cached.data[abs_offset..]).with_budget(self.object_budget.get());
+        let obj = parse_object(&mut obj_lexer)?;
+        self.object_budget.set(obj_lexer.budget());
+        Ok(obj)
     }
 }
 
