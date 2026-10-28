@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **`stet_pdf_reader::xref::XrefTable::entries` yields `(u32, &XrefEntry)`
+  pairs, lowest object number first, where it returned
+  `&[Option<XrefEntry>]`.** The slice had a slot for every object number up
+  to the highest the file gives, so its size was set by a number read from
+  the file; see the fix below. Object numbers without an entry are no
+  longer visited. `get`, `len` and `is_empty` are unchanged: `len` is
+  still one more than the highest object number, not the count of
+  entries, as is `Resolver::xref_len`. Code indexing the slice by object
+  number should call `get`.
+
 ### Added
 
 - **`PdfDocument::set_host_files`: read no file but the document.** Off,
@@ -145,6 +157,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A cross-reference entry with a huge object number costs what any
+  other entry does.** The PDF reader kept the cross-reference table as one
+  slot per object number up to the highest, so one entry numbered
+  4,294,967,295 asked for about 69 GB and took the process, and on a
+  machine with swap much else, down with it. Only the entries the file
+  gives are kept now.
 - **A predefined CMap is looked for only under a name a CMap can have.**
   The PDF reader takes the CMap name a document gives as a file name in
   the folders CMaps are kept in. It is now used only if it is made of

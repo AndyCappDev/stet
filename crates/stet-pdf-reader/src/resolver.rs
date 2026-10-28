@@ -493,8 +493,8 @@ impl<'a> Resolver<'a> {
     /// avoiding per-object decompression during page rendering.
     pub fn preload_object_streams(&self) {
         let mut stream_nums: HashSet<u32> = HashSet::new();
-        for entry in self.xref.entries() {
-            if let Some(XrefEntry::InStream { stream_obj_num, .. }) = entry {
+        for (_, entry) in self.xref.entries() {
+            if let XrefEntry::InStream { stream_obj_num, .. } = entry {
                 stream_nums.insert(*stream_obj_num);
             }
         }

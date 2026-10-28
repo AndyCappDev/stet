@@ -4,6 +4,8 @@
 
 //! PDF cross-reference table and trailer parsing.
 
+use std::collections::BTreeMap;
+
 use crate::error::PdfError;
 use crate::filters;
 use crate::lexer::{Lexer, Token, parse_dict_body};
@@ -37,8 +39,13 @@ struct XrefSection {
 
 #[derive(Clone)]
 pub struct XrefTable {
-    /// Map from object number to entry. Index = object number.
-    entries: Vec<Option<XrefEntry>>,
+    /// Each object the file gives a location for, by object number.
+    ///
+    /// A map, not a table indexed by object number: the numbers come from
+    /// the file, and a table with a slot for every number up to the highest
+    /// costs what that number says rather than what the file holds — one
+    /// entry numbered 4,294,967,295 asked for 69 GB.
+    entries: BTreeMap<u32, XrefEntry>,
     /// Trailer dictionary (from the most recent trailer/xref stream).
     pub trailer: PdfDict,
     /// Whether the table was rebuilt by scanning the file for objects,
@@ -51,7 +58,7 @@ impl XrefTable {
     #[cfg(test)]
     pub(crate) fn empty() -> Self {
         Self {
-            entries: Vec::new(),
+            entries: BTreeMap::new(),
             trailer: PdfDict::new(),
             rebuilt: false,
         }
@@ -59,17 +66,26 @@ impl XrefTable {
 
     /// Look up an object's location by number.
     pub fn get(&self, obj_num: u32) -> Option<&XrefEntry> {
-        self.entries.get(obj_num as usize).and_then(|e| e.as_ref())
+        self.entries.get(&obj_num)
     }
 
-    /// Iterate over all entries (including None gaps).
-    pub fn entries(&self) -> &[Option<XrefEntry>] {
-        &self.entries
+    /// Every entry the table holds, with its object number, lowest number
+    /// first. Numbers the file gives no entry for are not visited.
+    pub fn entries(&self) -> impl Iterator<Item = (u32, &XrefEntry)> + '_ {
+        self.entries.iter().map(|(&num, entry)| (num, entry))
     }
 
-    /// Total number of entry slots (including None gaps).
+    /// One more than the highest object number with an entry: the size a
+    /// table indexed by object number would need. It is not the number of
+    /// entries, and does not bound them: count [`entries`](Self::entries)
+    /// for that. Saturates at `usize::MAX` where `usize` is 32 bits wide.
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.entries.last_key_value().map_or(0, |(&num, _)| {
+            usize::try_from(num)
+                .ok()
+                .and_then(|num| num.checked_add(1))
+                .unwrap_or(usize::MAX)
+        })
     }
 
     /// Whether the table is empty.
@@ -197,20 +213,14 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
     // assuming discovery order matches chronological order, which breaks when
     // discover_orphaned_xref_sections finds sections in arbitrary order.
     sections.sort_by_key(|s| s.file_offset);
-    let mut combined_entries: Vec<Option<XrefEntry>> = Vec::new();
+    let mut combined_entries: BTreeMap<u32, XrefEntry> = BTreeMap::new();
     let mut final_trailer = PdfDict::new();
 
     for XrefSection {
         entries, trailer, ..
     } in sections
     {
-        for (num, entry) in entries {
-            let idx = num as usize;
-            if idx >= combined_entries.len() {
-                combined_entries.resize(idx + 1, None);
-            }
-            combined_entries[idx] = Some(entry);
-        }
+        combined_entries.extend(entries);
         // Merge trailer keys — later sections override earlier ones, but
         // empty trailers (e.g., from truncated xref sections in truncated
         // linearized PDFs) won't erase keys like /Root from earlier trailers
@@ -229,7 +239,7 @@ pub fn parse_xref(data: &[u8]) -> Result<XrefTable, PdfError> {
     // If %PDF- header isn't at byte 0 (e.g., UTF-8 BOM or prepended garbage),
     // adjust all InFile xref offsets by the header position.
     if header_offset > 0 {
-        for entry in combined_entries.iter_mut().flatten() {
+        for entry in combined_entries.values_mut() {
             if let XrefEntry::InFile { offset, .. } = entry {
                 *offset += header_offset;
             }
@@ -334,7 +344,7 @@ fn discover_orphaned_xref_sections(
 /// Scan file for `N G obj` patterns and add entries for objects not already
 /// in the xref table. This catches objects appended after %%EOF in
 /// linearized PDFs or broken incremental updates.
-fn supplement_xref_from_scan(data: &[u8], entries: &mut Vec<Option<XrefEntry>>) {
+fn supplement_xref_from_scan(data: &[u8], entries: &mut BTreeMap<u32, XrefEntry>) {
     let mut pos = 0;
     while pos < data.len() {
         // Advance to start-of-line
@@ -355,27 +365,22 @@ fn supplement_xref_from_scan(data: &[u8], entries: &mut Vec<Option<XrefEntry>>) 
         if pos < data.len()
             && data[pos].is_ascii_digit()
             && let Some((obj_num, generation, obj_offset)) = try_parse_obj_header(data, pos)
+            && obj_num < 100_000
         {
-            let idx = obj_num as usize;
-            if idx < 100_000 {
-                // Add if not already in the table, or if the existing entry is
-                // Free (malformed xref tables sometimes mark real objects as
-                // free, e.g. when the subsection start number is off-by-one).
-                let dominated_by_existing = entries.get(idx).is_some_and(|e| {
-                    matches!(
-                        e,
-                        Some(XrefEntry::InFile { .. } | XrefEntry::InStream { .. })
-                    )
-                });
-                if !dominated_by_existing {
-                    if idx >= entries.len() {
-                        entries.resize(idx + 1, None);
-                    }
-                    entries[idx] = Some(XrefEntry::InFile {
+            // Add if not already in the table, or if the existing entry is
+            // Free (malformed xref tables sometimes mark real objects as
+            // free, e.g. when the subsection start number is off-by-one).
+            let dominated_by_existing = entries.get(&obj_num).is_some_and(|e| {
+                matches!(e, XrefEntry::InFile { .. } | XrefEntry::InStream { .. })
+            });
+            if !dominated_by_existing {
+                entries.insert(
+                    obj_num,
+                    XrefEntry::InFile {
                         offset: obj_offset,
                         generation,
-                    });
-                }
+                    },
+                );
             }
         }
 
@@ -412,7 +417,7 @@ fn find_int_after_key(data: &[u8], key: &[u8]) -> Option<usize> {
 /// Rebuild the xref table by scanning the entire file for `N G obj` patterns.
 /// Used as a fallback when the xref table/stream is damaged or missing.
 fn rebuild_xref_from_scan(data: &[u8]) -> Result<XrefTable, PdfError> {
-    let mut entries: Vec<Option<XrefEntry>> = Vec::new();
+    let mut entries: BTreeMap<u32, XrefEntry> = BTreeMap::new();
 
     // Scan for "N G obj" patterns at the start of lines
     let mut pos = 0;
@@ -438,18 +443,16 @@ fn rebuild_xref_from_scan(data: &[u8]) -> Result<XrefTable, PdfError> {
         if pos < data.len()
             && data[pos].is_ascii_digit()
             && let Some((obj_num, generation, obj_offset)) = try_parse_obj_header(data, pos)
+            // sanity limit
+            && obj_num < 100_000
         {
-            let idx = obj_num as usize;
-            if idx < 100_000 {
-                // sanity limit
-                if idx >= entries.len() {
-                    entries.resize(idx + 1, None);
-                }
-                entries[idx] = Some(XrefEntry::InFile {
+            entries.insert(
+                obj_num,
+                XrefEntry::InFile {
                     offset: obj_offset,
                     generation,
-                });
-            }
+                },
+            );
         }
 
         // Advance to next line (handle both \n and \r line endings)
@@ -468,7 +471,7 @@ fn rebuild_xref_from_scan(data: &[u8]) -> Result<XrefTable, PdfError> {
     // Try to parse any xref stream objects found during the scan.
     // These carry the trailer dict (with /Root) and may reference objects
     // inside object streams that aren't discoverable by byte-scanning alone.
-    for entry in entries.iter().flatten() {
+    for entry in entries.values() {
         if let XrefEntry::InFile { offset, .. } = entry {
             let search_end = (*offset + 512).min(data.len());
             let slice = &data[*offset..search_end];
@@ -479,14 +482,8 @@ fn rebuild_xref_from_scan(data: &[u8]) -> Result<XrefTable, PdfError> {
                 // Merge entries from xref stream (includes ObjStm refs)
                 let mut merged = entries;
                 for (num, xentry) in xref_entries {
-                    let idx = num as usize;
-                    if idx < 100_000 {
-                        if idx >= merged.len() {
-                            merged.resize(idx + 1, None);
-                        }
-                        if merged[idx].is_none() {
-                            merged[idx] = Some(xentry);
-                        }
+                    if num < 100_000 {
+                        merged.entry(num).or_insert(xentry);
                     }
                 }
                 return Ok(XrefTable {
@@ -597,16 +594,16 @@ fn find_trailer_dict(data: &[u8]) -> Option<PdfDict> {
 }
 
 /// Scan resolved objects for one with /Type /Catalog and return its object number.
-fn find_catalog_obj(data: &[u8], entries: &[Option<XrefEntry>]) -> Option<u32> {
-    for (num, entry) in entries.iter().enumerate() {
-        if let Some(XrefEntry::InFile { offset, .. }) = entry {
+fn find_catalog_obj(data: &[u8], entries: &BTreeMap<u32, XrefEntry>) -> Option<u32> {
+    for (&num, entry) in entries {
+        if let XrefEntry::InFile { offset, .. } = entry {
             // Quick byte-level check before full parsing
             let search_end = (*offset + 512).min(data.len());
             let slice = &data[*offset..search_end];
             if let Some(idx) = slice.windows(8).position(|w| w == b"/Catalog") {
                 // Verify /Type precedes it
                 if idx > 5 && slice[..idx].windows(5).any(|w| w == b"/Type") {
-                    return Some(num as u32);
+                    return Some(num);
                 }
             }
             // Also check xref stream objects which carry /Root in their dict
@@ -1151,6 +1148,39 @@ fn is_whitespace(b: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A table with an entry numbered 4,294,967,295 holds that one entry,
+    /// not a slot for every number below it; `len` is still one more than
+    /// the highest number.
+    #[test]
+    fn a_huge_object_number_is_one_entry() {
+        let mut entries = BTreeMap::new();
+        entries.insert(1, XrefEntry::Free);
+        entries.insert(
+            u32::MAX,
+            XrefEntry::InFile {
+                offset: 9,
+                generation: 0,
+            },
+        );
+        let table = XrefTable {
+            entries,
+            trailer: PdfDict::new(),
+            rebuilt: false,
+        };
+        let numbers: Vec<u32> = table.entries().map(|(num, _)| num).collect();
+        assert_eq!(numbers, [1, u32::MAX]);
+        assert!(table.get(2).is_none());
+        assert!(matches!(
+            table.get(u32::MAX),
+            Some(XrefEntry::InFile { offset: 9, .. })
+        ));
+        assert_eq!(
+            table.len(),
+            usize::try_from(u64::from(u32::MAX) + 1).unwrap_or(usize::MAX)
+        );
+        assert!(XrefTable::empty().is_empty());
+    }
 
     #[test]
     fn find_startxref_simple() {
