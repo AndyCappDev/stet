@@ -194,6 +194,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   may hold, which made decoding up to three times as costly as that at
   its peak. `stet` prints the new warning, and `stet inspect` lists it as
   `object memory limit`.
+- **The operands waiting for an operator take at most 16 MiB.** A
+  content stream's operands were held until an operator took them,
+  however many there were, so 98 KB of Flate decoding to fifty million
+  numbers with no operator took 1.7 GB to render, and the same numbers as
+  one array 4 GB. Past 16 MiB the operands waiting are dropped, and an
+  array or dictionary too large on its own is read past, with one
+  `Content` warning for the page; the content after them is drawn as
+  before. An inline image's dictionary has as much again, its entries past
+  that left out, and is no longer searched one entry at a time for each
+  key it adds: 200,000 keys took 19 seconds to read. The most any operator
+  takes on any page of 717 test files is 14.7 KB, and rendering is
+  otherwise unchanged.
 - **An object numbered 100,000 or more is found when the file is
   scanned for objects.** When the cross-reference table is missing or
   damaged, or leaves objects out, the reader scans the file for them, and

@@ -77,13 +77,43 @@ impl<'a> Lexer<'a> {
         self.budget
     }
 
-    /// Take `bytes` from the budget, or fail if it does not hold them.
-    fn charge(&mut self, bytes: usize) -> Result<(), PdfError> {
+    /// Give the objects parsed from here on `bytes` of memory between
+    /// them, whatever was left: [`with_budget`](Self::with_budget), on a
+    /// lexer already in use.
+    pub(crate) fn set_budget(&mut self, bytes: usize) {
+        self.budget = bytes;
+    }
+
+    /// Take `bytes` from the budget, or fail with
+    /// [`PdfError::ObjectMemoryLimit`] if it does not hold them, leaving it
+    /// as it was.
+    pub(crate) fn charge(&mut self, bytes: usize) -> Result<(), PdfError> {
         self.budget = self
             .budget
             .checked_sub(bytes)
             .ok_or(PdfError::ObjectMemoryLimit)?;
         Ok(())
+    }
+
+    /// Read past the object that starts here without building it: one
+    /// token, and when that opens an array or dictionary, every token to
+    /// the one that closes it, nested ones included, or to the end of the
+    /// data. What a parse that passed the budget stopped inside of is
+    /// passed over this way, from where it started, so that what follows
+    /// it is read as it would have been.
+    pub(crate) fn skip_object(&mut self) {
+        let mut depth = 0usize;
+        loop {
+            match self.next_token() {
+                Ok(Token::ArrayBegin | Token::DictBegin) => depth += 1,
+                Ok(Token::ArrayEnd | Token::DictEnd) => depth = depth.saturating_sub(1),
+                Ok(Token::Eof) => return,
+                Ok(_) | Err(_) => {}
+            }
+            if depth == 0 {
+                return;
+            }
+        }
     }
 
     /// Current byte offset.

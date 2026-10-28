@@ -19,6 +19,19 @@ mod text_extract;
 use crate::diagnostics::{ParsePhase, Severity};
 use crate::error::{ContentLimit, PdfError};
 use crate::lexer::{Lexer, MAX_OBJECT_DEPTH, Token};
+
+/// Bytes of memory the operands waiting for an operator may take between
+/// them: an inline image's dictionary has as much again of its own.
+///
+/// An operator takes a few operands, and a content stream decodes to as
+/// many as hundreds of megabytes, so nothing else bounds them: 98 KB of
+/// Flate decoding to fifty million `1 ` with no operator after them took
+/// 1.7 GB to render, and the same as one array operand 4 GB. The most any
+/// operator takes on any page of 717 test files, rendered, is 14.7 KB, a
+/// `TJ` array, and 90 operands. Past this, the operands waiting are
+/// dropped as no operator's, and an array or dictionary too large on its
+/// own is passed over, with a warning for the page.
+const MAX_OPERAND_BYTES: usize = 16 << 20;
 use crate::objects::{PdfDict, PdfObj};
 use crate::resolver::Resolver;
 
@@ -1881,7 +1894,9 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     fn interpret_stream_inner(&mut self, data: &[u8]) -> Result<(), PdfError> {
-        let mut lexer = Lexer::new(data);
+        // The lexer's budget is what the operands waiting for an operator
+        // may still take: see [`MAX_OPERAND_BYTES`].
+        let mut lexer = Lexer::new(data).with_budget(MAX_OPERAND_BYTES);
         // Tracks whether the previous token was a number whose terminating
         // byte was *not* whitespace.  Used to detect lenient lexing of
         // sequences like `5f` (= `5 f`), where the painter is glued to a
@@ -1924,6 +1939,8 @@ impl<'a> ContentInterpreter<'a> {
                 };
 
                 if op == b"BI" {
+                    // The image's dictionary has an allowance of its own.
+                    lexer.set_budget(MAX_OPERAND_BYTES);
                     self.handle_inline_image(&mut lexer)?;
                 } else {
                     self.nested_failure_reported = false;
@@ -1935,6 +1952,7 @@ impl<'a> ContentInterpreter<'a> {
                     }
                 }
                 self.operand_stack.clear();
+                lexer.set_budget(MAX_OPERAND_BYTES);
                 continue;
             }
             let tok = match lexer.next_token() {
@@ -1950,28 +1968,30 @@ impl<'a> ContentInterpreter<'a> {
             match tok {
                 Token::Eof => break,
                 Token::Int(n) => {
-                    self.operand_stack.push(Operand::Int(n));
+                    self.push_operand(&mut lexer, Operand::Int(n), 0);
                     let p = lexer.pos();
                     prev_token_was_glued_number = p < data.len() && !is_whitespace_byte(data[p]);
                 }
                 Token::Real(f) => {
-                    self.operand_stack.push(Operand::Real(f));
+                    self.push_operand(&mut lexer, Operand::Real(f), 0);
                     let p = lexer.pos();
                     prev_token_was_glued_number = p < data.len() && !is_whitespace_byte(data[p]);
                 }
-                Token::Name(n) => self.operand_stack.push(Operand::Name(n)),
+                Token::Name(n) => {
+                    let held = n.len();
+                    self.push_operand(&mut lexer, Operand::Name(n), held);
+                }
                 Token::LitString(s) | Token::HexString(s) => {
-                    self.operand_stack.push(Operand::Str(s));
+                    let held = s.len();
+                    self.push_operand(&mut lexer, Operand::Str(s), held);
                 }
-                Token::Bool(b) => self.operand_stack.push(Operand::Bool(b)),
-                Token::ArrayBegin => {
-                    let arr = Self::parse_inline_array(&mut lexer)?;
-                    self.operand_stack.push(Operand::Array(arr));
-                }
-                Token::DictBegin => {
-                    let dict = crate::lexer::parse_dict_body(&mut lexer)?;
-                    self.operand_stack.push(Operand::Dict(dict));
-                }
+                Token::Bool(b) => self.push_operand(&mut lexer, Operand::Bool(b), 0),
+                Token::ArrayBegin => self.push_container(&mut lexer, pos_before, |lexer| {
+                    Self::parse_inline_array(lexer).map(Operand::Array)
+                })?,
+                Token::DictBegin => self.push_container(&mut lexer, pos_before, |lexer| {
+                    crate::lexer::parse_dict_body(lexer).map(Operand::Dict)
+                })?,
                 // Operators were taken above; `true` and `false` come back
                 // as `Bool`.
                 Token::Keyword(_) => {}
@@ -1981,6 +2001,72 @@ impl<'a> ContentInterpreter<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Push `operand`, which holds `held` bytes beside itself, charging it
+    /// against what the operands waiting for an operator may take. Past
+    /// that, the operands waiting are dropped first; one that is more than
+    /// the whole allowance on its own is dropped too.
+    fn push_operand(&mut self, lexer: &mut Lexer, operand: Operand, held: usize) {
+        let bytes = std::mem::size_of::<Operand>() + held;
+        if lexer.charge(bytes).is_err() {
+            self.drop_waiting_operands(lexer);
+            if lexer.charge(bytes).is_err() {
+                return;
+            }
+        }
+        self.operand_stack.push(operand);
+    }
+
+    /// Parse the array or dictionary operand that starts at `start` with
+    /// `parse`, which charges what it builds, and push it. Past what the
+    /// operands waiting may take, the ones before it are dropped and it is
+    /// parsed again; if it is too large even then, it is passed over, so
+    /// that what follows it is read as it would have been.
+    fn push_container(
+        &mut self,
+        lexer: &mut Lexer,
+        start: usize,
+        parse: impl Fn(&mut Lexer) -> Result<Operand, PdfError>,
+    ) -> Result<(), PdfError> {
+        let parse = |lexer: &mut Lexer| {
+            let operand = parse(lexer)?;
+            lexer.charge(std::mem::size_of::<Operand>())?;
+            Ok(operand)
+        };
+        let operand = match parse(lexer) {
+            Err(PdfError::ObjectMemoryLimit) if !self.operand_stack.is_empty() => {
+                self.drop_waiting_operands(lexer);
+                lexer.set_pos(start);
+                parse(lexer)
+            }
+            other => other,
+        };
+        match operand {
+            Ok(operand) => self.operand_stack.push(operand),
+            Err(PdfError::ObjectMemoryLimit) => {
+                lexer.set_pos(start);
+                lexer.skip_object();
+                self.drop_waiting_operands(lexer);
+            }
+            Err(e) => return Err(e),
+        }
+        Ok(())
+    }
+
+    /// Drop the operands waiting for an operator, as more than
+    /// [`MAX_OPERAND_BYTES`] of them is no operator's, and warn of it once
+    /// for the page.
+    fn drop_waiting_operands(&mut self, lexer: &mut Lexer) {
+        self.operand_stack.clear();
+        lexer.set_budget(MAX_OPERAND_BYTES);
+        self.resolver.warn_content(
+            Severity::Warning,
+            format!(
+                "operands of more than {MAX_OPERAND_BYTES} bytes waiting for an operator \
+                 are dropped"
+            ),
+        );
     }
 
     /// Parse an inline array from the content stream.
@@ -2006,6 +2092,16 @@ impl<'a> ContentInterpreter<'a> {
         let mut elems = Vec::new();
         loop {
             let tok = lexer.next_token()?;
+            // Each element is charged its place in the array and the bytes
+            // of a name or string, as the lexer charges an object.
+            let held = match &tok {
+                Token::ArrayEnd | Token::Eof => 0,
+                Token::Name(bytes) | Token::LitString(bytes) | Token::HexString(bytes) => {
+                    std::mem::size_of::<PdfObj>() + bytes.len()
+                }
+                _ => std::mem::size_of::<PdfObj>(),
+            };
+            lexer.charge(held)?;
             match tok {
                 Token::ArrayEnd | Token::Eof => break,
                 Token::Int(n) => elems.push(PdfObj::Int(n)),
@@ -2019,12 +2115,20 @@ impl<'a> ContentInterpreter<'a> {
                     // surrounding operand stream stays in sync.
                     match Self::parse_inline_array_at_depth(lexer, depth + 1) {
                         Ok(sub) => elems.push(PdfObj::Array(sub)),
+                        Err(PdfError::ObjectMemoryLimit) => {
+                            return Err(PdfError::ObjectMemoryLimit);
+                        }
                         Err(_) => continue,
                     }
                 }
                 Token::DictBegin => {
-                    let d = crate::lexer::parse_dict_body_at_depth(lexer, depth + 1)
-                        .unwrap_or_default();
+                    let d = match crate::lexer::parse_dict_body_at_depth(lexer, depth + 1) {
+                        Ok(d) => d,
+                        Err(PdfError::ObjectMemoryLimit) => {
+                            return Err(PdfError::ObjectMemoryLimit);
+                        }
+                        Err(_) => PdfDict::default(),
+                    };
                     elems.push(PdfObj::Dict(d));
                 }
                 Token::Keyword(ref kw) if kw == b"null" => {
@@ -2033,6 +2137,7 @@ impl<'a> ContentInterpreter<'a> {
                 _ => {}
             }
         }
+        elems.shrink_to_fit();
         Ok(elems)
     }
 
@@ -7217,34 +7322,72 @@ impl<'a> ContentInterpreter<'a> {
 
     /// Handle inline image (BI ... ID ... EI).
     fn handle_inline_image(&mut self, lexer: &mut Lexer) -> Result<(), PdfError> {
-        // Parse image dict (abbreviated keys)
+        // Parse image dict (abbreviated keys). Its entries are charged as
+        // operands are, and past the allowance the rest of them are read
+        // past without being kept, to `ID`.
         let mut dict = PdfDict::new();
+        let mut keys = std::collections::HashSet::new();
+        let mut cut_short = false;
         loop {
             let tok = lexer.next_token()?;
             match tok {
                 Token::Keyword(ref kw) if kw == b"ID" => break,
                 Token::Eof => return Ok(()),
+                Token::Name(_) if cut_short => {
+                    lexer.skip_object();
+                }
                 Token::Name(key) => {
                     let expanded_key = expand_inline_key(&key);
+                    let value_at = lexer.pos();
                     let val_tok = lexer.next_token()?;
+                    // `None` when the value is more than the allowance holds.
                     let val = match val_tok {
-                        Token::Int(n) => PdfObj::Int(n),
-                        Token::Real(f) => PdfObj::Real(f),
-                        Token::Name(n) => PdfObj::Name(expand_inline_value(&n)),
-                        Token::Bool(b) => PdfObj::Bool(b),
-                        Token::LitString(s) | Token::HexString(s) => PdfObj::Str(s),
-                        Token::ArrayBegin => {
-                            let arr = Self::parse_inline_array(lexer)?;
-                            PdfObj::Array(arr)
-                        }
-                        Token::DictBegin => crate::lexer::parse_dict_body(lexer)
-                            .map(PdfObj::Dict)
-                            .unwrap_or(PdfObj::Null),
-                        _ => PdfObj::Null,
+                        Token::Int(n) => Some(PdfObj::Int(n)),
+                        Token::Real(f) => Some(PdfObj::Real(f)),
+                        Token::Name(n) => Some(PdfObj::Name(expand_inline_value(&n))),
+                        Token::Bool(b) => Some(PdfObj::Bool(b)),
+                        Token::LitString(s) | Token::HexString(s) => Some(PdfObj::Str(s)),
+                        Token::ArrayBegin => match Self::parse_inline_array(lexer) {
+                            Ok(arr) => Some(PdfObj::Array(arr)),
+                            Err(PdfError::ObjectMemoryLimit) => None,
+                            Err(e) => return Err(e),
+                        },
+                        Token::DictBegin => match crate::lexer::parse_dict_body(lexer) {
+                            Ok(dict) => Some(PdfObj::Dict(dict)),
+                            Err(PdfError::ObjectMemoryLimit) => None,
+                            Err(_) => Some(PdfObj::Null),
+                        },
+                        _ => Some(PdfObj::Null),
+                    };
+                    let val = val.filter(|val| {
+                        let held = std::mem::size_of::<(Vec<u8>, PdfObj)>()
+                            + expanded_key.len()
+                            + match val {
+                                PdfObj::Name(bytes) | PdfObj::Str(bytes) => bytes.len(),
+                                _ => 0,
+                            };
+                        lexer.charge(held).is_ok()
+                    });
+                    let Some(val) = val else {
+                        // Past the allowance: the value is read past from
+                        // where it starts, and so is every entry after it.
+                        cut_short = true;
+                        lexer.set_pos(value_at);
+                        lexer.skip_object();
+                        self.resolver.warn_content(
+                            Severity::Warning,
+                            format!(
+                                "an inline image's dictionary is more than \
+                                 {MAX_OPERAND_BYTES} bytes; its entries past that are left out"
+                            ),
+                        );
+                        continue;
                     };
                     // First occurrence wins: when both abbreviated (/W) and full
                     // (/Width) forms are present, the first one takes precedence.
-                    if dict.get(&expanded_key).is_none() {
+                    // Looked up in a set, as a dictionary searches its entries
+                    // one by one and an image can list hundreds of thousands.
+                    if keys.insert(expanded_key.clone()) {
                         dict.insert(expanded_key, val);
                     }
                 }

@@ -882,7 +882,7 @@ rendered:
 | Severity | Examples |
 |---|---|
 | `Error` | a content stream, of the page or of a form, pattern or glyph it uses, that stops making sense part-way (what came before it is drawn); one of a page's content streams that cannot be decoded at all |
-| `Warning` | an operator that failed and was skipped — `operator Do: object 12 0 not found`, `operator sh: …`, `operator c: need 6 operands, have 4` — so an image that will not decode, a shading whose function is refused and a path with the wrong operand count all say so; a font or a soft mask that could not be loaded, an embedded font program or CMap that could not be read; an ICC profile that could not be used (`ICC profile: Failed to parse profile: …`), in which case the colour space's alternate is drawn; a page with more nested content than the reader will interpret; an image decoded only in part; a content stream, of the page or of a form, that the end of the file cuts short |
+| `Warning` | an operator that failed and was skipped — `operator Do: object 12 0 not found`, `operator sh: …`, `operator c: need 6 operands, have 4` — so an image that will not decode, a shading whose function is refused and a path with the wrong operand count all say so; a font or a soft mask that could not be loaded, an embedded font program or CMap that could not be read; an ICC profile that could not be used (`ICC profile: Failed to parse profile: …`), in which case the colour space's alternate is drawn; a page with more nested content than the reader will interpret; an image decoded only in part; a content stream, of the page or of a form, that the end of the file cuts short; more than 16 MiB of operands waiting for an operator, which are dropped, or of one inline image's dictionary, whose entries past that are left out (see below) |
 | `Info` | an image stream that needed the more lenient of two decoders |
 
 The page is in `location`, as `LocationHint::Page`:
@@ -902,6 +902,17 @@ for w in doc.parse_warnings().iter() {
 
 A profile that belongs to the document and not to a page — the output
 intent's — is reported with no location.
+
+The operands waiting for an operator may take 16 MiB of memory between
+them, and an inline image's dictionary as much again. An operator takes
+a few operands, and the most any operator takes on any page of 717 test
+files is 14.7 KB, so this is only met by content that is not what it
+seems: a few kilobytes of Flate can decode to tens of millions of
+numbers with no operator after them, which took gigabytes to hold. Past
+the allowance the operands waiting are dropped, the most recent kept
+for the operator after them; an array or dictionary too large on its own
+is read past, so the content after it is read as it would have been; and
+the page gets one `Warning`.
 
 Each is recorded once. Rendering a page again — which a viewer does at
 every zoom — adds nothing, so the list is bounded by what is wrong with
