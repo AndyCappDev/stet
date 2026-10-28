@@ -7,12 +7,15 @@
 //! `ParsePhase::MissingFont` or `ParsePhase::MissingCMap`, for the page
 //! that uses it. A missing font is drawn with a substitute and its text is
 //! still read; so is text in a font whose CMap is missing, through the
-//! document's own `/ToUnicode`.
+//! document's own `/ToUnicode`, unless the document is told to leave it out
+//! (`PdfDocument::set_leave_out_text_without_cmap`).
 //!
 //! Every document here is read with `set_host_files(false)`, so no CMap
 //! or font the machine has installed is looked for, and the tests give the
 //! same result on any machine.
 
+use stet_fonts::geometry::{PathSegment, PsPath};
+use stet_graphics::display_list::DisplayElement;
 use stet_graphics::text::text_runs;
 use stet_pdf_reader::{
     LayerSet, LocationHint, ParsePhase, ParseWarning, PdfDocument, Severity, TextExtraction,
@@ -115,8 +118,22 @@ fn read(pdf: &[u8]) -> (Vec<String>, Vec<ParseWarning>) {
 
 /// [`read`], with the number of glyphs each page draws.
 fn read_glyphs(pdf: &[u8]) -> (Vec<String>, Vec<usize>, Vec<ParseWarning>) {
+    read_glyphs_with(pdf, false)
+}
+
+/// [`read_glyphs`], with the text of a font whose CMap is missing left
+/// out.
+fn read_left_out(pdf: &[u8]) -> (Vec<String>, Vec<usize>, Vec<ParseWarning>) {
+    read_glyphs_with(pdf, true)
+}
+
+/// [`read_glyphs`], with `leave_out` given to
+/// `set_leave_out_text_without_cmap`.
+fn read_glyphs_with(pdf: &[u8], leave_out: bool) -> (Vec<String>, Vec<usize>, Vec<ParseWarning>) {
     let mut doc = PdfDocument::from_bytes(pdf).unwrap();
+    assert!(!doc.leave_out_text_without_cmap(), "off by default");
     doc.set_host_files(false);
+    doc.set_leave_out_text_without_cmap(leave_out);
     doc.set_text_extraction(TextExtraction::Glyphs);
     let mut texts = Vec::new();
     let mut glyphs = Vec::new();
@@ -170,6 +187,32 @@ fn not_found(name: &str) -> String {
         "predefined CMap '{name}' not found; \
          set STET_CMAP_DIR or install poppler-data for CJK support"
     )
+}
+
+/// What the MissingFont warnings of `warnings` say.
+fn font_messages(warnings: &[ParseWarning]) -> Vec<&str> {
+    warnings
+        .iter()
+        .filter(|w| w.phase == ParsePhase::MissingFont)
+        .map(|w| w.message.as_str())
+        .collect()
+}
+
+/// The message a CMap the document names as `name`, and that is not
+/// found, is reported with when the text in its font is left out.
+fn not_found_left_out(name: &str) -> String {
+    format!(
+        "{}; the text in the font that uses it is left out",
+        not_found(name)
+    )
+}
+
+/// The glyphs each page of [`two_pages`] draws with the Helvetica line of
+/// [`MIXED`] alone.
+fn latin_glyphs() -> Vec<usize> {
+    let (font, extra) = composite_font("GBK-EUC-H");
+    let pdf = two_pages(&font, "BT /F1 12 Tf 10 60 Td (Latin value) Tj ET", &extra);
+    read_glyphs(&pdf).1
 }
 
 /// Text in [`MIXED`] read through the font's `/ToUnicode`: the two GB 2312
@@ -359,4 +402,309 @@ fn an_embedded_font_that_cannot_be_read_is_a_content_warning() {
     ));
     assert_eq!(of_kind(&warnings, ParsePhase::MissingFont), []);
     assert_eq!(of_kind(&warnings, ParsePhase::Content), both_pages());
+}
+
+/// With the text of a font whose CMap is missing left out, nothing in a
+/// font whose GBK-EUC-H CMap is neither embedded nor found is drawn or
+/// read, nor in one whose CMap no machine has: each page draws and reads
+/// the Helvetica line alone. The CMap is reported for each page, saying
+/// the text is left out, and the font, which is not embedded either, is
+/// reported without a substitute said to be drawn.
+#[test]
+fn text_in_a_font_whose_cmap_is_missing_can_be_left_out() {
+    let latin = latin_glyphs();
+    for name in ["GBK-EUC-H", "NoSuchCMap-H"] {
+        let (font, extra) = composite_font(name);
+        let (texts, glyphs, warnings) = read_left_out(&two_pages(&font, MIXED, &extra));
+
+        assert_eq!(texts, ["Latin value", "Latin value"], "{name}");
+        assert_eq!(glyphs, latin, "{name}: only the Helvetica line is drawn");
+        assert_eq!(of_kind(&warnings, ParsePhase::MissingCMap), both_pages());
+        assert_eq!(of_kind(&warnings, ParsePhase::MissingFont), both_pages());
+        assert_eq!(of_kind(&warnings, ParsePhase::Content), []);
+        let message = not_found_left_out(name);
+        assert_eq!(
+            cmap_messages(&warnings),
+            [message.as_str(), message.as_str()]
+        );
+    }
+}
+
+/// The same holds for UTF-16 codes in a font whose UTF-16 CMap is not
+/// found.
+#[test]
+fn text_in_a_font_whose_utf16_cmap_is_missing_can_be_left_out() {
+    let (font, extra) = composite_font("UniGB-UTF16-H");
+    let content = "BT /F1 12 Tf 10 60 Td (Latin value) Tj ET \
+                   BT /F2 12 Tf 10 30 Td <554A963F> Tj ET";
+    let (texts, glyphs, warnings) = read_left_out(&two_pages(&font, content, &extra));
+
+    assert_eq!(texts, ["Latin value", "Latin value"]);
+    assert_eq!(glyphs, latin_glyphs(), "only the Helvetica line is drawn");
+    assert_eq!(of_kind(&warnings, ParsePhase::MissingCMap), both_pages());
+    assert_eq!(of_kind(&warnings, ParsePhase::Content), []);
+    let message = not_found_left_out("UniGB-UTF16-H");
+    assert_eq!(
+        cmap_messages(&warnings),
+        [message.as_str(), message.as_str()]
+    );
+}
+
+/// A font left out for its missing CMap, and not embedded either, is
+/// reported as a missing font by name, with no substitute said to be drawn
+/// in its place; read as before, it is said to be drawn with one.
+#[test]
+fn a_font_left_out_is_not_said_to_be_drawn_with_a_substitute() {
+    let (font, extra) = composite_font("GBK-EUC-H");
+    let pdf = two_pages(&font, MIXED, &extra);
+    let substitute = "a substitute is drawn in its place";
+
+    let (_, _, warnings) = read_left_out(&pdf);
+    let left_out = "font 'SimSun' is not embedded in the document; \
+                    its CMap is missing too, so its text is left out";
+    assert_eq!(font_messages(&warnings), [left_out, left_out]);
+
+    let (_, _, warnings) = read_glyphs(&pdf);
+    let messages = font_messages(&warnings);
+    assert_eq!(messages.len(), 2, "{warnings:#?}");
+    for message in messages {
+        assert!(message.contains(substitute), "{message}");
+    }
+}
+
+/// A UCS-2 CMap that is not found keeps its text with the setting on:
+/// its codes are Unicode, read two bytes at a time. The CMap is reported
+/// without saying the text is left out.
+#[test]
+fn text_in_a_font_whose_ucs2_cmap_is_missing_is_kept() {
+    let font = "<< /Type /Font /Subtype /Type0 /BaseFont /SimSun /Encoding /UniGB-UCS2-H \
+                /DescendantFonts [8 0 R] >>";
+    let (_, extra) = composite_font("UniGB-UCS2-H");
+    let content = "BT /F1 12 Tf 10 60 Td (Latin value) Tj ET \
+                   BT /F2 12 Tf 10 30 Td <00530053004E00200031> Tj <0032> Tj ET";
+    let (texts, _, warnings) = read_left_out(&two_pages(font, content, &extra[..2]));
+
+    assert_eq!(texts, ["Latin valueSSN 12", "Latin valueSSN 12"]);
+    assert_eq!(of_kind(&warnings, ParsePhase::MissingCMap), both_pages());
+    assert_eq!(of_kind(&warnings, ParsePhase::Content), []);
+    let name = not_found("UniGB-UCS2-H");
+    assert_eq!(cmap_messages(&warnings), [name.as_str(), name.as_str()]);
+}
+
+/// A CMap the document embeds whose `usecmap` base is not found still
+/// reads the codes it maps itself with the setting on: "SSN", one byte a
+/// character, is drawn and read through the font's `/ToUnicode`. The base
+/// is reported by name, without saying the text is left out.
+#[test]
+fn an_embedded_cmap_whose_base_is_missing_still_reads_its_own_codes() {
+    let font = "<< /Type /Font /Subtype /Type0 /BaseFont /SimSun /Encoding 11 0 R \
+                /DescendantFonts [8 0 R] /ToUnicode 10 0 R >>";
+    let (_, mut extra) = composite_font("Identity-H");
+    extra[2] = stream(
+        "",
+        "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
+         /CMapName /Test def\n1 begincodespacerange\n<00> <FF>\nendcodespacerange\n\
+         1 beginbfrange\n<41> <5A> <0041>\nendbfrange\n\
+         endcmap CMapName currentdict /CMap defineresource pop end end",
+    );
+    extra.push(stream(
+        "/Type /CMap /CMapName /Own \
+         /CIDSystemInfo << /Registry (Adobe) /Ordering (GB1) /Supplement 2 >>",
+        "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
+         /NoSuchBase-H usecmap\n/CMapName /Own def\n\
+         1 begincodespacerange\n<00> <FF>\nendcodespacerange\n\
+         1 begincidrange\n<41> <5A> 34\nendcidrange\n\
+         endcmap CMapName currentdict /CMap defineresource pop end end",
+    ));
+    let content = "BT /F1 12 Tf 10 60 Td (Latin value) Tj ET \
+                   BT /F2 12 Tf 10 30 Td <53534E> Tj ET";
+    let (texts, glyphs, warnings) = read_left_out(&two_pages(font, content, &extra));
+
+    assert_eq!(texts, ["Latin valueSSN", "Latin valueSSN"]);
+    let latin = latin_glyphs();
+    for page in 0..2 {
+        assert_eq!(glyphs[page], latin[page] + 3, "page {page}");
+    }
+    assert_eq!(of_kind(&warnings, ParsePhase::MissingCMap), both_pages());
+    assert_eq!(of_kind(&warnings, ParsePhase::Content), []);
+    let name = not_found("NoSuchBase-H");
+    assert_eq!(cmap_messages(&warnings), [name.as_str(), name.as_str()]);
+}
+
+/// Turned on after a page is read, the setting holds for the pages read
+/// next: the font is resolved again rather than kept as it was.
+#[test]
+fn the_setting_holds_once_a_page_is_read() {
+    let (font, extra) = composite_font("GBK-EUC-H");
+    let pdf = two_pages(&font, MIXED, &extra);
+    let mut doc = PdfDocument::from_bytes(&pdf).unwrap();
+    doc.set_host_files(false);
+    doc.set_text_extraction(TextExtraction::Glyphs);
+    let text = |doc: &PdfDocument| -> String {
+        let list = doc.render_page(0, 72.0).unwrap();
+        text_runs(&list, &LayerSet::new())
+            .iter()
+            .map(|run| run.text.as_str())
+            .collect()
+    };
+    assert_eq!(text(&doc), MIXED_TEXT);
+    doc.set_leave_out_text_without_cmap(true);
+    assert_eq!(text(&doc), "Latin value");
+    doc.set_leave_out_text_without_cmap(false);
+    assert_eq!(text(&doc), MIXED_TEXT);
+}
+
+/// Where `after`, in Helvetica, starts on the first page of `pdf`: the x
+/// of its first glyph's origin, read with `leave_out` given to
+/// `set_leave_out_text_without_cmap`.
+fn x_of_after(pdf: &[u8], leave_out: bool) -> f64 {
+    let mut doc = PdfDocument::from_bytes(pdf).unwrap();
+    doc.set_host_files(false);
+    doc.set_leave_out_text_without_cmap(leave_out);
+    doc.set_text_extraction(TextExtraction::Glyphs);
+    let list = doc.render_page(0, 72.0).unwrap();
+    let runs = text_runs(&list, &LayerSet::new());
+    let run = runs
+        .iter()
+        .find(|run| run.text.ends_with("after"))
+        .unwrap_or_else(|| panic!("no run ends with `after`: {runs:#?}"));
+    let first = run.text.len() - "after".len();
+    run.glyphs
+        .iter()
+        .find(|glyph| glyph.text_range.start as usize == first)
+        .expect("a glyph for the `a` of `after`")
+        .origin
+        .0
+}
+
+/// Text left out still takes its space: the codes of a font left out for
+/// its missing CMap are read two bytes at a time and move the text
+/// position on by the font's widths, so what follows in the same text
+/// object is drawn where it is with the text kept. Two codes at the
+/// font's `/DW` of 1000, in 12 points, from x = 10, put `after` at x = 34;
+/// with `/W` giving those codes 500 and 700, at x = 24.4.
+#[test]
+fn text_after_a_font_left_out_still_moves_on() {
+    let content = "BT /F2 12 Tf 10 30 Td <B0A1B0A2> Tj /F1 12 Tf (after) Tj ET";
+    let (font, extra) = composite_font("GBK-EUC-H");
+    let pdf = two_pages(&font, content, &extra);
+    let (texts, _, _) = read_left_out(&pdf);
+    assert_eq!(texts, ["after", "after"]);
+    assert!((x_of_after(&pdf, true) - 34.0).abs() < 1e-6);
+    assert!((x_of_after(&pdf, false) - 34.0).abs() < 1e-6);
+
+    // 0xB0A1 is 45217.
+    let (font, mut extra) = composite_font("GBK-EUC-H");
+    extra[0] = extra[0].replace("/DW 1000", "/DW 1000 /W [45217 [500 700]]");
+    let pdf = two_pages(&font, content, &extra);
+    assert!((x_of_after(&pdf, true) - 24.4).abs() < 1e-6);
+    assert!((x_of_after(&pdf, false) - 24.4).abs() < 1e-6);
+}
+
+/// One page that runs `content`, with the font `/F2` (object 7, `font`),
+/// `extra` objects from 8 up, and `/Im`, a one-pixel gray image.
+fn page_with_image(font: &str, content: &str, extra: &[String]) -> Vec<u8> {
+    let mut objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 100] \
+         /Resources 6 0 R /Contents 4 0 R >>"
+            .to_string(),
+        stream("", content),
+        stream(
+            "/Type /XObject /Subtype /Image /Width 1 /Height 1 \
+             /ColorSpace /DeviceGray /BitsPerComponent 8",
+            "0",
+        ),
+        "<< /Font << /F2 7 0 R >> /XObject << /Im 5 0 R >> >>".to_string(),
+        font.to_string(),
+    ];
+    objects.extend_from_slice(extra);
+    pdf_from(&objects)
+}
+
+/// The kind of each element of the first page's display list, read with
+/// `leave_out` given to `set_leave_out_text_without_cmap`, and the clip
+/// paths among them.
+fn element_kinds(pdf: &[u8], leave_out: bool) -> (Vec<&'static str>, Vec<PsPath>) {
+    let mut doc = PdfDocument::from_bytes(pdf).unwrap();
+    doc.set_host_files(false);
+    doc.set_leave_out_text_without_cmap(leave_out);
+    let list = doc.render_page(0, 72.0).unwrap();
+    let mut kinds = Vec::new();
+    let mut clips = Vec::new();
+    for element in list.elements() {
+        kinds.push(match element {
+            DisplayElement::Clip { path, .. } => {
+                clips.push(path.clone());
+                "Clip"
+            }
+            DisplayElement::Image { .. } => "Image",
+            DisplayElement::Fill { .. } => "Fill",
+            DisplayElement::Stroke { .. } => "Stroke",
+            _ => "other",
+        });
+    }
+    (kinds, clips)
+}
+
+/// Whether `path` has a point other than its first, so that it can
+/// enclose an area.
+fn has_area(path: &PsPath) -> bool {
+    let mut points = path.segments.iter().filter_map(|segment| match *segment {
+        PathSegment::MoveTo(x, y) | PathSegment::LineTo(x, y) => Some((x, y)),
+        PathSegment::CurveTo { x3, y3, .. } => Some((x3, y3)),
+        PathSegment::ClosePath => None,
+    });
+    let Some(first) = points.next() else {
+        return false;
+    };
+    points.any(|point| point != first)
+}
+
+/// The darkest red value on the first page of `pdf`, rendered with
+/// `leave_out` given to `set_leave_out_text_without_cmap`: 255 where the
+/// page is left white.
+fn darkest(pdf: &[u8], leave_out: bool) -> u8 {
+    let mut doc = PdfDocument::from_bytes(pdf).unwrap();
+    doc.set_host_files(false);
+    doc.set_leave_out_text_without_cmap(leave_out);
+    let (pixels, _, _) = doc.render_page_to_rgba(0, 72.0).unwrap();
+    pixels.chunks(4).map(|pixel| pixel[0]).min().unwrap()
+}
+
+/// Text left out in a text rendering mode that clips (here 7, invisible
+/// and added to the clip) still makes `ET` set the text clip: one that
+/// lets nothing through, since no glyph is added to it, so the image drawn
+/// after it is clipped away as the text would have hidden it. With the
+/// text kept, the clip is made of its glyphs.
+#[test]
+fn text_left_out_in_a_clipping_mode_still_clips() {
+    let content = "BT 7 Tr /F2 40 Tf 10 30 Td <00410042> Tj ET \
+                   q 300 0 0 100 0 0 cm /Im Do Q";
+    for cmap in ["GBK-EUC-H", "UniGB-UTF16-H"] {
+        let (font, extra) = composite_font(cmap);
+        let pdf = page_with_image(&font, content, &extra);
+
+        let (kinds, clips) = element_kinds(&pdf, true);
+        assert_eq!(kinds, ["Clip", "Image"], "{cmap}, text left out");
+        assert!(!clips[0].is_empty(), "{cmap}: the clip has a path");
+        assert!(
+            !has_area(&clips[0]),
+            "{cmap}: the clip lets nothing through"
+        );
+        assert_eq!(
+            darkest(&pdf, true),
+            255,
+            "{cmap}: the image is clipped away"
+        );
+
+        let (kinds, clips) = element_kinds(&pdf, false);
+        assert_eq!(kinds, ["Clip", "Image"], "{cmap}, text kept");
+        assert!(has_area(&clips[0]), "{cmap}: the clip is the glyphs");
+        assert!(
+            darkest(&pdf, false) < 255,
+            "{cmap}: the image shows in the glyphs"
+        );
+    }
 }

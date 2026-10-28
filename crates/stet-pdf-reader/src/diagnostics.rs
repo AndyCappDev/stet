@@ -114,6 +114,11 @@ pub enum ParsePhase {
     /// the document gives it (its `/BaseFont`), cut to 127 bytes, so a page
     /// with several such fonts has a warning for each.
     ///
+    /// A composite font whose CMap is missing too has no substitute drawn
+    /// when
+    /// [`set_leave_out_text_without_cmap`](crate::PdfDocument::set_leave_out_text_without_cmap)
+    /// is on: its text is left out, and the message says so instead.
+    ///
     /// An embedded font program that cannot be read is a
     /// [`Content`](Self::Content) warning instead.
     MissingFont,

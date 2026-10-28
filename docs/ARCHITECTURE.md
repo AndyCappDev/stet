@@ -738,7 +738,10 @@ If a required CMap is not found, the page reports it as
 text in the affected font is still drawn and extracted: its codes are
 read two bytes at a time, and turned into text through the document's
 own `/ToUnicode` where it gives one. CJK text in that font may not render
-correctly, and a one-byte code in it is not read as one.
+correctly, and a one-byte code in it is not read as one. An application
+that would rather lose that text than guess at it can leave it out with
+`PdfDocument::set_leave_out_text_without_cmap(true)` (see
+[PDF-READER-API.md](PDF-READER-API.md#leaving-out-text-whose-cmap-is-missing)).
 
 ## Crate Dependency Graph
 
