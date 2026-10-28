@@ -163,6 +163,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   4,294,967,295 asked for about 69 GB and took the process, and on a
   machine with swap much else, down with it. Only the entries the file
   gives are kept now.
+- **An object in an object stream is the one the stream lists under its
+  number.** A cross-reference entry gives an object's index in its object
+  stream, and the object at that index was taken whatever number the
+  stream gave it, so an entry could stand in for another object; a small
+  file made that way could take minutes to open. The index is now only
+  where the reader looks first, as in MuPDF. An index past 65,535 is read
+  too, where before it named another object.
+- **An object stream's `/N` and `/First` reserve nothing.** A huge `/N`
+  reserved memory for that many objects and could abort the process, and
+  a negative `/N` or `/First` panicked. The stream's header is read for
+  as many objects as it holds, a negative value makes the stream
+  unreadable, and an offset that would overflow is refused.
+- **A number in a PDF too large for what it counts is not read as a
+  smaller one.** A reference whose object number or generation does not
+  fit is a reference to the null object, as ISO 32000-1 §7.3.10 says; a
+  cross-reference subsection or `/Index` range that starts below 0 or runs
+  past the last object number gives those entries no object; and so does
+  an object number in an object stream's header that does not fit. Each
+  was cut to its low bits before, and could be read as another object.
 - **A predefined CMap is looked for only under a name a CMap can have.**
   The PDF reader takes the CMap name a document gives as a file name in
   the folders CMaps are kept in. It is now used only if it is made of

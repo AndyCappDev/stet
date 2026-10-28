@@ -19,6 +19,11 @@ pub enum XrefEntry {
     /// Object compressed inside an object stream.
     InStream {
         stream_obj_num: u32,
+        /// The object's index in the stream, as the cross-reference stream
+        /// gives it, cut to its low 16 bits. It is where the reader looks
+        /// first, not where the object must be: the object read is the one
+        /// the stream's header lists under the number asked for, so an
+        /// index past 65,535 is still found.
         index_within: u16,
     },
     /// Free entry.
@@ -756,7 +761,12 @@ fn parse_classic_xref(
             let generation = gen_val.min(65535) as u16;
 
             let type_byte = data[pos + 17];
-            let obj_num = first_obj as u32 + i;
+            // A subsection that starts below 0, or runs past the last object
+            // number there can be, gives those entries no object at all
+            // rather than the numbers they would wrap to.
+            let obj_num = u32::try_from(first_obj)
+                .ok()
+                .and_then(|first| first.checked_add(i));
 
             let entry = match type_byte {
                 b'n' => XrefEntry::InFile {
@@ -766,7 +776,9 @@ fn parse_classic_xref(
                 b'f' => XrefEntry::Free,
                 _ => XrefEntry::Free,
             };
-            entries.push((obj_num, entry));
+            if let Some(obj_num) = obj_num {
+                entries.push((obj_num, entry));
+            }
 
             // Advance past entry: skip to next line
             pos += 18;
@@ -930,21 +942,28 @@ fn parse_xref_stream(
     }
 
     // Parse /Index array (defaults to [0 Size])
-    let size = dict.get_int(b"Size").ok_or(PdfError::MissingKey("Size"))? as u32;
+    // A count below 0 is none; one past `u32` is as many as the stream
+    // holds, which bounds the loop below either way.
+    let count = |n: i64| u32::try_from(n.max(0)).unwrap_or(u32::MAX);
+    let size = count(dict.get_int(b"Size").ok_or(PdfError::MissingKey("Size"))?);
 
-    let index_pairs: Vec<(u32, u32)> = if let Some(index_arr) = dict.get_array(b"Index") {
+    // Each subsection's first object number, `None` when it is not one an
+    // object can have: its entries are still read, to keep the ones after
+    // them in step, but give no object.
+    let index_pairs: Vec<(Option<u32>, u32)> = if let Some(index_arr) = dict.get_array(b"Index") {
         index_arr
             .chunks(2)
             .filter_map(|pair| {
                 if pair.len() == 2 {
-                    Some((pair[0].as_int()? as u32, pair[1].as_int()? as u32))
+                    let first = pair[0].as_int()?;
+                    Some((u32::try_from(first).ok(), count(pair[1].as_int()?)))
                 } else {
                     None
                 }
             })
             .collect()
     } else {
-        vec![(0, size)]
+        vec![(Some(0), size)]
     };
 
     let mut entries = Vec::new();
@@ -963,17 +982,26 @@ fn parse_xref_stream(
 
             // Default type is 1 when w1 == 0
             let entry_type = if w1 == 0 { 1 } else { field1 };
-            let obj_num = first_obj + i;
+            let Some(obj_num) = first_obj.and_then(|first| first.checked_add(i)) else {
+                continue;
+            };
 
             let entry = match entry_type {
                 0 => XrefEntry::Free,
                 1 => XrefEntry::InFile {
-                    offset: field2 as usize,
-                    generation: field3 as u16,
+                    offset: usize::try_from(field2).unwrap_or(usize::MAX),
+                    // As in a cross-reference table, a generation past
+                    // 65,535 is taken as 65,535.
+                    generation: u16::try_from(field3).unwrap_or(u16::MAX),
                 },
-                2 => XrefEntry::InStream {
-                    stream_obj_num: field2 as u32,
-                    index_within: field3 as u16,
+                // An object stream whose number does not fit is no object.
+                2 => match u32::try_from(field2) {
+                    Ok(stream_obj_num) => XrefEntry::InStream {
+                        stream_obj_num,
+                        // Only a hint, see `XrefEntry::InStream`.
+                        index_within: field3 as u16,
+                    },
+                    Err(_) => XrefEntry::Free,
                 },
                 _ => XrefEntry::Free, // Unknown type, treat as free
             };

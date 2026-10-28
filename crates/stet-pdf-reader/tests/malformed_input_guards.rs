@@ -1942,3 +1942,260 @@ fn an_embedded_font_whose_glyph_fans_out_is_bounded() {
     load_and_render(&doc);
     assert!(start.elapsed().as_secs() < 10, "took {:?}", start.elapsed());
 }
+
+/// A document whose objects 1 (the catalog, pointing at pages node 2) and
+/// `plain` are written out in the file, and whose object stream, object 7,
+/// holds `stored` (object number and body, in order) under `objstm_extra`.
+/// Its cross-reference stream gives each of `compressed` (object number and
+/// index) as in object stream 7 at that index.
+fn object_stream_pdf(
+    plain: &[(u32, Vec<u8>)],
+    stored: &[(u64, &[u8])],
+    objstm_extra: &str,
+    compressed: &[(u32, u64)],
+) -> Vec<u8> {
+    let mut header = String::new();
+    let mut bodies = Vec::new();
+    for (num, body) in stored {
+        header.push_str(&format!("{num} {} ", bodies.len()));
+        bodies.extend_from_slice(body);
+        bodies.push(b' ');
+    }
+    let extra = format!("/First {} {objstm_extra}", header.len());
+    object_stream_pdf_raw(plain, &header, &bodies, &extra, compressed, None)
+}
+
+/// [`object_stream_pdf`] with the object stream's header, the bodies after
+/// it, and every entry of its dictionary but `/Type` and `/Length` given.
+///
+/// With `leading`, the cross-reference stream starts with a subsection of
+/// three entries numbered from it, ahead of the real one.
+fn object_stream_pdf_raw(
+    plain: &[(u32, Vec<u8>)],
+    header: &str,
+    bodies: &[u8],
+    objstm_dict: &str,
+    compressed: &[(u32, u64)],
+    leading: Option<i64>,
+) -> Vec<u8> {
+    const OBJSTM: u32 = 7;
+    let mut data = header.as_bytes().to_vec();
+    data.extend_from_slice(bodies);
+
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut in_file = std::collections::BTreeMap::new();
+    let mut write = |out: &mut Vec<u8>, num: u32, body: &[u8]| {
+        in_file.insert(num, out.len());
+        out.extend_from_slice(format!("{num} 0 obj\n").as_bytes());
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"\nendobj\n");
+    };
+    write(&mut out, 1, b"<</Type/Catalog/Pages 2 0 R>>");
+    for (num, body) in plain {
+        write(&mut out, *num, body);
+    }
+    let mut objstm = format!(
+        "<</Type/ObjStm {objstm_dict}/Length {}>>\nstream\n",
+        data.len()
+    )
+    .into_bytes();
+    objstm.extend_from_slice(&data);
+    objstm.extend_from_slice(b"\nendstream");
+    write(&mut out, OBJSTM, &objstm);
+
+    let xref_num = compressed
+        .iter()
+        .map(|&(n, _)| n)
+        .chain(in_file.keys().copied())
+        .max()
+        .unwrap()
+        + 1;
+    let xref_offset = out.len();
+    let mut rows = Vec::new();
+    let mut index = String::new();
+    if let Some(first) = leading {
+        for _ in 0..3 {
+            rows.push(1u8);
+            rows.extend_from_slice(&9u64.to_be_bytes());
+            rows.extend_from_slice(&0u64.to_be_bytes());
+        }
+        index = format!("/Index[{first} 3 0 {}]", xref_num + 1);
+    }
+    for num in 0..=xref_num {
+        let (kind, field2, field3) = if num == xref_num {
+            (1u8, xref_offset as u64, 0u64)
+        } else if let Some(&off) = in_file.get(&num) {
+            (1, off as u64, 0)
+        } else if let Some(&(_, index)) = compressed.iter().find(|&&(n, _)| n == num) {
+            (2, u64::from(OBJSTM), index)
+        } else {
+            (0, 0, 0)
+        };
+        rows.push(kind);
+        rows.extend_from_slice(&field2.to_be_bytes());
+        rows.extend_from_slice(&field3.to_be_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "{xref_num} 0 obj\n<</Type/XRef/Size {}{index}/W[1 8 8]/Root 1 0 R/Length {}>>\nstream\n",
+            xref_num + 1,
+            rows.len()
+        )
+        .as_bytes(),
+    );
+    out.extend_from_slice(&rows);
+    out.extend_from_slice(
+        format!("\nendstream\nendobj\nstartxref\n{xref_offset}\n%%EOF\n").as_bytes(),
+    );
+    out
+}
+
+/// The one page, object 3, written out in the file.
+fn plain_page() -> Vec<(u32, Vec<u8>)> {
+    vec![(
+        3,
+        b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]>>".to_vec(),
+    )]
+}
+
+/// A cross-reference entry names an object in an object stream by its
+/// index there, but the object found at that index is one only if its
+/// number is the one asked for. Here a thousand more kids of the root
+/// pages node are each given index 0, where the root itself is: read by
+/// index alone, each kid is the root again, and opening walks the whole
+/// tree once for each of them (6 s for this 2 KB file, 47 s for twice the
+/// kids).
+#[test]
+fn an_object_stream_entry_does_not_stand_in_for_another_object() {
+    let kids: Vec<u32> = (1000..2000).collect();
+    let refs: String = kids.iter().map(|k| format!(" {k} 0 R")).collect();
+    let root = format!("<</Type/Pages/Kids[3 0 R{refs}]/Count 1>>");
+    let mut compressed = vec![(2, 0)];
+    compressed.extend(kids.iter().map(|&k| (k, 0)));
+    let pdf = object_stream_pdf(&plain_page(), &[(2, root.as_bytes())], "/N 1", &compressed);
+
+    let start = std::time::Instant::now();
+    let doc = PdfDocument::from_bytes(&pdf).unwrap();
+    let elapsed = start.elapsed();
+    assert!(elapsed.as_secs() < 2, "took {elapsed:?}");
+    // The kids are not in the object stream, so none of them is a page
+    // node; what stands in for them is up to the page tree.
+    assert!(doc.page_count() >= 1, "{}", doc.page_count());
+    assert_eq!(doc.render_page(0, 72.0).unwrap().elements().len(), 0);
+}
+
+/// A pages node with no pages, for an object looked up at the wrong index
+/// to find.
+const NO_PAGES: &[u8] = b"<</Type/Pages/Kids[]/Count 0>>";
+
+/// An object at an index past 65,535 is read: the index cut to 16 bits
+/// would name the object at index 0, a pages node with no pages.
+#[test]
+fn an_object_stream_index_past_65535_is_read() {
+    let mut stored: Vec<(u64, &[u8])> = vec![(100, NO_PAGES)];
+    stored.extend((101..100 + 65_536).map(|n| (n, &b"0"[..])));
+    stored.push((2, b"<</Type/Pages/Kids[3 0 R]/Count 1>>"));
+    let n = stored.len();
+    let pdf = object_stream_pdf(&plain_page(), &stored, &format!("/N {n}"), &[(2, 65_536)]);
+    let doc = PdfDocument::from_bytes(&pdf).unwrap();
+    assert_eq!(doc.page_count(), 1);
+}
+
+/// An object whose cross-reference entry gives the wrong index is still
+/// found, by its number, in the object stream the entry names.
+#[test]
+fn an_object_at_another_index_of_its_object_stream_is_found() {
+    let stored: [(u64, &[u8]); 2] = [(5, NO_PAGES), (2, b"<</Type/Pages/Kids[3 0 R]/Count 1>>")];
+    let pdf = object_stream_pdf(&plain_page(), &stored, "/N 2", &[(2, 0), (5, 0)]);
+    let doc = PdfDocument::from_bytes(&pdf).unwrap();
+    assert_eq!(doc.page_count(), 1);
+}
+
+/// An object number in an object stream's header that does not fit is not
+/// read as the number it wraps to: 4,294,967,298 is not object 2. Here it
+/// is a pages node giving its page a 500 by 500 MediaBox, which the page
+/// would inherit were it read as object 2; read for what it is, object 2
+/// is not there, and the page is found by scanning the file.
+#[test]
+fn an_object_stream_number_that_does_not_fit_is_not_another_object() {
+    let page = vec![(3, b"<</Type/Page/Parent 2 0 R>>".to_vec())];
+    let stored: [(u64, &[u8]); 1] = [(
+        4_294_967_298,
+        b"<</Type/Pages/Kids[3 0 R]/Count 1/MediaBox[0 0 500 500]>>",
+    )];
+    let pdf = object_stream_pdf(&page, &stored, "/N 1", &[(2, 0)]);
+    let sizes: Vec<_> = PdfDocument::from_bytes(&pdf)
+        .map(|doc| {
+            (0..doc.page_count())
+                .map(|i| doc.page_size(i).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(!sizes.contains(&Some((500.0, 500.0))), "{sizes:?}");
+}
+
+/// An object stream's `/N`, huge or negative, reserves nothing: the header
+/// is read for as many objects as it holds.
+#[test]
+fn an_object_stream_count_reserves_nothing() {
+    for n in ["1000000000000000", "-1", "9223372036854775807"] {
+        let stored: [(u64, &[u8]); 1] = [(2, b"<</Type/Pages/Kids[3 0 R]/Count 1>>")];
+        let pdf = object_stream_pdf(&plain_page(), &stored, &format!("/N {n}"), &[(2, 0)]);
+        load_and_render(&pdf);
+    }
+}
+
+/// An object stream's `/First` or an offset in its header, huge or
+/// negative, does not overflow the arithmetic that finds an object.
+#[test]
+fn an_object_stream_offset_that_overflows_is_refused() {
+    let pages: &[u8] = b"<</Type/Pages/Kids[3 0 R]/Count 1>>";
+    let cases = [
+        ("2 0 ", "/N 1 /First 18446744073709551615"),
+        ("2 0 ", "/N 1 /First -1"),
+        ("2 0 ", "/N 1 /First 9223372036854775807"),
+        ("2 18446744073709551615 ", "/N 1 /First 23"),
+        ("2 9223372036854775807 ", "/N 1 /First 22"),
+        ("2 -5 ", "/N 1 /First 5"),
+    ];
+    for (header, dict) in cases {
+        let pdf = object_stream_pdf_raw(&plain_page(), header, pages, dict, &[(2, 0)], None);
+        load_and_render(&pdf);
+    }
+}
+
+/// A cross-reference subsection whose object numbers run past the last
+/// one there can be, or start below 0, gives those entries no object
+/// rather than wrapping (or, with overflow checks, panicking).
+#[test]
+fn a_cross_reference_subsection_past_the_last_object_number_is_ignored() {
+    let body = one_page_doc(b"", b"", &[]);
+    for first in ["4294967295", "-1"] {
+        // A subsection ahead of the real one, in the same table, so no
+        // offset moves.
+        let extra = format!("xref\n{first} 3\n{}", "0000000009 00000 n \n".repeat(3));
+        let pdf = String::from_utf8_lossy(&body).replacen("xref\n", &extra, 1);
+        let doc = PdfDocument::from_bytes(pdf.as_bytes()).unwrap();
+        assert_eq!(doc.page_count(), 1, "first object {first}");
+    }
+}
+
+/// The same for a cross-reference stream's `/Index`.
+#[test]
+fn a_cross_reference_stream_index_past_the_last_object_number_is_ignored() {
+    let pages: &[u8] = b"<</Type/Pages/Kids[3 0 R]/Count 1>>";
+    for first in [4_294_967_295, -1] {
+        let mut header = String::new();
+        header.push_str("2 0 ");
+        let pdf = object_stream_pdf_raw(
+            &plain_page(),
+            &header,
+            pages,
+            &format!("/N 1 /First {}", header.len()),
+            &[(2, 0)],
+            Some(first),
+        );
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        assert_eq!(doc.page_count(), 1, "first object {first}");
+    }
+}

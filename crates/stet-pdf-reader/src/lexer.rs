@@ -570,7 +570,15 @@ pub fn parse_object_from_token_at_depth(
             let saved = lexer.pos();
             match lexer.next_token() {
                 Ok(Token::Int(g)) => match lexer.next_token() {
-                    Ok(Token::Keyword(ref kw)) if kw == b"R" => Ok(PdfObj::Ref(n as u32, g as u16)),
+                    Ok(Token::Keyword(ref kw)) if kw == b"R" => {
+                        Ok(match (u32::try_from(n), u16::try_from(g)) {
+                            (Ok(n), Ok(g)) => PdfObj::Ref(n, g),
+                            // A reference to an object that cannot exist is
+                            // a reference to the null object (ISO 32000-1
+                            // §7.3.10), not to the one its number wraps to.
+                            _ => PdfObj::Null,
+                        })
+                    }
                     _ => {
                         lexer.set_pos(saved);
                         Ok(PdfObj::Int(n))
@@ -686,6 +694,27 @@ fn hex_digit(b: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reference whose object number or generation does not fit is a
+    /// reference to the null object (ISO 32000-1 §7.3.10), not to the
+    /// object the number would wrap to.
+    #[test]
+    fn a_reference_that_does_not_fit_is_null() {
+        let parse = |text: &[u8]| parse_object(&mut Lexer::new(text)).unwrap();
+        assert!(matches!(parse(b"2 0 R"), PdfObj::Ref(2, 0)));
+        assert!(matches!(
+            parse(b"4294967295 65535 R"),
+            PdfObj::Ref(4_294_967_295, 65_535)
+        ));
+        for text in [&b"4294967298 0 R"[..], b"-1 0 R", b"2 65538 R", b"2 -1 R"] {
+            let obj = parse(text);
+            assert!(
+                matches!(obj, PdfObj::Null),
+                "{}: {obj:?}",
+                String::from_utf8_lossy(text)
+            );
+        }
+    }
 
     fn tokenize(input: &[u8]) -> Vec<Token> {
         let mut lexer = Lexer::new(input);

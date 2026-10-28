@@ -28,7 +28,11 @@ pub(crate) type PageWarning = (
 struct ObjStmCache {
     data: Vec<u8>,
     first: usize,
+    /// Each object's number and its offset from `first`, as the header
+    /// lists them.
     offsets: Vec<(u32, usize)>,
+    /// Where in `offsets` each object number first appears.
+    by_number: HashMap<u32, usize>,
 }
 
 /// Resolves indirect object references, caching parsed objects.
@@ -584,7 +588,7 @@ impl<'a> Resolver<'a> {
                 index_within,
             } => {
                 // Objects in object streams are not individually encrypted
-                return self.parse_object_from_stream(stream_obj_num, index_within);
+                return self.parse_object_from_stream(stream_obj_num, index_within, obj_num);
             }
             XrefEntry::Free => return Err(PdfError::ObjectNotFound { obj_num, gen_num }),
         };
@@ -994,7 +998,7 @@ impl<'a> Resolver<'a> {
 
         // Parse the "N G obj" header and verify the object number
         let parsed_num = match lexer.next_token()? {
-            Token::Int(n) => n as u32,
+            Token::Int(n) => u32::try_from(n).map_err(|_| PdfError::InvalidObject(offset))?,
             _ => return Err(PdfError::InvalidObject(offset)),
         };
         let _gen_num = lexer.next_token()?; // Int
@@ -1202,23 +1206,48 @@ impl<'a> Resolver<'a> {
             )?
         };
 
-        let n = dict.get_int(b"N").ok_or(PdfError::MissingKey("N"))? as usize;
+        // `/N` and `/First` come from the file: neither may size an
+        // allocation, and one that is negative is not a count or a place.
+        let invalid = |key| {
+            PdfError::Other(format!(
+                "object stream {stream_obj_num} has an invalid /{key}"
+            ))
+        };
+        let n = dict.get_int(b"N").ok_or(PdfError::MissingKey("N"))?;
+        let n = usize::try_from(n).map_err(|_| invalid("N"))?;
         let first = dict
             .get_int(b"First")
-            .ok_or(PdfError::MissingKey("First"))? as usize;
+            .ok_or(PdfError::MissingKey("First"))?;
+        let first = usize::try_from(first).map_err(|_| invalid("First"))?;
 
-        let mut header_lexer = Lexer::new(&stream_data[..first.min(stream_data.len())]);
-        let mut obj_offsets: Vec<(u32, usize)> = Vec::with_capacity(n);
+        // The header is read for at most `/N` objects, and for no more than
+        // it holds: each takes at least four bytes, `1 0 `.
+        let header = &stream_data[..first.min(stream_data.len())];
+        let mut header_lexer = Lexer::new(header);
+        let mut obj_offsets: Vec<(u32, usize)> = Vec::with_capacity(n.min(header.len() / 4));
         for _ in 0..n {
+            // An object number or offset that does not fit ends the header,
+            // as one that is not a number does, rather than being taken for
+            // the number it would wrap to.
             let num = match header_lexer.next_token()? {
-                Token::Int(v) => v as u32,
+                Token::Int(v) => match u32::try_from(v) {
+                    Ok(num) => num,
+                    Err(_) => break,
+                },
                 _ => break,
             };
             let off = match header_lexer.next_token()? {
-                Token::Int(v) => v as usize,
+                Token::Int(v) => match usize::try_from(v) {
+                    Ok(off) => off,
+                    Err(_) => break,
+                },
                 _ => break,
             };
             obj_offsets.push((num, off));
+        }
+        let mut by_number = HashMap::with_capacity(obj_offsets.len());
+        for (index, &(num, _)) in obj_offsets.iter().enumerate() {
+            by_number.entry(num).or_insert(index);
         }
 
         self.objstm_cache.borrow_mut().insert(
@@ -1227,16 +1256,27 @@ impl<'a> Resolver<'a> {
                 data: stream_data,
                 first,
                 offsets: obj_offsets,
+                by_number,
             },
         );
         Ok(())
     }
 
-    /// Parse an object from inside an object stream (ObjStm).
+    /// Parse object `obj_num` from inside an object stream (ObjStm).
+    ///
+    /// The object is the one the stream's header lists under `obj_num`.
+    /// The cross-reference entry's `index_within` is where to look first,
+    /// and nothing more: the object at that index is used only if its
+    /// number is `obj_num`. Taken on trust, an index would let any entry
+    /// stand in for any object in the stream — every kid of a pages node
+    /// the node itself, so that opening walks the tree once for each of
+    /// them — and an index past 65,535, cut to 16 bits, would name another
+    /// object. This is how MuPDF reads them too.
     fn parse_object_from_stream(
         &self,
         stream_obj_num: u32,
         index_within: u16,
+        obj_num: u32,
     ) -> Result<PdfObj, PdfError> {
         // Ensure decompressed data is cached
         self.ensure_objstm_cached(stream_obj_num)?;
@@ -1246,31 +1286,31 @@ impl<'a> Resolver<'a> {
             .get(&stream_obj_num)
             .ok_or_else(|| PdfError::Other(format!("ObjStm {stream_obj_num} not in cache")))?;
 
-        // Find and parse the target object
-        let idx = index_within as usize;
-        if idx >= cached.offsets.len() {
-            return Err(PdfError::Other(format!(
-                "index {idx} out of range in object stream {stream_obj_num}"
-            )));
-        }
+        let hint = usize::from(index_within);
+        let idx = match cached.offsets.get(hint) {
+            Some(&(num, _)) if num == obj_num => hint,
+            _ => *cached
+                .by_number
+                .get(&obj_num)
+                .ok_or(PdfError::ObjectNotFound {
+                    obj_num,
+                    gen_num: 0,
+                })?,
+        };
 
-        let (_target_num, target_offset) = cached.offsets[idx];
-        let abs_offset = cached.first + target_offset;
-        if abs_offset >= cached.data.len() {
-            return Err(PdfError::Other(format!(
-                "object offset {abs_offset} out of range in stream {stream_obj_num}"
-            )));
-        }
+        let target_offset = cached.offsets[idx].1;
+        let abs_offset = cached
+            .first
+            .checked_add(target_offset)
+            .filter(|&at| at < cached.data.len())
+            .ok_or_else(|| {
+                PdfError::Other(format!(
+                    "object {obj_num} lies past the end of object stream {stream_obj_num}"
+                ))
+            })?;
 
         let mut obj_lexer = Lexer::new(&cached.data[abs_offset..]);
-        let obj = parse_object(&mut obj_lexer)?;
-
-        // Cache the parsed object
-        let target_num = cached.offsets[idx].0;
-        drop(cache);
-        self.cache.borrow_mut().insert(target_num, obj.clone());
-
-        Ok(obj)
+        parse_object(&mut obj_lexer)
     }
 }
 
