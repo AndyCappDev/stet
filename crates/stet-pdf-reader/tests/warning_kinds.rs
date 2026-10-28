@@ -329,6 +329,52 @@ fn a_damaged_cross_reference_table_is_rebuilt_and_said_so() {
     );
 }
 
+/// Objects found by scanning the file are found whatever their numbers:
+/// here the one page is object 150,000. With no cross-reference table the
+/// whole table is rebuilt by scanning; with one that leaves the page out,
+/// the scan adds it to the table.
+#[test]
+fn an_object_found_by_scanning_is_found_whatever_its_number() {
+    const PAGE: u32 = 150_000;
+    let mut pdf = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (num, body) in [
+        (1, "<< /Type /Catalog /Pages 2 0 R >>".to_string()),
+        (2, format!("<< /Type /Pages /Kids [{PAGE} 0 R] /Count 1 >>")),
+        (
+            PAGE,
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 50 70] >>".to_string(),
+        ),
+    ] {
+        offsets.push(pdf.len());
+        pdf.extend(format!("{num} 0 obj\n{body}\nendobj\n").as_bytes());
+    }
+    let without_table = [&pdf[..], b"%%EOF\n"].concat();
+    let mut leaving_it_out = pdf.clone();
+    let xref = leaving_it_out.len();
+    leaving_it_out.extend(b"xref\n0 3\n0000000000 65535 f\r\n");
+    for off in &offsets[..2] {
+        leaving_it_out.extend(format!("{off:010} 00000 n\r\n").as_bytes());
+    }
+    leaving_it_out.extend(
+        format!("trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+    );
+
+    for (what, pdf, expected) in [
+        (
+            "no table",
+            without_table,
+            &[(ParsePhase::CrossReference, None, Severity::Info)][..],
+        ),
+        ("a table leaving it out", leaving_it_out, &[][..]),
+    ] {
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        assert_eq!(doc.page_count(), 1, "{what}");
+        assert_eq!(doc.page_size(0).unwrap(), (50.0, 70.0), "{what}");
+        assert_eq!(kinds(&doc), expected, "{what}");
+    }
+}
+
 // === The page tree =======================================================
 
 /// The catalog names a page tree that is not in the file. The pages are

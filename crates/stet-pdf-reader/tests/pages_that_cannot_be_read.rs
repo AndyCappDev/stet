@@ -440,9 +440,11 @@ fn a_kid_naming_object_0_is_no_page() {
     );
 }
 
-/// Every blank page counts against the pages the file's length allows.
-/// Here a branch that cannot be read has used them all, so the next kid
-/// that cannot be read has no blank page, and its warning says why.
+/// Every page counts against the pages the file's length allows. Here a
+/// branch that cannot be read has used them all, so the next kid that
+/// cannot be read has no blank page, and its warning says why; the page
+/// after it is left out, as there is no room for it either, so that no
+/// page changes its number, and a warning says so.
 #[test]
 fn a_kid_that_cannot_be_read_once_the_file_allows_no_more_blank_pages_is_no_page() {
     // The counts are padded, so that the file's length does not depend on
@@ -460,18 +462,30 @@ fn a_kid_that_cannot_be_read_once_the_file_allows_no_more_blank_pages_is_no_page
     // the file's length allows.
     let allowed = pdf_from(&objects_for(0)).len() / 4;
     let doc = open(&objects_for(allowed));
-    assert_eq!(doc.page_count(), allowed + 1);
+    assert_eq!(doc.page_count(), allowed);
     assert_eq!(text_of(&doc, 0), ["first"]);
     assert!(doc.render_page(allowed - 1, 72.0).unwrap().is_empty());
-    assert_eq!(text_of(&doc, allowed), ["last"]);
+    let after_the_last = (ParsePhase::PageTree, None, Severity::Warning);
     assert_eq!(
         kinds(&doc),
-        [page_tree_warning_at(1), page_tree_warning_at(allowed)]
+        [
+            page_tree_warning_at(1),
+            after_the_last.clone(),
+            after_the_last
+        ]
     );
     let message = doc.parse_warnings()[1].message.clone();
     assert!(message.contains("object 9 0"), "{message}");
     assert!(
         message.contains("the file's length allows no more blank pages"),
+        "{message}"
+    );
+    let message = doc.parse_warnings()[2].message.clone();
+    assert!(
+        message.contains(&format!(
+            "page {} and those after it are left out",
+            allowed + 1
+        )),
         "{message}"
     );
 }

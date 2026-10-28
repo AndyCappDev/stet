@@ -117,10 +117,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   branch of the tree that cannot be read is as many blank pages as its
   parent's `/Count` leaves for it, with one warning naming them all, or
   one blank page when that cannot be told or when the count is more
-  pages than one for every 4 bytes of the file. Every blank page counts
-  against that bound: past it, a kid that cannot be read has no blank
-  page, and its warning says so. A kid `0 0 R` is no page at all,
-  however many times it is listed, as object 0 can never be a page. When
+  pages than one for every 4 bytes of the file. Every page counts against
+  that bound, the ones that can be read too: past it, a kid that cannot
+  be read has no blank page, and its warning says so, and the pages the
+  tree names are left out from there to the end, with one warning, so
+  that no page kept changes its number. A page dictionary written in the
+  `/Kids` array itself, which is no object of the file, counts the same
+  way; a million of them took a 44 KB file to 715 MB. A kid `0 0 R` is
+  no page at all, however many times it is listed and even where the
+  file gives object 0 an entry in use, as object 0 can never be a page.
+  When
   page tree warnings are cut short, the last one no longer says more
   pages may be left out. `page_count()` counts these pages, so for these
   files it and the numbers of the pages after them change. See
@@ -163,6 +169,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   4,294,967,295 asked for about 69 GB and took the process, and on a
   machine with swap much else, down with it. Only the entries the file
   gives are kept now.
+- **An object numbered 100,000 or more is found when the file is
+  scanned for objects.** When the cross-reference table is missing or
+  damaged, or leaves objects out, the reader scans the file for them, and
+  passed over any numbered 100,000 or more; a page among them became a
+  blank page. They are found now.
 - **An object in an object stream is the one the stream lists under its
   number.** A cross-reference entry gives an object's index in its object
   stream, and the object at that index was taken whatever number the

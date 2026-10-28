@@ -806,9 +806,23 @@ impl<'a> Resolver<'a> {
         &self.data
     }
 
-    /// Number of entries in the xref table.
+    /// One more than the highest object number the cross-reference table
+    /// has an entry for. It is not the number of objects, and counting up
+    /// to it is not a way to visit them: a file can name object
+    /// 4,294,967,294 in a few bytes. Use
+    /// [`object_numbers`](Self::object_numbers) for that.
     pub fn xref_len(&self) -> usize {
         self.xref.len()
+    }
+
+    /// Each object number the cross-reference table gives a place for,
+    /// lowest first: the objects there are to read, though one may still
+    /// fail to.
+    pub fn object_numbers(&self) -> impl Iterator<Item = u32> + '_ {
+        self.xref
+            .entries()
+            .filter(|(_, entry)| !matches!(entry, XrefEntry::Free))
+            .map(|(num, _)| num)
     }
 
     /// Decrypt all strings within a parsed object tree.

@@ -2032,8 +2032,7 @@ fn parse_output_intents_full(resolver: &Resolver) -> Vec<OutputIntentRecord> {
 /// Scan all objects to find the real Catalog dict (has /Type /Catalog).
 /// Used when the trailer's /Root points to the wrong object.
 pub(crate) fn find_catalog(resolver: &Resolver) -> Option<PdfObj> {
-    let xref_len = resolver.xref_len();
-    for obj_num in 0..xref_len as u32 {
+    for obj_num in resolver.object_numbers() {
         if let Ok(obj) = resolver.resolve(obj_num, 0)
             && let Some(dict) = obj.as_dict()
             && dict.get_name(b"Type") == Some(b"Catalog")

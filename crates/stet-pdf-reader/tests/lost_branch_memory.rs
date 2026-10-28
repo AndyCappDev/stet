@@ -12,8 +12,9 @@
 //! a very high object number, and a compressed cross-reference stream
 //! declares millions of entries in a few kilobytes. Nor are the kids a
 //! tree lists, as a compressed object stream lists a million in a few
-//! kilobytes too: a kid naming object 0 is no page at all, and every blank
-//! page counts against the file's length.
+//! kilobytes too: a kid naming object 0 is no page at all, and every page,
+//! blank, written in `/Kids` itself or read from the file, counts against
+//! the file's length.
 //!
 //! This file has its own allocator, which records the most memory live at
 //! once, so that each test can show that a count claiming millions of
@@ -165,10 +166,24 @@ fn deflated(bytes: &[u8]) -> Vec<u8> {
 /// an object stream, object 7, as a `/Kids` array of many kids can be. Its
 /// cross-reference stream is object 8.
 fn with_tree_compressed(objects: &[Vec<u8>]) -> Vec<u8> {
-    let header = b"2 0 ";
-    let packed = deflated(&[&header[..], &objects[1]].concat());
+    with_tree_and_object_0_compressed(objects, None)
+}
+
+/// [`with_tree_compressed`], with `object_0`, when given, written in the
+/// object stream after the tree and given an entry in use as object 0,
+/// which no file should do.
+fn with_tree_and_object_0_compressed(objects: &[Vec<u8>], object_0: Option<&[u8]>) -> Vec<u8> {
+    let mut header = b"2 0 ".to_vec();
+    let mut bodies = objects[1].clone();
+    if let Some(object_0) = object_0 {
+        bodies.push(b' ');
+        header.extend(format!("0 {} ", bodies.len()).as_bytes());
+        bodies.extend(object_0);
+    }
+    let packed = deflated(&[&header[..], &bodies].concat());
     let mut object_stream = format!(
-        "<< /Type /ObjStm /N 1 /First {} /Filter /FlateDecode /Length {} >>\nstream\n",
+        "<< /Type /ObjStm /N {} /First {} /Filter /FlateDecode /Length {} >>\nstream\n",
+        1 + usize::from(object_0.is_some()),
         header.len(),
         packed.len()
     )
@@ -202,7 +217,11 @@ fn with_tree_compressed(objects: &[Vec<u8>]) -> Vec<u8> {
         e.extend([0, 0]);
         e
     };
-    let mut table = vec![0u8; 7];
+    let mut table = match object_0 {
+        // The second object of object stream 7.
+        Some(_) => vec![2, 0, 0, 0, 7, 0, 1],
+        None => vec![0u8; 7],
+    };
     table.extend(entry(1, offsets[0]));
     // Object 2 is the first object of object stream 7.
     table.extend(entry(2, 7));
@@ -345,9 +364,79 @@ fn many_kids_that_cannot_be_read_have_no_more_blank_pages_than_the_file_allows()
 
     let (pages, warnings, _) = open(pdf);
     // The first page and the blank pages are as many as the file allows,
-    // and the last page is still there.
-    assert_eq!(pages, allowed + 1);
+    // and so the last page is left out too.
+    assert_eq!(pages, allowed);
     // As many warnings as a tree lists, and the note that the list is cut
     // short.
     assert_eq!(warnings.len(), 65);
+}
+
+/// When the page tree cannot be followed, the pages are found by looking
+/// at each object the file has, not at each number up to its highest: one
+/// subsection naming object 4,294,967,294 is not four billion objects to
+/// look at, and one naming 4,294,967,295, whose count of numbers does not
+/// fit an object number, does not hide the objects below it. The catalog
+/// here has no page tree, so the catalogs are looked for first, then the
+/// pages.
+#[test]
+fn pages_found_by_scanning_are_found_whatever_the_highest_object_number() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let mut objects = objects("<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>");
+    objects[0] = b"<< /Type /Catalog >>".to_vec();
+    for high in [u32::MAX - 1, u32::MAX] {
+        let started = std::time::Instant::now();
+        let (pages, _, _) = open(with_table_reaching(&objects, high));
+        assert_eq!(pages, 2, "highest object {high}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "highest object {high}: {:?}",
+            started.elapsed()
+        );
+    }
+}
+
+/// A page tree can list page dictionaries in its `/Kids` array itself,
+/// though the kids should be references: such a page is no object of the
+/// file, and a compressed object stream holds a million of them in 44 KB.
+/// They are pages while the file's length allows one more, as blank pages
+/// are, and the rest are left out, with one warning.
+#[test]
+fn a_million_page_dictionaries_listed_as_kids_are_as_many_pages_as_the_file_allows() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    const KIDS: usize = 1_000_000;
+    let tree = format!(
+        "<< /Type /Pages /Kids [3 0 R {}] /Count {} >>",
+        "<< /Type /Page >> ".repeat(KIDS),
+        KIDS + 1
+    );
+    let pdf = with_tree_compressed(&objects(&tree));
+    let allowed = pdf.len() / 4;
+    assert!(allowed < KIDS / 10, "the file is {} bytes", pdf.len());
+
+    let (pages, warnings, _) = open(pdf);
+    assert_eq!(pages, allowed);
+    assert_eq!(warnings, [(ParsePhase::PageTree, None, Severity::Warning)]);
+}
+
+/// Object 0 is no page even where the file gives it an entry in use and
+/// it reads as one: a million kids naming it are no pages, as when it is
+/// free, and a `/Pages` node there is not followed.
+#[test]
+fn a_kid_naming_object_0_is_no_page_even_when_object_0_is_in_use() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    const KIDS: usize = 1_000_000;
+    let tree = format!(
+        "<< /Type /Pages /Kids [3 0 R {}5 0 R] /Count {} >>",
+        "0 0 R ".repeat(KIDS),
+        KIDS + 2
+    );
+    for object_0 in [
+        &b"<< /Type /Page >>"[..],
+        b"<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>",
+    ] {
+        let pdf = with_tree_and_object_0_compressed(&objects(&tree), Some(object_0));
+        let (pages, warnings, _) = open(pdf);
+        assert_eq!(pages, 2, "{}", String::from_utf8_lossy(object_0));
+        assert_eq!(warnings, [lost_page_at(1)]);
+    }
 }

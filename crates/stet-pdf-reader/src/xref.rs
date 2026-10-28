@@ -370,7 +370,6 @@ fn supplement_xref_from_scan(data: &[u8], entries: &mut BTreeMap<u32, XrefEntry>
         if pos < data.len()
             && data[pos].is_ascii_digit()
             && let Some((obj_num, generation, obj_offset)) = try_parse_obj_header(data, pos)
-            && obj_num < 100_000
         {
             // Add if not already in the table, or if the existing entry is
             // Free (malformed xref tables sometimes mark real objects as
@@ -448,8 +447,6 @@ fn rebuild_xref_from_scan(data: &[u8]) -> Result<XrefTable, PdfError> {
         if pos < data.len()
             && data[pos].is_ascii_digit()
             && let Some((obj_num, generation, obj_offset)) = try_parse_obj_header(data, pos)
-            // sanity limit
-            && obj_num < 100_000
         {
             entries.insert(
                 obj_num,
@@ -487,9 +484,7 @@ fn rebuild_xref_from_scan(data: &[u8]) -> Result<XrefTable, PdfError> {
                 // Merge entries from xref stream (includes ObjStm refs)
                 let mut merged = entries;
                 for (num, xentry) in xref_entries {
-                    if num < 100_000 {
-                        merged.entry(num).or_insert(xentry);
-                    }
+                    merged.entry(num).or_insert(xentry);
                 }
                 return Ok(XrefTable {
                     entries: merged,
