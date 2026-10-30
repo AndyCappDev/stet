@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The READMEs no longer state the URW++ fonts' OFL licensing as settled
+  fact.** URW++ granted the OFL for the fonts' Version 2.0 set, and the
+  files stet embeds are URW++'s 2017 revisions of that set, which Artifex
+  publishes under the AGPL option alone. stet reads the grant as covering
+  them and distributes them under the OFL; `LICENSE-URW-FONTS` always said
+  so, but the READMEs stated it without the basis. They now say what the
+  licence file says. The fonts and their licence file are unchanged.
+
 ## [0.9.0] — 2026-10-28
 
 ### Breaking

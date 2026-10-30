@@ -575,10 +575,17 @@ depends on. Reach out at scott@bowmans.org.
 ## License
 
 stet's own code is Apache-2.0 OR MIT. The binary also embeds the URW++
-base 35 fonts (SIL Open Font License 1.1), a public-domain (CC0) CMYK
-ICC profile, and Adobe's CMap and
-glyph-list data (BSD-3-Clause), and links third-party crates under their
-own permissive licences. Each prebuilt release archive includes
+base 35 fonts, a public-domain (CC0) CMYK ICC profile, and Adobe's CMap
+and glyph-list data (BSD-3-Clause), and links third-party crates under
+their own permissive licences.
+
+stet distributes the fonts under the SIL Open Font License 1.1. URW++
+granted the OFL for the fonts' Version 2.0 set, and stet reads that grant
+as covering the 2017 revisions of the set that it embeds;
+[`LICENSE-URW-FONTS`](crates/stet/LICENSE-URW-FONTS) sets out the grant
+and that reading.
+
+Each prebuilt release archive includes
 `THIRD-PARTY-NOTICES.txt` with all of their terms;
 `scripts/gen-third-party-notices.sh` generates it for a build from source.
 

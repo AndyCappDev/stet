@@ -88,8 +88,14 @@ requested zoom step using pre-captured display lists.
 
 ## License
 
-Apache-2.0 OR MIT, except the 35 embedded (from the `stet` crate's resources) URW++ base 35 font programs,
-which are under the SIL Open Font License 1.1 — see
-[`LICENSE-URW-FONTS`](LICENSE-URW-FONTS) — and the embedded CMYK ICC
-profile, which is public domain (CC0) — see
+Apache-2.0 OR MIT, except the 35 URW++ base 35 font programs embedded
+from the `stet` crate's resources, and the embedded CMYK ICC profile.
+
+stet distributes those under the SIL Open Font License 1.1. URW++
+granted the OFL for the fonts' Version 2.0 set, and stet reads that grant
+as covering the 2017 revisions of the set that it embeds;
+[`LICENSE-URW-FONTS`](LICENSE-URW-FONTS) sets out the grant and that
+reading.
+
+The CMYK ICC profile is public domain (CC0) — see
 [`LICENSE-CMYK-PROFILE`](LICENSE-CMYK-PROFILE).
