@@ -1,29 +1,60 @@
 The 35 Type 1 font programs this crate embeds (resources/Font/*.t1) are the
-URW++ base 35 fonts, byte-identical to the Type 1 files in
-https://github.com/ArtifexSoftware/urw-base35-fonts (fonts/*.t1).
-Their own notices read "Copyright 2013 by (URW)++ Design & Development"
-(one font), "Copyright 2014 by (URW)++ Design & Development" (33 fonts),
-and "Copyright 2015 by URW" (one font).
+URW++ base 35 fonts. Their own notices read "Copyright 2013 by (URW)++
+Design & Development" (one font), "Copyright 2014 by (URW)++ Design &
+Development" (33 fonts), and "Copyright 2015 by URW" (one font).
 
 They are not covered by this crate's Apache-2.0 OR MIT licence. stet
 distributes them under the SIL Open Font License, Version 1.1.
 
-In 2017 URW++ licensed "URW Core 35 Fonts, Version 2.00" in its own
-repository (github.com/URWPP/Core_35, no longer online) under a choice of
-three licences: the GNU Affero General Public License v3 with a font
-exception, the LaTeX Project Public License 1.3c, and the SIL Open Font
-License 1.1. An archive of that repository keeps the commit:
-https://github.com/twardoch/urw-core35-fonts/tree/1b5267a9a14d8d5bcf261e067187e382df40c520
+The grant
+---------
 
-The files here are URW++'s 2017 revisions of that Version 2.0 set (its
-2017-05-01, 2017-07-20 and 2017-07-27 updates, and a 2020 correction to
-Nimbus Sans Italic and Bold Italic), which URW++ supplied to Artifex and
-which are published in the Artifex repository above under the AGPL option
-alone. stet takes them to be covered by URW++'s licensing of the Version
-2.0 set, and takes the OFL option.
+URW++ offers these fonts under a choice of three licences: the GNU Affero
+General Public License v3 with a font exception, the LaTeX Project Public
+License 1.3c, and the SIL Open Font License 1.1. stet takes the OFL.
 
-Reproduced below from URW++'s repository at that commit: its LICENSE.md,
-followed by its LICENSE.OFL (line endings converted from CRLF to LF).
+URW++'s managing director, Peter Rosenfeld, approved adding the OFL on
+26 February 2016. In May 2017 URW++'s technical director, Juergen
+Willrodt, gave Adam Twardoch administrator access to URW++'s GitHub
+organisation (URWPP, later renamed URWTypeFoundry), and on 2 September
+2017 Twardoch committed the three licences to URW++'s Core_35 repository.
+Twardoch records this authorisation, with its dates, in his archive of
+the fonts:
+
+  https://github.com/twardoch/urw-core35-fonts/blob/cb9f45f7a4f83a97d959710f0c9f8020e46bdd14/docs/provenance.md
+
+URW++'s repository is no longer online; Twardoch reports that it was
+closed after Monotype acquired URW Type Foundry. An archived copy shows
+the three licences in URW++'s own repository, at commit 1b5267a:
+
+  https://web.archive.org/web/20200904172916/https://github.com/URWTypeFoundry/Core_35/
+
+and Twardoch's archive keeps that commit:
+
+  https://github.com/twardoch/urw-core35-fonts/tree/1b5267a9a14d8d5bcf261e067187e382df40c520
+
+The files
+---------
+
+The files here are URW++'s 2017 revisions of its Version 2.0 set (the
+2017-05-01, 2017-07-20 and 2017-07-27 updates) and a 2020 correction to
+Nimbus Sans Italic and Bold Italic. They are byte-identical to the Type 1
+files in Twardoch's archive at the revision above (tag v2.2.0), which
+offers them under the same three licences, and to the Type 1 files in
+https://github.com/ArtifexSoftware/urw-base35-fonts (fonts/*.t1).
+
+URW++ supplied these revisions to Artifex, whose repository publishes
+them under the AGPL option alone; the OFL and LPPL choices come from
+URW++'s authorisation above, not from Artifex. Rosenfeld's approval
+predates the June 2016 release of Version 2.0, so it was given for the
+font set rather than for one release of its files. Artifex's commit of
+the 2020 correction credits URW++ as its source:
+
+  https://github.com/ArtifexSoftware/urw-base35-fonts/commit/c15105598aa7eb256b1ebfcecd3d078801521e73
+
+Reproduced below from URW++'s repository at commit 1b5267a: its
+LICENSE.md, followed by its LICENSE.OFL (line endings converted from CRLF
+to LF).
 
 ================================================================================
 LICENSE.md

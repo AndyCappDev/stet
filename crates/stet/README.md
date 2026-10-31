@@ -253,11 +253,10 @@ stet::ps_exec(ctx, b"/greeting (Hello, PostScript!) def greeting print")?;
 Apache-2.0 OR MIT, except the 35 embedded URW++ base 35 font programs
 and the embedded CMYK ICC profile.
 
-stet distributes those under the SIL Open Font License 1.1. URW++
-granted the OFL for the fonts' Version 2.0 set, and stet reads that grant
-as covering the 2017 revisions of the set that it embeds;
-[`LICENSE-URW-FONTS`](LICENSE-URW-FONTS) sets out the grant and that
-reading.
+stet distributes the fonts under the SIL Open Font License 1.1, one of the
+three licences URW++ offers them under;
+[`LICENSE-URW-FONTS`](LICENSE-URW-FONTS) records URW++'s grant and where
+the files come from.
 
 The CMYK ICC profile is public domain (CC0) — see
 [`LICENSE-CMYK-PROFILE`](LICENSE-CMYK-PROFILE).

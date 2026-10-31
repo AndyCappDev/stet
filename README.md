@@ -579,11 +579,10 @@ base 35 fonts, a public-domain (CC0) CMYK ICC profile, and Adobe's CMap
 and glyph-list data (BSD-3-Clause), and links third-party crates under
 their own permissive licences.
 
-stet distributes the fonts under the SIL Open Font License 1.1. URW++
-granted the OFL for the fonts' Version 2.0 set, and stet reads that grant
-as covering the 2017 revisions of the set that it embeds;
-[`LICENSE-URW-FONTS`](crates/stet/LICENSE-URW-FONTS) sets out the grant
-and that reading.
+stet distributes the fonts under the SIL Open Font License 1.1, one of
+the three licences URW++ offers them under;
+[`LICENSE-URW-FONTS`](crates/stet/LICENSE-URW-FONTS) records URW++'s grant
+and where the files come from.
 
 Each prebuilt release archive includes
 `THIRD-PARTY-NOTICES.txt` with all of their terms;
