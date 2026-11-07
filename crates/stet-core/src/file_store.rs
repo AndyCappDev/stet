@@ -11,6 +11,7 @@
 //! that decodes data from an underlying source file, and `FileHandle::StringSource`
 //! provides a read-only byte stream from in-memory data.
 
+use std::sync::Arc;
 use std::collections::HashMap;
 use std::io::{self, BufReader, IsTerminal, Read, Seek, Write};
 
@@ -196,7 +197,7 @@ pub enum FileHandle {
     /// Decode/encode filter wrapping another file.
     Filter(Box<FilterState>),
     /// In-memory byte source (for string-backed data).
-    StringSource { data: Vec<u8>, pos: usize },
+    StringSource { data: Arc<[u8]>, pos: usize },
     /// A procedure data source that has not been run yet (PLRM 3.8.4).
     ///
     /// This is a *transitional* state. The procedure has to be executed by the
@@ -399,7 +400,7 @@ impl FileStore {
             let id = EntityId(self.files.len() as u32);
             self.files.push(FileEntry {
                 handle: FileHandle::StringSource {
-                    data: data.to_vec(),
+                    data: Arc::from(&data[..]),
                     pos: 0,
                 },
                 name: name.to_string(),
@@ -520,7 +521,7 @@ impl FileStore {
     pub fn create_string_source(&mut self, data: Vec<u8>) -> EntityId {
         let id = EntityId(self.files.len() as u32);
         self.files.push(FileEntry {
-            handle: FileHandle::StringSource { data, pos: 0 },
+            handle: FileHandle::StringSource { data: data.into(), pos: 0 },
             name: "%stringsource".to_string(),
             mode: "r".to_string(),
             line_num: 1,
@@ -643,7 +644,7 @@ impl FileStore {
             matches!(entry.handle, FileHandle::PendingProc { .. }),
             "install_proc_data on a handle that is not a pending procedure source"
         );
-        entry.handle = FileHandle::StringSource { data, pos: 0 };
+        entry.handle = FileHandle::StringSource { data: data.into(), pos: 0 };
         self.pending_procs = self.pending_procs.saturating_sub(1);
     }
 
@@ -654,7 +655,7 @@ impl FileStore {
     /// without moving it.
     pub fn memory_contents(&self, entity: EntityId) -> Option<&[u8]> {
         match &self.files.get(entity.raw_index())?.handle {
-            FileHandle::StringSource { data, .. } => Some(data),
+            FileHandle::StringSource { data, .. } => Some(&data[..]),
             _ => None,
         }
     }
@@ -668,6 +669,15 @@ impl FileStore {
         match &entry.handle {
             FileHandle::StringSource { data, pos } => &data[*pos..],
             _ => &[],
+        }
+    }
+
+    /// A StringSource file's bytes, shared, and its read position: what
+    /// [`Self::get_remaining_bytes`] gives, without borrowing the store.
+    pub fn shared_remaining(&self, entity: EntityId) -> Option<(Arc<[u8]>, usize)> {
+        match &self.files.get(entity.raw_index())?.handle {
+            FileHandle::StringSource { data, pos } => Some((Arc::clone(data), *pos)),
+            _ => None,
         }
     }
 
