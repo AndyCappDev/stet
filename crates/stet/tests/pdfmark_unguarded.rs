@@ -41,12 +41,10 @@ fn an_unguarded_pdfmark_consumes_its_operands() {
 #[test]
 fn a_pdfmark_inside_a_procedure_consumes_its_operands() {
     // Procedures resolve names on their own fast path: a bound and an unbound one.
-    let src = b"%!PS
-/mark1 { [ /Title (A) /DOCINFO pdfmark } def
-/mark2 { [ /Subject (B) /DOCINFO pdfmark } bind def
-        mark1 mark2 mark1
-        count 0 ne { 1 0 0 setrgbcolor } { 0 0 1 setrgbcolor } ifelse 0 0 100 100 rectfill showpage
-";
+    let src = b"%!PS\n/mark1 { [ /Title (A) /DOCINFO pdfmark } def\n\
+        /mark2 { [ /Subject (B) /DOCINFO pdfmark } bind def\n\
+        mark1 mark2 mark1\n\
+        count 0 ne { 1 0 0 setrgbcolor } { 0 0 1 setrgbcolor } ifelse 0 0 100 100 rectfill showpage\n";
     let mut interp = Interpreter::builder().suppress_output().build();
     let pages = interp.render(src, 18.0).expect("renders");
     assert_eq!(pages.len(), 1);
