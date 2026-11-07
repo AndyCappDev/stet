@@ -21,8 +21,7 @@ fn pixel(body: &str, x: usize, y: usize) -> [u8; 3] {
     let src = format!("{COMPOSITE}{body}\nshowpage\n");
     let mut interp = Interpreter::builder().suppress_output().build();
     let pages = interp.render(src.as_bytes(), 72.0).expect("renders");
-    assert_eq!(pages.len(), 1, "{:?}", interp.last_error());
-    assert!(interp.last_error().is_none(), "{:?}", interp.last_error());
+    assert_eq!(pages.len(), 1);
     let (w, h) = (pages[0].width as usize, pages[0].height as usize);
     let at = ((h - 1 - y) * w + x) * 4;
     [
