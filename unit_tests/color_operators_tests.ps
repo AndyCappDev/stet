@@ -789,4 +789,22 @@ not { (ProcessColorModel should be stored in page device) print } if
 %% pipeline (convert_to_device_color), which cannot be tested from PostScript.
 %% The color conversion is verified by rendering tests (e.g. samples/tiger.ps).
 
+%% =============================================================================
+%% TN 5044 custom colours (findcmykcustomcolor, findrgbcustomcolor, setcustomcolor)
+%% =============================================================================
+
+%% A CMYK custom colour at a tint scales its components; Illustrator's AGM procsets paint spot
+%% colours with a CMYK alternate this way.
+.2 .4 .6 0 (Beige) findcmykcustomcolor 0.5 setcustomcolor
+/currentcolorspace [[/DeviceCMYK]] assert
+/currentcolor [0.1 0.2 0.3 0.0] assert
+.2 .4 .6 .1 (Beige) findcmykcustomcolor 1 setcustomcolor
+/currentcolor [0.2 0.4 0.6 0.1] assert
+%% An RGB custom colour at tint t is 1 - t(1 - c): white at 0, the colour at 1.
+1 .5 0 (Orange) findrgbcustomcolor 0.5 setcustomcolor
+/currentcolorspace [[/DeviceRGB]] assert
+/currentcolor [1.0 0.75 0.5] assert
+1 .5 0 (Orange) findrgbcustomcolor 0 setcustomcolor
+/currentcolor [1.0 1.0 1.0] assert
+
 % Test completed - use the standard unittest framework summary

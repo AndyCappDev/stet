@@ -298,7 +298,20 @@ false setglobal
     %% TN: 5044 operators
     /findcmykcustomcolor { 5 array astore } bind def
     /findrgbcustomcolor { 4 array astore } bind def
-    /setcustomcolor {pop pop} bind def
+    % array tint setcustomcolor: the colour at that tint. A CMYK custom colour scales its components
+    % by the tint (subtractive), an RGB one moves from white towards them. Illustrator's AGM procsets
+    % paint every spot colour with a CMYK alternate through this, so a stub paints them all black.
+    /setcustomcolor {
+        exch dup length 5 eq {
+            aload pop pop
+            4 { 4 index mul 4 1 roll } repeat
+            setcmykcolor pop
+        } {
+            aload pop pop
+            3 { 1 exch sub 3 index mul 1 exch sub 3 1 roll } repeat
+            setrgbcolor pop
+        } ifelse
+    } bind def
 
 end % systemdict
 
