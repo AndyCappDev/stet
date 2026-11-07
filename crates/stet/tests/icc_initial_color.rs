@@ -25,9 +25,12 @@ fn pixel_10_10(job: &str) -> [u8; 3] {
 
 /// A page filled straight after `[/ICCBased dict] setcolorspace`.
 fn fill_in_icc(dict_extra: &str, with_profile: bool) -> String {
+    // The profile goes in as a hex string, not a file path: a Windows path's
+    // backslashes are escapes in a PostScript string, and mangled it.
     let source = if with_profile {
-        let profile = concat!(env!("CARGO_MANIFEST_DIR"), "/resources/default_cmyk.icc");
-        format!("/DataSource ({profile}) (r) file")
+        let profile = include_bytes!("../resources/default_cmyk.icc");
+        let hex: String = profile.iter().map(|b| format!("{b:02x}")).collect();
+        format!("/DataSource <{hex}>")
     } else {
         String::new()
     };
