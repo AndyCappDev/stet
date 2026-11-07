@@ -38,3 +38,18 @@ fn partial_pages_keep_what_was_painted() {
     assert_eq!(pages.len(), 1);
     assert!(interp.last_error().is_none());
 }
+
+/// A job stopped by its deadline is not resumed by the `showpage` that keeps
+/// its page: an endless loop ends at the deadline, with what it painted.
+#[test]
+fn a_timeout_ends_the_job_it_interrupted() {
+    let mut interp = Interpreter::builder().suppress_output().keep_partial_pages().build();
+    interp.context().set_timeout(Some(std::time::Duration::from_millis(200)));
+    let started = std::time::Instant::now();
+    let pages = interp
+        .render(b"%!PS\n0 0 1 setrgbcolor 20 20 100 100 rectfill\n{ 1 1 add pop } loop\n", 18.0)
+        .expect("the painted page is kept");
+    assert!(started.elapsed() < std::time::Duration::from_secs(5), "took {:?}", started.elapsed());
+    assert_eq!(pages.len(), 1);
+    assert!(interp.last_error().is_some());
+}

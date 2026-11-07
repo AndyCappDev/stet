@@ -163,6 +163,9 @@ pub struct Interpreter {
     last_error: Option<StetError>,
 }
 
+/// How long the `showpage` that ends a job cut short by an error may take.
+const FLUSH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Builder for configuring an [`Interpreter`] before creation.
 pub struct InterpreterBuilder {
     use_icc: bool,
@@ -410,12 +413,21 @@ impl Interpreter {
         self.last_error.as_ref()
     }
 
-    /// End a page cut short by an error, so the marks painted so far are kept:
-    /// the deadline is lifted first (a job that ran out of time would otherwise
-    /// run out again at once) and the graphics state reset.
+    /// End a page cut short by an error, so the marks painted so far are kept.
     fn flush_partial_page(&mut self) {
-        self.ctx.set_timeout(None);
+        self.abandon_job();
         let _ = parse_and_exec(&mut self.ctx, b"{ showpage } stopped pop");
+    }
+
+    /// After an error that left the job mid-flight: drop what it was running,
+    /// so code run now does not resume it, and give that code a deadline of its
+    /// own (a job that ran out of time would otherwise run out again at once,
+    /// and `showpage` may be the program's own procedure).
+    fn abandon_job(&mut self) {
+        self.ctx.o_stack.clear();
+        self.ctx.e_stack.clear();
+        self.ctx.loops.clear();
+        self.ctx.set_timeout(Some(FLUSH_DEADLINE));
     }
 
     /// The error a job ended in, by its PostScript name when the job ended in
@@ -590,8 +602,7 @@ impl Interpreter {
         self.last_error = None;
         let ran = parse_and_exec(&mut self.ctx, ps_data);
         if let Err(e) = job_result(&self.ctx, ran) {
-            // A job that ran out of time would run out again in the showpage.
-            self.ctx.set_timeout(None);
+            self.abandon_job();
             if self.keep_partial {
                 self.last_error = Some(self.named_error(e));
             }
