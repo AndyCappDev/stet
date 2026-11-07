@@ -37,93 +37,201 @@ pub fn clear_pattern_color(ctx: &mut Context) {
 }
 
 /// Make `space` current after `setgray`, `setrgbcolor`, `setcmykcolor` or
-/// `sethsbcolor`, remapped under UseCIEColor (PLRM 6.2.5).
+/// `sethsbcolor` has set `comps` in it, remapped under UseCIEColor (PLRM
+/// 6.2.5).
 ///
-/// The remapping is meant to be invisible, so a remapped space still reports
-/// the device space it replaced from `currentcolorspace`.
-fn install_device_space(ctx: &mut Context, space: ColorSpace, name: &[u8]) {
+/// A remapped colour is painted through the `Default*` space: `comps` go to
+/// that space's `setcolor`, as they would after `setcolorspace`, and the
+/// device colour already set is replaced by what it converts them to. The
+/// remapping is meant to be invisible otherwise, so `currentcolorspace` still
+/// reports the device space and `currentcolor` the components given. A
+/// default space that cannot take the colour — its `setcolor` fails — leaves
+/// the device space and colour in place.
+fn install_device_space(ctx: &mut Context, space: ColorSpace, name: &[u8], comps: &[f64]) {
     ctx.gstate.color_space = space;
     ctx.gstate.color_space_object = None;
-    if is_use_cie_color(ctx)
-        && let Some(cs) = lookup_default_colorspace(ctx, name)
-    {
-        ctx.gstate.color_space = cs;
-        ctx.gstate.color_space_object = Some(PsObject::name_lit(ctx.names.intern(name)));
+    if !is_use_cie_color(ctx) {
+        return;
     }
+    let Some(default_space) = lookup_default_colorspace(ctx, name) else {
+        return;
+    };
+    let device_space = std::mem::replace(&mut ctx.gstate.color_space, default_space);
+    if paint_through_current_space(ctx, comps) {
+        ctx.gstate.color_space_object = Some(PsObject::name_lit(ctx.names.intern(name)));
+    } else {
+        ctx.gstate.color_space = device_space;
+        ctx.gstate.color_components = None;
+    }
+}
+
+/// Paint `comps`, a colour in a device space already set as `gstate.color`,
+/// through the current colour space: the `Default*` space UseCIEColor put in
+/// the device space's place. `currentcolor` reports `comps` either way.
+///
+/// `false`, leaving the device colour, when that space's `setcolor` fails.
+fn paint_through_current_space(ctx: &mut Context, comps: &[f64]) -> bool {
+    let device_color = ctx.gstate.color.clone();
+    let depth = ctx.o_stack.len();
+    let pushed = comps
+        .iter()
+        .all(|&c| ctx.o_stack.push(PsObject::real(c)).is_ok());
+    let painted = pushed && set_color_in_space(ctx).is_ok();
+    if !painted {
+        ctx.o_stack.truncate(depth);
+        ctx.gstate.color = device_color;
+    }
+    ctx.gstate.color_components = Some(Arc::from(comps));
+    painted
+}
+
+/// The device space the current colour space stands in for, when UseCIEColor
+/// has put a `Default*` space in its place: the device space `setcolorspace`
+/// or a colour operator named, while `color_space` holds the default.
+///
+/// `None` in any other space, including a device space a `Default*` resource
+/// left as it was (`[/DeviceCMYK]`, for no remapping).
+fn remapped_device_space(ctx: &Context) -> Option<ColorSpace> {
+    if matches!(
+        ctx.gstate.color_space,
+        ColorSpace::DeviceGray | ColorSpace::DeviceRGB | ColorSpace::DeviceCMYK
+    ) {
+        return None;
+    }
+    let obj = ctx.gstate.color_space_object?;
+    let family = match obj.value {
+        PsValue::Name(id) => id,
+        _ => match array_span(&obj)? {
+            (entity, start, 1) => match ctx.arrays.get_element(entity, start).value {
+                PsValue::Name(id) => id,
+                _ => return None,
+            },
+            _ => return None,
+        },
+    };
+    match ctx.names.get_bytes(family) {
+        b"DeviceGray" => Some(ColorSpace::DeviceGray),
+        b"DeviceRGB" => Some(ColorSpace::DeviceRGB),
+        b"DeviceCMYK" => Some(ColorSpace::DeviceCMYK),
+        _ => None,
+    }
+}
+
+/// `setcolor` in a device space UseCIEColor remapped: the device space's
+/// components, clipped as it clips them, painted through the `Default*` space.
+fn set_remapped_device_color(ctx: &mut Context, device: &ColorSpace) -> Result<(), PsError> {
+    let comps: Vec<f64> = match device {
+        ColorSpace::DeviceGray => set_gray_components(ctx)?.to_vec(),
+        ColorSpace::DeviceRGB => set_rgb_components(ctx)?.to_vec(),
+        _ => set_cmyk_components(ctx)?.to_vec(),
+    };
+    paint_through_current_space(ctx, &comps);
+    Ok(())
+}
+
+/// The device colour `currentgray`, `currentrgbcolor`, `currentcmykcolor`
+/// and `currenthsbcolor` describe.
+///
+/// That is `gstate.color`, except in a space UseCIEColor remapped, where
+/// `gstate.color` is what the `Default*` space converted the colour to. The
+/// PLRM keeps the remapping out of "the current color values", so these
+/// describe the device colour the program set, as Ghostscript does.
+fn reported_color(ctx: &mut Context) -> DeviceColor {
+    if let Some(device) = remapped_device_space(ctx)
+        && let Some(comps) = ctx.gstate.color_components.clone()
+    {
+        match (device, &comps[..]) {
+            (ColorSpace::DeviceGray, &[g]) => return DeviceColor::from_gray(g),
+            (ColorSpace::DeviceRGB, &[r, g, b]) => return DeviceColor::from_rgb(r, g, b),
+            (ColorSpace::DeviceCMYK, &[c, m, y, k]) => {
+                let intent = gstate_intent(ctx);
+                return DeviceColor::from_cmyk_icc_with_intent(
+                    c,
+                    m,
+                    y,
+                    k,
+                    intent,
+                    &mut ctx.icc_cache,
+                );
+            }
+            _ => {}
+        }
+    }
+    ctx.gstate.color.clone()
 }
 
 /// Pop a gray level and make it the current colour, leaving the colour
 /// space as it is: the part of `setgray` that `setcolor` shares.
-fn set_gray_components(ctx: &mut Context) -> Result<(), PsError> {
+fn set_gray_components(ctx: &mut Context) -> Result<[f64; 1], PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
     }
     let obj = ctx.o_stack.peek(0)?;
-    let gray = obj.as_f64().ok_or(PsError::TypeCheck)?;
+    let gray = obj.as_f64().ok_or(PsError::TypeCheck)?.clamp(0.0, 1.0);
     ctx.o_stack.pop()?;
-    ctx.gstate.color = DeviceColor::from_gray(gray.clamp(0.0, 1.0));
+    ctx.gstate.color = DeviceColor::from_gray(gray);
     ctx.gstate.icc_components = None;
     ctx.gstate.color_components = None;
     clear_pattern_color(ctx);
-    Ok(())
+    Ok([gray])
 }
 
 /// `setgray`: num → —
 pub fn op_setgray(ctx: &mut Context) -> Result<(), PsError> {
-    set_gray_components(ctx)?;
-    install_device_space(ctx, ColorSpace::DeviceGray, b"DeviceGray");
+    let comps = set_gray_components(ctx)?;
+    install_device_space(ctx, ColorSpace::DeviceGray, b"DeviceGray", &comps);
     Ok(())
 }
 
 /// `currentgray`: — → num
 pub fn op_currentgray(ctx: &mut Context) -> Result<(), PsError> {
-    let gray = ctx.gstate.color.to_gray();
+    let gray = reported_color(ctx).to_gray();
     ctx.o_stack.push(PsObject::real(gray))?;
     Ok(())
 }
 
 /// Pop red, green and blue and make them the current colour, leaving the
 /// colour space as it is: the part of `setrgbcolor` that `setcolor` shares.
-fn set_rgb_components(ctx: &mut Context) -> Result<(), PsError> {
+fn set_rgb_components(ctx: &mut Context) -> Result<[f64; 3], PsError> {
     if ctx.o_stack.len() < 3 {
         return Err(PsError::StackUnderflow);
     }
     let b_obj = ctx.o_stack.peek(0)?;
     let g_obj = ctx.o_stack.peek(1)?;
     let r_obj = ctx.o_stack.peek(2)?;
-    let r = r_obj.as_f64().ok_or(PsError::TypeCheck)?;
-    let g = g_obj.as_f64().ok_or(PsError::TypeCheck)?;
-    let b = b_obj.as_f64().ok_or(PsError::TypeCheck)?;
+    let r = r_obj.as_f64().ok_or(PsError::TypeCheck)?.clamp(0.0, 1.0);
+    let g = g_obj.as_f64().ok_or(PsError::TypeCheck)?.clamp(0.0, 1.0);
+    let b = b_obj.as_f64().ok_or(PsError::TypeCheck)?.clamp(0.0, 1.0);
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
-    ctx.gstate.color =
-        DeviceColor::from_rgb(r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0));
+    ctx.gstate.color = DeviceColor::from_rgb(r, g, b);
     ctx.gstate.icc_components = None;
     ctx.gstate.color_components = None;
     clear_pattern_color(ctx);
-    Ok(())
+    Ok([r, g, b])
 }
 
 /// `setrgbcolor`: r g b → —
 pub fn op_setrgbcolor(ctx: &mut Context) -> Result<(), PsError> {
-    set_rgb_components(ctx)?;
-    install_device_space(ctx, ColorSpace::DeviceRGB, b"DeviceRGB");
+    let comps = set_rgb_components(ctx)?;
+    install_device_space(ctx, ColorSpace::DeviceRGB, b"DeviceRGB", &comps);
     Ok(())
 }
 
 /// `currentrgbcolor`: — → r g b
 pub fn op_currentrgbcolor(ctx: &mut Context) -> Result<(), PsError> {
-    ctx.o_stack.push(PsObject::real(ctx.gstate.color.r))?;
-    ctx.o_stack.push(PsObject::real(ctx.gstate.color.g))?;
-    ctx.o_stack.push(PsObject::real(ctx.gstate.color.b))?;
+    let color = reported_color(ctx);
+    ctx.o_stack.push(PsObject::real(color.r))?;
+    ctx.o_stack.push(PsObject::real(color.g))?;
+    ctx.o_stack.push(PsObject::real(color.b))?;
     Ok(())
 }
 
 /// Pop cyan, magenta, yellow and black and make them the current colour,
 /// converted through the system CMYK profile, leaving the colour space as it
 /// is: the part of `setcmykcolor` that `setcolor` shares.
-fn set_cmyk_components(ctx: &mut Context) -> Result<(), PsError> {
+fn set_cmyk_components(ctx: &mut Context) -> Result<[f64; 4], PsError> {
     if ctx.o_stack.len() < 4 {
         return Err(PsError::StackUnderflow);
     }
@@ -131,39 +239,33 @@ fn set_cmyk_components(ctx: &mut Context) -> Result<(), PsError> {
     let y_obj = ctx.o_stack.peek(1)?;
     let m_obj = ctx.o_stack.peek(2)?;
     let c_obj = ctx.o_stack.peek(3)?;
-    let c = c_obj.as_f64().ok_or(PsError::TypeCheck)?;
-    let m = m_obj.as_f64().ok_or(PsError::TypeCheck)?;
-    let y = y_obj.as_f64().ok_or(PsError::TypeCheck)?;
-    let k = k_obj.as_f64().ok_or(PsError::TypeCheck)?;
+    let c = c_obj.as_f64().ok_or(PsError::TypeCheck)?.clamp(0.0, 1.0);
+    let m = m_obj.as_f64().ok_or(PsError::TypeCheck)?.clamp(0.0, 1.0);
+    let y = y_obj.as_f64().ok_or(PsError::TypeCheck)?.clamp(0.0, 1.0);
+    let k = k_obj.as_f64().ok_or(PsError::TypeCheck)?.clamp(0.0, 1.0);
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
     let intent = gstate_intent(ctx);
-    ctx.gstate.color = DeviceColor::from_cmyk_icc_with_intent(
-        c.clamp(0.0, 1.0),
-        m.clamp(0.0, 1.0),
-        y.clamp(0.0, 1.0),
-        k.clamp(0.0, 1.0),
-        intent,
-        &mut ctx.icc_cache,
-    );
+    ctx.gstate.color =
+        DeviceColor::from_cmyk_icc_with_intent(c, m, y, k, intent, &mut ctx.icc_cache);
     ctx.gstate.icc_components = None;
     ctx.gstate.color_components = None;
     clear_pattern_color(ctx);
-    Ok(())
+    Ok([c, m, y, k])
 }
 
 /// `setcmykcolor`: c m y k → —
 pub fn op_setcmykcolor(ctx: &mut Context) -> Result<(), PsError> {
-    set_cmyk_components(ctx)?;
-    install_device_space(ctx, ColorSpace::DeviceCMYK, b"DeviceCMYK");
+    let comps = set_cmyk_components(ctx)?;
+    install_device_space(ctx, ColorSpace::DeviceCMYK, b"DeviceCMYK", &comps);
     Ok(())
 }
 
 /// `currentcmykcolor`: — → c m y k
 pub fn op_currentcmykcolor(ctx: &mut Context) -> Result<(), PsError> {
-    let (c, m, y, k) = ctx.gstate.color.to_cmyk();
+    let (c, m, y, k) = reported_color(ctx).to_cmyk();
     ctx.o_stack.push(PsObject::real(c))?;
     ctx.o_stack.push(PsObject::real(m))?;
     ctx.o_stack.push(PsObject::real(y))?;
@@ -190,13 +292,15 @@ pub fn op_sethsbcolor(ctx: &mut Context) -> Result<(), PsError> {
     ctx.gstate.icc_components = None;
     ctx.gstate.color_components = None;
     clear_pattern_color(ctx);
-    install_device_space(ctx, ColorSpace::DeviceRGB, b"DeviceRGB");
+    // `sethsbcolor` sets an RGB colour, so a remap takes its RGB components.
+    let comps = [ctx.gstate.color.r, ctx.gstate.color.g, ctx.gstate.color.b];
+    install_device_space(ctx, ColorSpace::DeviceRGB, b"DeviceRGB", &comps);
     Ok(())
 }
 
 /// `currenthsbcolor`: — → h s b
 pub fn op_currenthsbcolor(ctx: &mut Context) -> Result<(), PsError> {
-    let (h, s, b) = ctx.gstate.color.to_hsb();
+    let (h, s, b) = reported_color(ctx).to_hsb();
     ctx.o_stack.push(PsObject::real(h))?;
     ctx.o_stack.push(PsObject::real(s))?;
     ctx.o_stack.push(PsObject::real(b))?;
@@ -239,6 +343,7 @@ pub fn op_setcolorspace(ctx: &mut Context) -> Result<(), PsError> {
             ctx.gstate.color_space = cs;
             ctx.gstate.color_space_object = Some(obj);
             clear_pattern_color(ctx);
+            install_remapped_initial_color(ctx);
             Ok(())
         }
         // Also accept array form [/DeviceGray] or [/Indexed base hival lookup],
@@ -293,6 +398,7 @@ pub fn op_setcolorspace(ctx: &mut Context) -> Result<(), PsError> {
                 clear_pattern_color(ctx);
                 cache_tint_table(ctx);
                 install_initial_tints(ctx);
+                install_remapped_initial_color(ctx);
                 Ok(())
             } else {
                 Err(PsError::TypeCheck)
@@ -329,6 +435,29 @@ fn initial_components(ctx: &Context, cs: &ColorSpace) -> Option<Arc<[f64]>> {
         | ColorSpace::DeviceCMYK
         | ColorSpace::Pattern { .. } => None,
     }
+}
+
+/// Paint the initial colour of a device space UseCIEColor remapped: the
+/// device space's own initial colour — black, `0 0 0 1` for DeviceCMYK —
+/// through the `Default*` space, rather than that space's initial colour,
+/// which for a CIEBasedDEFG `DefaultCMYK` is all zeros, no ink.
+fn install_remapped_initial_color(ctx: &mut Context) {
+    let Some(device) = remapped_device_space(ctx) else {
+        return;
+    };
+    let comps: &[f64] = match device {
+        ColorSpace::DeviceGray => &[0.0],
+        ColorSpace::DeviceRGB => &[0.0, 0.0, 0.0],
+        _ => &[0.0, 0.0, 0.0, 1.0],
+    };
+    let intent = gstate_intent(ctx);
+    ctx.gstate.color = match device {
+        ColorSpace::DeviceGray => DeviceColor::from_gray(0.0),
+        ColorSpace::DeviceRGB => DeviceColor::from_rgb(0.0, 0.0, 0.0),
+        _ => DeviceColor::from_cmyk_icc_with_intent(0.0, 0.0, 0.0, 1.0, intent, &mut ctx.icc_cache),
+    };
+    ctx.gstate.icc_components = None;
+    paint_through_current_space(ctx, comps);
 }
 
 /// Paint the initial colour of a Separation or DeviceN space: every tint 1.0,
@@ -551,6 +680,16 @@ fn cie_space_object(ctx: &mut Context, name: &[u8], dict_entity: EntityId) -> Ps
 
 /// `setcolor`: comp1 ... compn → — (set color using current color space)
 pub fn op_setcolor(ctx: &mut Context) -> Result<(), PsError> {
+    if let Some(device) = remapped_device_space(ctx) {
+        return set_remapped_device_color(ctx, &device);
+    }
+    set_color_in_space(ctx)
+}
+
+/// Set the colour in `gstate.color_space` from the operand stack, without
+/// regard to UseCIEColor: the remapped device spaces call it to paint
+/// through their `Default*` space.
+fn set_color_in_space(ctx: &mut Context) -> Result<(), PsError> {
     // Clear tint values and ICC components by default; the Separation,
     // DeviceN and ICCBased arms re-set them. Each arm sets the components
     // `currentcolor` reports once its operands are popped, so a `setcolor`
@@ -560,9 +699,9 @@ pub fn op_setcolor(ctx: &mut Context) -> Result<(), PsError> {
     ctx.gstate.tint_values = None;
     ctx.gstate.icc_components = None;
     match ctx.gstate.color_space.clone() {
-        ColorSpace::DeviceGray => set_gray_components(ctx),
-        ColorSpace::DeviceRGB => set_rgb_components(ctx),
-        ColorSpace::DeviceCMYK => set_cmyk_components(ctx),
+        ColorSpace::DeviceGray => set_gray_components(ctx).map(drop),
+        ColorSpace::DeviceRGB => set_rgb_components(ctx).map(drop),
+        ColorSpace::DeviceCMYK => set_cmyk_components(ctx).map(drop),
         ColorSpace::Indexed { .. } => set_indexed_color(ctx),
         ColorSpace::CIEBasedABC { params, .. } => set_cie_abc_color(ctx, &params),
         ColorSpace::CIEBasedA { params, .. } => set_cie_a_color(ctx, &params),
@@ -580,8 +719,8 @@ pub fn op_setcolor(ctx: &mut Context) -> Result<(), PsError> {
                 // profile. The space stays ICCBased, so `setgray` and
                 // `setrgbcolor` themselves would be wrong here.
                 match n {
-                    1 => set_gray_components(ctx),
-                    3 => set_rgb_components(ctx),
+                    1 => set_gray_components(ctx).map(drop),
+                    3 => set_rgb_components(ctx).map(drop),
                     4 => {
                         // Use from_cmyk (PLRM formula) directly, not op_setcmykcolor
                         // which would apply the system CMYK ICC profile

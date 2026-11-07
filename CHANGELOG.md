@@ -53,6 +53,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an Indexed one came back as its family name alone. `setcolor` in an
   ICCBased space without a profile also changed the space to DeviceGray or
   DeviceRGB; it stays ICCBased.
+- **With `UseCIEColor` on, `setgray`, `setrgbcolor`, `setcmykcolor` and
+  `sethsbcolor` paint through the `DefaultGray`, `DefaultRGB` or
+  `DefaultCMYK` space.** They select their device space implicitly, so the
+  PLRM remaps them as it does `setcolorspace`, but stet set the device
+  colour directly and only `setcolor` was converted. `currentgray`,
+  `currentrgbcolor`, `currentcmykcolor` and `currenthsbcolor` report the
+  device colour the program set, not what the default space made of it,
+  and `setcolor` in a remapped device space clips as that device space
+  does, as in Ghostscript. A remapped DeviceCMYK starts at `0 0 0 1`
+  through `DefaultCMYK`, rather than at the default space's own initial
+  colour, no ink.
 - **An ICCBased colour space with a profile starts with every component
   at 0, clipped to its `/Range`.** For a CMYK profile that is no ink, white;
   stet started it at `0 0 0 1`, the initial colour of DeviceCMYK, and

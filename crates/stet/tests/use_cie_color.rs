@@ -44,3 +44,40 @@ fn setcolor_in_a_device_space_paints_through_the_default_space() {
 fn without_use_cie_color_the_device_space_is_painted_as_is() {
     assert_eq!(pixel_10_10(&white_gray_fill(false)), [255, 255, 255]);
 }
+
+/// A page filled after `paint` with UseCIEColor on, a `DefaultGray` that
+/// maps every gray to black, and a `DefaultRGB` with its R and B rows
+/// swapped, which paints red as blue.
+fn remapped_fill(paint: &str) -> String {
+    format!(
+        "%!PS\n<< /PageSize [20 20] >> setpagedevice\n\
+         /DefaultGray [/CIEBasedA << /WhitePoint [0.9505 1 1.089] /MatrixA [0 0 0] >>]\n\
+         /ColorSpace defineresource pop\n\
+         /DefaultRGB [/CIEBasedABC << /WhitePoint [0.9505 1 1.089]\n\
+           /MatrixABC [0.1805 0.0722 0.9505 0.3576 0.7152 0.1192 0.4124 0.2126 0.0193] >>]\n\
+         /ColorSpace defineresource pop\n\
+         << /UseCIEColor true >> setpagedevice\n\
+         {paint} 0 0 20 20 rectfill showpage\n"
+    )
+}
+
+/// `setgray`, `setrgbcolor` and `sethsbcolor` select their device space
+/// implicitly, so they are remapped just as `setcolorspace` is. They used to
+/// set the device colour directly, painting white where Ghostscript paints
+/// black and red where it paints blue.
+#[test]
+fn the_colour_operators_paint_through_the_default_space() {
+    assert_eq!(pixel_10_10(&remapped_fill("1 setgray")), [0, 0, 0]);
+    assert_eq!(
+        pixel_10_10(&remapped_fill("1 0 0 setrgbcolor")),
+        [0, 0, 255]
+    );
+    assert_eq!(
+        pixel_10_10(&remapped_fill("0 1 1 sethsbcolor")),
+        [0, 0, 255]
+    );
+    assert_eq!(
+        pixel_10_10(&remapped_fill("[/DeviceRGB] setcolorspace 1 0 0 setcolor")),
+        [0, 0, 255]
+    );
+}
