@@ -81,6 +81,11 @@ pub enum FilterKind {
         eod_string: Vec<u8>,
         eod_count: i32,
         bytes_remaining: Option<i64>,
+        /// Bytes of `eod_string` matched so far. Kept across refills, so a
+        /// marker that straddles two refills is still found.
+        matched: usize,
+        /// Occurrences of `eod_string` found so far (for EODCount > 0).
+        found: i32,
     },
     /// CCITT Group 3/4 fax decode (lazily decoded on first read).
     CCITTFaxDecode {
@@ -2132,12 +2137,14 @@ impl FileStore {
         out: &mut Vec<u8>,
         eof: &mut bool,
     ) -> io::Result<()> {
-        let (eod_string, eod_count, bytes_remaining) = match kind {
+        let (eod_string, eod_count, bytes_remaining, matched, found) = match kind {
             FilterKind::SubFileDecode {
                 eod_string,
                 eod_count,
                 bytes_remaining,
-            } => (eod_string, eod_count, bytes_remaining),
+                matched,
+                found,
+            } => (eod_string, eod_count, bytes_remaining, matched, found),
             _ => return Err(io::Error::other("not SubFile")),
         };
 
@@ -2179,23 +2186,27 @@ impl FileStore {
                 }
             }
         } else {
-            // String-search mode: pass data until N occurrences of EOD string found
+            // String-search mode: pass data until N occurrences of EOD string
+            // found. The match state lives in the filter: a refill reads at
+            // most 4096 bytes, and Illustrator's XMP block ends in a marker
+            // that can straddle two refills.
             let eod = eod_string.clone();
             let target_count = *eod_count;
-            let mut match_pos = 0;
-            let mut found_count = 0;
 
             for _ in 0..4096 {
                 match self.read_byte(source)? {
                     None => {
+                        // A partial match at the end of the source is data.
+                        out.extend_from_slice(&eod[..*matched]);
+                        *matched = 0;
                         *eof = true;
                         return Ok(());
                     }
                     Some(b) => {
-                        if b == eod[match_pos] {
-                            match_pos += 1;
-                            if match_pos == eod.len() {
-                                match_pos = 0;
+                        if b == eod[*matched] {
+                            *matched += 1;
+                            if *matched == eod.len() {
+                                *matched = 0;
                                 // PLRM: with EODCount 0 the first occurrence is
                                 // consumed but *not* passed through; with
                                 // EODCount > 0 data up to and including the
@@ -2204,20 +2215,27 @@ impl FileStore {
                                     *eof = true;
                                     return Ok(());
                                 }
-                                found_count += 1;
+                                *found += 1;
                                 out.extend_from_slice(&eod);
-                                if found_count >= target_count {
+                                if *found >= target_count {
                                     *eof = true;
                                     return Ok(());
                                 }
                             }
-                        } else {
-                            // Output any partially matched bytes
-                            if match_pos > 0 {
-                                out.extend_from_slice(&eod[..match_pos]);
-                                match_pos = 0;
-                            }
+                        } else if *matched == 0 {
                             out.push(b);
+                        } else {
+                            // The bytes matched so far plus this one: keep the
+                            // longest tail that still begins the marker, pass
+                            // the rest through (`%%  &&end` holds `%  &&end`).
+                            let mut seen = eod[..*matched].to_vec();
+                            seen.push(b);
+                            let keep = (1..seen.len())
+                                .rev()
+                                .find(|&k| seen[seen.len() - k..] == eod[..k])
+                                .unwrap_or(0);
+                            out.extend_from_slice(&seen[..seen.len() - keep]);
+                            *matched = keep;
                         }
                     }
                 }
@@ -2782,6 +2800,8 @@ impl FilterKind {
             eod_string,
             eod_count,
             bytes_remaining,
+            matched: 0,
+            found: 0,
         }
     }
 
@@ -3204,14 +3224,7 @@ mod tests {
     fn test_subfile_byte_count() {
         let mut store = FileStore::new();
         let src = store.create_string_source(b"Hello, World!".to_vec());
-        let filt = store.create_filter(
-            src,
-            FilterKind::SubFileDecode {
-                eod_string: Vec::new(),
-                eod_count: 0,
-                bytes_remaining: Some(5),
-            },
-        );
+        let filt = store.create_filter(src, FilterKind::sub_file_decode(Vec::new(), 0, Some(5)));
         let mut result = Vec::new();
         while let Some(b) = store.read_byte(filt).unwrap() {
             result.push(b);
@@ -3258,6 +3271,48 @@ mod tests {
         let src = store.create_string_source(b"abcSTOPdef".to_vec());
         let filt = store.create_filter(src, FilterKind::sub_file_decode(b"STOP".to_vec(), 1, None));
         assert_eq!(&drain(&mut store, filt), b"abcSTOP");
+    }
+
+    #[test]
+    fn test_subfile_marker_across_refills() {
+        // A refill reads 4096 bytes; the marker starts 3 bytes before that.
+        let mut data = vec![b'x'; 4093];
+        data.extend_from_slice(b"STOPrest");
+        let mut store = FileStore::new();
+        let src = store.create_string_source(data);
+        let filt = store.create_filter(src, FilterKind::sub_file_decode(b"STOP".to_vec(), 0, None));
+        assert_eq!(drain(&mut store, filt), vec![b'x'; 4093]);
+    }
+
+    #[test]
+    fn test_subfile_marker_after_a_partial_match() {
+        let mut store = FileStore::new();
+        let src = store.create_string_source(b"ab%%  &&end tail".to_vec());
+        let filt = store.create_filter(
+            src,
+            FilterKind::sub_file_decode(b"%  &&end".to_vec(), 0, None),
+        );
+        assert_eq!(&drain(&mut store, filt), b"ab%");
+        let src = store.create_string_source(b"aSTSTOPb".to_vec());
+        let filt = store.create_filter(src, FilterKind::sub_file_decode(b"STOP".to_vec(), 0, None));
+        assert_eq!(&drain(&mut store, filt), b"aST");
+    }
+
+    #[test]
+    fn test_subfile_count_across_refills_and_partial_tail() {
+        let mut data = b"aSTOP".to_vec();
+        data.extend(vec![b'x'; 5000]);
+        data.extend_from_slice(b"STOPbSTO");
+        let mut expect = data[..data.len() - 4].to_vec();
+        let mut store = FileStore::new();
+        let src = store.create_string_source(data.clone());
+        let filt = store.create_filter(src, FilterKind::sub_file_decode(b"STOP".to_vec(), 2, None));
+        assert_eq!(drain(&mut store, filt), expect);
+        // No second marker: everything passes, the unfinished "STO" too.
+        expect = b"aSTOPbSTO".to_vec();
+        let src = store.create_string_source(expect.clone());
+        let filt = store.create_filter(src, FilterKind::sub_file_decode(b"STOP".to_vec(), 2, None));
+        assert_eq!(drain(&mut store, filt), expect);
     }
 
     // --- FlateDecode tests ---
