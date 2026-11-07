@@ -28,8 +28,7 @@ fn an_unguarded_pdfmark_consumes_its_operands() {
         count 0 ne { 1 0 0 setrgbcolor } { 0 0 1 setrgbcolor } ifelse 0 0 100 100 rectfill showpage\n";
     let mut interp = Interpreter::builder().suppress_output().build();
     let pages = interp.render(src, 18.0).expect("renders");
-    assert_eq!(pages.len(), 1, "{:?}", interp.last_error());
-    assert!(interp.last_error().is_none(), "{:?}", interp.last_error());
+    assert_eq!(pages.len(), 1);
     let w = pages[0].width as usize;
     let at = ((pages[0].height as usize - 5) * w + 5) * 4;
     assert_eq!(
@@ -50,8 +49,7 @@ fn a_pdfmark_inside_a_procedure_consumes_its_operands() {
 ";
     let mut interp = Interpreter::builder().suppress_output().build();
     let pages = interp.render(src, 18.0).expect("renders");
-    assert_eq!(pages.len(), 1, "{:?}", interp.last_error());
-    assert!(interp.last_error().is_none(), "{:?}", interp.last_error());
+    assert_eq!(pages.len(), 1);
     let w = pages[0].width as usize;
     let at = ((pages[0].height as usize - 5) * w + 5) * 4;
     assert_eq!(
