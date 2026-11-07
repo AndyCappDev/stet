@@ -917,6 +917,21 @@ cc_sep setcolorspace
 /cc_family [/Pattern] assert
 /cc_family_base [/Separation] assert
 
+%% ICCBased with a profile: each component starts at 0 clipped to /Range (for CMYK, no ink,
+%% not the 0 0 0 1 DeviceCMYK starts at), and setcolor clips to /Range too.
+/cc_icc { << /N 4 /DataSource (crates/stet/resources/default_cmyk.icc) (r) file >> } def
+[/ICCBased cc_icc] setcolorspace
+/currentcolor [0.0 0.0 0.0 0.0] assert
+5 -1 0.5 0 setcolor
+/currentcolor [1.0 0.0 0.5 0.0] assert
+[/ICCBased cc_icc dup /Range [0.2 1 0 1 0 1 0 1] put] setcolorspace
+/currentcolor [0.2 0.0 0.0 0.0] assert
+0 0 0 0 setcolor
+/currentcolor [0.2 0.0 0.0 0.0] assert
+%% Without a profile the space stands for DeviceCMYK, and starts where it does.
+[/ICCBased << /N 4 >>] setcolorspace
+/currentcolor [0.0 0.0 0.0 1.0] assert
+
 %% A colour space may be a packed array, and so may any array inside one; currentcolorspace
 %% hands the packed array back.
 /cc_pk_sep /Separation /S /DeviceGray {} 4 packedarray def
@@ -936,7 +951,7 @@ cc_pk_sep setcolorspace 0.4 setcolor
 /cc_family [/Pattern] assert
 
 [/cc_sep /cc_same /cc_gray /cc_same_gray /cc_index_type /cc_family /cc_family_base
- /cc_pk_sep /cc_same_pk]
+ /cc_icc /cc_pk_sep /cc_same_pk]
 { userdict exch undef } forall
 0 setgray
 

@@ -9267,8 +9267,11 @@ e1e2e2e3e4e5e6e7e7e8e9eaebecededeeeff0f1f2f3f3f4f5f6f7f8f9f9fafbfcfdfeff
 /Helvetica findfont 11 scalefont setfont
 72 700 moveto (Top: with ICC profiles  |  Bottom: Device color spaces  |  Compare differences) show
 
+% Each label sets black itself: text is painted in the current colour, and
+% after an ICCBased CMYK row that is the space's initial colour, no ink.
 % --- Row 1: RGB with sRGB ICC profile ---
 /Helvetica-Bold findfont 11 scalefont setfont
+0 setgray
 72 675 moveto (sRGB ICC) show
 
 [/ICCBased << /N 3 /DataSource srgb_icc >>] setcolorspace
@@ -9281,6 +9284,7 @@ grestore
 
 % --- Row 2: CMYK with CMYK ICC profile ---
 /Helvetica-Bold findfont 11 scalefont setfont
+0 setgray
 220 675 moveto (CMYK ICC) show
 
 [/ICCBased << /N 4 /DataSource cmyk_icc >>] setcolorspace
@@ -9293,6 +9297,7 @@ grestore
 
 % --- Row 3: Gray with Gray ICC profile ---
 /Helvetica-Bold findfont 11 scalefont setfont
+0 setgray
 380 675 moveto (Gray ICC) show
 
 [/ICCBased << /N 1 /DataSource gray_icc >>] setcolorspace
@@ -9305,6 +9310,7 @@ grestore
 
 % --- Row 4: Same images with Device color spaces ---
 /Helvetica-Bold findfont 11 scalefont setfont
+0 setgray
 72 595 moveto (DeviceRGB) show
 
 /DeviceRGB setcolorspace
@@ -9316,6 +9322,7 @@ gsave
 grestore
 
 /Helvetica-Bold findfont 11 scalefont setfont
+0 setgray
 220 595 moveto (DeviceCMYK) show
 
 /DeviceCMYK setcolorspace
@@ -9327,6 +9334,7 @@ gsave
 grestore
 
 /Helvetica-Bold findfont 11 scalefont setfont
+0 setgray
 380 595 moveto (DeviceGray) show
 
 /DeviceGray setcolorspace

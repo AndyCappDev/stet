@@ -569,10 +569,12 @@ pub fn op_setcolor(ctx: &mut Context) -> Result<(), PsError> {
         ColorSpace::CIEBasedDEF { params, .. } => set_cie_def_color(ctx, &params),
         ColorSpace::CIEBasedDEFG { params, .. } => set_cie_defg_color(ctx, &params),
         ColorSpace::ICCBased {
-            n, profile_hash, ..
+            n,
+            profile_hash,
+            dict_entity,
         } => {
             if let Some(hash) = profile_hash {
-                set_icc_color(ctx, n, &hash)
+                set_icc_color(ctx, n, &hash, dict_entity)
             } else {
                 // No embedded ICC profile — use PLRM formulas, not system ICC
                 // profile. The space stays ICCBased, so `setgray` and
@@ -790,7 +792,12 @@ pub fn op_currentcolor(ctx: &mut Context) -> Result<(), PsError> {
 /// Set color from ICCBased color space with an actual ICC profile.
 /// Pops N components, converts through ICC profile, stores as DeviceColor,
 /// and keeps the components for [`reconvert_color_for_intent`].
-fn set_icc_color(ctx: &mut Context, n: u32, hash: &[u8; 32]) -> Result<(), PsError> {
+fn set_icc_color(
+    ctx: &mut Context,
+    n: u32,
+    hash: &[u8; 32],
+    dict_entity: EntityId,
+) -> Result<(), PsError> {
     if (ctx.o_stack.len() as u32) < n {
         return Err(PsError::StackUnderflow);
     }
@@ -812,36 +819,53 @@ fn set_icc_color(ctx: &mut Context, n: u32, hash: &[u8; 32]) -> Result<(), PsErr
             _ => 0.0,
         };
     }
-    // Convert through ICC
-    let intent = gstate_intent(ctx);
-    if let Some((r, g, b)) = ctx
-        .icc_cache
-        .convert_color_with_intent(hash, &comps, intent)
-    {
-        ctx.gstate.color = DeviceColor::from_rgb(r, g, b);
-    } else {
-        // Fallback to device-based conversion
-        ctx.gstate.color = match n {
-            1 => DeviceColor::from_gray(comps[0].clamp(0.0, 1.0)),
-            3 => DeviceColor::from_rgb(
-                comps[0].clamp(0.0, 1.0),
-                comps[1].clamp(0.0, 1.0),
-                comps[2].clamp(0.0, 1.0),
-            ),
-            4 => DeviceColor::from_cmyk_icc_with_intent(
-                comps[0].clamp(0.0, 1.0),
-                comps[1].clamp(0.0, 1.0),
-                comps[2].clamp(0.0, 1.0),
-                comps[3].clamp(0.0, 1.0),
-                intent,
-                &mut ctx.icc_cache,
-            ),
-            _ => DeviceColor::black(),
-        };
-    }
+    // Each component is clipped to the space's /Range, as Ghostscript does,
+    // before it is converted and before `currentcolor` reports it.
+    let comps = clamp_to_ranges(&comps, &icc_range(ctx, dict_entity, n)).to_vec();
+    ctx.gstate.color = icc_device_color(ctx, n, hash, &comps);
     ctx.gstate.color_components = Some(Arc::from(comps.as_slice()));
     ctx.gstate.icc_components = Some(comps);
     Ok(())
+}
+
+/// An ICCBased space's `/Range`: a `[min max]` pair for each of its `n`
+/// components, `[0 1]` for each when the dictionary gives none or gives one
+/// of the wrong length.
+fn icc_range(ctx: &Context, dict_entity: EntityId, n: u32) -> Vec<f64> {
+    let default: Vec<f64> = (0..n).flat_map(|_| [0.0, 1.0]).collect();
+    let range = get_cie_float_array(ctx, dict_entity, b"Range", &default);
+    if range.len() == default.len() {
+        range
+    } else {
+        default
+    }
+}
+
+/// Convert components in an ICCBased space with a profile to the device
+/// colour, through the profile, or through the device space with as many
+/// components when the profile cannot convert them.
+fn icc_device_color(ctx: &mut Context, n: u32, hash: &[u8; 32], comps: &[f64]) -> DeviceColor {
+    let intent = gstate_intent(ctx);
+    if let Some((r, g, b)) = ctx.icc_cache.convert_color_with_intent(hash, comps, intent) {
+        return DeviceColor::from_rgb(r, g, b);
+    }
+    match n {
+        1 => DeviceColor::from_gray(comps[0].clamp(0.0, 1.0)),
+        3 => DeviceColor::from_rgb(
+            comps[0].clamp(0.0, 1.0),
+            comps[1].clamp(0.0, 1.0),
+            comps[2].clamp(0.0, 1.0),
+        ),
+        4 => DeviceColor::from_cmyk_icc_with_intent(
+            comps[0].clamp(0.0, 1.0),
+            comps[1].clamp(0.0, 1.0),
+            comps[2].clamp(0.0, 1.0),
+            comps[3].clamp(0.0, 1.0),
+            intent,
+            &mut ctx.icc_cache,
+        ),
+        _ => DeviceColor::black(),
+    }
 }
 
 /// Set color in an Indexed color space: index → —
@@ -934,37 +958,36 @@ fn default_color_for_space(cs: &ColorSpace, ctx: &mut Context) -> DeviceColor {
             DeviceColor::from_cie_defg(0.0, 0.0, 0.0, 0.0, params)
         }
         ColorSpace::ICCBased {
-            n, profile_hash, ..
+            n,
+            profile_hash,
+            dict_entity,
         } => {
-            let default_comps: &[f64] = match n {
-                1 => &[0.0],
-                3 => &[0.0, 0.0, 0.0],
-                4 => &[0.0, 0.0, 0.0, 1.0],
-                _ => return DeviceColor::black(),
+            let Some(hash) = profile_hash else {
+                // Without a profile it can use, the space stands for the
+                // device space with as many components, which is what
+                // Ghostscript substitutes, and starts at that space's
+                // initial colour: black.
+                return match n {
+                    1 => DeviceColor::from_gray(0.0),
+                    3 => DeviceColor::from_rgb(0.0, 0.0, 0.0),
+                    4 => DeviceColor::from_cmyk_icc_with_intent(
+                        0.0,
+                        0.0,
+                        0.0,
+                        1.0,
+                        intent,
+                        &mut ctx.icc_cache,
+                    ),
+                    _ => DeviceColor::black(),
+                };
             };
-            if profile_hash.is_some() {
-                ctx.gstate.icc_components = Some(default_comps.to_vec());
-            }
-            if let Some(hash) = profile_hash
-                && let Some((r, g, b)) =
-                    ctx.icc_cache
-                        .convert_color_with_intent(hash, default_comps, intent)
-            {
-                return DeviceColor::from_rgb(r, g, b);
-            }
-            match n {
-                1 => DeviceColor::from_gray(0.0),
-                3 => DeviceColor::from_rgb(0.0, 0.0, 0.0),
-                4 => DeviceColor::from_cmyk_icc_with_intent(
-                    0.0,
-                    0.0,
-                    0.0,
-                    1.0,
-                    intent,
-                    &mut ctx.icc_cache,
-                ),
-                _ => DeviceColor::black(),
-            }
+            // Each component starts at 0, clipped to /Range (PLRM,
+            // `setcolorspace`) — for a CMYK profile no ink, white, not the
+            // `0 0 0 1` DeviceCMYK starts at.
+            let comps = clamp_to_ranges(&vec![0.0; *n as usize], &icc_range(ctx, *dict_entity, *n));
+            let color = icc_device_color(ctx, *n, hash, &comps);
+            ctx.gstate.icc_components = Some(comps.to_vec());
+            color
         }
         ColorSpace::Indexed { base, lookup, .. } => {
             // Default is index 0 resolved through the palette
@@ -2973,6 +2996,22 @@ mod tests {
         assert!(ctx.gstate.color_space_object.is_none());
         op_currentcolorspace(&mut ctx).unwrap();
         assert!(!same_array(&ctx.o_stack.pop().unwrap(), &space));
+    }
+
+    #[test]
+    fn test_icc_range_defaults_to_unit_ranges() {
+        let mut ctx = setup();
+        let dict = crate::vm_ops::alloc_dict(&mut ctx, 4, b"icc");
+        assert_eq!(icc_range(&ctx, dict, 3), [0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
+
+        // A /Range of the wrong length is ignored rather than misread.
+        let short = [PsObject::real(0.2), PsObject::real(1.0)];
+        let entity = crate::vm_ops::alloc_array_from(&mut ctx, &short);
+        let short = crate::vm_ops::make_array_obj(&ctx, entity, 2);
+        let key = DictKey::Name(ctx.names.intern(b"Range"));
+        ctx.dicts.put(dict, key, short);
+        assert_eq!(icc_range(&ctx, dict, 3), [0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(icc_range(&ctx, dict, 1), [0.2, 1.0]);
     }
 
     #[test]

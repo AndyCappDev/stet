@@ -53,6 +53,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an Indexed one came back as its family name alone. `setcolor` in an
   ICCBased space without a profile also changed the space to DeviceGray or
   DeviceRGB; it stays ICCBased.
+- **An ICCBased colour space with a profile starts with every component
+  at 0, clipped to its `/Range`.** For a CMYK profile that is no ink, white;
+  stet started it at `0 0 0 1`, the initial colour of DeviceCMYK, and
+  painted black. `setcolor` in such a space also clips the components to
+  `/Range` before converting them, as Ghostscript does. A space whose
+  profile cannot be used stands for the device space, as in Ghostscript,
+  and still starts black.
 - **`setcolorspace` takes a packed array, and packed arrays anywhere inside
   a colour space.** It raised `typecheck` for one, so a program run with
   `true setpacking` could not set a colour space it built with

@@ -56,8 +56,13 @@ fn iccbased_profile(cmyk: [f64; 4], intent: IccRenderingIntent) -> [f64; 3] {
 
 /// `[/ICCBased <<…>>]` over `SPLIT_SAT`.
 fn iccbased_space() -> String {
+    iccbased_space_with("")
+}
+
+/// [`iccbased_space`] with `extra` added to its dictionary.
+fn iccbased_space_with(extra: &str) -> String {
     let hex: String = SPLIT_SAT.iter().map(|b| format!("{b:02x}")).collect();
-    format!("[/ICCBased << /N 4 /DataSource <{hex}> >>]")
+    format!("[/ICCBased << /N 4 /DataSource <{hex}> {extra} >>]")
 }
 
 /// Run `body` as a one-page program with `SPLIT` as the CMYK profile and
@@ -155,12 +160,17 @@ fn grestore_restores_the_intent_and_the_colour_together() {
 #[test]
 fn iccbased_cmyk_takes_the_intent_through_its_own_profile() {
     let space = iccbased_space();
+    // An ICCBased space starts with every component at 0 clipped to /Range:
+    // for a CMYK profile no ink, white, which every intent leaves white. A
+    // /Range holding black at 1 starts it at 0 0 0 1 instead, where the
+    // intents differ.
+    let black_start = iccbased_space_with("/Range [0 1 0 1 0 1 1 1]");
     let fills = fill_colors(&format!(
-        "{space} setcolorspace\n\
+        "{black_start} setcolorspace\n\
          /Saturation setrenderingintent 0 0 10 10 rectfill\n\
-         0.8 0.4 0 0.1 setcolor 0 0 10 10 rectfill\n\
+         {space} setcolorspace 0.8 0.4 0 0.1 setcolor 0 0 10 10 rectfill\n\
          /Perceptual setrenderingintent 0 0 10 10 rectfill\n\
-         {space} setcolorspace 0 0 10 10 rectfill"
+         {black_start} setcolorspace 0 0 10 10 rectfill"
     ));
     // The initial colour, set under RelativeColorimetric, follows the
     // intent like any other.
