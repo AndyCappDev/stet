@@ -807,4 +807,41 @@ not { (ProcessColorModel should be stored in page device) print } if
 1 .5 0 (Orange) findrgbcustomcolor 0 setcustomcolor
 /currentcolor [1.0 1.0 1.0] assert
 
+%% A packed array, as Adobe's own procsets build the custom colour.
+.2 .4 .6 0 (Packed) 5 packedarray 1 setcustomcolor
+/currentcolor [0.2 0.4 0.6 0.0] assert
+
+%% A tint outside 0..1 is clamped, so the colour keeps its hue.
+/cc_cmyk .2 .4 .6 .1 (Beige) findcmykcustomcolor def
+cc_cmyk 2 setcustomcolor
+/currentcolor [0.2 0.4 0.6 0.1] assert
+cc_cmyk -1 setcustomcolor
+/currentcolor [0.0 0.0 0.0 0.0] assert
+
+%% A null tint, which older Adobe procsets pass, leaves the colour as it was.
+.5 .5 .5 setrgbcolor
+cc_cmyk null /setcustomcolor [] assert
+/currentcolorspace [[/DeviceRGB]] assert
+/currentcolor [0.5 0.5 0.5] assert
+
+%% Error conditions: the operands stay on the stack.
+/setcustomcolor [/stackunderflow] assert
+0.5 /setcustomcolor [0.5 /stackunderflow] assert
+cc_cmyk (x) /setcustomcolor [cc_cmyk (x) /typecheck] assert
+(str) 0.5 /setcustomcolor [(str) 0.5 /typecheck] assert
+/cc_short [.2 .4 (Short)] def
+cc_short 0.5 /setcustomcolor [cc_short 0.5 /rangecheck] assert
+/cc_bad [.2 (x) .6 0 (Bad)] def
+cc_bad 0.5 /setcustomcolor [cc_bad 0.5 /typecheck] assert
+/cc_noread [.2 .4 .6 0 (NoRead)] noaccess def
+%% Checked by hand: assert compares the stack with eq, which refuses a no-access array.
+/cc_noread_result {
+    { cc_noread 0.5 setcustomcolor } stopped        % array 0.5 true
+    $error /newerror false put
+    $error /errorname get                            % array 0.5 true /invalidaccess
+    4 -1 roll type                                   % 0.5 true /invalidaccess /arraytype
+} def
+/cc_noread_result [0.5 true /invalidaccess /arraytype] assert
+[/cc_cmyk /cc_short /cc_bad /cc_noread /cc_noread_result] { userdict exch undef } forall
+
 % Test completed - use the standard unittest framework summary

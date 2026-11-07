@@ -21,6 +21,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   all three licences. The READMEs, which stated the OFL licensing without
   its basis, now point to it. The fonts are unchanged.
 
+### Fixed
+
+- **Spot colours set with `setcustomcolor` are painted in their colour.**
+  It did nothing, so the shape took whatever colour was set before it,
+  usually black or white. Worse, Adobe's procsets define a working
+  `setcustomcolor` only when none exists, so stet's empty one also
+  displaced theirs: Illustrator EPS files lost every spot colour (a
+  PANTONE 185 C logo came out black). A CMYK custom colour now paints its
+  components scaled by the tint and an RGB one moves from white towards
+  its colour, as Adobe TN 5044 describes. The colour's name is not kept,
+  so the spot is painted as process colour. A tint outside 0 to 1 is
+  clamped and a `null` tint, which older Adobe procsets pass, does
+  nothing. Contributed by @nielsbosma (#19).
+
 ## [0.9.0] — 2026-10-28
 
 ### Breaking
