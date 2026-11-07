@@ -83,7 +83,9 @@ fn objects_equal(ctx: &Context, a: &PsObject, b: &PsObject) -> bool {
             },
         ) => ea == eb && sa == sb && la == lb,
 
-        // PackedArray — value comparison (compare contents element-by-element)
+        // PackedArray — same entity, start, len (identity comparison, as for
+        // Array: PLRM `eq` makes composites other than strings equal only when
+        // they share the same value)
         (
             PsValue::PackedArray {
                 entity: ea,
@@ -95,20 +97,7 @@ fn objects_equal(ctx: &Context, a: &PsObject, b: &PsObject) -> bool {
                 start: sb,
                 len: lb,
             },
-        ) => {
-            if la != lb {
-                return false;
-            }
-            if ea == eb && sa == sb {
-                return true;
-            }
-            let slice_a = ctx.arrays.get(*ea, *sa, *la);
-            let slice_b = ctx.arrays.get(*eb, *sb, *lb);
-            slice_a
-                .iter()
-                .zip(slice_b.iter())
-                .all(|(x, y)| objects_equal(ctx, x, y))
-        }
+        ) => ea == eb && sa == sb && la == lb,
 
         _ => false,
     }
@@ -154,20 +143,34 @@ fn objects_compare(
     }
 }
 
+/// Check the access `eq` and `ne` need: read access on every string operand.
+///
+/// Strings are the only objects compared by their contents, so they are the
+/// only ones that must be readable — whatever the other operand is, as
+/// Ghostscript does. Arrays, packed arrays, procedures and dictionaries are
+/// compared by identity, which reads nothing, so their access is not checked:
+/// `{…} executeonly dup eq` is `true`. That is the PLRM's "access attributes
+/// are not considered in comparisons".
+fn require_eq_access(a: &PsObject, b: &PsObject) -> Result<(), PsError> {
+    for obj in [a, b] {
+        if matches!(obj.value, PsValue::String { .. }) {
+            obj.flags.require_read()?;
+        }
+    }
+    Ok(())
+}
+
 /// `eq`: any1 any2 → bool
 ///
-/// Both operands require read access (comparing composite objects
-/// requires reading their contents). The PLRM note that "access
-/// attributes are not considered in comparisons" means access level
-/// does not affect equality — not that access checks are bypassed.
+/// A string operand needs read access, whatever it is compared with; no
+/// other operand does, since only strings are compared by their contents.
 pub fn op_eq(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.len() < 2 {
         return Err(PsError::StackUnderflow);
     }
     let b = ctx.o_stack.peek(0)?;
     let a = ctx.o_stack.peek(1)?;
-    a.flags.require_read()?;
-    b.flags.require_read()?;
+    require_eq_access(&a, &b)?;
     let result = objects_equal(ctx, &a, &b);
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
@@ -176,14 +179,16 @@ pub fn op_eq(ctx: &mut Context) -> Result<(), PsError> {
 }
 
 /// `ne`: any1 any2 → bool
+///
+/// A string operand needs read access, whatever it is compared with; no
+/// other operand does, since only strings are compared by their contents.
 pub fn op_ne(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.len() < 2 {
         return Err(PsError::StackUnderflow);
     }
     let b = ctx.o_stack.peek(0)?;
     let a = ctx.o_stack.peek(1)?;
-    a.flags.require_read()?;
-    b.flags.require_read()?;
+    require_eq_access(&a, &b)?;
     let result = !objects_equal(ctx, &a, &b);
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
@@ -379,6 +384,101 @@ mod tests {
             ctx.o_stack.pop().unwrap().value,
             PsValue::Bool(true)
         ));
+    }
+
+    /// An array holding `items`, with the given access.
+    fn array_with_access(ctx: &mut Context, items: &[PsObject], access: u8) -> PsObject {
+        let entity = crate::vm_ops::alloc_array_from(ctx, items);
+        let mut obj = crate::vm_ops::make_array_obj(ctx, entity, items.len() as u32);
+        obj.flags.set_access(access);
+        obj
+    }
+
+    /// A packed array holding `items`.
+    fn packed_array(ctx: &mut Context, items: &[PsObject]) -> PsObject {
+        let entity = crate::vm_ops::alloc_array_from(ctx, items);
+        let mut obj = crate::vm_ops::make_array_obj(ctx, entity, items.len() as u32);
+        obj.value = PsValue::PackedArray {
+            entity,
+            start: 0,
+            len: items.len() as u32,
+        };
+        obj
+    }
+
+    /// A string holding `bytes`, with the given access.
+    fn string_with_access(ctx: &mut Context, bytes: &[u8], access: u8) -> PsObject {
+        let entity = crate::vm_ops::alloc_string(ctx, bytes);
+        let mut obj = crate::vm_ops::make_string_obj(ctx, entity, bytes.len() as u32);
+        obj.flags.set_access(access);
+        obj
+    }
+
+    fn pop_bool(ctx: &mut Context) -> bool {
+        match ctx.o_stack.pop().unwrap().value {
+            PsValue::Bool(b) => b,
+            other => panic!("expected a boolean, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_eq_compares_unreadable_arrays_by_identity() {
+        use stet_core::object::ObjFlags;
+        let mut ctx = test_ctx();
+        for access in [ObjFlags::ACCESS_NONE, ObjFlags::ACCESS_EXECUTE_ONLY] {
+            let arr = array_with_access(&mut ctx, &[PsObject::int(1)], access);
+            ctx.o_stack.push(arr).unwrap();
+            ctx.o_stack.push(arr).unwrap();
+            op_eq(&mut ctx).unwrap();
+            assert!(pop_bool(&mut ctx));
+
+            let other = array_with_access(&mut ctx, &[PsObject::int(1)], access);
+            ctx.o_stack.push(arr).unwrap();
+            ctx.o_stack.push(other).unwrap();
+            op_ne(&mut ctx).unwrap();
+            assert!(pop_bool(&mut ctx));
+        }
+    }
+
+    #[test]
+    fn test_eq_unreadable_string_is_invalidaccess() {
+        use stet_core::object::ObjFlags;
+        let mut ctx = test_ctx();
+        let hidden = string_with_access(&mut ctx, b"abc", ObjFlags::ACCESS_NONE);
+        let plain = string_with_access(&mut ctx, b"abc", ObjFlags::ACCESS_UNLIMITED);
+        // Whatever the other operand is, and in either position.
+        for (a, b) in [
+            (hidden, plain),
+            (plain, hidden),
+            (hidden, PsObject::int(5)),
+            (PsObject::int(5), hidden),
+        ] {
+            for op in [op_eq as fn(&mut Context) -> Result<(), PsError>, op_ne] {
+                ctx.o_stack.push(a).unwrap();
+                ctx.o_stack.push(b).unwrap();
+                assert!(matches!(op(&mut ctx), Err(PsError::InvalidAccess)));
+                // Operands are left in place.
+                assert_eq!(ctx.o_stack.len(), 2);
+                ctx.o_stack.pop().unwrap();
+                ctx.o_stack.pop().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn test_eq_compares_packed_arrays_by_identity() {
+        let mut ctx = test_ctx();
+        let items = [PsObject::int(1), PsObject::int(2)];
+        let a = packed_array(&mut ctx, &items);
+        let b = packed_array(&mut ctx, &items);
+        ctx.o_stack.push(a).unwrap();
+        ctx.o_stack.push(b).unwrap();
+        op_eq(&mut ctx).unwrap();
+        assert!(!pop_bool(&mut ctx), "distinct packed arrays are unequal");
+        ctx.o_stack.push(a).unwrap();
+        ctx.o_stack.push(a).unwrap();
+        op_eq(&mut ctx).unwrap();
+        assert!(pop_bool(&mut ctx), "a packed array equals itself");
     }
 
     #[test]

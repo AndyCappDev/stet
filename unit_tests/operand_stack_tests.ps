@@ -80,7 +80,12 @@ userdict /$unittest known not {(unit_tests/unittest.ps) run} if
     (a) (b) 3 /copy [(a) (b) 3 /stackoverflow] assert
     (a) (b) -3 /copy [(a) (b) -3 /rangecheck] assert
     (abc) [123] /copy [(abc) [123] /typecheck] assert
-    [1 2] 1 2 2 packedarray /copy [[1 2] 1 2 2 packedarray /typecheck] assert
-    1 2 2 packedarray 1 2 2 packedarray /copy [1 2 2 packedarray 1 2 2 packedarray /typecheck] assert
+    % eq compares packed arrays by identity (PLRM), so the operands expected back are the
+    % same packed arrays, not equal ones built again.
+    /os_pk1 1 2 2 packedarray def
+    /os_pk2 1 2 2 packedarray def
+    [1 2] os_pk1 /copy [[1 2] os_pk1 /typecheck] assert
+    os_pk1 os_pk2 /copy [os_pk1 os_pk2 /typecheck] assert
+    [/os_pk1 /os_pk2] { userdict exch undef } forall
     [1 2 3 4] [1 2 3] /copy [[1 2 3 4] [1 2 3] /rangecheck] assert
     false setglobal [(a) (b)] true setglobal [1 2] false setglobal /copy [[(a) (b)] [1 2] /invalidaccess] assert

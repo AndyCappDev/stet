@@ -30,6 +30,26 @@ false false /and [false] assert
     % eq errors
     /eq [/stackunderflow] assert
     1 /eq [1 /stackunderflow] assert
+%% Access: only a string is compared by its contents, so only a string must be readable.
+%% Arrays, procedures and dictionaries are compared by identity whatever their access.
+[1 2 3] noaccess dup /eq [true] assert
+[1 2 3] noaccess [1 2 3] /eq [false] assert
+{1 2} executeonly dup /eq [true] assert
+<< /key1 1 >> noaccess dup /eq [true] assert
+%% A packed array is compared by identity too.
+1 2 2 packedarray 1 2 2 packedarray /eq [false] assert
+1 2 2 packedarray dup /eq [true] assert
+    % An unreadable string is an invalidaccess, whatever it is compared with. Checked by
+    % hand: assert compares the stack it leaves with eq, which would refuse the string too.
+    /rel_noread (abc) noaccess def
+    /rel_eq_noread {
+        { exec } stopped $error /newerror false put $error /errorname get  % a b true /name
+        4 -2 roll pop pop                                                  % true /name
+    } def
+    { rel_noread (abc) eq } /rel_eq_noread [true /invalidaccess] assert
+    { (abc) rel_noread eq } /rel_eq_noread [true /invalidaccess] assert
+    { rel_noread 5 eq } /rel_eq_noread [true /invalidaccess] assert
+    { rel_noread /abc eq } /rel_eq_noread [true /invalidaccess] assert
 
 
 %% ne %%
@@ -45,6 +65,12 @@ false false /and [false] assert
     % ne errors
     /ne [/stackunderflow] assert
     1 /ne [1 /stackunderflow] assert
+[1 2 3] noaccess dup /ne [false] assert
+{1 2} executeonly {1 2} executeonly /ne [true] assert
+1 2 2 packedarray 1 2 2 packedarray /ne [true] assert
+    { rel_noread (abc) ne } /rel_eq_noread [true /invalidaccess] assert
+    { 5 rel_noread ne } /rel_eq_noread [true /invalidaccess] assert
+    [/rel_noread /rel_eq_noread] { userdict exch undef } forall
 
 
 %% ge %%

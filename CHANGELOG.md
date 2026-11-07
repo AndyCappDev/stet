@@ -34,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so the spot is painted as process colour. A tint outside 0 to 1 is
   clamped and a `null` tint, which older Adobe procsets pass, does
   nothing. Contributed by @nielsbosma (#19).
+- **`eq` and `ne` compare arrays, procedures and packed arrays by
+  identity, whatever their access.** Comparing an `executeonly` procedure
+  or a `noaccess` array raised `invalidaccess`, though only a string, whose
+  contents are compared, needs to be readable, as in Ghostscript. Two
+  separate packed arrays with the same contents compared equal; the PLRM
+  makes them unequal, as arrays are.
 
 ## [0.9.0] — 2026-10-28
 
