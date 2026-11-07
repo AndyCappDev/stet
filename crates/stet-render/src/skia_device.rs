@@ -3720,7 +3720,7 @@ fn register_shading_icc_profiles(list: &DisplayList, cache: &mut IccCache) {
 /// An image's samples as premultiplied RGBA: [`samples_to_rgba`], then the
 /// transfer function the paint applies (see [`paint_transfer`]) on each
 /// pixel's colour, then the colour key's pixels cleared.
-fn image_to_rgba(
+pub fn image_to_rgba(
     sample_data: &[u8],
     params: &ImageParams,
     icc: Option<&IccCache>,
@@ -15422,6 +15422,42 @@ pub fn render_region(
     image_cache: Option<&ImageCache>,
     no_aa: bool,
 ) -> Vec<u8> {
+    render_region_inner(list, vp_x, vp_y, vp_w, vp_h, pixel_w, pixel_h, dpi, icc, image_cache, no_aa, true)
+}
+
+/// Like [`render_region`], but leaves the unpainted area transparent: premultiplied RGBA, for a
+/// consumer that places the region over other content (a vector writer's raster island).
+#[allow(clippy::too_many_arguments)]
+pub fn render_region_transparent(
+    list: &DisplayList,
+    vp_x: f64,
+    vp_y: f64,
+    vp_w: f64,
+    vp_h: f64,
+    pixel_w: u32,
+    pixel_h: u32,
+    dpi: f64,
+    icc: Option<&IccCache>,
+    no_aa: bool,
+) -> Vec<u8> {
+    render_region_inner(list, vp_x, vp_y, vp_w, vp_h, pixel_w, pixel_h, dpi, icc, None, no_aa, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_region_inner(
+    list: &DisplayList,
+    vp_x: f64,
+    vp_y: f64,
+    vp_w: f64,
+    vp_h: f64,
+    pixel_w: u32,
+    pixel_h: u32,
+    dpi: f64,
+    icc: Option<&IccCache>,
+    image_cache: Option<&ImageCache>,
+    no_aa: bool,
+    onto_white: bool,
+) -> Vec<u8> {
     if pixel_w == 0 || pixel_h == 0 || vp_w <= 0.0 || vp_h <= 0.0 {
         return vec![0xFF; pixel_w as usize * pixel_h as usize * 4];
     }
@@ -15543,7 +15579,9 @@ pub fn render_region(
         }
     }
 
-    composite_onto_white(pixmap.data_mut());
+    if onto_white {
+        composite_onto_white(pixmap.data_mut());
+    }
     // Extract only the requested pixel_h rows (skip OVERLAP padding).
     let row_bytes = pixel_w as usize * 4;
     let end = pixel_h as usize * row_bytes;
