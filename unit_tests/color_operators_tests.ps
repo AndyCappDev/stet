@@ -317,10 +317,10 @@ not { (HSB values out of range) print } if
 currentcolorspace length 4 eq
 not { (Indexed currentcolorspace length != 4) print } if
 
-%% After setcolorspace, initial color should be index 0 resolved via palette
-%% Index 0 = <FF0000> = RGB(1.0, 0.0, 0.0) (red)
+%% After setcolorspace, the initial colour is index 0. currentcolor returns the index, the
+%% one component of an Indexed space, not the colour it looks up.
 [/Indexed /DeviceRGB 2 <FF0000 00FF00 0000FF>] setcolorspace
-currentcolor 3 array astore /length [3] assert  % Should have 3 components (resolved RGB)
+/currentcolor [0] assert
 
 %% setcolor with Indexed - set specific indices
 [/Indexed /DeviceRGB 2 <FF0000 00FF00 0000FF>] setcolorspace
@@ -843,5 +843,82 @@ cc_bad 0.5 /setcustomcolor [cc_bad 0.5 /typecheck] assert
 } def
 /cc_noread_result [0.5 true /invalidaccess /arraytype] assert
 [/cc_cmyk /cc_short /cc_bad /cc_noread /cc_noread_result] { userdict exch undef } forall
+
+%% =============================================================================
+%% currentcolor / currentcolorspace report what setcolor and setcolorspace took
+%% =============================================================================
+
+%% currentcolorspace hands back the array setcolorspace was given, itself, and keeps it
+%% through setcolor and gsave/grestore. A colour operator replaces it.
+/cc_sep [/Separation (Spot) /DeviceCMYK {dup 0 mul exch dup .91 mul exch dup .76 mul exch 0 mul}] def
+/cc_same { currentcolorspace cc_sep eq } def
+cc_sep setcolorspace
+/cc_same [true] assert
+0.5 setcolor
+/cc_same [true] assert
+gsave 0.2 setcolor grestore
+/cc_same [true] assert
+0.5 setgray
+/currentcolorspace [[/DeviceGray]] assert
+/cc_gray [/DeviceGray] def
+cc_gray setcolorspace 0.3 setcolor
+/cc_same_gray { currentcolorspace cc_gray eq } def
+/cc_same_gray [true] assert
+/DeviceRGB setcolorspace
+/currentcolorspace [[/DeviceRGB]] assert
+
+%% Separation and DeviceN: the tints, not the alternate-space colour; 1.0 before setcolor.
+cc_sep setcolorspace
+/currentcolor [1.0] assert
+0.5 setcolor
+/currentcolor [0.5] assert
+2 setcolor
+/currentcolor [1.0] assert
+[/DeviceN [/Cyan /Spot] /DeviceCMYK {0 0 4 2 roll}] setcolorspace
+/currentcolor [1.0 1.0] assert
+0.2 0.7 setcolor
+/currentcolor [0.2 0.7] assert
+%% A setcolor that fails leaves the colour that was current.
+cc_sep setcolorspace 0.4 setcolor
+(x) /setcolor [(x) /typecheck] assert
+/currentcolor [0.4] assert
+
+%% Indexed: the index, rounded and clipped to 0..hival, as an integer.
+[/Indexed /DeviceRGB 2 <ff000000ff000000ff>] setcolorspace
+/currentcolor [0] assert
+0.7 setcolor
+/currentcolor [1] assert
+9 setcolor
+/currentcolor [2] assert
+/cc_index_type { mark currentcolor type exch pop } def
+/cc_index_type [/integertype] assert
+
+%% CIE-based: the inputs clipped to the space's range; each starts at 0 clipped to it.
+[/CIEBasedABC << /WhitePoint [0.9505 1 1.089] /RangeABC [0.2 0.8 -1 1 0 1] >>] setcolorspace
+/currentcolor [0.2 0.0 0.0] assert
+5 -5 0.5 setcolor
+/currentcolor [0.8 -1.0 0.5] assert
+[/CIEBasedA << /WhitePoint [0.9505 1 1.089] /RangeA [0.25 2] >>] setcolorspace
+/currentcolor [0.25] assert
+3 setcolor
+/currentcolor [2.0] assert
+
+%% ICCBased without a profile stays ICCBased through setcolor.
+[/ICCBased << /N 3 >>] setcolorspace 0.2 0.3 0.4 setcolor
+/currentcolor [0.2 0.3 0.4] assert
+/cc_family { currentcolorspace 0 get } def
+/cc_family [/ICCBased] assert
+
+%% A Pattern space set by setpattern describes the space it was built on.
+/cc_family_base { currentcolorspace 1 get 0 get } def
+cc_sep setcolorspace
+<< /PatternType 1 /PaintType 2 /TilingType 1 /BBox [0 0 1 1] /XStep 1 /YStep 1
+   /PaintProc { pop } >> matrix makepattern 0.3 exch setpattern
+/cc_family [/Pattern] assert
+/cc_family_base [/Separation] assert
+
+[/cc_sep /cc_same /cc_gray /cc_same_gray /cc_index_type /cc_family /cc_family_base]
+{ userdict exch undef } forall
+0 setgray
 
 % Test completed - use the standard unittest framework summary

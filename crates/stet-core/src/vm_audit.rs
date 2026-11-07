@@ -369,6 +369,7 @@ fn check_gstate(
     one(&gs.black_generation, "black_generation", out);
     one(&gs.undercolor_removal, "undercolor_removal", out);
     one(&gs.color_rendering, "color_rendering", out);
+    one(&gs.color_space_object, "color_space_object", out);
 
     if let Some(pd) = gs.page_device {
         check_ref(

@@ -34,6 +34,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so the spot is painted as process colour. A tint outside 0 to 1 is
   clamped and a `null` tint, which older Adobe procsets pass, does
   nothing. Contributed by @nielsbosma (#19).
+- **A Separation or DeviceN colour space paints at full tint until
+  `setcolor` says otherwise.** The PLRM makes 1.0 the initial value of
+  every tint, so a fill straight after `setcolorspace` is the spot colour at
+  full strength; stet painted it black.
+- **`currentcolor` returns the colour as `setcolor` was given it, in the
+  current colour space.** In a Separation or DeviceN space it returned the
+  alternate-space colour the tints were converted to, in an Indexed space
+  the looked-up colour rather than the index, and in a CIE-based space the
+  converted colour rather than its inputs. It now returns the tints, the
+  index as an integer, and the CIE inputs clipped to the space's range, as
+  Ghostscript does, so a program that saves the colour with `currentcolor`
+  and puts it back with `setcolor` gets the same colour.
+- **`currentcolorspace` returns the array `setcolorspace` was given.** For
+  a Separation or DeviceN space it returned just `[/Separation]` or
+  `[/DeviceN]`, losing the colorant, alternate space and tint transform, so
+  the result could not be passed back to `setcolorspace`. A space nested in
+  an Indexed one came back as its family name alone. `setcolor` in an
+  ICCBased space without a profile also changed the space to DeviceGray or
+  DeviceRGB; it stays ICCBased.
 - **`eq` and `ne` compare arrays, procedures and packed arrays by
   identity, whatever their access.** Comparing an `executeonly` procedure
   or a `noaccess` array raised `invalidaccess`, though only a string, whose

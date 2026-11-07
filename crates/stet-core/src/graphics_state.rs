@@ -484,6 +484,21 @@ pub struct GraphicsState {
     /// Set when setcolorspace installs a Separation/DeviceN space.
     pub cached_tint_table: Option<Arc<crate::device::TintLookupTable>>,
 
+    /// The operand `setcolorspace` was given — the array, or the name of a
+    /// device space — which `currentcolorspace` hands back, as Ghostscript
+    /// does. A program can compare it with `eq` to skip setting a space that
+    /// is already current, and handing back the same array saves building a
+    /// new one in VM on each call. `None` when a colour operator such as
+    /// `setgray` set the space, which is then described from `color_space`.
+    pub color_space_object: Option<crate::object::PsObject>,
+
+    /// The current colour as `setcolor` took it, in the current colour space:
+    /// after clamping to the space's range, and for an Indexed space the
+    /// rounded index. `currentcolor` returns these. `None` in a device space,
+    /// an ICCBased one without a profile, and a Pattern space, where `color`
+    /// (or `pattern_components`) already holds the components exactly.
+    pub color_components: Option<Arc<[f64]>>,
+
     /// Constant fill opacity (PDF `ca`). Range \[0,1\]. Default 1.0.
     pub fill_opacity: f64,
     /// Constant stroke opacity (PDF `CA`). Range \[0,1\]. Default 1.0.
@@ -549,6 +564,8 @@ impl GraphicsState {
             tint_values: None,
             icc_components: None,
             cached_tint_table: None,
+            color_space_object: None,
+            color_components: None,
             fill_opacity: 1.0,
             stroke_opacity: 1.0,
             blend_mode: 0,
@@ -598,6 +615,8 @@ impl GraphicsState {
             tint_values,
             icc_components,
             cached_tint_table,
+            color_space_object,
+            color_components,
             fill_opacity,
             stroke_opacity,
             blend_mode,
@@ -658,6 +677,8 @@ impl GraphicsState {
         self.tint_values = tint_values;
         self.icc_components = icc_components;
         self.cached_tint_table = cached_tint_table;
+        self.color_space_object = color_space_object;
+        self.color_components = color_components;
         self.fill_opacity = fill_opacity;
         self.stroke_opacity = stroke_opacity;
         self.blend_mode = blend_mode;

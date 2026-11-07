@@ -64,8 +64,9 @@ test_pat 123 /makepattern [test_pat 123 /typecheck] assert
 { /Pattern setcolorspace currentcolorspace length } [1] assert
 { [/Pattern] setcolorspace currentcolorspace 0 get } [/Pattern] assert
 
-%% [/Pattern base] keeps its base space %%
-{ [/Pattern /DeviceRGB] setcolorspace currentcolorspace 1 get 0 get } [/DeviceRGB] assert
+%% [/Pattern base] keeps its base space: currentcolorspace hands back the array %%
+%% setcolorspace was given, so the base is the name the program wrote %%
+{ [/Pattern /DeviceRGB] setcolorspace currentcolorspace 1 get } [/DeviceRGB] assert
 
 %% a Pattern space may not be based on another Pattern space %%
 [/Pattern [/Pattern]] /setcolorspace [[/Pattern [/Pattern]] /rangecheck] assert
@@ -75,7 +76,7 @@ test_pat 123 /makepattern [test_pat 123 /typecheck] assert
 
 %% setcolor installs the pattern and leaves the color space alone %%
 { [/Pattern /DeviceCMYK] setcolorspace 0 0 0 1 mkuncolored setcolor
-  currentcolorspace 1 get 0 get } [/DeviceCMYK] assert
+  currentcolorspace 1 get } [/DeviceCMYK] assert
 { [/Pattern /DeviceCMYK] setcolorspace 0 0 0 1 mkuncolored setcolor
   currentcolor type } [0.0 0.0 0.0 1.0 /dicttype] assert
 

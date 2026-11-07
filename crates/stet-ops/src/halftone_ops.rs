@@ -1062,12 +1062,16 @@ pub fn op_makepattern(ctx: &mut Context) -> Result<(), PsError> {
 /// side effect, so `currentcolorspace` afterwards reports `[/Pattern base]`.
 /// A Pattern space that is already current keeps its own base.
 pub fn op_setpattern(ctx: &mut Context) -> Result<(), PsError> {
-    let base = match ctx.gstate.color_space.clone() {
-        ColorSpace::Pattern { base } => base,
-        other => Some(Box::new(other)),
+    let (base, new_space) = match ctx.gstate.color_space.clone() {
+        ColorSpace::Pattern { base } => (base, false),
+        other => (Some(Box::new(other)), true),
     };
     install_pattern_color(ctx, base.as_deref())?;
     ctx.gstate.color_space = ColorSpace::Pattern { base };
+    // The array `setcolorspace` kept named the space just replaced.
+    if new_space {
+        ctx.gstate.color_space_object = None;
+    }
     Ok(())
 }
 
@@ -1144,6 +1148,9 @@ pub fn install_pattern_color(ctx: &mut Context, base: Option<&ColorSpace>) -> Re
     ctx.gstate.current_pattern = Some(pattern_id);
     ctx.gstate.current_pattern_dict = Some(dict_entity);
     ctx.gstate.pattern_components = comps;
+    // `currentcolor` reports a pattern colour from `pattern_components`, and
+    // the base-space `setcolor` above may have left components of its own.
+    ctx.gstate.color_components = None;
     Ok(())
 }
 
