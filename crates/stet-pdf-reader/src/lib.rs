@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 // stet-pdf-reader
 // Copyright (c) 2026 Scott Bowman
 // SPDX-License-Identifier: Apache-2.0 OR MIT

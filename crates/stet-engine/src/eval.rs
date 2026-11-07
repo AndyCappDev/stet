@@ -249,16 +249,28 @@ fn eval_one(ctx: &mut Context, obj: PsObject) -> Result<(), PsError> {
         }
 
         // Executable strings → tokenize one token, advance start/len in place.
-        // SAFETY: String store data is not modified or reallocated during
-        // tokenization — we use a raw pointer to break the borrow conflict
-        // with &mut Context needed by scan_token_from_bytes.
+        //
+        // Scanning a token allocates in the string store (a string literal, a
+        // procedure's strings), and that can move the store's bytes, so the
+        // scanner reads a copy. Only a window is copied, so a long executable
+        // string is not copied once per token: the window grows when the token
+        // may run past it (it reaches the window's end, or does not end in it).
         PsValue::String { entity, start, len } => {
-            let bytes = ctx.strings.get(entity, start, len);
-            let (ptr, byte_len) = (bytes.as_ptr(), bytes.len());
-            let bytes = unsafe { std::slice::from_raw_parts(ptr, byte_len) };
-            if let Some((tok_obj, consumed, is_immediate, auto_exec)) =
-                scan_token_from_bytes(ctx, bytes)?
-            {
+            const FIRST_WINDOW: usize = 256;
+            let total = len as usize;
+            let mut window = total.min(FIRST_WINDOW);
+            let (scanned, bytes) = loop {
+                let bytes = ctx.strings.get(entity, start, window as u32).to_vec();
+                let whole = window == total;
+                match scan_token_from_bytes(ctx, &bytes) {
+                    Ok(Some(t)) if whole || t.1 < bytes.len() => break (Some(t), bytes),
+                    Ok(None) if whole => break (None, bytes),
+                    Err(e) if whole => return Err(e),
+                    _ => window = window.saturating_mul(8).min(total),
+                }
+            };
+            let bytes = &bytes[..];
+            if let Some((tok_obj, consumed, is_immediate, auto_exec)) = scanned {
                 let newlines = count_newlines(&bytes[..consumed]);
                 ctx.current_source_line += newlines;
 
@@ -490,15 +502,13 @@ fn eval_one(ctx: &mut Context, obj: PsObject) -> Result<(), PsError> {
             // reports the line this token is on, not the previous one.
             ctx.files.flush_pending_newlines(file_entity);
 
-            // Fast path: StringSource files have all data in memory.
-            // We grab a raw pointer to avoid copying the remaining bytes on
-            // every token read (which was an O(n^2) bottleneck for large files).
-            // SAFETY: The StringSource data Vec is not modified or reallocated
-            // during tokenization — only `pos` is advanced afterward.
-            let remaining = ctx.files.get_remaining_bytes(file_entity);
-            let (ptr, len) = (remaining.as_ptr(), remaining.len());
-            if len > 0 {
-                let remaining = unsafe { std::slice::from_raw_parts(ptr, len) };
+            // Fast path: StringSource files have all data in memory, shared,
+            // so the scanner reads them without copying the remaining bytes on
+            // every token (which was an O(n^2) bottleneck for large files).
+            let shared = ctx.files.shared_remaining(file_entity);
+            let len = shared.as_ref().map_or(0, |(d, p)| d.len() - p);
+            if let Some((data, pos)) = shared.filter(|_| len > 0) {
+                let remaining = &data[pos..];
                 if let Some((tok_obj, consumed, is_immediate, auto_exec)) =
                     scan_token_from_bytes(ctx, remaining)?
                 {
