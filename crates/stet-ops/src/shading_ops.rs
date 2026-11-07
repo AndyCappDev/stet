@@ -1376,7 +1376,8 @@ fn evaluate_ps_function(
     for (i, &val) in inputs.iter().enumerate() {
         let d_min = domain.get(i * 2).copied().unwrap_or(0.0);
         let d_max = domain.get(i * 2 + 1).copied().unwrap_or(1.0);
-        clamped_inputs.push(val.clamp(d_min, d_max));
+        // The domain is the file's; see `clamp_to_range`.
+        clamped_inputs.push(stet_graphics::color::clamp_to_range(val, d_min, d_max));
     }
 
     let mut results = match func_type {
@@ -1392,7 +1393,7 @@ fn evaluate_ps_function(
         for (i, val) in results.iter_mut().enumerate() {
             let r_min = range.get(i * 2).copied().unwrap_or(0.0);
             let r_max = range.get(i * 2 + 1).copied().unwrap_or(1.0);
-            *val = val.clamp(r_min, r_max);
+            *val = stet_graphics::color::clamp_to_range(*val, r_min, r_max);
         }
     }
 

@@ -372,8 +372,8 @@ impl DeviceColor {
         const D65: [f64; 3] = [0.95047, 1.0, 1.08883];
 
         let l_star = l_star.clamp(0.0, 100.0);
-        let a_star = a_star.clamp(range[0], range[1]);
-        let b_star = b_star.clamp(range[2], range[3]);
+        let a_star = clamp_to_range(a_star, range[0], range[1]);
+        let b_star = clamp_to_range(b_star, range[2], range[3]);
 
         let fy = (l_star + 16.0) / 116.0;
         let fx = a_star / 500.0 + fy;
@@ -396,9 +396,9 @@ impl DeviceColor {
 
     /// Convert CIEBasedABC color to sRGB.
     pub fn from_cie_abc(a: f64, b: f64, c: f64, params: &CieAbcParams) -> Self {
-        let mut a = a.clamp(params.range_abc[0], params.range_abc[1]);
-        let mut b = b.clamp(params.range_abc[2], params.range_abc[3]);
-        let mut c = c.clamp(params.range_abc[4], params.range_abc[5]);
+        let mut a = clamp_to_range(a, params.range_abc[0], params.range_abc[1]);
+        let mut b = clamp_to_range(b, params.range_abc[2], params.range_abc[3]);
+        let mut c = clamp_to_range(c, params.range_abc[4], params.range_abc[5]);
 
         if let Some(ref tables) = params.decode_abc {
             let ra = params.range_abc[1] - params.range_abc[0];
@@ -426,9 +426,9 @@ impl DeviceColor {
 
         let lmn = Self::apply_matrix_3x3(&params.matrix_abc, &[a, b, c]);
 
-        let mut l = lmn[0].clamp(params.range_lmn[0], params.range_lmn[1]);
-        let mut m = lmn[1].clamp(params.range_lmn[2], params.range_lmn[3]);
-        let mut n = lmn[2].clamp(params.range_lmn[4], params.range_lmn[5]);
+        let mut l = clamp_to_range(lmn[0], params.range_lmn[0], params.range_lmn[1]);
+        let mut m = clamp_to_range(lmn[1], params.range_lmn[2], params.range_lmn[3]);
+        let mut n = clamp_to_range(lmn[2], params.range_lmn[4], params.range_lmn[5]);
 
         if let Some(ref tables) = params.decode_lmn {
             let rl = params.range_lmn[1] - params.range_lmn[0];
@@ -463,7 +463,7 @@ impl DeviceColor {
 
     /// Convert CIEBasedA color to sRGB.
     pub fn from_cie_a(a: f64, params: &CieAParams) -> Self {
-        let mut a = a.clamp(params.range_a[0], params.range_a[1]);
+        let mut a = clamp_to_range(a, params.range_a[0], params.range_a[1]);
 
         if let Some(ref table) = params.decode_a {
             let ra = params.range_a[1] - params.range_a[0];
@@ -481,9 +481,9 @@ impl DeviceColor {
             params.matrix_a[2] * a,
         ];
 
-        let mut l = lmn[0].clamp(params.range_lmn[0], params.range_lmn[1]);
-        let mut m = lmn[1].clamp(params.range_lmn[2], params.range_lmn[3]);
-        let mut n = lmn[2].clamp(params.range_lmn[4], params.range_lmn[5]);
+        let mut l = clamp_to_range(lmn[0], params.range_lmn[0], params.range_lmn[1]);
+        let mut m = clamp_to_range(lmn[1], params.range_lmn[2], params.range_lmn[3]);
+        let mut n = clamp_to_range(lmn[2], params.range_lmn[4], params.range_lmn[5]);
 
         if let Some(ref tables) = params.decode_lmn {
             let rl = params.range_lmn[1] - params.range_lmn[0];
@@ -635,6 +635,19 @@ impl DeviceColor {
     }
 }
 
+/// Clip `value` to the range from `a` to `b`, whichever way round they are.
+///
+/// For ranges a file supplies — a colour space's `/RangeABC` or `/Range`, a
+/// function's `/Domain` — which are not to be trusted to be in order.
+/// `f64::clamp` panics on a reversed or NaN pair, so `/RangeABC [1 0 0 1 0 1]`
+/// in a PostScript program, or a Lab `/Range [100 -100 -100 100]` in a PDF,
+/// took the process down. A reversed pair is taken as the range it spans; a
+/// NaN bound leaves the other bound to stand for both, and a NaN value gives
+/// the lower bound.
+pub fn clamp_to_range(value: f64, a: f64, b: f64) -> f64 {
+    value.max(a.min(b)).min(a.max(b))
+}
+
 impl Default for DeviceColor {
     fn default() -> Self {
         Self::black()
@@ -783,5 +796,14 @@ mod tests {
         assert_eq!(LineJoin::from_i32(1), Some(LineJoin::Round));
         assert_eq!(LineJoin::from_i32(2), Some(LineJoin::Bevel));
         assert_eq!(LineJoin::from_i32(3), None);
+    }
+
+    #[test]
+    fn clamp_to_range_takes_either_order_and_never_panics() {
+        assert_eq!(clamp_to_range(5.0, 0.0, 1.0), 1.0);
+        assert_eq!(clamp_to_range(5.0, 1.0, 0.0), 1.0);
+        assert_eq!(clamp_to_range(-5.0, 1.0, 0.0), 0.0);
+        assert_eq!(clamp_to_range(0.5, f64::NAN, 1.0), 1.0);
+        assert_eq!(clamp_to_range(f64::NAN, 0.0, 1.0), 0.0);
     }
 }

@@ -2021,14 +2021,13 @@ fn set_cie_defg_color(ctx: &mut Context, params: &Arc<CieDefgParams>) -> Result<
 /// space's RangeA / RangeABC / RangeDEF / RangeDEFG: what `currentcolor`
 /// reports for the colour `setcolor` was given.
 ///
-/// The ranges come from the program, so they are not trusted to be ordered:
-/// `max`/`min` rather than `f64::clamp`, which panics on a reversed or NaN
-/// pair.
+/// The ranges come from the program, so they are not trusted to be ordered;
+/// see [`clamp_to_range`](stet_graphics::color::clamp_to_range).
 fn clamp_to_ranges(values: &[f64], ranges: &[f64]) -> Arc<[f64]> {
     values
         .iter()
         .zip(ranges.as_chunks::<2>().0)
-        .map(|(v, [a, b])| v.max(a.min(*b)).min(a.max(*b)))
+        .map(|(&v, &[a, b])| stet_graphics::color::clamp_to_range(v, a, b))
         .collect()
 }
 

@@ -23,6 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A colour space or function with a reversed range no longer crashes
+  the process.** A PostScript CIE-based colour space whose `/RangeABC`,
+  `/RangeLMN` or `/RangeA` runs high to low, a shading function's reversed
+  `/Domain` or `/Range`, and a PDF Lab colour space's reversed `/Range`
+  each panicked when a colour was converted, taking down any program
+  embedding the interpreter or the PDF reader. A reversed range is now
+  taken as the span it covers, through a new
+  `stet_graphics::color::clamp_to_range`, which clips to a range given in
+  either order.
 - **Spot colours set with `setcustomcolor` are painted in their colour.**
   It did nothing, so the shape took whatever colour was set before it,
   usually black or white. Worse, Adobe's procsets define a working

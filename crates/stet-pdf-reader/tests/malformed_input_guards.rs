@@ -2199,3 +2199,19 @@ fn a_cross_reference_stream_index_past_the_last_object_number_is_ignored() {
         assert_eq!(doc.page_count(), 1, "first object {first}");
     }
 }
+
+/// A Lab colour space whose `/Range` is reversed. The a*/b* clamp took its
+/// bounds from the file with `f64::clamp`, which panics on a reversed pair,
+/// so one fill in this space took the process down. A fill and an image
+/// reach it by different paths: the reader converts the fill, the renderer
+/// the image's samples.
+#[test]
+fn a_reversed_lab_range_does_not_panic() {
+    let page = b"/Resources<</ColorSpace<</CS0[/Lab<</WhitePoint[0.9505 1 1.089]\
+                 /Range[100 -100 -100 100]>>]>>>>";
+    let contents = b"/CS0 cs 50 10 10 sc 0 0 50 50 re f\n\
+                     q 50 0 0 50 0 0 cm BI /W 1 /H 1 /CS /CS0 /BPC 8 ID \x80\x10\x10 EI Q";
+    let pdf = one_page_doc(page, contents, &[]);
+    let doc = PdfDocument::from_bytes(&pdf).unwrap();
+    let _ = doc.render_page(0, 72.0);
+}
