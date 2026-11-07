@@ -516,123 +516,133 @@ impl DeviceColor {
         Self::from_xyz(xyz[0], xyz[1], xyz[2])
     }
 
-    /// Convert CIEBasedDEF color to sRGB via pre-converted trilinear interpolation table.
+    /// Convert CIEBasedDEF color to sRGB: through `/DecodeDEF` and
+    /// `/RangeHIJ` to a position in the 3D table, interpolated trilinearly.
     pub fn from_cie_def(d: f64, e: f64, f: f64, params: &CieDefParams) -> Self {
-        let (m1, m2, m3) = (params.m1, params.m2, params.m3);
-        if m1 < 2 || m2 < 2 || m3 < 2 {
+        let dims = [params.m1, params.m2, params.m3];
+        if dims.iter().any(|&m| m < 2) {
             return Self::from_gray(0.0);
         }
-
-        let d_range = params.range_def[1] - params.range_def[0];
-        let e_range = params.range_def[3] - params.range_def[2];
-        let f_range = params.range_def[5] - params.range_def[4];
-
-        let di = if d_range > 0.0 {
-            ((d - params.range_def[0]) / d_range * (m1 - 1) as f64).clamp(0.0, (m1 - 1) as f64)
-        } else {
-            0.0
-        };
-        let ei = if e_range > 0.0 {
-            ((e - params.range_def[2]) / e_range * (m2 - 1) as f64).clamp(0.0, (m2 - 1) as f64)
-        } else {
-            0.0
-        };
-        let fi = if f_range > 0.0 {
-            ((f - params.range_def[4]) / f_range * (m3 - 1) as f64).clamp(0.0, (m3 - 1) as f64)
-        } else {
-            0.0
-        };
-
-        let di0 = (di as usize).min(m1 - 2);
-        let ei0 = (ei as usize).min(m2 - 2);
-        let fi0 = (fi as usize).min(m3 - 2);
-        let di1 = di0 + 1;
-        let ei1 = ei0 + 1;
-        let fi1 = fi0 + 1;
-        let dd = di - di0 as f64;
-        let de = ei - ei0 as f64;
-        let df = fi - fi0 as f64;
-
-        let stride_e = m3;
-        let stride_d = m2 * m3;
-
-        let mut abc = [0.0f64; 3];
-        for (ch, table) in [&params.a_table, &params.b_table, &params.c_table]
-            .iter()
-            .enumerate()
-        {
-            let c000 = table[di0 * stride_d + ei0 * stride_e + fi0];
-            let c001 = table[di0 * stride_d + ei0 * stride_e + fi1];
-            let c010 = table[di0 * stride_d + ei1 * stride_e + fi0];
-            let c011 = table[di0 * stride_d + ei1 * stride_e + fi1];
-            let c100 = table[di1 * stride_d + ei0 * stride_e + fi0];
-            let c101 = table[di1 * stride_d + ei0 * stride_e + fi1];
-            let c110 = table[di1 * stride_d + ei1 * stride_e + fi0];
-            let c111 = table[di1 * stride_d + ei1 * stride_e + fi1];
-
-            let c00 = c000 * (1.0 - df) + c001 * df;
-            let c01 = c010 * (1.0 - df) + c011 * df;
-            let c10 = c100 * (1.0 - df) + c101 * df;
-            let c11 = c110 * (1.0 - df) + c111 * df;
-
-            let c0 = c00 * (1.0 - de) + c01 * de;
-            let c1 = c10 * (1.0 - de) + c11 * de;
-
-            abc[ch] = c0 * (1.0 - dd) + c1 * dd;
+        let decode = params.decode_def.as_ref();
+        let mut coords = [0.0; 3];
+        for (i, v) in [d, e, f].into_iter().enumerate() {
+            coords[i] = table_coord(
+                v,
+                [params.range_def[2 * i], params.range_def[2 * i + 1]],
+                decode.map(|t| t[i].as_slice()),
+                [params.range_hij[2 * i], params.range_hij[2 * i + 1]],
+                dims[i],
+            );
         }
-
+        let tables = [&params.a_table, &params.b_table, &params.c_table];
+        let Some(abc) = interpolate_table(tables, &dims, &coords) else {
+            return Self::from_gray(0.0);
+        };
         Self::from_cie_abc(abc[0], abc[1], abc[2], &params.abc_params)
     }
 
-    /// Convert CIEBasedDEFG color to sRGB via pre-converted nearest-neighbor 4D table.
+    /// Convert CIEBasedDEFG color to sRGB: through `/DecodeDEFG` and
+    /// `/RangeHIJK` to a position in the 4D table, interpolated
+    /// quadrilinearly, as Ghostscript does.
     pub fn from_cie_defg(d: f64, e: f64, f: f64, g: f64, params: &CieDefgParams) -> Self {
-        let (m1, m2, m3, m4) = (params.m1, params.m2, params.m3, params.m4);
-        if m1 == 0 || m2 == 0 || m3 == 0 || m4 == 0 {
+        let dims = [params.m1, params.m2, params.m3, params.m4];
+        if dims.iter().any(|&m| m < 2) {
             return Self::from_gray(0.0);
         }
-
-        let d_range = params.range_defg[1] - params.range_defg[0];
-        let e_range = params.range_defg[3] - params.range_defg[2];
-        let f_range = params.range_defg[5] - params.range_defg[4];
-        let g_range = params.range_defg[7] - params.range_defg[6];
-
-        let di = if d_range > 0.0 {
-            ((d - params.range_defg[0]) / d_range * (m1 - 1) as f64 + 0.5) as usize
-        } else {
-            0
+        let decode = params.decode_defg.as_ref();
+        let mut coords = [0.0; 4];
+        for (i, v) in [d, e, f, g].into_iter().enumerate() {
+            coords[i] = table_coord(
+                v,
+                [params.range_defg[2 * i], params.range_defg[2 * i + 1]],
+                decode.map(|t| t[i].as_slice()),
+                [params.range_hijk[2 * i], params.range_hijk[2 * i + 1]],
+                dims[i],
+            );
         }
-        .min(m1 - 1);
-        let ei = if e_range > 0.0 {
-            ((e - params.range_defg[2]) / e_range * (m2 - 1) as f64 + 0.5) as usize
-        } else {
-            0
-        }
-        .min(m2 - 1);
-        let fi = if f_range > 0.0 {
-            ((f - params.range_defg[4]) / f_range * (m3 - 1) as f64 + 0.5) as usize
-        } else {
-            0
-        }
-        .min(m3 - 1);
-        let gi = if g_range > 0.0 {
-            ((g - params.range_defg[6]) / g_range * (m4 - 1) as f64 + 0.5) as usize
-        } else {
-            0
-        }
-        .min(m4 - 1);
-
-        let idx = di * m2 * m3 * m4 + ei * m3 * m4 + fi * m4 + gi;
-        if idx >= params.a_table.len() {
+        let tables = [&params.a_table, &params.b_table, &params.c_table];
+        let Some(abc) = interpolate_table(tables, &dims, &coords) else {
             return Self::from_gray(0.0);
-        }
-
-        Self::from_cie_abc(
-            params.a_table[idx],
-            params.b_table[idx],
-            params.c_table[idx],
-            &params.abc_params,
-        )
+        };
+        Self::from_cie_abc(abc[0], abc[1], abc[2], &params.abc_params)
     }
+}
+
+/// Where one component of a CIEBasedDEF or CIEBasedDEFG colour falls on its
+/// table axis of `m` points (PLRM): clipped to its input range `range_in`,
+/// through its decode table if it has one (sampled over `range_in`, as the
+/// ABC decode tables are), clipped to `range_out` — the `/RangeHIJ` or
+/// `/RangeHIJK` pair, which spans the axis — and scaled to `0..m-1`.
+fn table_coord(
+    v: f64,
+    range_in: [f64; 2],
+    decode: Option<&[f64]>,
+    range_out: [f64; 2],
+    m: usize,
+) -> f64 {
+    let v = clamp_to_range(v, range_in[0], range_in[1]);
+    let v = match decode {
+        Some(table) => {
+            let span = range_in[1] - range_in[0];
+            let t = if span != 0.0 {
+                (v - range_in[0]) / span
+            } else {
+                0.0
+            };
+            DeviceColor::decode_lookup(table, clamp_to_range(t, 0.0, 1.0))
+        }
+        None => v,
+    };
+    let v = clamp_to_range(v, range_out[0], range_out[1]);
+    let span = range_out[1] - range_out[0];
+    let t = if span != 0.0 {
+        (v - range_out[0]) / span
+    } else {
+        0.0
+    };
+    clamp_to_range(t * (m - 1) as f64, 0.0, (m - 1) as f64)
+}
+
+/// Interpolate the A, B and C tables of a CIEBasedDEF or CIEBasedDEFG space
+/// at `coords`, a position on each axis of `dims` points (the last axis
+/// varying fastest in the tables): the weighted sum of the 2ⁿ entries around
+/// it. `None` when a table is shorter than `dims` says, which the parser
+/// does not let happen.
+fn interpolate_table(tables: [&Vec<f64>; 3], dims: &[usize], coords: &[f64]) -> Option<[f64; 3]> {
+    let n = dims.len();
+    let total: usize = dims.iter().product();
+    if tables.iter().any(|t| t.len() < total) {
+        return None;
+    }
+    // The cell's lower corner and the position within it, per axis.
+    let mut base = [0usize; 4];
+    let mut frac = [0.0f64; 4];
+    let mut stride = [0usize; 4];
+    let mut s = 1;
+    for i in (0..n).rev() {
+        stride[i] = s;
+        s *= dims[i];
+        let lo = (coords[i] as usize).min(dims[i] - 2);
+        base[i] = lo;
+        frac[i] = coords[i] - lo as f64;
+    }
+    let mut abc = [0.0; 3];
+    for corner in 0..(1usize << n) {
+        let mut weight = 1.0;
+        let mut index = 0;
+        for i in 0..n {
+            let up = (corner >> i) & 1 == 1;
+            weight *= if up { frac[i] } else { 1.0 - frac[i] };
+            index += (base[i] + up as usize) * stride[i];
+        }
+        if weight == 0.0 {
+            continue;
+        }
+        for (ch, table) in tables.iter().enumerate() {
+            abc[ch] += table[index] * weight;
+        }
+    }
+    Some(abc)
 }
 
 /// Clip `value` to the range from `a` to `b`, whichever way round they are.
@@ -707,9 +717,17 @@ impl Default for CieAParams {
 }
 
 /// Pre-converted parameters for CIEBasedDEF color space (3D table → RGB).
+///
+/// A colour runs DEF → clipped to `range_def` → `decode_def` → HIJ, clipped
+/// to `range_hij` → the table, interpolated → ABC → [`CieAbcParams`].
 #[derive(Clone, Debug)]
 pub struct CieDefParams {
     pub range_def: [f64; 6],
+    /// `/RangeHIJ`: the span of each table axis, `[0 1]` for each by default.
+    pub range_hij: [f64; 6],
+    /// `/DecodeDEF`, each procedure sampled over its `range_def` pair, as
+    /// [`CieAbcParams::decode_abc`] is. `None` for the identity.
+    pub decode_def: Option<[Vec<f64>; 3]>,
     pub m1: usize,
     pub m2: usize,
     pub m3: usize,
@@ -721,8 +739,16 @@ pub struct CieDefParams {
 
 /// Parameters for CIEBasedDEFG color space (4D table → ABC → CIE pipeline).
 #[derive(Clone, Debug)]
+///
+/// A colour runs DEFG → clipped to `range_defg` → `decode_defg` → HIJK,
+/// clipped to `range_hijk` → the table, interpolated → ABC → [`CieAbcParams`].
 pub struct CieDefgParams {
     pub range_defg: [f64; 8],
+    /// `/RangeHIJK`: the span of each table axis, `[0 1]` for each by default.
+    pub range_hijk: [f64; 8],
+    /// `/DecodeDEFG`, each procedure sampled over its `range_defg` pair, as
+    /// [`CieAbcParams::decode_abc`] is. `None` for the identity.
+    pub decode_defg: Option<[Vec<f64>; 4]>,
     pub m1: usize,
     pub m2: usize,
     pub m3: usize,
@@ -805,5 +831,68 @@ mod tests {
         assert_eq!(clamp_to_range(-5.0, 1.0, 0.0), 0.0);
         assert_eq!(clamp_to_range(0.5, f64::NAN, 1.0), 1.0);
         assert_eq!(clamp_to_range(f64::NAN, 0.0, 1.0), 0.0);
+    }
+
+    /// A 2×2×2×2 DEFG table whose A, B and C are each taken from one axis
+    /// (D, E and F; G leaves them alone), so interpolation is visible in the
+    /// ABC values the table produces.
+    fn axis_table() -> CieDefgParams {
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        let mut c = Vec::new();
+        for d in 0..2 {
+            for e in 0..2 {
+                for f in 0..2 {
+                    for _g in 0..2 {
+                        a.push(d as f64);
+                        b.push(e as f64);
+                        c.push(f as f64);
+                    }
+                }
+            }
+        }
+        CieDefgParams {
+            range_defg: [0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+            range_hijk: [0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+            decode_defg: None,
+            m1: 2,
+            m2: 2,
+            m3: 2,
+            m4: 2,
+            a_table: a,
+            b_table: b,
+            c_table: c,
+            abc_params: CieAbcParams::default(),
+        }
+    }
+
+    /// The colour the ABC stage gives `abc`, to compare a table's output with.
+    fn via_abc(abc: [f64; 3], params: &CieDefgParams) -> DeviceColor {
+        DeviceColor::from_cie_abc(abc[0], abc[1], abc[2], &params.abc_params)
+    }
+
+    fn same_color(x: &DeviceColor, y: &DeviceColor) -> bool {
+        (x.r - y.r).abs() < 1e-9 && (x.g - y.g).abs() < 1e-9 && (x.b - y.b).abs() < 1e-9
+    }
+
+    #[test]
+    fn defg_table_is_interpolated_between_entries() {
+        let p = axis_table();
+        // Halfway along D and a quarter along E: A 0.5, B 0.25. The nearest
+        // entry, which stet used to take, would give 1 and 0.
+        let got = DeviceColor::from_cie_defg(0.5, 0.25, 0.0, 0.7, &p);
+        assert!(same_color(&got, &via_abc([0.5, 0.25, 0.0], &p)));
+    }
+
+    #[test]
+    fn defg_decode_and_range_hijk_place_the_colour_on_the_table() {
+        let mut p = axis_table();
+        // DecodeDEFG inverts D, and RangeHIJK makes E's axis span 0..2.
+        let invert: Vec<f64> = (0..256).map(|i| 1.0 - i as f64 / 255.0).collect();
+        let identity: Vec<f64> = (0..256).map(|i| i as f64 / 255.0).collect();
+        p.decode_defg = Some([invert, identity.clone(), identity.clone(), identity]);
+        p.range_hijk = [0.0, 1.0, 0.0, 2.0, 0.0, 1.0, 0.0, 1.0];
+        let got = DeviceColor::from_cie_defg(0.25, 1.0, 0.0, 0.0, &p);
+        assert!(same_color(&got, &via_abc([0.75, 0.5, 0.0], &p)));
     }
 }

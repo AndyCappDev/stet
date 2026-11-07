@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and Twardoch's archive, which offers the same files byte for byte under
   all three licences. The READMEs, which stated the OFL licensing without
   its basis, now point to it. The fonts are unchanged.
+- **`stet_graphics::color::CieDefParams` and `CieDefgParams` have new
+  public fields:** `range_hij` and `decode_def`, and `range_hijk` and
+  `decode_defg` — the `/RangeHIJ(K)` and `/DecodeDEF(G)` stages of their
+  colour spaces (see Fixed). Code that builds either with a struct literal
+  needs the fields. Both become `#[non_exhaustive]` at the next breaking
+  release, as `GraphicsState` did in 0.9.0.
 
 ### Fixed
 
@@ -32,6 +38,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   taken as the span it covers, through a new
   `stet_graphics::color::clamp_to_range`, which clips to a range given in
   either order.
+- **CIEBasedDEFG colour spaces paint the colours their table gives.** The
+  PLRM lays the table out as m1 arrays, each of m2 strings; stet read m1
+  strings, found arrays, and painted every colour in such a space the
+  same: black, or a deep blue for the Lab-based tables `pdftops` writes
+  for every CMYK ICC profile it converts to PostScript, where whole pages
+  came out blue. The table is now interpolated between its entries, as
+  Ghostscript does, rather than read at the nearest one.
+- **CIEBasedDEF and CIEBasedDEFG apply `/DecodeDEF(G)` and
+  `/RangeHIJ(K)`,** which stet ignored, so a space that set either was
+  looked up at the wrong place in its table.
+- **A CIEBasedDEF or CIEBasedDEFG table that does not match its
+  dimensions is an error,** as in Ghostscript: `rangecheck` for a
+  dimension below 2 or an array or string too short for it, `typecheck`
+  for an element of the wrong type. Before, a short table read past its
+  end, and a misshapen one was taken as all black. A table of more than
+  2²² entries is a `limitcheck`: arrays can alias, so a few kilobytes of
+  PostScript could claim a table of any size, and real ones stay below
+  1.2 million.
 - **Spot colours set with `setcustomcolor` are painted in their colour.**
   It did nothing, so the shape took whatever colour was set before it,
   usually black or white. Worse, Adobe's procsets define a working

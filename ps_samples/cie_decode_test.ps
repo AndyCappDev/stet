@@ -332,14 +332,14 @@ showpage
 675 (Section 6: CIEBasedDEFG 2x2x2x2 table) section_title
 
 % 2x2x2x2 table: maps DEFG (CMYK-like) to ABC (RGB-like)
-% Each string has m2*m3*m4*3 = 2*2*2*3 = 24 bytes.
-% Offset = (ei*m3*m4 + fi*m4 + gi) * 3
+% PLRM: the table is m1 arrays, each of m2 strings of m3*m4*3 = 2*2*3 = 12
+% bytes. Entry (d,e,f,g) is in array d, string e, at offset (fi*m4 + gi) * 3.
 %
 % We'll make a CMYK-to-RGB-ish mapping:
 % D=C, E=M, F=Y, G=K
 % RGB = (1-C-K, 1-M-K, 1-Y-K) clamped
 %
-% String for d=0 (C=0):
+% Array for d=0 (C=0), its strings e=0 (M=0) then e=1 (M=1):
 %   e=0,f=0,g=0 (M=0,Y=0,K=0): R=1,G=1,B=1 = (255,255,255)
 %   e=0,f=0,g=1 (M=0,Y=0,K=1): R=0,G=0,B=0 = (0,0,0)
 %   e=0,f=1,g=0 (M=0,Y=1,K=0): R=1,G=1,B=0 = (255,255,0)
@@ -349,7 +349,7 @@ showpage
 %   e=1,f=1,g=0 (M=1,Y=1,K=0): R=1,G=0,B=0 = (255,0,0)
 %   e=1,f=1,g=1 (M=1,Y=1,K=1): R=0,G=0,B=0 = (0,0,0)
 %
-% String for d=1 (C=1):
+% Array for d=1 (C=1):
 %   e=0,f=0,g=0: R=0,G=1,B=1 = (0,255,255)
 %   e=0,f=0,g=1: R=0,G=0,B=0 = (0,0,0)
 %   e=0,f=1,g=0: R=0,G=1,B=0 = (0,255,0)
@@ -364,8 +364,8 @@ showpage
   /RangeABC [0 1 0 1 0 1]
   /RangeDEFG [0 1 0 1 0 1 0 1]
   /Table [2 2 2 2 [
-    <FFFFFF 000000 FFFF00 000000 FF00FF 000000 FF0000 000000>
-    <00FFFF 000000 00FF00 000000 0000FF 000000 000000 000000>
+    [<FFFFFF 000000 FFFF00 000000> <FF00FF 000000 FF0000 000000>]
+    [<00FFFF 000000 00FF00 000000> <0000FF 000000 000000 000000>]
   ]]
 >>] def
 

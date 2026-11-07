@@ -1604,6 +1604,8 @@ fn parse_cie_def_colorspace(
     }
     let params = CieDefParams {
         range_def,
+        range_hij: [0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+        decode_def: None,
         m1: 0,
         m2: 0,
         m3: 0,
@@ -1648,6 +1650,8 @@ fn parse_cie_defg_colorspace(
     }
     let params = CieDefgParams {
         range_defg,
+        range_hijk: [0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+        decode_defg: None,
         m1: 0,
         m2: 0,
         m3: 0,
@@ -2543,129 +2547,187 @@ fn eval_decode_table_range_uncached(
     Ok(table)
 }
 
-/// Pre-convert a CIEBasedDEF 3D lookup table to sRGB.
+/// Most entries a CIEBasedDEF or CIEBasedDEFG table may have.
+///
+/// The dimensions are the program's to choose, and arrays may alias — one
+/// inner array repeated down the outer one, one string down each inner one —
+/// so a few kilobytes of program can claim a table of any size; the strings
+/// alone do not bound it. Real tables are far smaller: `pdftops` writes 17⁴
+/// (83,521) entries for an ICC profile, and 33 points an axis, 33⁴ (1.19M),
+/// is as fine as colour-management tables go. 2²² (4.19M) entries is 100 MB
+/// of tables; past it, `limitcheck`, the PLRM's error for an implementation
+/// limit.
+const MAX_CIE_TABLE_ENTRIES: usize = 1 << 22;
+
+/// Read the `/Table` of a CIEBasedDEF (`n` = 3) or CIEBasedDEFG (`n` = 4)
+/// space: `[m1 … mn table]` (PLRM, "CIEBasedDEF and CIEBasedDEFG Color
+/// Spaces"). For DEF, `table` is m1 strings of 3·m2·m3 bytes; for DEFG it is
+/// m1 arrays, each of m2 strings of 3·m3·m4 bytes. Each entry's three bytes
+/// are A, B and C, scaled into `range_abc`. Returns the dimensions and the
+/// A, B and C tables, the last axis varying fastest.
+///
+/// Every dimension must be an integer greater than 1 and every array and
+/// string at least as long as the dimensions make it — `rangecheck`
+/// otherwise, `typecheck` for an element of the wrong type, as in
+/// Ghostscript. All of it is checked before the tables are allocated.
+fn read_cie_table(
+    ctx: &Context,
+    dict_entity: EntityId,
+    n: usize,
+    range_abc: &[f64; 6],
+) -> Result<(Vec<usize>, [Vec<f64>; 3]), PsError> {
+    let table_obj = get_dict_obj_by_key(ctx, dict_entity, b"Table").ok_or(PsError::Undefined)?;
+    let (entity, start, len) = array_span(&table_obj).ok_or(PsError::TypeCheck)?;
+    if (len as usize) < n + 1 {
+        return Err(PsError::RangeCheck);
+    }
+    let mut dims = Vec::with_capacity(n);
+    for i in 0..n {
+        // An integer, as the PLRM has it; a real with a whole value is taken
+        // for one, and any other real is a `rangecheck`, as in Ghostscript.
+        let m = match ctx.arrays.get_element(entity, start + i as u32).value {
+            PsValue::Int(m) => m as f64,
+            PsValue::Real(m) if m.fract() == 0.0 => m,
+            PsValue::Real(_) => return Err(PsError::RangeCheck),
+            _ => return Err(PsError::TypeCheck),
+        };
+        if !(2.0..=MAX_CIE_TABLE_ENTRIES as f64).contains(&m) {
+            return Err(if m < 2.0 {
+                PsError::RangeCheck
+            } else {
+                PsError::LimitCheck
+            });
+        }
+        dims.push(m as usize);
+    }
+    let total = dims
+        .iter()
+        .try_fold(1usize, |acc, &m| acc.checked_mul(m))
+        .filter(|&t| t <= MAX_CIE_TABLE_ENTRIES)
+        .ok_or(PsError::LimitCheck)?;
+    // Each string holds the entries of the last two axes, three bytes each.
+    let per_string = dims[n - 2] * dims[n - 1];
+
+    let string_at = |obj: PsObject| -> Result<(EntityId, u32), PsError> {
+        match obj.value {
+            PsValue::String { entity, start, len } if (len as usize) >= per_string * 3 => {
+                Ok((entity, start))
+            }
+            PsValue::String { .. } => Err(PsError::RangeCheck),
+            _ => Err(PsError::TypeCheck),
+        }
+    };
+    // The strings in table order, the leading axes slowest.
+    let outer = ctx.arrays.get_element(entity, start + n as u32);
+    let (outer_entity, outer_start, outer_len) = array_span(&outer).ok_or(PsError::TypeCheck)?;
+    if (outer_len as usize) < dims[0] {
+        return Err(PsError::RangeCheck);
+    }
+    let mut strings = Vec::with_capacity(total / per_string);
+    for h in 0..dims[0] {
+        let elem = ctx.arrays.get_element(outer_entity, outer_start + h as u32);
+        if n == 3 {
+            strings.push(string_at(elem)?);
+            continue;
+        }
+        let (inner_entity, inner_start, inner_len) = array_span(&elem).ok_or(PsError::TypeCheck)?;
+        if (inner_len as usize) < dims[1] {
+            return Err(PsError::RangeCheck);
+        }
+        for i in 0..dims[1] {
+            strings.push(string_at(
+                ctx.arrays.get_element(inner_entity, inner_start + i as u32),
+            )?);
+        }
+    }
+
+    let scale = |ch: usize, byte: u8| {
+        range_abc[2 * ch] + byte as f64 * (range_abc[2 * ch + 1] - range_abc[2 * ch]) / 255.0
+    };
+    let mut tables = [
+        Vec::with_capacity(total),
+        Vec::with_capacity(total),
+        Vec::with_capacity(total),
+    ];
+    for (str_entity, str_start) in strings {
+        let bytes = ctx
+            .strings
+            .get(str_entity, str_start, (per_string * 3) as u32);
+        for entry in bytes.as_chunks::<3>().0 {
+            for (ch, table) in tables.iter_mut().enumerate() {
+                table.push(scale(ch, entry[ch]));
+            }
+        }
+    }
+    Ok((dims, tables))
+}
+
+/// A CIE range array from the dictionary — `[min max]` per component, `N`
+/// numbers — or `[0 1]` for each component when it is absent or short.
+fn cie_range<const N: usize>(ctx: &Context, dict_entity: EntityId, key: &[u8]) -> [f64; N] {
+    let mut range = [0.0; N];
+    for pair in range.as_chunks_mut::<2>().0 {
+        pair[1] = 1.0;
+    }
+    let found = get_cie_float_array(ctx, dict_entity, key, &range);
+    if found.len() >= N {
+        range.copy_from_slice(&found[..N]);
+    }
+    range
+}
+
+/// Sample the `N` decode procedures under `key` over their input ranges —
+/// `range` gives a `[min max]` pair for each — as the ABC and LMN decode
+/// tables are sampled. `None` when the dictionary has none.
+fn sample_decode_procs<const N: usize>(
+    ctx: &mut Context,
+    dict_entity: EntityId,
+    key: &[u8],
+    range: &[f64],
+) -> Result<Option<[Vec<f64>; N]>, PsError> {
+    let Some(procs) = get_cie_decode_procs(ctx, dict_entity, key, N) else {
+        return Ok(None);
+    };
+    let mut tables: [Vec<f64>; N] = std::array::from_fn(|_| Vec::new());
+    for (ch, proc) in procs.iter().enumerate() {
+        tables[ch] = eval_decode_table_range(ctx, *proc, 256, range[2 * ch], range[2 * ch + 1])?;
+    }
+    Ok(Some(tables))
+}
+
+/// The ABC stage of a CIEBasedDEF or CIEBasedDEFG space, which its table
+/// feeds, with its DecodeABC and DecodeLMN procedures sampled.
+fn table_space_abc_params(
+    ctx: &mut Context,
+    dict_entity: EntityId,
+) -> Result<CieAbcParams, PsError> {
+    let mut abc_params = extract_cie_abc_params(ctx, dict_entity);
+    let range_abc = abc_params.range_abc;
+    abc_params.decode_abc = sample_decode_procs::<3>(ctx, dict_entity, b"DecodeABC", &range_abc)?;
+    let range_lmn = abc_params.range_lmn;
+    abc_params.decode_lmn = sample_decode_procs::<3>(ctx, dict_entity, b"DecodeLMN", &range_lmn)?;
+    Ok(abc_params)
+}
+
+/// Read a CIEBasedDEF space's table and decode stages: DEF → DecodeDEF →
+/// HIJ (RangeHIJ) → the 3D table → ABC.
 fn precompute_cie_def_table(
     ctx: &mut Context,
     dict_entity: EntityId,
 ) -> Result<CieDefParams, PsError> {
-    // Extract RangeDEF
-    let range_def_vec = get_cie_float_array(
-        ctx,
-        dict_entity,
-        b"RangeDEF",
-        &[0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
-    );
-    let mut range_def = [0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
-    if range_def_vec.len() >= 6 {
-        range_def.copy_from_slice(&range_def_vec[..6]);
-    }
-
-    // Extract Table: [m1 m2 m3 [string1 ... string_m1]]
-    let table_obj = get_dict_obj_by_key(ctx, dict_entity, b"Table");
-    let (m1, m2, m3, strings_entity, strings_start) = match table_obj {
-        Some(obj) => match obj.value {
-            PsValue::Array { entity, start, len } | PsValue::PackedArray { entity, start, len }
-                if len >= 4 =>
-            {
-                let m1 = ctx.arrays.get_element(entity, start).as_i32().unwrap_or(0) as usize;
-                let m2 = ctx
-                    .arrays
-                    .get_element(entity, start + 1)
-                    .as_i32()
-                    .unwrap_or(0) as usize;
-                let m3 = ctx
-                    .arrays
-                    .get_element(entity, start + 2)
-                    .as_i32()
-                    .unwrap_or(0) as usize;
-                let strings_obj = ctx.arrays.get_element(entity, start + 3);
-                match array_span(&strings_obj) {
-                    Some((se, ss, _)) => (m1, m2, m3, se, ss),
-                    _ => return Err(PsError::TypeCheck),
-                }
-            }
-            _ => return Err(PsError::TypeCheck),
-        },
-        None => return Err(PsError::Undefined),
-    };
-
-    if m1 == 0 || m2 == 0 || m3 == 0 {
-        return Err(PsError::RangeCheck);
-    }
-
-    // Build CIE ABC params for conversion (with decode tables)
-    let abc_params = extract_cie_abc_params(ctx, dict_entity);
-    // Pre-evaluate DecodeABC and DecodeLMN over their respective ranges
-    let mut abc_params = abc_params;
-    if let Some(procs) = get_cie_decode_procs(ctx, dict_entity, b"DecodeABC", 3) {
-        let mut tables: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-        for (ch, proc) in procs.iter().enumerate() {
-            let lo = abc_params.range_abc[ch * 2];
-            let hi = abc_params.range_abc[ch * 2 + 1];
-            tables[ch] = eval_decode_table_range(ctx, *proc, 256, lo, hi)?;
-        }
-        abc_params.decode_abc = Some(tables);
-    }
-    if let Some(procs) = get_cie_decode_procs(ctx, dict_entity, b"DecodeLMN", 3) {
-        let mut tables: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-        for (ch, proc) in procs.iter().enumerate() {
-            let lo = abc_params.range_lmn[ch * 2];
-            let hi = abc_params.range_lmn[ch * 2 + 1];
-            tables[ch] = eval_decode_table_range(ctx, *proc, 256, lo, hi)?;
-        }
-        abc_params.decode_lmn = Some(tables);
-    }
-
-    // Extract RangeABC for byte scaling
-    let abc_min = [
-        abc_params.range_abc[0],
-        abc_params.range_abc[2],
-        abc_params.range_abc[4],
-    ];
-    let abc_scale = [
-        (abc_params.range_abc[1] - abc_params.range_abc[0]) / 255.0,
-        (abc_params.range_abc[3] - abc_params.range_abc[2]) / 255.0,
-        (abc_params.range_abc[5] - abc_params.range_abc[4]) / 255.0,
-    ];
-
-    // Extract table ABC values (interpolation done in ABC space, not RGB)
-    let total = m1 * m2 * m3;
-    let mut a_table = vec![0.0f64; total];
-    let mut b_table = vec![0.0f64; total];
-    let mut c_table = vec![0.0f64; total];
-
-    let mut idx = 0;
-    for di in 0..m1 {
-        let string_obj = ctx
-            .arrays
-            .get_element(strings_entity, strings_start + di as u32);
-        let data = match string_obj.value {
-            PsValue::String {
-                entity: se,
-                start: ss,
-                len: sl,
-            } => ctx.strings.get(se, ss, sl).to_vec(),
-            _ => continue,
-        };
-
-        for ei in 0..m2 {
-            for fi in 0..m3 {
-                let offset = (ei * m3 + fi) * 3;
-                if offset + 2 < data.len() {
-                    a_table[idx] = abc_min[0] + data[offset] as f64 * abc_scale[0];
-                    b_table[idx] = abc_min[1] + data[offset + 1] as f64 * abc_scale[1];
-                    c_table[idx] = abc_min[2] + data[offset + 2] as f64 * abc_scale[2];
-                }
-                idx += 1;
-            }
-        }
-    }
-
+    let range_def = cie_range::<6>(ctx, dict_entity, b"RangeDEF");
+    let range_hij = cie_range::<6>(ctx, dict_entity, b"RangeHIJ");
+    let abc_params = table_space_abc_params(ctx, dict_entity)?;
+    let (dims, [a_table, b_table, c_table]) =
+        read_cie_table(ctx, dict_entity, 3, &abc_params.range_abc)?;
+    let decode_def = sample_decode_procs::<3>(ctx, dict_entity, b"DecodeDEF", &range_def)?;
     Ok(CieDefParams {
         range_def,
-        m1,
-        m2,
-        m3,
+        range_hij,
+        decode_def,
+        m1: dims[0],
+        m2: dims[1],
+        m3: dims[2],
         a_table,
         b_table,
         c_table,
@@ -2673,134 +2735,26 @@ fn precompute_cie_def_table(
     })
 }
 
-/// Pre-convert a CIEBasedDEFG 4D lookup table to sRGB.
+/// Read a CIEBasedDEFG space's table and decode stages: DEFG → DecodeDEFG →
+/// HIJK (RangeHIJK) → the 4D table → ABC.
 fn precompute_cie_defg_table(
     ctx: &mut Context,
     dict_entity: EntityId,
 ) -> Result<CieDefgParams, PsError> {
-    // Extract RangeDEFG
-    let range_defg_vec = get_cie_float_array(
-        ctx,
-        dict_entity,
-        b"RangeDEFG",
-        &[0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
-    );
-    let mut range_defg = [0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
-    if range_defg_vec.len() >= 8 {
-        range_defg.copy_from_slice(&range_defg_vec[..8]);
-    }
-
-    // Extract Table: [m1 m2 m3 m4 [string1 ... string_m1]]
-    let table_obj = get_dict_obj_by_key(ctx, dict_entity, b"Table");
-    let (m1, m2, m3, m4, strings_entity, strings_start) = match table_obj {
-        Some(obj) => match obj.value {
-            PsValue::Array { entity, start, len } | PsValue::PackedArray { entity, start, len }
-                if len >= 5 =>
-            {
-                let m1 = ctx.arrays.get_element(entity, start).as_i32().unwrap_or(0) as usize;
-                let m2 = ctx
-                    .arrays
-                    .get_element(entity, start + 1)
-                    .as_i32()
-                    .unwrap_or(0) as usize;
-                let m3 = ctx
-                    .arrays
-                    .get_element(entity, start + 2)
-                    .as_i32()
-                    .unwrap_or(0) as usize;
-                let m4 = ctx
-                    .arrays
-                    .get_element(entity, start + 3)
-                    .as_i32()
-                    .unwrap_or(0) as usize;
-                let strings_obj = ctx.arrays.get_element(entity, start + 4);
-                match array_span(&strings_obj) {
-                    Some((se, ss, _)) => (m1, m2, m3, m4, se, ss),
-                    _ => return Err(PsError::TypeCheck),
-                }
-            }
-            _ => return Err(PsError::TypeCheck),
-        },
-        None => return Err(PsError::Undefined),
-    };
-
-    if m1 == 0 || m2 == 0 || m3 == 0 || m4 == 0 {
-        return Err(PsError::RangeCheck);
-    }
-
-    // Build CIE ABC params for conversion (with decode tables)
-    let mut abc_params = extract_cie_abc_params(ctx, dict_entity);
-    if let Some(procs) = get_cie_decode_procs(ctx, dict_entity, b"DecodeABC", 3) {
-        let mut tables: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-        for (ch, proc) in procs.iter().enumerate() {
-            let lo = abc_params.range_abc[ch * 2];
-            let hi = abc_params.range_abc[ch * 2 + 1];
-            tables[ch] = eval_decode_table_range(ctx, *proc, 256, lo, hi)?;
-        }
-        abc_params.decode_abc = Some(tables);
-    }
-    if let Some(procs) = get_cie_decode_procs(ctx, dict_entity, b"DecodeLMN", 3) {
-        let mut tables: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-        for (ch, proc) in procs.iter().enumerate() {
-            let lo = abc_params.range_lmn[ch * 2];
-            let hi = abc_params.range_lmn[ch * 2 + 1];
-            tables[ch] = eval_decode_table_range(ctx, *proc, 256, lo, hi)?;
-        }
-        abc_params.decode_lmn = Some(tables);
-    }
-
-    let abc_min = [
-        abc_params.range_abc[0],
-        abc_params.range_abc[2],
-        abc_params.range_abc[4],
-    ];
-    let abc_scale = [
-        (abc_params.range_abc[1] - abc_params.range_abc[0]) / 255.0,
-        (abc_params.range_abc[3] - abc_params.range_abc[2]) / 255.0,
-        (abc_params.range_abc[5] - abc_params.range_abc[4]) / 255.0,
-    ];
-
-    // Extract table ABC values (conversion done at lookup time, not pre-converted)
-    let total = m1 * m2 * m3 * m4;
-    let mut a_table = vec![0.0f64; total];
-    let mut b_table = vec![0.0f64; total];
-    let mut c_table = vec![0.0f64; total];
-
-    let mut idx = 0;
-    for di in 0..m1 {
-        let string_obj = ctx
-            .arrays
-            .get_element(strings_entity, strings_start + di as u32);
-        let data = match string_obj.value {
-            PsValue::String {
-                entity: se,
-                start: ss,
-                len: sl,
-            } => ctx.strings.get(se, ss, sl).to_vec(),
-            _ => continue,
-        };
-
-        for ei in 0..m2 {
-            for fi in 0..m3 {
-                for gi in 0..m4 {
-                    let offset = (ei * m3 * m4 + fi * m4 + gi) * 3;
-                    if offset + 2 < data.len() {
-                        a_table[idx] = abc_min[0] + data[offset] as f64 * abc_scale[0];
-                        b_table[idx] = abc_min[1] + data[offset + 1] as f64 * abc_scale[1];
-                        c_table[idx] = abc_min[2] + data[offset + 2] as f64 * abc_scale[2];
-                    }
-                    idx += 1;
-                }
-            }
-        }
-    }
-
+    let range_defg = cie_range::<8>(ctx, dict_entity, b"RangeDEFG");
+    let range_hijk = cie_range::<8>(ctx, dict_entity, b"RangeHIJK");
+    let abc_params = table_space_abc_params(ctx, dict_entity)?;
+    let (dims, [a_table, b_table, c_table]) =
+        read_cie_table(ctx, dict_entity, 4, &abc_params.range_abc)?;
+    let decode_defg = sample_decode_procs::<4>(ctx, dict_entity, b"DecodeDEFG", &range_defg)?;
     Ok(CieDefgParams {
         range_defg,
-        m1,
-        m2,
-        m3,
-        m4,
+        range_hijk,
+        decode_defg,
+        m1: dims[0],
+        m2: dims[1],
+        m3: dims[2],
+        m4: dims[3],
         a_table,
         b_table,
         c_table,

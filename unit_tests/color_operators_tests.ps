@@ -979,4 +979,30 @@ cc_pk_sep setcolorspace 0.4 setcolor
 { userdict exch undef } forall
 0 setgray
 
+%% =============================================================================
+%% CIEBasedDEF / CIEBasedDEFG tables (PLRM): errors for a table that does not match its dimensions
+%% =============================================================================
+
+/cie_wp { /WhitePoint [0.9505 1 1.089] } def
+%% A dimension must be an integer greater than 1.
+/cie_bad [/CIEBasedDEF << cie_wp /Table [1 2 2 [<000000000000000000000000>]] >>] def
+cie_bad /setcolorspace [cie_bad /rangecheck] assert
+%% A DEFG table is m1 arrays of m2 strings, not m1 strings.
+/cie_bad [/CIEBasedDEFG << cie_wp /Table [2 2 2 2 [<00> <00>]] >>] def
+cie_bad /setcolorspace [cie_bad /typecheck] assert
+%% Each string holds 3 bytes for every entry of the last two axes.
+/cie_bad [/CIEBasedDEFG << cie_wp
+  /Table [2 2 2 2 [[<000000000000000000000000> <00>] [<000000000000000000000000> <000000000000000000000000>]]] >>] def
+cie_bad /setcolorspace [cie_bad /rangecheck] assert
+/cie_bad [/CIEBasedDEF << cie_wp /Table [3 3 3 [<00>]] >>] def
+cie_bad /setcolorspace [cie_bad /rangecheck] assert
+%% Aliased arrays let a short program claim a table of any size; past 2^22 entries, limitcheck.
+/cie_s 12 string def
+/cie_a [ 4096 { cie_s } repeat ] def
+/cie_bad [/CIEBasedDEFG << cie_wp /Table [4096 4096 2 2 [ 4096 { cie_a } repeat ]] >>] def
+cie_bad /setcolorspace [cie_bad /limitcheck] assert
+%% The PLRM layout is accepted, and a whole-number real is taken for an integer.
+[/CIEBasedDEFG << cie_wp /Table [2.0 2 2 2 [[cie_s cie_s] [cie_s cie_s]]] >>] /setcolorspace [] assert
+[/cie_wp /cie_bad /cie_s /cie_a] { userdict exch undef } forall
+
 % Test completed - use the standard unittest framework summary
