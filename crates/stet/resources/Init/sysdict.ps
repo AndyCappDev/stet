@@ -501,7 +501,7 @@ true setglobal
         mark exch
         (/) [ResourceDir () [5 index =string cvs ResourceExtension] =string join] =string join
         dup status {4 {pop} repeat}
-            {pop exch pop /findresource /undefinedresource .error} ifelse
+            {pop exch pop Category /findresource /undefinedresource .error} ifelse
         run
         counttomark 2 eq { %ifelse
             % The file left the instance's value behind — register it.
@@ -517,7 +517,7 @@ true setglobal
                 1 index known { %ifelse
                     Category localresourcedict pop exch get
                 } {
-                    exch pop /findresource /undefinedresource .error
+                    exch pop Category /findresource /undefinedresource .error
                 } ifelse
             } ifelse
         } ifelse

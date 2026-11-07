@@ -78,7 +78,7 @@ systemdict begin
         % FindResource: return key itself if valid instance
         dup /FindResource {
             Instances 1 index known not {
-                /findresource /undefinedresource .error
+                Category /findresource /undefinedresource .error
             } if
         } bind put
 
