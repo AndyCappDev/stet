@@ -682,7 +682,29 @@ true setglobal
     /findencoding { /Encoding findresource } bind def
 
     % ColorRendering category convenience operator
-    /findcolorrendering { /ColorRendering findresource } bind def
+    % intent findcolorrendering name bool (PLRM 3rd ed.): the CRD named intent.pagedevice.halftone if that
+    % resource exists (true), else the ColorRendering ProcSet's GetSubstituteCRD (false).
+    /findcolorrendering {
+        /ColorRendering /ProcSet findresource begin
+        dup
+        3 dict begin
+            /.s 256 string def
+            /.n 0 def
+            /.add {
+                dup type /stringtype ne { 128 string cvs } if
+                dup length .n add .s length gt { pop } {
+                    dup .s exch .n exch putinterval length .n add /.n exch def
+                } ifelse
+            } def
+            .add (.) .add GetPageDeviceName .add (.) .add GetHalftoneName .add
+            .s 0 .n getinterval cvn
+        end
+        dup /ColorRendering resourcestatus
+            { pop pop exch pop true }
+            { pop GetSubstituteCRD false }
+        ifelse
+        end
+    } bind def
 
     % Standard encodings - load from resource files
 
