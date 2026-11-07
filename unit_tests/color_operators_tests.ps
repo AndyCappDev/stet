@@ -717,17 +717,19 @@ icc_long /setcolorspace [icc_long /rangecheck] assert
 %% confirming that the resource IS found (vs. fallback when no resource).
 /DefaultCMYK [/DeviceCMYK] /ColorSpace defineresource pop
 
-%% --- Now enable UseCIEColor and test remapping ---
+%% --- Now enable UseCIEColor ---
+%% PLRM, "Remapping Device Colors to CIE": "Enabling UseCIEColor does not alter the current
+%% color space or current color values in the graphics state. The remapping ... is entirely
+%% internal", so currentcolorspace still reports the device space, as in Ghostscript. That
+%% the remapped space is used is checked by its painted effect, in
+%% crates/stet/tests/use_cie_color.rs.
 << /UseCIEColor true >> setpagedevice
 1.0 0.0 0.0 setrgbcolor
-currentcolorspace 0 get /CIEBasedABC eq
-not { (UseCIEColor: setrgbcolor should remap to CIEBasedABC) print } if
+/currentcolorspace [[/DeviceRGB]] assert
 /currentcolor [1.0 0.0 0.0] assert                    % Color values preserved
 
-%% --- setgray remapping: space changes, color value preserved ---
 0.5 setgray
-currentcolorspace 0 get /CIEBasedA eq
-not { (UseCIEColor: setgray should remap to CIEBasedA) print } if
+/currentcolorspace [[/DeviceGray]] assert
 /currentcolor [0.5] assert                             % Color value preserved
 
 %% --- setcmykcolor with DefaultCMYK as pass-through [/DeviceCMYK] ---
@@ -738,14 +740,12 @@ currentcolorspace 0 get /DeviceCMYK eq
 not { (UseCIEColor: setcmykcolor with pass-through DefaultCMYK should be DeviceCMYK) print } if
 /currentcolor [0.1 0.2 0.3 0.4] assert                % Color values preserved
 
-%% --- setcolorspace remapping for all three device spaces ---
+%% --- setcolorspace with a device space: the array given is the one reported ---
 [/DeviceRGB] setcolorspace
-currentcolorspace 0 get /CIEBasedABC eq
-not { (UseCIEColor: setcolorspace [/DeviceRGB] should remap to CIEBasedABC) print } if
+/currentcolorspace [[/DeviceRGB]] assert
 
 [/DeviceGray] setcolorspace
-currentcolorspace 0 get /CIEBasedA eq
-not { (UseCIEColor: setcolorspace [/DeviceGray] should remap to CIEBasedA) print } if
+/currentcolorspace [[/DeviceGray]] assert
 
 [/DeviceCMYK] setcolorspace
 currentcolorspace 0 get /DeviceCMYK eq
