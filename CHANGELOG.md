@@ -53,6 +53,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an Indexed one came back as its family name alone. `setcolor` in an
   ICCBased space without a profile also changed the space to DeviceGray or
   DeviceRGB; it stays ICCBased.
+- **`setcolorspace` takes a packed array, and packed arrays anywhere inside
+  a colour space.** It raised `typecheck` for one, so a program run with
+  `true setpacking` could not set a colour space it built with
+  `packedarray`, and procedures written while packing was on — the decode
+  procedures of a CIE-based space — were ignored. `currentcolorspace` hands
+  the packed array back.
 - **`eq` and `ne` compare arrays, procedures and packed arrays by
   identity, whatever their access.** Comparing an `executeonly` procedure
   or a `noaccess` array raised `invalidaccess`, though only a string, whose

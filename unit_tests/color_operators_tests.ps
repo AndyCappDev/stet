@@ -917,7 +917,26 @@ cc_sep setcolorspace
 /cc_family [/Pattern] assert
 /cc_family_base [/Separation] assert
 
-[/cc_sep /cc_same /cc_gray /cc_same_gray /cc_index_type /cc_family /cc_family_base]
+%% A colour space may be a packed array, and so may any array inside one; currentcolorspace
+%% hands the packed array back.
+/cc_pk_sep /Separation /S /DeviceGray {} 4 packedarray def
+/cc_same_pk { currentcolorspace cc_pk_sep eq } def
+cc_pk_sep setcolorspace 0.4 setcolor
+/currentcolor [0.4] assert
+/cc_same_pk [true] assert
+/DeviceRGB 1 packedarray setcolorspace 0.1 0.2 0.3 setcolor
+/currentcolor [0.1 0.2 0.3] assert
+[/Indexed /Separation /S /DeviceGray {} 4 packedarray 1 <00ff>] setcolorspace 1 setcolor
+/currentcolor [1] assert
+[/Separation /S /DeviceRGB 1 packedarray {dup dup}] setcolorspace 0.5 setcolor
+/currentcolor [0.5] assert
+[/DeviceN /A /B 2 packedarray /DeviceGray {pop}] setcolorspace 0.2 0.3 setcolor
+/currentcolor [0.2 0.3] assert
+/Pattern /DeviceRGB 2 packedarray setcolorspace
+/cc_family [/Pattern] assert
+
+[/cc_sep /cc_same /cc_gray /cc_same_gray /cc_index_type /cc_family /cc_family_base
+ /cc_pk_sep /cc_same_pk]
 { userdict exch undef } forall
 0 setgray
 

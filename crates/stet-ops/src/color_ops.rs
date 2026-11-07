@@ -241,8 +241,9 @@ pub fn op_setcolorspace(ctx: &mut Context) -> Result<(), PsError> {
             clear_pattern_color(ctx);
             Ok(())
         }
-        // Also accept array form [/DeviceGray] or [/Indexed base hival lookup]
-        PsValue::Array { entity, start, len } => {
+        // Also accept array form [/DeviceGray] or [/Indexed base hival lookup],
+        // a packed array as well as a plain one.
+        PsValue::Array { entity, start, len } | PsValue::PackedArray { entity, start, len } => {
             obj.flags.require_read()?;
             if len == 0 {
                 return Err(PsError::RangeCheck);
@@ -396,7 +397,7 @@ fn cache_tint_table(ctx: &mut Context) {
 /// as a new one-element array.
 pub fn op_currentcolorspace(ctx: &mut Context) -> Result<(), PsError> {
     let obj = match ctx.gstate.color_space_object {
-        Some(obj) if matches!(obj.value, PsValue::Array { .. }) => obj,
+        Some(obj) if obj.is_array_type() => obj,
         Some(PsObject {
             value: PsValue::Name(id),
             ..
@@ -1100,6 +1101,25 @@ fn color_for_intent(
     })
 }
 
+/// The elements of an array or a packed array: entity, start and length.
+///
+/// A colour space array, and every array inside one, may be either: a program
+/// run with `true setpacking` builds packed arrays throughout, and Ghostscript
+/// accepts them anywhere a colour space takes an array.
+fn array_span(obj: &PsObject) -> Option<(EntityId, u32, u32)> {
+    match obj.value {
+        PsValue::Array { entity, start, len } | PsValue::PackedArray { entity, start, len } => {
+            Some((entity, start, len))
+        }
+        _ => None,
+    }
+}
+
+/// Whether `obj` is a procedure: an executable array or packed array.
+fn is_procedure(obj: &PsObject) -> bool {
+    obj.is_array_type() && obj.flags.is_executable()
+}
+
 /// Resolve a color space from a PsObject (name or array).
 /// Returns the ColorSpace and its number of components.
 pub fn resolve_color_space_from_obj(
@@ -1117,7 +1137,7 @@ pub fn resolve_color_space_from_obj(
                 _ => Err(PsError::Undefined),
             }
         }
-        PsValue::Array { entity, start, len } => {
+        PsValue::Array { entity, start, len } | PsValue::PackedArray { entity, start, len } => {
             if len == 0 {
                 return Err(PsError::RangeCheck);
             }
@@ -1196,7 +1216,7 @@ fn parse_indexed_colorspace(
                 _ => return Err(PsError::RangeCheck),
             }
         }
-        PsValue::Array { .. } => {
+        PsValue::Array { .. } | PsValue::PackedArray { .. } => {
             let (cs, _) = resolve_color_space_from_obj(ctx, &base_obj)?;
             // An Indexed space may not be based on another Indexed space.
             if matches!(cs, ColorSpace::Indexed { .. }) {
@@ -1223,7 +1243,7 @@ fn parse_indexed_colorspace(
             start,
             len,
         } => (ctx.strings.get(se, start, len).to_vec(), None),
-        PsValue::ExecArray { .. } | PsValue::Array { .. } => {
+        PsValue::ExecArray { .. } | PsValue::Array { .. } | PsValue::PackedArray { .. } => {
             // Procedure lookup — will be pre-evaluated in resolve_indexed_proc_lookup
             (Vec::new(), Some(lookup_obj))
         }
@@ -1315,10 +1335,7 @@ fn lookup_default_colorspace(ctx: &mut Context, device_space: &[u8]) -> Option<C
     })?;
 
     // Parse the resource array as a color space
-    let (entity, start, len) = match resource_obj.value {
-        PsValue::Array { entity, start, len } => (entity, start, len),
-        _ => return None,
-    };
+    let (entity, start, len) = array_span(&resource_obj)?;
     if len == 0 {
         return None;
     }
@@ -1606,12 +1623,8 @@ fn parse_devicen_colorspace(
 ) -> Result<ColorSpace, PsError> {
     // Element 1: array of colorant names
     let names_obj = ctx.arrays.get_element(entity, start + 1);
-    let (num_colorants, names) = match names_obj.value {
-        PsValue::Array {
-            entity: name_ent,
-            start: name_start,
-            len,
-        } => {
+    let (num_colorants, names) = match array_span(&names_obj) {
+        Some((name_ent, name_start, len)) => {
             let mut names = Vec::with_capacity(len as usize);
             for i in 0..len {
                 let elem = ctx.arrays.get_element(name_ent, name_start + i);
@@ -1653,7 +1666,7 @@ fn parse_alt_space_name(ctx: &mut Context, obj: &PsObject) -> Result<(ColorSpace
         // PLRM 4.9.4/4.9.5: the alternate space may be any device or CIE-based
         // space, which `pdftops` writes in array form — e.g. a spot colour over
         // `[/CIEBasedABC <<...>>]`. It may not itself be a special space.
-        PsValue::Array { .. } => {
+        PsValue::Array { .. } | PsValue::PackedArray { .. } => {
             let (cs, n) = resolve_color_space_from_obj(ctx, obj)?;
             if matches!(
                 cs,
@@ -1683,7 +1696,7 @@ fn get_cie_float_array(
     let dk = DictKey::Name(name_id);
     match ctx.dicts.get(dict_entity, &dk) {
         Some(obj) => match obj.value {
-            PsValue::Array { entity, start, len } => {
+            PsValue::Array { entity, start, len } | PsValue::PackedArray { entity, start, len } => {
                 let mut result = Vec::with_capacity(len as usize);
                 for i in 0..len {
                     let elem = ctx.arrays.get_element(entity, start + i);
@@ -2074,24 +2087,20 @@ fn get_cie_decode_procs(
     let name_id = ctx.names.find(key)?;
     let dk = DictKey::Name(name_id);
     let obj = ctx.dicts.get(dict_entity, &dk)?;
-    match obj.value {
-        PsValue::Array { entity, start, len } => {
-            if (len as usize) < expected {
-                return None;
-            }
-            let mut procs = Vec::with_capacity(expected);
-            for i in 0..expected as u32 {
-                let elem = ctx.arrays.get_element(entity, start + i);
-                // Each element should be an executable array (procedure)
-                match elem.value {
-                    PsValue::Array { .. } if elem.flags.is_executable() => procs.push(elem),
-                    _ => return None,
-                }
-            }
-            Some(procs)
-        }
-        _ => None,
+    let (entity, start, len) = array_span(&obj)?;
+    if (len as usize) < expected {
+        return None;
     }
+    let mut procs = Vec::with_capacity(expected);
+    for i in 0..expected as u32 {
+        let elem = ctx.arrays.get_element(entity, start + i);
+        // Each element should be a procedure
+        if !is_procedure(&elem) {
+            return None;
+        }
+        procs.push(elem);
+    }
+    Some(procs)
 }
 
 /// Extract a single decode procedure from a CIE dict entry (for DecodeA).
@@ -2103,10 +2112,7 @@ fn get_cie_decode_proc_single(
     let name_id = ctx.names.find(key)?;
     let dk = DictKey::Name(name_id);
     let obj = ctx.dicts.get(dict_entity, &dk)?;
-    match obj.value {
-        PsValue::Array { .. } if obj.flags.is_executable() => Some(obj),
-        _ => None,
-    }
+    is_procedure(&obj).then_some(obj)
 }
 
 /// Upper bound on memoised decode tables. Each entry is one `Vec<f64>` of
@@ -2397,7 +2403,9 @@ fn precompute_cie_def_table(
     let table_obj = get_dict_obj_by_key(ctx, dict_entity, b"Table");
     let (m1, m2, m3, strings_entity, strings_start) = match table_obj {
         Some(obj) => match obj.value {
-            PsValue::Array { entity, start, len } if len >= 4 => {
+            PsValue::Array { entity, start, len } | PsValue::PackedArray { entity, start, len }
+                if len >= 4 =>
+            {
                 let m1 = ctx.arrays.get_element(entity, start).as_i32().unwrap_or(0) as usize;
                 let m2 = ctx
                     .arrays
@@ -2410,12 +2418,8 @@ fn precompute_cie_def_table(
                     .as_i32()
                     .unwrap_or(0) as usize;
                 let strings_obj = ctx.arrays.get_element(entity, start + 3);
-                match strings_obj.value {
-                    PsValue::Array {
-                        entity: se,
-                        start: ss,
-                        ..
-                    } => (m1, m2, m3, se, ss),
+                match array_span(&strings_obj) {
+                    Some((se, ss, _)) => (m1, m2, m3, se, ss),
                     _ => return Err(PsError::TypeCheck),
                 }
             }
@@ -2529,7 +2533,9 @@ fn precompute_cie_defg_table(
     let table_obj = get_dict_obj_by_key(ctx, dict_entity, b"Table");
     let (m1, m2, m3, m4, strings_entity, strings_start) = match table_obj {
         Some(obj) => match obj.value {
-            PsValue::Array { entity, start, len } if len >= 5 => {
+            PsValue::Array { entity, start, len } | PsValue::PackedArray { entity, start, len }
+                if len >= 5 =>
+            {
                 let m1 = ctx.arrays.get_element(entity, start).as_i32().unwrap_or(0) as usize;
                 let m2 = ctx
                     .arrays
@@ -2547,12 +2553,8 @@ fn precompute_cie_defg_table(
                     .as_i32()
                     .unwrap_or(0) as usize;
                 let strings_obj = ctx.arrays.get_element(entity, start + 4);
-                match strings_obj.value {
-                    PsValue::Array {
-                        entity: se,
-                        start: ss,
-                        ..
-                    } => (m1, m2, m3, m4, se, ss),
+                match array_span(&strings_obj) {
+                    Some((se, ss, _)) => (m1, m2, m3, m4, se, ss),
                     _ => return Err(PsError::TypeCheck),
                 }
             }
