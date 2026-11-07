@@ -730,6 +730,23 @@ statusdict begin
     /setjobtimeout {pop} def
 
     /lettertray {} def
+    % Level 1 printer controls that print drivers call through statusdict (Oracle Toolkit, PCL-to-PS
+    % drivers: `0 statusdict /setpapertray get exec`). A renderer has no trays or duplex unit: no-ops,
+    % and the queries answer the defaults.
+    /setpapertray {pop} def
+    /papertray {1} def
+    /legaltray {} def
+    /a4tray {} def
+    /a3tray {} def
+    /a5tray {} def
+    /b5tray {} def
+    /11x17tray {} def
+    /ledgertray {} def
+    /setduplexmode {pop} def
+    /duplexmode {false} def
+    /settumble {pop} def
+    /tumble {false} def
+    /manualfeed false def
 end % statusdict
 
 
