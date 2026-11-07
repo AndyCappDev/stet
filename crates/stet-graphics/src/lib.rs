@@ -35,6 +35,7 @@ pub mod document_structure;
 pub mod icc;
 pub mod image_limits;
 pub mod image_samples;
+pub mod jpeg;
 pub mod layer_set;
 pub mod mesh_shading;
 pub mod rendering_intent;

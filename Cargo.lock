@@ -3010,7 +3010,6 @@ dependencies = [
  "glob",
  "hayro-jbig2",
  "hayro-jpeg2000",
- "jpeg-decoder",
  "jpeg-encoder",
  "moxcms",
  "rustc-hash 2.1.3",
@@ -3049,9 +3048,12 @@ name = "stet-graphics"
 version = "0.9.0"
 dependencies = [
  "glob",
+ "jpeg-decoder",
  "moxcms",
  "sha2",
  "stet-fonts",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -3084,7 +3086,6 @@ dependencies = [
  "hayro-ccitt",
  "hayro-jbig2",
  "hayro-jpeg2000",
- "jpeg-decoder",
  "md5",
  "png 0.17.16",
  "rayon",
@@ -3095,8 +3096,6 @@ dependencies = [
  "stet-render",
  "stringprep",
  "thiserror 2.0.20",
- "zune-core",
- "zune-jpeg",
 ]
 
 [[package]]

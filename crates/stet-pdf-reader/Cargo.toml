@@ -15,9 +15,6 @@ categories = ["parser-implementations", "graphics"]
 thiserror.workspace = true
 flate2 = "1"
 md5 = "0.7"
-jpeg-decoder = "0.3"
-zune-jpeg = "0.5"
-zune-core = "0.5"
 stet-fonts.workspace = true
 stet-graphics.workspace = true
 # `default-features = false` is load-bearing: it drops `ps-device`, and
@@ -40,7 +37,7 @@ default = ["jpx", "render", "saslprep", "parallel"]
 render = ["dep:stet-render"]
 # Work done while a page is read that has no order to it — sampling a
 # function-based shading — is spread over threads.
-parallel = ["dep:rayon"]
+parallel = ["dep:rayon", "stet-graphics/parallel"]
 jpx = ["dep:hayro-jpeg2000"]
 # SASLprep (RFC 4013) for AES-256 passwords, as ISO 32000-2 requires. It
 # brings in Unicode normalisation tables; without it a password is used as

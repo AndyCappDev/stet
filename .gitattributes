@@ -22,6 +22,7 @@ crates/stet-pdf-reader/fonts/** linguist-vendored
 # `encryption` tests that `include_bytes!` them failed there and nowhere else.
 *.pdf                  binary
 *.jp2                  binary
+*.jpg                  binary
 
 # Unit-test PostScript programs — ported test fixtures, not language
 # we maintain.

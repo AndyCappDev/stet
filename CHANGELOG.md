@@ -26,9 +26,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   colour spaces (see Fixed). Code that builds either with a struct literal
   needs the fields. Both become `#[non_exhaustive]` at the next breaking
   release, as `GraphicsState` did in 0.9.0.
+- **JPEG decoding moved into `stet-graphics` as `stet_graphics::jpeg`**
+  (`decode`, `jpeg_dimensions`, `patch_jpeg_sof_height`), so the
+  PostScript `DCTDecode` filter and the PDF reader share it (see Fixed).
+  `stet_pdf_reader::filters::jpeg_dimensions` and `patch_jpeg_sof_height`
+  remain, re-exported. Decoding a JPEG on several threads is now the
+  `stet-graphics` feature `parallel`, which `stet-pdf-reader`'s `parallel`
+  turns on: a reader built without `parallel` no longer starts threads for
+  JPEGs, and `stet-core` no longer depends on `jpeg-decoder` itself.
 
 ### Fixed
 
+- **A CMYK JPEG in PostScript decodes to the samples it stores.** The
+  `DCTDecode` filter returned them inverted, so an image `pdftops` wrote
+  from a CMYK JPEG came out as its negative — a white page black — where
+  the PDF reader and Ghostscript read it right. The filter now decodes
+  through the PDF reader's decoder, which also brings it that decoder's
+  handling of Adobe RGB and YCCK markers, 2-component JPEGs, heights given
+  in a DNL marker, and truncated streams. `DCTEncode` stored CMYK inverted
+  to match, so a CMYK JPEG it wrote read back inverted in Ghostscript; it
+  now stores the samples it is given.
 - **A colour space or function with a reversed range no longer crashes
   the process.** A PostScript CIE-based colour space whose `/RangeABC`,
   `/RangeLMN` or `/RangeA` runs high to low, a shading function's reversed

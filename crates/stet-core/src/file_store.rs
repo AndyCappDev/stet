@@ -1222,6 +1222,16 @@ impl FileStore {
                 let expected_len = w as usize * h as usize * nc as usize;
                 // Pad or truncate to expected size
                 buf.resize(expected_len, 0);
+                // `jpeg-encoder` stores CMYK inverted, as Adobe's encoders do,
+                // but a JPEG's samples are what `DCTDecode` returns as stored
+                // (`stet_graphics::jpeg::decode`), so the samples written must
+                // be the ones stored, as Ghostscript writes them. Inverting
+                // here cancels the encoder's inversion.
+                if color_type == jpeg_encoder::ColorType::Cmyk {
+                    for b in buf.iter_mut() {
+                        *b = 255 - *b;
+                    }
+                }
 
                 let mut jpeg_data = Vec::new();
                 let encoder = jpeg_encoder::Encoder::new(&mut jpeg_data, q);
@@ -1635,9 +1645,9 @@ impl FileStore {
                     if !jpeg_data.ends_with(&[0xFF, 0xD9]) {
                         jpeg_data.extend_from_slice(&[0xFF, 0xD9]);
                     }
-                    let mut decoder = jpeg_decoder::Decoder::new(jpeg_data.as_slice());
-                    let pixels = decoder
-                        .decode()
+                    // The PDF reader's decoder, so a JPEG gives the samples
+                    // it gives there: a CMYK one as stored, not inverted.
+                    let pixels = stet_graphics::jpeg::decode(&jpeg_data)
                         .map_err(|e| io::Error::other(format!("JPEG decode error: {e}")))?;
                     state.output_buf = pixels;
                     state.output_pos = 0;
