@@ -1,4 +1,3 @@
-#![forbid(unsafe_code)]
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
 // SPDX-License-Identifier: Apache-2.0 OR MIT
@@ -76,6 +75,8 @@
 //! |---------|------|-----------------|
 //! | `render` | `render()` — RGBA pixel output | `stet-render` (tiny-skia) |
 //! | `pdf-output` | `render_to_pdf()` — PDF output | `stet-pdf` |
+
+#![forbid(unsafe_code)]
 
 pub mod diagnostics;
 pub mod embedded_resources;

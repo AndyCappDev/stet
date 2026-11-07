@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`stet_core::file_store::FileHandle::StringSource`'s `data` is an
+  `Arc<Vec<u8>>`**, so the scanner can hold a source's bytes while it
+  allocates (see Fixed); `FileStore::shared_remaining` hands out that
+  share. Code matching the variant reads the bytes through the `Arc`
+  unchanged. Contributed by @nielsbosma (#20).
+- **`stet-fonts`, `stet-graphics`, `stet-pdf-reader` and `stet` are
+  `#![forbid(unsafe_code)]`.** None contained any; the attribute keeps it
+  that way.
 - **`LICENSE-URW-FONTS` now cites URW++'s authorisation of the OFL for
   the embedded fonts, where it gave stet's reading of the grant.** The
   files are URW++'s 2017 revisions of its Version 2.0 set and a 2020
@@ -37,6 +45,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Executing a string no longer reads freed memory.** The scanner read
+  an executable string (`(...) cvx exec`) in place, in the byte store all
+  strings share, while scanning a token can allocate in that store and
+  move it. A procedure in such a string holding enough string literals
+  read the rest of itself from freed memory: a valid 2 MB file
+  segfaulted. The scanner now reads a copied window of the string.
+  Contributed by @nielsbosma (#20).
 - **A CMYK JPEG in PostScript decodes to the samples it stores.** The
   `DCTDecode` filter returned them inverted, so an image `pdftops` wrote
   from a CMYK JPEG came out as its negative — a white page black — where

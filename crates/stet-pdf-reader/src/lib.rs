@@ -1,4 +1,3 @@
-#![forbid(unsafe_code)]
 // stet-pdf-reader
 // Copyright (c) 2026 Scott Bowman
 // SPDX-License-Identifier: Apache-2.0 OR MIT
@@ -180,6 +179,7 @@
 //! out as reusable crates — `stet-pdf-reader` would not cover the full
 //! PDF stream-filter surface without them.
 
+#![forbid(unsafe_code)]
 // A library does not write to the terminal of the application that links
 // it: diagnostics go to `parse_warnings()`. Tests may print.
 #![cfg_attr(not(test), deny(clippy::print_stderr, clippy::print_stdout))]

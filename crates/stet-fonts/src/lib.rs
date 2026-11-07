@@ -1,4 +1,3 @@
-#![forbid(unsafe_code)]
 // stet - A PostScript Interpreter
 // Copyright (c) 2026 Scott Bowman
 // SPDX-License-Identifier: Apache-2.0 OR MIT
@@ -57,6 +56,8 @@
 //! fonts, no variable-font interpolation, and no OpenType
 //! GSUB/GPOS/BASE/GDEF tables. For a general-purpose font-layout
 //! library, consider `ttf-parser`, `rustybuzz`, or `skrifa`.
+
+#![forbid(unsafe_code)]
 
 pub mod agl;
 pub mod cff_parser;
