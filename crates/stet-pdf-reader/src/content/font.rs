@@ -898,7 +898,7 @@ fn load_predefined_cmap(name: &[u8]) -> Option<Vec<u8>> {
     // 1. User-specified directory via environment variable
     if let Ok(dir) = std::env::var("STET_CMAP_DIR") {
         let path = format!("{}/{}", dir, name_str);
-        if let Ok(data) = std::fs::read(&path) {
+        if let Ok(data) = stet_fonts::host::read(&path) {
             return Some(data);
         }
     }
@@ -908,7 +908,7 @@ fn load_predefined_cmap(name: &[u8]) -> Option<Vec<u8>> {
         let path = std::path::Path::new(&home)
             .join(".local/share/stet/CMap")
             .join(name_str);
-        if let Ok(data) = std::fs::read(&path) {
+        if let Ok(data) = stet_fonts::host::read(&path) {
             return Some(data);
         }
     }
@@ -932,7 +932,7 @@ fn load_predefined_cmap(name: &[u8]) -> Option<Vec<u8>> {
     for base in &poppler_dirs {
         for collection in &collections {
             let path = format!("{}/{}/{}", base, collection, name_str);
-            if let Ok(data) = std::fs::read(&path) {
+            if let Ok(data) = stet_fonts::host::read(&path) {
                 return Some(data);
             }
         }
@@ -946,7 +946,7 @@ fn load_predefined_cmap(name: &[u8]) -> Option<Vec<u8>> {
     ];
     for dir in &gs_dirs {
         let path = format!("{}/{}", dir, name_str);
-        if let Ok(data) = std::fs::read(&path) {
+        if let Ok(data) = stet_fonts::host::read(&path) {
             return Some(data);
         }
     }
@@ -2367,7 +2367,7 @@ fn embedded_font(name: &str) -> Option<Vec<u8>> {
 /// Read a font file, handling TrueType Collection (.ttc) files by extracting
 /// the sub-font matching `ps_name` (or the first font if no match found).
 fn read_font_file(path: &std::path::Path, ps_name: &str) -> std::io::Result<Vec<u8>> {
-    let data = std::fs::read(path)?;
+    let data = stet_fonts::host::read(path)?;
     if data.len() > 12 && &data[0..4] == b"ttcf" {
         // TTC: extract the sub-font at the correct offset
         let num_fonts = u32::from_be_bytes([data[8], data[9], data[10], data[11]]) as usize;

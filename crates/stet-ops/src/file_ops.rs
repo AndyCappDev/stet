@@ -698,6 +698,8 @@ pub fn op_status(ctx: &mut Context) -> Result<(), PsError> {
             // Check embedded files first (for WASM builds)
             let exists = if ctx.files.get_embedded_file(&path).is_some() {
                 true
+            } else if !stet_fonts::host::host_access_allowed() {
+                false
             } else {
                 // resolve_filename returns the original if nothing matched,
                 // so check whether the resolved path actually exists
@@ -745,6 +747,9 @@ pub fn op_deletefile(ctx: &mut Context) -> Result<(), PsError> {
         return Err(PsError::InvalidFileAccess);
     }
 
+    if !stet_fonts::host::host_access_allowed() {
+        return Err(PsError::InvalidFileAccess);
+    }
     ctx.o_stack.pop()?;
     std::fs::remove_file(&path).map_err(|_| PsError::UndefinedFilename)?;
     Ok(())
@@ -790,6 +795,9 @@ pub fn op_renamefile(ctx: &mut Context) -> Result<(), PsError> {
         return Err(PsError::UndefinedFilename);
     }
 
+    if !stet_fonts::host::host_access_allowed() {
+        return Err(PsError::InvalidFileAccess);
+    }
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
     std::fs::rename(&old_name, &new_name).map_err(|_| PsError::UndefinedFilename)?;
@@ -827,7 +835,9 @@ pub fn op_filenameforall(ctx: &mut Context) -> Result<(), PsError> {
 
     // Use glob to expand the template pattern
     let mut matches: Vec<String> = Vec::new();
-    if let Ok(paths) = glob::glob(&template) {
+    if !stet_fonts::host::host_access_allowed() {
+        // Only embedded resources exist when the host is off limits.
+    } else if let Ok(paths) = glob::glob(&template) {
         for path in paths.flatten() {
             matches.push(path.to_string_lossy().into_owned());
         }

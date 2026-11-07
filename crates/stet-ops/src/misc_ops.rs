@@ -249,6 +249,9 @@ pub fn op_run(ctx: &mut Context) -> Result<(), PsError> {
 
     let resolved = crate::file_ops::resolve_filename(ctx, &filename);
 
+    if !stet_fonts::host::host_access_allowed() {
+        return Err(PsError::InvalidFileAccess);
+    }
     let source = std::fs::read(&resolved).map_err(|_| PsError::UndefinedFilename)?;
 
     // Strip DOS EPS binary header if present

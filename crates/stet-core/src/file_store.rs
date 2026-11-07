@@ -374,6 +374,9 @@ impl FileStore {
                         "read-only special file",
                     ));
                 }
+                if !stet_fonts::host::host_access_allowed() {
+                    return Err(io::Error::new(io::ErrorKind::NotFound, "EOF on stdin"));
+                }
                 // Read one line from stdin, strip trailing newline
                 let mut line = String::new();
                 let n = io::stdin().read_line(&mut line)?;
@@ -412,6 +415,12 @@ impl FileStore {
             return Ok(id);
         }
 
+        if !stet_fonts::host::host_access_allowed() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "host access denied",
+            ));
+        }
         let file = match mode {
             "r" => std::fs::File::open(name)?,
             "w" => std::fs::File::create(name)?,
@@ -764,7 +773,7 @@ impl FileStore {
                 if n == 0 { Ok(None) } else { Ok(Some(buf[0])) }
             }
             FileHandle::Stdin => {
-                if std::io::stdin().is_terminal() {
+                if !stet_fonts::host::host_access_allowed() || std::io::stdin().is_terminal() {
                     Ok(None) // EOF when stdin is a terminal
                 } else {
                     let mut buf = [0u8; 1];
@@ -847,7 +856,7 @@ impl FileStore {
             FileHandle::Stdin => {
                 // Return EOF immediately when stdin is a terminal (not a pipe)
                 // to avoid blocking the interpreter during file execution.
-                if std::io::stdin().is_terminal() {
+                if !stet_fonts::host::host_access_allowed() || std::io::stdin().is_terminal() {
                     Ok(0)
                 } else {
                     io::stdin().read(buf)
@@ -900,6 +909,7 @@ impl FileStore {
         let entry = &mut self.files[entity.raw_index()];
         match &mut entry.handle {
             FileHandle::Real(f) => f.get_mut().write_all(buf),
+            FileHandle::Stdout | FileHandle::Stderr if !stet_fonts::host::host_access_allowed() => Ok(()),
             FileHandle::Stdout => io::stdout().write_all(buf),
             FileHandle::Stderr => io::stderr().write_all(buf),
             FileHandle::Closed => Err(io::Error::other("file closed")),
