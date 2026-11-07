@@ -45,6 +45,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Print drivers' Level 1 tray and duplex calls work.** A job calling
+  `0 statusdict /setpapertray get exec`, as Oracle Toolkit's output does,
+  stopped at `undefined`: statusdict had only `setjobtimeout` and
+  `lettertray`. It now has `setpapertray`, `setduplexmode` and `settumble`,
+  whose settings `papertray`, `duplexmode` and `tumble` read back, and
+  `manualfeed`. The tray selectors `lettertray`, `legaltray`, `11x17tray`,
+  `ledgertray`, `a3tray`, `a4tray`, `a5tray`, `b4tray` and `b5tray` set the
+  page size of their tray's paper, as Ghostscript's do; `lettertray`
+  previously did nothing. Contributed by @nielsbosma (#25).
 - **Executing a string no longer reads freed memory.** The scanner read
   an executable string (`(...) cvx exec`) in place, in the byte store all
   strings share, while scanning a token can allocate in that store and

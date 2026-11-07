@@ -729,23 +729,31 @@ statusdict begin
 
     /setjobtimeout {pop} def
 
-    /lettertray {} def
     % Level 1 printer controls that print drivers call through statusdict (Oracle Toolkit, PCL-to-PS
-    % drivers: `0 statusdict /setpapertray get exec`). A renderer has no trays or duplex unit: no-ops,
-    % and the queries answer the defaults.
-    /setpapertray {pop} def
-    /papertray {1} def
-    /legaltray {} def
-    /a4tray {} def
-    /a3tray {} def
-    /a5tray {} def
-    /b5tray {} def
-    /11x17tray {} def
-    /ledgertray {} def
-    /setduplexmode {pop} def
-    /duplexmode {false} def
-    /settumble {pop} def
-    /tumble {false} def
+    % drivers: `0 statusdict /setpapertray get exec`).
+    %
+    % Choosing a tray chooses the paper in it, so each tray selector sets its page size, through the
+    % page-size procedure of that name in userdict, as Ghostscript does (gs_statd.ps). userdict is
+    % named rather than searched for so that a program's own dictionary on the dictionary stack, as
+    % in FrameMaker prologs that define their own `a4tray`, does not redirect it.
+    /lettertray {userdict /letter get exec} bind def
+    /legaltray {userdict /legal get exec} bind def
+    /11x17tray {userdict /11x17 get exec} bind def
+    /ledgertray {userdict /ledger get exec} bind def
+    /a3tray {userdict /a3 get exec} bind def
+    /a4tray {userdict /a4 get exec} bind def
+    /a5tray {userdict /a5 get exec} bind def
+    /b4tray {userdict /b4 get exec} bind def
+    /b5tray {userdict /b5 get exec} bind def
+
+    % There is no tray or duplex unit to set, so each setting is only recorded, and its query
+    % answers what was set last.
+    /papertray 1 def
+    /setpapertray {statusdict exch /papertray exch put} bind def
+    /duplexmode false def
+    /setduplexmode {statusdict exch /duplexmode exch put} bind def
+    /tumble false def
+    /settumble {statusdict exch /tumble exch put} bind def
     /manualfeed false def
 end % statusdict
 
