@@ -14,7 +14,7 @@ fn leaves(probe: &str, want: usize) -> [u8; 3] {
     );
     let mut interp = Interpreter::builder().suppress_output().build();
     let pages = interp.render(src.as_bytes(), 18.0).expect("renders");
-    assert_eq!(pages.len(), 1, "{:?}", interp.last_error());
+    assert_eq!(pages.len(), 1);
     let w = pages[0].width as usize;
     let at = ((pages[0].height as usize - 5) * w + 5) * 4;
     [
