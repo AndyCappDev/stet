@@ -73,7 +73,12 @@ fn same_in_pdf(font: &str) {
         .build()
         .render_to_pdf(&ps, 72.0)
         .unwrap();
-    let doc = stet_pdf_reader::PdfDocument::from_bytes(&pdf).unwrap();
+    // Read with the machine's fonts off: a referenced font is then drawn
+    // with the reader's own copy, the same file the interpreter used. An
+    // installed copy can differ, or be the OpenType one, and the result
+    // would depend on the machine.
+    let mut doc = stet_pdf_reader::PdfDocument::from_bytes(&pdf).unwrap();
+    doc.set_host_files(false);
     let list = doc.render_page(0, 72.0).unwrap();
     assert_eq!(boxes(list.elements().iter()), expected);
 }

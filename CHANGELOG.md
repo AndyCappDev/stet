@@ -128,6 +128,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Text in a PDF font that isn't embedded is no longer lost when the
+  machine's copy of the stand-in font is OpenType.** The PDF reader
+  draws such a font, Helvetica say, with a Nimbus font, and looks for it
+  among the installed fonts before its own. The URW fonts are often
+  installed as both Type 1 and OpenType, and which file the reader found
+  depended on the order the machine listed its font folders in. Given
+  the OpenType one, it could not read it as Type 1 and drew none of the
+  text, warning only that a FontFile was missing. It now passes over a
+  font it cannot read and takes the next source, ending with its own
+  copy. The same holds for a font a `FontProvider` supplies.
 - **`closepath` does nothing when the path is empty or the current
   subpath is already closed**, as the PLRM says and as in Ghostscript.
   stet added a close either way. Rendered pages didn't change, but the

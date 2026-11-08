@@ -969,30 +969,13 @@ fn substitute_font(
     last_char: usize,
 ) -> Option<PdfFont> {
     let (clean_name, font_file_name) = substitute_names(base_font);
-
-    // Try the font provider first (for WASM and other non-filesystem environments)
-    let font_data = if let Some(provider) = font_provider {
-        provider(font_file_name)
-    } else {
-        None
-    };
-
-    // Try system font (full glyph set) before bundled subset
-    let font_data = font_data.or_else(|| {
-        let cache = system_font_cache(host_files).ok()?;
-        let path = cache.get_font_path(font_file_name)?;
-        read_font_file(path, font_file_name).ok()
-    });
-
-    // Fall back to bundled subset font
-    let font_data = font_data.or_else(|| embedded_font(font_file_name));
-
-    // If the named font wasn't found, use a default substitute based on the
-    // font descriptor Flags (serif bit) and weight/style from the font name.
-    let font_data =
-        font_data.or_else(|| default_substitute(clean_name, descriptor_flags, font_provider))?;
-
-    let font = parse_type1(&font_data).ok()?;
+    let font = stand_in_font(
+        clean_name,
+        font_file_name,
+        descriptor_flags,
+        font_provider,
+        host_files,
+    )?;
     let fm = font.font_matrix;
     let mut font_matrix = Matrix::new(fm[0], fm[1], fm[2], fm[3], fm[4], fm[5]);
     let mut per_char_scale = false;
@@ -1150,14 +1133,45 @@ fn substitute_names(base_font: &str) -> (&str, &str) {
     (clean_name, urw_name.unwrap_or(clean_name))
 }
 
+/// The Type 1 font that stands in for a font the document does not embed:
+/// `font_file_name`, the Nimbus font that substitutes for it, else the
+/// Nimbus Roman or Nimbus Sans [`default_substitute_name`] picks.
+///
+/// Each name is looked for from the caller's [`FontProvider`], then (with
+/// `host_files`) among the fonts installed on the machine, then among stet's
+/// own, and the first that parses as Type 1 is taken. A source whose data
+/// does not parse is passed over, not taken as the end of the search: the
+/// installed copy of a Nimbus font can be the OpenType one, which the
+/// machine's font folders list before the Type 1 one on some systems, and
+/// taking it as final left the text undrawn.
+fn stand_in_font(
+    clean_name: &str,
+    font_file_name: &str,
+    descriptor_flags: u32,
+    font_provider: Option<&FontProvider>,
+    host_files: bool,
+) -> Option<stet_fonts::type1_parser::Type1Font> {
+    let from_provider = |name: &str| font_provider.and_then(|provider| provider(name));
+    let installed = || {
+        let cache = system_font_cache(host_files).ok()?;
+        let path = cache.get_font_path(font_file_name)?;
+        read_font_file(path, font_file_name).ok()
+    };
+    let default_name = default_substitute_name(clean_name, descriptor_flags);
+    let sources: [&dyn Fn() -> Option<Vec<u8>>; 5] = [
+        &|| from_provider(font_file_name),
+        &installed,
+        &|| embedded_font(font_file_name),
+        &|| from_provider(default_name),
+        &|| embedded_font(default_name),
+    ];
+    sources.iter().find_map(|load| parse_type1(&load()?).ok())
+}
+
 /// The Nimbus Roman or Nimbus Sans that stands in for a font stet has no
 /// substitute for, by the descriptor's serif flag and the weight and slant
 /// the name says.
-fn default_substitute(
-    clean_name: &str,
-    descriptor_flags: u32,
-    font_provider: Option<&FontProvider>,
-) -> Option<Vec<u8>> {
+fn default_substitute_name(clean_name: &str, descriptor_flags: u32) -> &'static str {
     let lower = clean_name.to_ascii_lowercase();
     let is_bold = lower.contains("bold")
         || lower.contains("demi")
@@ -1165,7 +1179,7 @@ fn default_substitute(
         || lower.contains("heavy");
     let is_italic = lower.contains("italic") || lower.contains("oblique");
     let is_serif = descriptor_flags & 2 != 0; // PDF flag bit 2 = Serif
-    let default_name = if is_serif {
+    if is_serif {
         match (is_bold, is_italic) {
             (true, true) => "NimbusRoman-BoldItalic",
             (true, false) => "NimbusRoman-Bold",
@@ -1179,13 +1193,7 @@ fn default_substitute(
             (false, true) => "NimbusSans-Italic",
             (false, false) => "NimbusSans-Regular",
         }
-    };
-    if let Some(provider) = font_provider
-        && let Some(data) = provider(default_name)
-    {
-        return Some(data);
     }
-    embedded_font(default_name)
 }
 
 /// Returns true if `name` (after normalizing commas to hyphens) is one of the
@@ -1897,13 +1905,14 @@ fn own_cid_font(
         w2,
     } = metrics;
     let (clean_name, font_file_name) = substitute_names(base_font);
-    let font_data = font_provider
-        .and_then(|provider| provider(font_file_name))
-        .or_else(|| embedded_font(font_file_name))
-        .or_else(|| default_substitute(clean_name, descriptor_flags, font_provider))
-        .ok_or_else(|| PdfError::Other(format!("no substitute for font '{clean_name}'")))?;
-    let font =
-        parse_type1(&font_data).map_err(|e| PdfError::Other(format!("Type1 parse error: {e}")))?;
+    let font = stand_in_font(
+        clean_name,
+        font_file_name,
+        descriptor_flags,
+        font_provider,
+        false,
+    )
+    .ok_or_else(|| PdfError::Other(format!("no substitute for font '{clean_name}'")))?;
     let fm = font.font_matrix;
     let font_matrix = Matrix::new(fm[0], fm[1], fm[2], fm[3], fm[4], fm[5]);
 
