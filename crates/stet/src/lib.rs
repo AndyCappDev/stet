@@ -904,6 +904,9 @@ impl OutputDevice for PageSizeRecorder {
     fn page_size(&self) -> (u32, u32) {
         (self.width, self.height)
     }
+    fn reads_display_list(&self) -> bool {
+        false
+    }
     fn replay_and_show(&mut self, _list: DisplayList, _output_path: &str) -> Result<(), String> {
         if let Ok(mut pages) = self.pages.lock() {
             pages.push(PageDims {
