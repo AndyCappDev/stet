@@ -44,9 +44,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   meaning. Each permit takes a folder or one file, may be repeated, and
   implies `--safer`; one naming a folder that does not exist stops the
   command with an error. stet's own output (`-o`) is unaffected.
+- **`keep_partial_pages()` keeps what a job painted before an error.**
+  With `Interpreter::builder().keep_partial_pages()`, `render`,
+  `render_to_display_list` and `render_to_pdf` return the pages shown
+  before the error plus the one being painted when it happened, instead of
+  failing, and `Interpreter::last_error()` says what the error was. A job
+  stopped by its timeout ends the same way, with what it painted. Off by
+  default. Contributed by @nielsbosma (#22).
 
 ### Changed
 
+- **A failed render names its PostScript error.** `render`,
+  `render_to_display_list` and `render_to_pdf` reported any error a
+  program raised as `PostScript error: stop`. They now give its name and
+  the command that raised it, such as `PostScript error: undefined in
+  nosuchoperator`. Code that matched the text `stop` needs updating.
+  Contributed by @nielsbosma (#22).
 - **`stet_core::file_store::FileHandle::StringSource`'s `data` is an
   `Arc<Vec<u8>>`**, so the scanner can hold a source's bytes while it
   allocates (see Fixed); `FileStore::shared_remaining` hands out that
