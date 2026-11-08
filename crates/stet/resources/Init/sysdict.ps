@@ -515,7 +515,7 @@ true setglobal
         mark exch
         % A key naming a folder is not looked for (see .plainfilename).
         dup =string cvs //.plainfilename exec not {
-            exch pop /findresource /undefinedresource .error
+            exch pop Category /findresource /undefinedresource .error
         } if
         (/) [ResourceDir () [5 index =string cvs ResourceExtension] =string join] =string join
         dup status {4 {pop} repeat}

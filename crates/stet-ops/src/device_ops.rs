@@ -230,7 +230,12 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
             ];
             let proc_entity = crate::vm_ops::alloc_array_from(ctx, &proc_elements);
             let proc_obj = PsObject::procedure(proc_entity, proc_elements.len() as u32);
-            let dev_entity = if ctx.exec_sync(proc_obj).is_ok() {
+            // A device with no resource falls back to the request alone, so
+            // whatever `findresource` leaves when it fails (its key and
+            // category) is dropped: the program's stack is as it was.
+            let depth = ctx.o_stack.len();
+            let found = ctx.exec_sync(proc_obj).is_ok() && ctx.o_stack.len() > depth;
+            let dev_entity = if found {
                 ctx.o_stack.pop().ok().and_then(|obj| {
                     if let PsValue::Dict(e) = obj.value {
                         Some(e)
@@ -241,6 +246,7 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
             } else {
                 None
             };
+            ctx.o_stack.truncate(depth);
             if let Some(dev_entity) = dev_entity {
                 // Copy device resource dict, merge request entries on top
                 let new_pd = alloc_page_device(ctx);

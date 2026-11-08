@@ -49,3 +49,19 @@ fn a_missing_instance_of_an_implicit_category_leaves_key_and_category() {
 fn a_found_procset_is_still_one_object() {
     assert_eq!(leaves("/CIDInit /ProcSet findresource", 1), [0, 0, 255]);
 }
+
+#[test]
+fn a_key_naming_a_folder_leaves_key_and_category() {
+    // Refused before any file is looked for, the same way as a missing one.
+    assert_eq!(leaves("(a/b) /ProcSet findresource", 2), [0, 0, 255]);
+}
+
+#[test]
+fn an_unknown_output_device_leaves_the_stack_alone() {
+    // setpagedevice looks the device up with findresource and falls back to the request alone;
+    // the failed lookup's operands do not reach the program.
+    assert_eq!(
+        leaves("<< /OutputDevice /nosuchdev >> setpagedevice", 0),
+        [0, 0, 255]
+    );
+}

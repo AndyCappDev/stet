@@ -109,6 +109,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `findresource` that fails leaves its key and category on the
+  operand stack**, as the PLRM has every failing operator do, and as
+  Ghostscript does. stet left only the key (nothing for `/Category`), so
+  the common probe `{ /OCProcSet /ProcSet findresource } stopped { pop
+  pop … }`, which Intergraph's map plots and other prologs use, stopped
+  at `stackunderflow`. A program that popped one object after a failed
+  `findresource` now needs to pop two, as it already does under
+  Ghostscript. `findencoding` still leaves just the key, as in
+  Ghostscript, and now reports the error as its own. Contributed by
+  @nielsbosma (#28).
+- **`setpagedevice` with an `/OutputDevice` stet has no resource for no
+  longer leaves stray objects on the operand stack.** It falls back to
+  the request alone, as before.
 - **`SubFileDecode` finds its end-of-data marker wherever it falls.**
   The filter reads its source 4096 bytes at a time and forgot a partial
   match between reads, so a marker that crossed that boundary was missed
