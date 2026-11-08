@@ -1,0 +1,27 @@
+%!PS-Adobe-3.0 Resource-ProcSet
+%%Title: ColorRendering
+%%Creator: stet
+%%EndComments
+
+% The ColorRendering ProcSet that findcolorrendering consults (PLRM 3rd ed., section 7.1.3 and the
+% findcolorrendering operator). Programs that select a CRD (Illustrator's and CorelDRAW's EPS prologs) copy it,
+% replace GetSubstituteCRD and define it again, so findcolorrendering looks it up on every call.
+
+<<
+    % - GetPageDeviceName name: the page device's PageDeviceName, or /none.
+    /GetPageDeviceName {
+        currentpagedevice dup /PageDeviceName known
+            { /PageDeviceName get dup null eq { pop /none } if }
+            { pop /none }
+        ifelse
+    } bind
+    % - GetHalftoneName name: the current halftone's HalftoneName, or /none.
+    /GetHalftoneName {
+        currenthalftone dup /HalftoneName known
+            { /HalftoneName get }
+            { pop /none }
+        ifelse
+    } bind
+    % intent GetSubstituteCRD name: the CRD to use when none is named for this intent, device and halftone.
+    /GetSubstituteCRD { pop /DefaultColorRendering } bind
+>>

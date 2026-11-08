@@ -59,6 +59,15 @@ const ENTRIES: &[(&str, &[u8])] = &[
         "ProcSet/FontSetInit.ps",
         include_bytes!("../resources/ProcSet/FontSetInit.ps"),
     ),
+    (
+        "ProcSet/ColorRendering.ps",
+        include_bytes!("../resources/ProcSet/ColorRendering.ps"),
+    ),
+    // ColorRendering
+    (
+        "ColorRendering/DefaultColorRendering.ps",
+        include_bytes!("../resources/ColorRendering/DefaultColorRendering.ps"),
+    ),
     // CMap
     (
         "CMap/Identity-H.ps",
