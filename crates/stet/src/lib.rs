@@ -71,19 +71,31 @@
 //! PostScript is a programming language with file access: by default a
 //! program can read, write, delete and rename files with `file`, `run`,
 //! `deletefile` and `renamefile`, as it can in Ghostscript with
-//! `-dNOSAFER`. A program that renders documents it did not write calls
-//! [`deny_host_access`] once, before the first one. It holds for the rest
-//! of the process and keeps every document, PostScript or PDF, from the
-//! machine's files, installed fonts and color profiles.
+//! `-dNOSAFER`. There are two ways to restrict that.
+//!
+//! **[`InterpreterBuilder::safer`]** is Ghostscript's `-dSAFER`, for one
+//! interpreter. Programs reach stet's own resources and installed fonts,
+//! and only what [`Interpreter::permit_read`],
+//! [`permit_write`](Interpreter::permit_write) and
+//! [`permit_control`](Interpreter::permit_control) allow; any other file
+//! is `invalidfileaccess`, whether or not it exists. Fonts, CMaps and
+//! color profiles stet finds itself are read as before, so pages render
+//! the same.
 //!
 //! ```no_run
-//! stet::deny_host_access();
-//! let mut interp = stet::Interpreter::new();
+//! let mut interp = stet::Interpreter::builder().safer().build();
+//! interp.permit_read("prologs")?; // a folder of the job's own files
 //! let result = interp.render(b"(/etc/passwd) (r) file", 72.0);
 //! assert!(result.is_err()); // invalidfileaccess
+//! # Ok::<(), std::io::Error>(())
 //! ```
 //!
-//! It limits what a document can reach, not how long it runs or how much
+//! **[`deny_host_access`]** goes further, for the whole process: called
+//! once, before the first document, it keeps every document, PostScript or
+//! PDF, from the machine's files, installed fonts and color profiles, so
+//! output is the same on every machine. No permit lifts it.
+//!
+//! Either limits what a document can reach, not how long it runs or how much
 //! memory it takes. For those, set [`PsContext::set_timeout`] before each
 //! job and [`PsContext::max_local_vm`], through [`Interpreter::context`].
 //!
@@ -118,6 +130,7 @@ pub use diagnostics::{ExecWarning, ExecWarningKind};
 
 // Re-exports for power users
 pub use stet_core::context::Context as PsContext;
+pub use stet_core::file_access::{Access, FileAccess};
 pub use stet_engine::eval::parse_and_exec as ps_exec;
 pub use stet_fonts::host::{deny_host_access, host_access_allowed};
 pub use stet_graphics::device::{ShownGlyph, TextExtraction, TextRunParams, UnicodeSource};
@@ -191,6 +204,7 @@ pub struct InterpreterBuilder {
     suppress_output: bool,
     text_extraction: TextExtraction,
     default_rendering_intent: RenderingIntent,
+    file_access: FileAccess,
     #[cfg(feature = "render")]
     page_background: PageBackground,
 }
@@ -211,6 +225,7 @@ impl Interpreter {
             suppress_output: false,
             text_extraction: TextExtraction::Off,
             default_rendering_intent: RenderingIntent::RelativeColorimetric,
+            file_access: FileAccess::Full,
             #[cfg(feature = "render")]
             page_background: PageBackground::White,
         }
@@ -425,6 +440,37 @@ impl Interpreter {
     /// Access the underlying Context for power-user operations.
     pub fn context(&mut self) -> &mut Context {
         &mut self.ctx
+    }
+
+    /// Let programs read `path` with `file` and `run`: everything inside
+    /// it if it is a folder, only itself if it is a file. Restricts them
+    /// to what is permitted, as [`InterpreterBuilder::safer`] does.
+    ///
+    /// An error when the folder `path` names, or would be in, does not
+    /// exist: a mistyped path would otherwise permit nothing.
+    pub fn permit_read(&mut self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        self.ctx.permit(Access::Read, path)
+    }
+
+    /// Let programs write `path` with `file` (`(w)` or `(a)`). The file
+    /// need not exist yet. Otherwise as [`Self::permit_read`].
+    pub fn permit_write(&mut self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        self.ctx.permit(Access::Write, path)
+    }
+
+    /// Let programs delete and rename `path` with `deletefile` and
+    /// `renamefile`. Otherwise as [`Self::permit_read`].
+    pub fn permit_control(&mut self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        self.ctx.permit(Access::Control, path)
+    }
+
+    /// [`Self::permit_read`], [`Self::permit_write`] and
+    /// [`Self::permit_control`] at once.
+    pub fn permit_all(&mut self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        let path = path.as_ref();
+        self.permit_read(path)?;
+        self.permit_write(path)?;
+        self.permit_control(path)
     }
 
     /// Record a dropped-final-page warning if the job left marks unpainted.
@@ -666,10 +712,33 @@ impl InterpreterBuilder {
         self
     }
 
+    /// How much of the host's file system programs reach with `file`,
+    /// `run`, `deletefile`, `renamefile`, `status` and `filenameforall`.
+    ///
+    /// [`FileAccess::Full`], the default, is the whole file system, as in
+    /// Ghostscript with `-dNOSAFER`. [`FileAccess::Safer`] is Ghostscript's
+    /// `-dSAFER`: stet's own resources and installed fonts, and what
+    /// [`Interpreter::permit_read`], [`permit_write`](Interpreter::permit_write)
+    /// and [`permit_control`](Interpreter::permit_control) allow. Fonts,
+    /// CMaps and color profiles stet finds itself are read as under `Full`,
+    /// so pages render the same. See [`stet_core::file_access`].
+    pub fn file_access(mut self, access: FileAccess) -> Self {
+        self.file_access = access;
+        self
+    }
+
+    /// [`file_access(FileAccess::Safer)`](Self::file_access): for documents
+    /// the program did not write.
+    pub fn safer(self) -> Self {
+        self.file_access(FileAccess::Safer)
+    }
+
     /// Build the interpreter.
     pub fn build(self) -> Interpreter {
         let mut ctx = init::create_initialized_context(self.use_icc, self.suppress_output)
             .expect("interpreter initialization failed");
+        // After initialization, whose scripts are stet's own.
+        ctx.file_access = self.file_access;
         ctx.text_extraction = self.text_extraction;
         ctx.set_default_rendering_intent(self.default_rendering_intent);
         Interpreter {

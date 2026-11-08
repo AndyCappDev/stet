@@ -76,6 +76,12 @@ fn denied_host_access_refuses_files_and_runs() {
     interp
         .exec(format!("({name}) status {{ 1 0 div }} if").as_bytes())
         .expect("status finds no host file");
+    // No permit lifts the denial.
+    let mut permitted = Interpreter::builder().suppress_output().build();
+    permitted.permit_all(&dir).unwrap();
+    permitted
+        .exec(format!("{{ ({name}) (r) file }} stopped not {{ 1 0 div }} if").as_bytes())
+        .expect("a permit does not lift deny_host_access");
     // %stdin reads as empty, %stdout swallows.
     interp
         .exec(b"(%stdin) (r) file read { 1 0 div } if (%stdout) (w) file (x) writestring")

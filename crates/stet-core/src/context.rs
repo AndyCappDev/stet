@@ -318,6 +318,14 @@ pub struct Context {
     pub category_registry: EntityId,
     pub resource_base_path: Option<String>,
 
+    /// How much of the host's file system PostScript's file operators
+    /// reach: see [`crate::file_access`]. [`Self::permit`] sets it to
+    /// `Safer`.
+    pub file_access: crate::file_access::FileAccess,
+    /// What a program may read, write and control under
+    /// [`FileAccess::Safer`](crate::file_access::FileAccess::Safer).
+    pub file_permits: crate::file_access::FilePermits,
+
     // Parameter system
     pub user_params: EntityId,
     pub system_params: EntityId,
@@ -731,6 +739,31 @@ const DEFAULT_MAX_LOCAL_VM: usize = {
 };
 
 impl Context {
+    /// Permit a program `access` to `path` (a folder and what is inside it,
+    /// or one file), and restrict it to what is permitted:
+    /// [`file_access`](Self::file_access) becomes `Safer`. See
+    /// [`FilePermits::add`](crate::file_access::FilePermits::add) for the
+    /// error.
+    pub fn permit(
+        &mut self,
+        access: crate::file_access::Access,
+        path: impl AsRef<std::path::Path>,
+    ) -> std::io::Result<()> {
+        self.file_permits.add(access, path)?;
+        self.file_access = crate::file_access::FileAccess::Safer;
+        Ok(())
+    }
+
+    /// The rule the file operators apply to host files: see
+    /// [`crate::file_access`].
+    pub fn host_policy(&self) -> crate::file_access::HostPolicy<'_> {
+        crate::file_access::HostPolicy::new(
+            self.file_access,
+            &self.file_permits,
+            self.resource_base_path.as_deref(),
+        )
+    }
+
     /// Stop interpreting once `limit` has elapsed from now.
     ///
     /// Raises [`PsError::Timeout`] from the eval loop when the deadline
@@ -1343,6 +1376,8 @@ impl Context {
             local_resources,
             category_registry,
             resource_base_path: None,
+            file_access: crate::file_access::FileAccess::Full,
+            file_permits: crate::file_access::FilePermits::new(),
             user_params,
             system_params,
             internaldict,

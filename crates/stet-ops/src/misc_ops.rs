@@ -249,7 +249,12 @@ pub fn op_run(ctx: &mut Context) -> Result<(), PsError> {
 
     let resolved = crate::file_ops::resolve_filename(ctx, &filename);
 
-    if !stet_fonts::host::host_access_allowed() {
+    // Before the disk is touched, so the refusal does not depend on
+    // whether the file exists.
+    if !ctx.host_policy().allows(
+        std::path::Path::new(&resolved),
+        stet_core::file_access::Access::Read,
+    ) {
         return Err(PsError::InvalidFileAccess);
     }
     let source = std::fs::read(&resolved).map_err(|_| PsError::UndefinedFilename)?;
@@ -488,6 +493,10 @@ pub fn op_loadbinaryfontfile(ctx: &mut Context) -> Result<(), PsError> {
     } else if !path_str
         .strip_prefix(FONT_FOLDER)
         .is_some_and(stet_core::font_loader::is_plain_file_name)
+        || !ctx.host_policy().allows(
+            std::path::Path::new(path_str.as_ref()),
+            stet_core::file_access::Access::Read,
+        )
     {
         false
     } else {

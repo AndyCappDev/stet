@@ -9,6 +9,7 @@
 
 use crate::context::Context;
 use crate::dict::DictKey;
+use crate::file_access::{Access, HostPolicy};
 use crate::object::{PsObject, PsValue};
 
 // Re-export font substitution data from stet-fonts for backward compatibility.
@@ -32,6 +33,17 @@ pub fn load_font_file(
     resource_path: &str,
     files: &crate::file_store::FileStore,
 ) -> Option<Vec<u8>> {
+    load_font_file_with(font_name, resource_path, files, &HostPolicy::full())
+}
+
+/// [`load_font_file`], reading from disk only a file `policy` lets a
+/// program read.
+pub fn load_font_file_with(
+    font_name: &str,
+    resource_path: &str,
+    files: &crate::file_store::FileStore,
+    policy: &HostPolicy<'_>,
+) -> Option<Vec<u8>> {
     if !is_plain_file_name(font_name) {
         return None;
     }
@@ -48,12 +60,19 @@ pub fn load_font_file(
     }
 
     // Fall back to disk I/O
-    if let Ok(data) = stet_fonts::host::read(&direct_path) {
+    let read = |path: &str| {
+        if policy.allows(std::path::Path::new(path), Access::Read) {
+            stet_fonts::host::read(path).ok()
+        } else {
+            None
+        }
+    };
+    if let Some(data) = read(&direct_path) {
         return Some(data);
     }
     if let Some(urw_name) = find_substitution(font_name) {
         let sub_path = format!("{}/{}.t1", resource_path, urw_name);
-        if let Ok(data) = stet_fonts::host::read(&sub_path) {
+        if let Some(data) = read(&sub_path) {
             return Some(data);
         }
     }
@@ -234,7 +253,7 @@ pub fn find_font(ctx: &mut Context, name_bytes: &[u8]) -> Result<PsObject, Strin
         .clone()
         .ok_or_else(|| format!("Font '{}' not found and no resource path set", font_name))?;
 
-    let font_data = load_font_file(&font_name, &resource_path, &ctx.files)
+    let font_data = load_font_file_with(&font_name, &resource_path, &ctx.files, &ctx.host_policy())
         .ok_or_else(|| format!("Font '{}' not found in {}", font_name, resource_path))?;
 
     let font_obj = load_type1_font(ctx, &font_data)?;

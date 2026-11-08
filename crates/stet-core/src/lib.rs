@@ -52,6 +52,7 @@ pub mod dual_string_store;
 pub mod entity_table;
 pub mod eps;
 pub mod error;
+pub mod file_access;
 pub mod file_store;
 pub mod font_loader;
 pub mod font_snapshot;

@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::io::{self, BufReader, IsTerminal, Read, Seek, Write};
 use std::sync::Arc;
 
+use crate::file_access::{Access, HostPolicy};
 use crate::object::{EntityId, PsObject};
 
 /// State for a RunLengthDecode filter.
@@ -344,7 +345,24 @@ impl FileStore {
     /// Open a file, returning its EntityId.
     ///
     /// For read mode, checks the embedded file map first (for WASM builds).
+    /// A host file is opened unless
+    /// [`deny_host_access`](stet_fonts::host::deny_host_access) was called;
+    /// [`Self::open_with`] applies a [`HostPolicy`] as well.
     pub fn open(&mut self, name: &str, mode: &str) -> io::Result<EntityId> {
+        self.open_with(name, mode, &HostPolicy::full())
+    }
+
+    /// [`Self::open`], opening a host file only where `policy` allows the
+    /// access `mode` needs: reading for `r`, writing for `w` and `a`, both
+    /// for `r+`. A refusal is [`io::ErrorKind::PermissionDenied`], whether
+    /// or not the file exists. Special files and embedded resources are not
+    /// host files.
+    pub fn open_with(
+        &mut self,
+        name: &str,
+        mode: &str,
+        policy: &HostPolicy<'_>,
+    ) -> io::Result<EntityId> {
         // Handle special names
         match name {
             "%stdin" => {
@@ -422,7 +440,15 @@ impl FileStore {
             return Ok(id);
         }
 
-        if !stet_fonts::host::host_access_allowed() {
+        let path = std::path::Path::new(name);
+        let allowed = match mode {
+            "r" => policy.allows(path, Access::Read),
+            "w" | "a" => policy.allows(path, Access::Write),
+            "r+" => policy.allows(path, Access::Read) && policy.allows(path, Access::Write),
+            // Not a mode: refused as one below.
+            _ => true,
+        };
+        if !allowed {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "host access denied",

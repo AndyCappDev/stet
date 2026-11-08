@@ -22,6 +22,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It cannot be undone. In the PDF reader it switches every document's
   `set_host_files` off, and `host_files()` reports it. Contributed by
   @nielsbosma (#21).
+- **`FileAccess::Safer` restricts one interpreter's file access the way
+  Ghostscript's `-dSAFER` does, without changing how pages render.**
+  `Interpreter::builder().safer()` (or `.file_access(FileAccess::Safer)`)
+  lets programs read only stet's resource folder, the installed fonts stet
+  has found, and what `Interpreter::permit_read`, `permit_write`,
+  `permit_control` and `permit_all` allow, each a folder and what is
+  inside it or one file, like Ghostscript's `--permit-file-read`,
+  `--permit-file-write`, `--permit-file-control` and `--permit-file-all`.
+  Any permit turns `Safer` on. Anything else is `invalidfileaccess`,
+  whether or not it exists, and `status` and `filenameforall` do not see
+  it. Symbolic links and `..` are resolved before a path is judged.
+  `renamefile` needs control on both names and write on the new one.
+  Unlike `deny_host_access()`, fonts, CMaps and colour profiles stet finds
+  itself are read as before, and `%stdin`, `%stdout` and `%stderr` work.
+  `stet_core::file_access` holds the rule; `Context` carries it as
+  `file_access` and `file_permits`, with `Context::permit`.
 
 ### Changed
 
