@@ -1036,11 +1036,23 @@ mod tests {
     #[test]
     fn test_string_end_of_line_is_one_newline() {
         // PLRM 3.2.2: CR, LF and CR LF inside a string are each one newline; LF CR is two.
-        assert_eq!(tokenize_all(b"(a\rb)"), vec![Token::String(b"a\nb".to_vec())]);
-        assert_eq!(tokenize_all(b"(a\r\nb)"), vec![Token::String(b"a\nb".to_vec())]);
-        assert_eq!(tokenize_all(b"(a\n\rb)"), vec![Token::String(b"a\n\nb".to_vec())]);
+        assert_eq!(
+            tokenize_all(b"(a\rb)"),
+            vec![Token::String(b"a\nb".to_vec())]
+        );
+        assert_eq!(
+            tokenize_all(b"(a\r\nb)"),
+            vec![Token::String(b"a\nb".to_vec())]
+        );
+        assert_eq!(
+            tokenize_all(b"(a\n\rb)"),
+            vec![Token::String(b"a\n\nb".to_vec())]
+        );
         // A backslash before the end-of-line still continues the line.
-        assert_eq!(tokenize_all(b"(a\\\r\nb)"), vec![Token::String(b"ab".to_vec())]);
+        assert_eq!(
+            tokenize_all(b"(a\\\r\nb)"),
+            vec![Token::String(b"ab".to_vec())]
+        );
     }
 
     #[test]
