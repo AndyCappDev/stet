@@ -3717,6 +3717,7 @@ fn register_shading_icc_profiles(list: &DisplayList, cache: &mut IccCache) {
     let mut seen = HashSet::new();
     scan(list.elements(), &mut seen, cache);
 }
+
 /// An image's samples as premultiplied RGBA, `width` x `height` x 4 bytes,
 /// as the renderer paints them: colour converted through `icc` (the device
 /// formulas without one), then the pixels the colour key (`/MaskColor`)

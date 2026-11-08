@@ -134,6 +134,12 @@ let rgba = stet::render_region_prepared(
 );
 ```
 
+The region is composited onto white paper. To leave its unpainted area
+clear instead, for a region placed over other content, render it with
+`stet_render::render_region_with_background` and
+`PageBackground::Transparent`: the result is straight-alpha RGBA, as from
+`render_to_rgba_with_background`. It takes the display list unprepared.
+
 ## PDF Reader
 
 `stet-pdf-reader` is a separate crate that parses PDF files and converts

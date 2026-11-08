@@ -51,6 +51,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failing, and `Interpreter::last_error()` says what the error was. A job
   stopped by its timeout ends the same way, with what it painted. Off by
   default. Contributed by @nielsbosma (#22).
+- **`stet_render::render_region_with_background` renders a region
+  without the white paper.** With `PageBackground::Transparent` the
+  unpainted area stays clear and the result is straight-alpha RGBA, as for
+  a whole page from `render_to_rgba_with_background`; with `White` it is
+  `render_region`, whose output is unchanged. `image_samples_to_rgba`
+  gives a display-list image's samples as premultiplied RGBA, colour
+  converted and its colour key applied, for a consumer that takes images
+  out of a display list. Contributed by @nielsbosma (#23).
 
 ### Changed
 
