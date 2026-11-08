@@ -264,6 +264,11 @@ pub struct FileEntry {
     /// as `EntityMeta::created_after_save` is for the other composites;
     /// 0 when no save was outstanding.
     pub created_after_save: u32,
+    /// Bytes put back on a disk file or `%stdin`, read again before the
+    /// file's own, last put back first (see [`FileStore::putback_bytes`]).
+    /// A file held in memory moves its position back instead, and a filter
+    /// keeps its own.
+    pushback: Vec<u8>,
 }
 
 /// Storage for all open PostScript files.
@@ -304,6 +309,7 @@ impl FileStore {
             pending_newlines: 0,
             global: true,
             created_after_save: 0,
+            pushback: Vec::new(),
         });
         store.files.push(FileEntry {
             handle: FileHandle::Stdout,
@@ -313,6 +319,7 @@ impl FileStore {
             pending_newlines: 0,
             global: true,
             created_after_save: 0,
+            pushback: Vec::new(),
         });
         store.files.push(FileEntry {
             handle: FileHandle::Stderr,
@@ -322,6 +329,7 @@ impl FileStore {
             pending_newlines: 0,
             global: true,
             created_after_save: 0,
+            pushback: Vec::new(),
         });
         store
     }
@@ -441,6 +449,7 @@ impl FileStore {
                 pending_newlines: 0,
                 global: false,
                 created_after_save: 0,
+                pushback: Vec::new(),
             });
             return Ok(id);
         }
@@ -482,6 +491,7 @@ impl FileStore {
             pending_newlines: 0,
             global: false,
             created_after_save: 0,
+            pushback: Vec::new(),
         });
         Ok(id)
     }
@@ -506,6 +516,7 @@ impl FileStore {
             pending_newlines: 0,
             global: false,
             created_after_save: 0,
+            pushback: Vec::new(),
         });
         id
     }
@@ -535,6 +546,7 @@ impl FileStore {
             pending_newlines: 0,
             global: false,
             created_after_save: 0,
+            pushback: Vec::new(),
         });
         id
     }
@@ -559,6 +571,7 @@ impl FileStore {
             pending_newlines: 0,
             global: false,
             created_after_save: 0,
+            pushback: Vec::new(),
         });
         id
     }
@@ -577,6 +590,7 @@ impl FileStore {
             pending_newlines: 0,
             global: false,
             created_after_save: 0,
+            pushback: Vec::new(),
         });
         id
     }
@@ -597,6 +611,7 @@ impl FileStore {
             pending_newlines: 0,
             global: false,
             created_after_save: 0,
+            pushback: Vec::new(),
         });
         id
     }
@@ -790,6 +805,7 @@ impl FileStore {
             }
             _ => {
                 entry.handle = FileHandle::Closed;
+                entry.pushback.clear();
                 Ok(())
             }
         }
@@ -819,6 +835,11 @@ impl FileStore {
     /// Read one byte from a file. Returns None on EOF.
     pub fn read_byte(&mut self, entity: EntityId) -> io::Result<Option<u8>> {
         let entry = &mut self.files[entity.raw_index()];
+        if matches!(entry.handle, FileHandle::Real(_) | FileHandle::Stdin)
+            && let Some(b) = entry.pushback.pop()
+        {
+            return Ok(Some(b));
+        }
         match &mut entry.handle {
             FileHandle::Real(f) => {
                 let mut buf = [0u8; 1];
@@ -904,6 +925,20 @@ impl FileStore {
     /// Read into a buffer. Returns number of bytes actually read.
     pub fn read_into(&mut self, entity: EntityId, buf: &mut [u8]) -> io::Result<usize> {
         let entry = &mut self.files[entity.raw_index()];
+        if matches!(entry.handle, FileHandle::Real(_) | FileHandle::Stdin)
+            && !entry.pushback.is_empty()
+        {
+            // What was put back comes first, last put back first; the rest
+            // is read on the next call.
+            let mut n = 0;
+            while n < buf.len()
+                && let Some(b) = entry.pushback.pop()
+            {
+                buf[n] = b;
+                n += 1;
+            }
+            return Ok(n);
+        }
         match &mut entry.handle {
             FileHandle::Real(f) => f.read(buf),
             FileHandle::Stdin => {
@@ -1352,7 +1387,9 @@ impl FileStore {
     pub fn position(&mut self, entity: EntityId) -> io::Result<u64> {
         let entry = &mut self.files[entity.raw_index()];
         match &mut entry.handle {
-            FileHandle::Real(f) => f.stream_position(),
+            FileHandle::Real(f) => Ok(f
+                .stream_position()?
+                .saturating_sub(entry.pushback.len() as u64)),
             FileHandle::StringSource { pos, .. } => Ok(*pos as u64),
             FileHandle::Filter(state) => Ok(state.bytes_read),
             _ => Err(io::Error::other("not seekable")),
@@ -1365,6 +1402,7 @@ impl FileStore {
         match &mut entry.handle {
             FileHandle::Real(f) => {
                 f.seek(io::SeekFrom::Start(pos))?;
+                entry.pushback.clear();
                 Ok(())
             }
             FileHandle::StringSource { data, pos: p } => {
@@ -1384,6 +1422,7 @@ impl FileStore {
                 if entry.mode.starts_with('r') {
                     // Read file: consume remaining data and close (PLRM)
                     entry.handle = FileHandle::Closed;
+                    entry.pushback.clear();
                 } else if let FileHandle::Real(f) = &mut entry.handle {
                     f.get_mut().flush()?;
                 }
@@ -1461,11 +1500,17 @@ impl FileStore {
             FileHandle::StringSource { pos, .. } => {
                 *pos = pos.saturating_sub(bytes.len());
             }
-            FileHandle::Real(f) => {
-                // Seek backwards to put bytes back
-                let _ = f.seek(std::io::SeekFrom::Current(-(bytes.len() as i64)));
+            // Kept rather than sought back over: seeking fails on a pipe or a
+            // FIFO, and `%stdin` cannot seek at all, so the bytes were lost
+            // there. Reading takes them before the file's own.
+            FileHandle::Real(_) | FileHandle::Stdin => {
+                entry.pushback.extend(bytes.iter().rev());
             }
-            _ => {}
+            // Nothing is read from these, so nothing comes back to them.
+            FileHandle::Stdout
+            | FileHandle::Stderr
+            | FileHandle::Closed
+            | FileHandle::PendingProc { .. } => {}
         }
     }
 
@@ -1493,7 +1538,7 @@ impl FileStore {
                 if let Ok(cur) = f.stream_position() {
                     if let Ok(end) = f.seek(io::SeekFrom::End(0)) {
                         let _ = f.seek(io::SeekFrom::Start(cur));
-                        let remaining = end.saturating_sub(cur);
+                        let remaining = end.saturating_sub(cur) + entry.pushback.len() as u64;
                         if remaining == 0 {
                             -1 // at EOF
                         } else {

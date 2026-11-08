@@ -137,6 +137,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Reading from `%stdin` or a pipe no longer loses a byte after a token
+  or a line.** The scanner reads one byte past a token to find its end,
+  and `readline` one past a CR to see whether an LF follows. Each then
+  puts that byte back, which worked for a disk file by seeking back, but
+  `%stdin` cannot seek and seeking a pipe fails, so the byte was
+  dropped. `abc/def` read from standard input scanned as `abc` and `def`
+  instead of `abc` and `/def`, and `readline` gave `(d)` for `cd` after a
+  lone CR. Bytes put back on a disk file or `%stdin` are now kept and
+  read again first, and `fileposition` and `bytesavailable` count them.
 - **`break` is no longer defined, so Illustrator 3 to 5.5 EPS files
   finish.** Their pattern prolog, Adobe_pattern_AI3, leaves a loop by
   calling `break` inside `stopped`, relying on it being undefined, as it
