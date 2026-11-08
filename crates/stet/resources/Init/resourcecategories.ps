@@ -78,7 +78,9 @@ systemdict begin
     % key .cidfontsubstitute key' -- the substitute's name for a CIDFont that
     % is not present and has one, else key.
     /.cidfontsubstitute {
-        dup /CIDFont resourcestatus { pop pop } {
+        % Whether the CIDFont itself is there: the category's ResourceStatus
+        % also answers for names that have a substitute.
+        dup /CIDFont /Category findresource begin .GenericResourceStatus end { pop pop } {
             .CIDFontOrderings 1 index known {
                 .CIDFontOrderings 1 index get
                 .CIDFontSubstitutes 1 index known {
@@ -136,6 +138,20 @@ end
 /CIDFont /Category findresource begin
     /.GenericFindResource /FindResource load def
     /FindResource { .cidfontsubstitute .GenericFindResource } bind def
+    % A CIDFont that is not there but has a substitute is there to be
+    % loaded (status 2): programs check resourcestatus before findresource.
+    /.GenericResourceStatus /ResourceStatus load def
+    /ResourceStatus {
+        dup .GenericResourceStatus { 3 -1 roll pop true } {
+            .CIDFontOrderings 1 index known {
+                .CIDFontOrderings exch get
+                .CIDFontSubstitutes 1 index known {
+                    .CIDFontSubstitutes exch get .GenericResourceStatus
+                    { pop pop 2 -1 true } { false } ifelse
+                } { pop false } ifelse
+            } { pop false } ifelse
+        } ifelse
+    } bind def
 end
 
 % Font Set Category

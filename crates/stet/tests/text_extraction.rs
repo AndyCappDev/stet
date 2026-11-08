@@ -864,3 +864,70 @@ fn glyphshow_of_a_cid_composes_one_font() {
     let glyphs: usize = runs.iter().map(|r| r.glyphs.len()).sum();
     assert_eq!(glyphs, 201, "{runs:#?}");
 }
+
+#[test]
+fn a_missing_cidfont_is_drawn_with_its_collections_substitute() {
+    // SubJ stands in for every Japan1 CIDFont. Ryumin-Light is not there:
+    // resourcestatus says it can be loaded (status 2), as a program checks
+    // before findresource, and Ryumin-Light-Identity-H composes from SubJ.
+    let ps = r#"%!PS
+/SubJ <<
+  /CIDFontType 0 /CIDFontName /SubJ /FontType 9
+  /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 4 >>
+  /FontMatrix [0.001 0 0 0.001 0 0] /FontBBox [0 -120 1000 880]
+  /CIDCount 65536 /DW 1000
+  /CharStrings << 3851 <1C03E80E> 3852 <1C03E80E> >>
+>> /CIDFont defineresource pop
+.CIDFontSubstitutes begin /Japan1 /SubJ def end
+/Ryumin-Light /CIDFont resourcestatus { pop 2 ne { 1 0 div } if } { 1 0 div } ifelse
+/NoSuchFont /CIDFont resourcestatus { 1 0 div } if
+/Ryumin-Light-Identity-H /Font resourcestatus { pop pop } { 1 0 div } ifelse
+/Ryumin-Light-Identity-H findfont 12 scalefont setfont
+72 700 moveto <0F0B0F0C> show
+showpage
+"#;
+    let runs = runs_of(ps);
+    assert_eq!(runs.len(), 1, "{runs:#?}");
+    assert_eq!(glyph_texts(&runs[0]), ["諭", "輸"]);
+}
+
+#[test]
+fn a_host_program_supplies_resource_files_stet_does_not_ship() {
+    static CMAP: &[u8] = b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap \
+        /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 4 >> def \
+        /CMapName /HostTest-H def /CMapType 1 def \
+        1 begincodespacerange <00> <FF> endcodespacerange \
+        1 begincidrange <41> <42> 3851 endcidrange \
+        endcmap CMapName currentdict /CMap defineresource pop end end";
+    let ps = r#"%!PS
+/SubJ <<
+  /CIDFontType 0 /CIDFontName /SubJ /FontType 9
+  /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 4 >>
+  /FontMatrix [0.001 0 0 0.001 0 0] /FontBBox [0 -120 1000 880]
+  /CIDCount 65536 /DW 1000
+  /CharStrings << 3851 <1C03E80E> 3852 <1C03E80E> >>
+>> /CIDFont defineresource pop
+/HostTest-H /CMap resourcestatus { pop 2 ne { 1 0 div } if } { 1 0 div } ifelse
+/T /HostTest-H [/SubJ /CIDFont findresource] composefont 12 scalefont setfont
+72 700 moveto (AB) show
+showpage
+"#;
+    let mut interp = Interpreter::builder()
+        .text_extraction(TextExtraction::Glyphs)
+        .build();
+    interp
+        .context()
+        .files
+        .set_embedded_provider(Some(Box::new(|path: &str| {
+            (path == "resources/CMap/HostTest-H.ps").then_some(CMAP)
+        })));
+    let pages = interp
+        .render_to_display_list(ps.as_bytes(), 72.0)
+        .expect("renders");
+    let runs: Vec<TextRunParams> = runs(&pages[0].display_list)
+        .into_iter()
+        .map(|(_, run)| run)
+        .collect();
+    assert_eq!(runs.len(), 1, "{runs:#?}");
+    assert_eq!(glyph_texts(&runs[0]), ["諭", "輸"]);
+}
