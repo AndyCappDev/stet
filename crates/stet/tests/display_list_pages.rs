@@ -1,3 +1,7 @@
+// stet - A PostScript Interpreter
+// Copyright (c) 2026 Scott Bowman
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! `render_to_display_list` hands back each page's own display list. The facade's device only records that a page
 //! was sent, so the capture takes the page's list itself rather than a copy, and the device gets an empty one.
 

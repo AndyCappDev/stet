@@ -135,3 +135,45 @@ fn a_small_shape_on_a_tall_page_is_filled_where_it_is() {
         assert_eq!(at(x, y), WHITE, "({x},{y}) is outside both");
     }
 }
+
+/// The `/TilingType` each pattern fill of the page carries.
+fn tiling_types(tiling_type: &str) -> Vec<i32> {
+    let pattern = stream(
+        &format!(
+            "/Type /Pattern /PatternType 1 /PaintType 1 /TilingType {tiling_type} \
+             /BBox [0 0 10 10] /XStep 10 /YStep 10 /Resources << >>"
+        ),
+        "0 0 1 rg 0 0 5 5 re f",
+    );
+    let doc = PdfDocument::from_owned(page(100, FILL_PAGE, pattern)).expect("document opens");
+    let list = doc.render_page(0, 72.0).expect("page renders");
+    list.elements()
+        .iter()
+        .filter_map(|e| match e {
+            stet_graphics::display_list::DisplayElement::PatternFill { params } => {
+                Some(params.tiling_type)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A pattern's `/TilingType` reaches the display list. One outside 1 to 3,
+/// which ISO 32000-1 does not allow, is taken as 1, so a consumer only sees
+/// values it knows.
+#[test]
+fn the_tiling_type_reaches_the_display_list() {
+    for tiling_type in ["1", "2", "3"] {
+        assert_eq!(
+            tiling_types(tiling_type),
+            [tiling_type.parse::<i32>().unwrap()]
+        );
+    }
+    for out_of_range in ["0", "7", "-2", "4294967298"] {
+        assert_eq!(
+            tiling_types(out_of_range),
+            [1],
+            "/TilingType {out_of_range}"
+        );
+    }
+}

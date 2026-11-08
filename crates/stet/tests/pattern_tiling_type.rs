@@ -1,3 +1,7 @@
+// stet - A PostScript Interpreter
+// Copyright (c) 2026 Scott Bowman
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! A pattern's `TilingType` reaches the display list and the PDF output. TilingType 2 asks for the exact step,
 //! which a device may not round to whole pixels as it may for 1; a vector writer needs to know which it has.
 

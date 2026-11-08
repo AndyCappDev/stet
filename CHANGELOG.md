@@ -62,6 +62,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A tiling pattern's `TilingType` reaches the display list and the
+  PDF output.** `PatternFillParams` has a new `tiling_type` field, set
+  from a PostScript pattern and from a PDF pattern's `/TilingType`: 1
+  lets a device round the step to whole pixels, 2 asks for the exact
+  step. PostScript converted to PDF wrote `/TilingType 1` for every
+  pattern and now keeps the pattern's own. Rendering is unchanged, since
+  the rasteriser does not read it; a vector writer can. A PDF value
+  outside 1 to 3 is read as 1. Code that builds `PatternFillParams`
+  itself needs to set the new field. Contributed by @nielsbosma (#38).
 - **`render_to_display_list` no longer holds each page twice.** The
   page's display list goes to the caller, not a copy of it, so a page
   with millions of marks needs far less memory: `mandelbrot.ps`, with

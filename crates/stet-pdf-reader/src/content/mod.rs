@@ -8812,7 +8812,13 @@ impl<'a> ContentInterpreter<'a> {
             return Err(PdfError::Other("pattern recursion limit".into()));
         }
         let paint_type = pat_dict.get_int(b"PaintType").unwrap_or(1) as i32;
-        let tiling_type = pat_dict.get_int(b"TilingType").unwrap_or(1) as i32;
+        // ISO 32000-1 Table 75 allows 1, 2 and 3. Any other value is taken
+        // as 1, as makepattern's rangecheck keeps PostScript patterns in
+        // range, so the display list carries only values a consumer knows.
+        let tiling_type = match pat_dict.get_int(b"TilingType") {
+            Some(t @ 1..=3) => t as i32,
+            _ => 1,
+        };
 
         let bbox = deref_num_array(self.resolver, pat_dict, b"BBox")
             .map(|v| {

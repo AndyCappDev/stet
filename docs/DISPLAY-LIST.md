@@ -410,6 +410,7 @@ uncolored (PaintType 2) patterns.
 | `bbox` | `[f64; 4]` | Tile bbox in pattern space |
 | `xstep`, `ystep` | `f64` | Horizontal/vertical step between tile origins |
 | `paint_type` | `i32` | 1 = colored, 2 = uncolored |
+| `tiling_type` | `i32` | 1 = constant spacing (a device may round the step to whole pixels), 2 = no distortion (the exact step), 3 = faster tiling. Always 1, 2 or 3. The rasteriser ignores it; a vector writer reads it to know whether the step is exact |
 | `underlying_color` | `Option<DeviceColor>` | Fill color for uncolored patterns |
 | `pattern_id` | `u32` | Unique ID for PDF dedup |
 | `device_space_tile` | `bool` | `true` when tile element CTMs already bake in the pattern matrix |
