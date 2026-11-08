@@ -1886,6 +1886,33 @@ impl FileStore {
                 }
             }
         }
+        // A full buffer that ends right before the `~>` must still take it: a
+        // reader that wants exactly these bytes never asks again, and the
+        // marker stays in the source for the interpreter to execute (`~` is
+        // undefined). Ghostscript reads it with the data. Illustrator's
+        // images (`flushfile` on their RunLengthDecode filter) and GIMP's
+        // per-row `currentfile /ASCII85Decode filter` both hit this whenever
+        // their data comes to a multiple of the buffer size.
+        if group.is_empty() {
+            loop {
+                match self.read_byte(source)? {
+                    Some(b) if b.is_ascii_whitespace() => {}
+                    Some(b'~') => {
+                        let _ = self.read_byte(source)?; // consume '>'
+                        *eof = true;
+                        break;
+                    }
+                    Some(b) => {
+                        self.putback_bytes(source, &[b]);
+                        break;
+                    }
+                    None => {
+                        *eof = true;
+                        break;
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -3170,6 +3197,46 @@ mod tests {
             result.push(b);
         }
         assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_ascii85_full_buffer_takes_the_eod_after_it() {
+        // 4096 bytes are one full refill: a reader that takes exactly those
+        // must still leave the source after the `~>`, not on it.
+        let mut src_bytes = Vec::new();
+        for _ in 0..1024 {
+            src_bytes.extend_from_slice(b"9jqo^");
+        }
+        src_bytes.extend_from_slice(b"\r\n~>\r\nrest");
+        let mut store = FileStore::new();
+        let src = store.create_string_source(src_bytes);
+        let filt = store.create_filter(src, FilterKind::ASCII85Decode { group: Vec::new() });
+        for _ in 0..4096 {
+            assert!(store.read_byte(filt).unwrap().is_some());
+        }
+        let mut rest = Vec::new();
+        while let Some(b) = store.read_byte(src).unwrap() {
+            rest.push(b);
+        }
+        assert_eq!(&rest, b"\r\nrest");
+        assert_eq!(store.read_byte(filt).unwrap(), None);
+    }
+
+    #[test]
+    fn test_ascii85_full_buffer_leaves_what_is_not_eod() {
+        let mut src_bytes = Vec::new();
+        for _ in 0..1024 {
+            src_bytes.extend_from_slice(b"9jqo^");
+        }
+        src_bytes.extend_from_slice(b"\n9jqo^~>");
+        let mut store = FileStore::new();
+        let src = store.create_string_source(src_bytes);
+        let filt = store.create_filter(src, FilterKind::ASCII85Decode { group: Vec::new() });
+        let mut n = 0;
+        while store.read_byte(filt).unwrap().is_some() {
+            n += 1;
+        }
+        assert_eq!(n, 4100);
     }
 
     // --- RunLengthDecode tests ---
