@@ -104,6 +104,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`findcolorrendering` returns a name and a boolean, as the PLRM
+  defines it, and the `/ColorRendering /ProcSet` resource exists.**
+  `intent findcolorrendering` gives the name `intent.device.halftone` and
+  `true` when a ColorRendering resource has that name, and otherwise the
+  ProcSet's `GetSubstituteCRD` result (`/DefaultColorRendering`, now
+  embedded) and `false`. It returned a CRD dictionary before, or raised
+  `undefinedresource`. EPS files from Illustrator and CorelDRAW, whose
+  prologs replace `GetSubstituteCRD` in that ProcSet, stopped at
+  `undefinedresource` before drawing anything; they now render. stet
+  still does not convert colours through a CRD, so rendering is otherwise
+  unchanged. Contributed by @nielsbosma (#24).
 - **A TrueType or OpenType font added to an on-disk `resources/Font`
   folder loads.** `findfont` found it there but then looked for the file
   in the working directory, so the font was reported not found and

@@ -697,15 +697,21 @@ is shown and covers top-level images and layers only.
 
 The PostScript interpreter requires several resource files to function:
 
-- **Init scripts** (4 files): Bootstrap the resource system, error handlers,
-  font categories, and font name mappings
+- **Init scripts** (5 files): Bootstrap the resource system, error handlers,
+  font categories, font name mappings, and aliases for the PDF-imaging
+  extension operators
 - **Fonts** (35 Type 1 files): URW equivalents of the standard PostScript fonts
 - **Encodings** (3 files): StandardEncoding, ISOLatin1Encoding, SymbolEncoding
 - **CMap** (2 files): Identity-H, Identity-V
-- **ProcSet** (2 files): CIDInit, FontSetInit
+- **ProcSet** (3 files): CIDInit, ColorRendering, FontSetInit
+- **ColorSpace** (3 files): DefaultGray, DefaultRGB, DefaultCMYK
+- **ColorRendering** (1 file): DefaultColorRendering, the substitute CRD
+  `findcolorrendering` returns
+- **OutputDevice** (4 files): png, pdf, viewer, null
+- **FontSet** (1 file): NimbusRoman-Regular-CFF
 - **ICC profile** (1 file): CC0-licensed CMYK → sRGB conversion profile
 
-The `stet` facade crate embeds all 56 files (4.4 MB) via `include_bytes!()`.
+The `stet` facade crate embeds all 58 files (4.4 MB) via `include_bytes!()`.
 The CLI discovers them relative to the executable. The WASM build embeds
 them in a virtual filesystem.
 
