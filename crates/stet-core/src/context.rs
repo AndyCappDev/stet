@@ -463,6 +463,20 @@ pub struct Context {
     /// are where a large prepress job actually spends memory.
     pub max_local_vm: usize,
 
+    /// Largest page side a file may declare, in points; a larger `PageSize`
+    /// is clamped to it.
+    ///
+    /// The default, 14400 pt (200 inches), is the largest `/MediaBox` extent
+    /// in Adobe's PDF 1.7 implementation limits. A host that does not
+    /// rasterise pages at the file's size, or that bounds memory by other
+    /// means, may raise it: Illustrator artboards reach 16383 pt (227 inches)
+    /// and its large canvas ten times that, and their EPS files declare that
+    /// bounding box. The points come from the file; the render resolution is
+    /// the caller's and is not capped (see `stet_ops::device_ops`).
+    /// `f64::INFINITY` lifts the limit; a value that is not greater than zero
+    /// (NaN included) counts as [`DEFAULT_MAX_PAGE_SIZE_POINTS`].
+    pub max_page_size_points: f64,
+
     /// The program's own `MaxLocalVM`, from `setuserparams`; `None` until it
     /// sets one. Kept apart from [`Self::max_local_vm`] rather than written
     /// over it, so the host's ceiling survives whatever the program asks for
@@ -735,6 +749,10 @@ const DEFAULT_MAX_LOCAL_VM: usize = {
         usize::MAX / 4
     }
 };
+
+/// Default for [`Context::max_page_size_points`]: 200 inches, the largest
+/// `/MediaBox` extent in Adobe's PDF 1.7 implementation limits (Table C.1).
+pub const DEFAULT_MAX_PAGE_SIZE_POINTS: f64 = 14_400.0;
 
 impl Context {
     /// Permit a program `access` to `path` (a folder and what is inside it,
@@ -1434,6 +1452,7 @@ impl Context {
             interrupt_flag: None,
             exec_sync_depth: 0,
             max_local_vm: DEFAULT_MAX_LOCAL_VM,
+            max_page_size_points: DEFAULT_MAX_PAGE_SIZE_POINTS,
             program_max_vm: None,
             deadline: None,
             steps_to_deadline_check: DEADLINE_CHECK_INTERVAL,
