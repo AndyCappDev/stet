@@ -91,6 +91,15 @@ pub trait OutputDevice {
     /// Page dimensions in device pixels.
     fn page_size(&self) -> (u32, u32);
 
+    /// Whether [`replay_and_show`](Self::replay_and_show) reads the display
+    /// list it is given. A device that only records that a page was sent
+    /// answers `false`, and a context capturing display lists then moves
+    /// the page's list into the capture instead of copying it, which halves
+    /// the memory a page with millions of elements needs.
+    fn reads_display_list(&self) -> bool {
+        true
+    }
+
     /// The page device changed: `setpagedevice` asks for a page of `media`
     /// device pixels, `page_size` (the `PageSize`) in default user space
     /// units.

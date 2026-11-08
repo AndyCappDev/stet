@@ -351,6 +351,12 @@ impl DisplayList {
         self.elements.is_empty()
     }
 
+    /// Release the spare capacity the element list grew into. A page that is
+    /// kept rather than replayed holds on to up to twice its size otherwise.
+    pub fn shrink_to_fit(&mut self) {
+        self.elements.shrink_to_fit();
+    }
+
     /// Returns the number of elements.
     pub fn len(&self) -> usize {
         self.elements.len()

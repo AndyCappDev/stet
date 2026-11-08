@@ -1561,10 +1561,25 @@ impl Context {
     /// call sites. When `capture_display_lists` is active, a clone is saved
     /// along with the current page DPI from the pagedevice HWResolution.
     pub fn take_display_list(&mut self) -> DisplayList {
+        // When nothing else reads the list, the capture takes the list itself
+        // rather than a copy, and the device gets an empty one.
+        let move_into_capture = self.capture_display_lists.is_some()
+            && self.display_list_sender.is_none()
+            && self
+                .device
+                .as_ref()
+                .is_some_and(|d| !d.reads_display_list());
         if self.capture_display_lists.is_some() {
             let dpi = self.current_page_dpi();
+            let list = if move_into_capture {
+                let mut list = std::mem::take(&mut self.display_list);
+                list.shrink_to_fit();
+                list
+            } else {
+                self.display_list.clone()
+            };
             if let Some(ref mut captures) = self.capture_display_lists {
-                captures.push((self.display_list.clone(), dpi));
+                captures.push((list, dpi));
             }
         }
         if let Some(ref sender) = self.display_list_sender {
