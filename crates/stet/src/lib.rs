@@ -267,6 +267,7 @@ impl Interpreter {
         dpi: f64,
     ) -> Result<Vec<DisplayListPage>, StetError> {
         self.warnings.clear();
+        self.last_error = None;
         let ps_data = strip_dos_eps_header(ps_data);
         let is_eps = content_is_epsf(ps_data);
 
@@ -291,6 +292,7 @@ impl Interpreter {
     #[cfg(feature = "pdf-output")]
     pub fn render_to_pdf(&mut self, ps_data: &[u8], dpi: f64) -> Result<Vec<u8>, StetError> {
         self.warnings.clear();
+        self.last_error = None;
         self.ctx.null_device_used = false;
         let ps_data = strip_dos_eps_header(ps_data);
         let is_eps = content_is_epsf(ps_data);
@@ -333,7 +335,7 @@ impl Interpreter {
             let result = parse_and_exec(&mut self.ctx, ps_data);
             job_result(&self.ctx, result)
         };
-        let exec_result = exec_result.and_then(|()| self.end_page_device());
+        let exec_result = self.finish_job(exec_result);
 
         self.record_end_of_job_warnings();
 
@@ -363,6 +365,8 @@ impl Interpreter {
     ///
     /// Useful for running test suites or scripts that don't produce pages.
     pub fn exec(&mut self, ps_data: &[u8]) -> Result<(), StetError> {
+        // `exec` keeps no pages and returns its error itself.
+        self.last_error = None;
         let save_obj = self.ctx.vm_save();
         let save_id = extract_save_id(&save_obj);
 
@@ -405,29 +409,62 @@ impl Interpreter {
         &self.warnings
     }
 
-    /// The error that ended the most recent render call early, when the
-    /// interpreter keeps partial pages ([`InterpreterBuilder::keep_partial_pages`]);
-    /// the pages it returned are those shown before the error, plus the one
-    /// being painted when it happened.
+    /// The error that ended the most recent call early, when the interpreter
+    /// keeps partial pages ([`InterpreterBuilder::keep_partial_pages`]); the
+    /// pages it returned are those shown before the error, plus the one being
+    /// painted when it happened.
+    ///
+    /// Cleared at the start of every [`render`](Interpreter::render),
+    /// [`render_to_display_list`](Interpreter::render_to_display_list),
+    /// `render_to_pdf` and [`exec`](Interpreter::exec) call. `exec` keeps no
+    /// pages and returns its error, so after it this is always `None`.
     pub fn last_error(&self) -> Option<&StetError> {
         self.last_error.as_ref()
     }
 
     /// End a page cut short by an error, so the marks painted so far are kept.
     fn flush_partial_page(&mut self) {
-        self.abandon_job();
+        let callers = self.abandon_job();
         let _ = parse_and_exec(&mut self.ctx, b"{ showpage } stopped pop");
+        self.ctx.deadline = callers;
     }
 
     /// After an error that left the job mid-flight: drop what it was running,
     /// so code run now does not resume it, and give that code a deadline of its
     /// own (a job that ran out of time would otherwise run out again at once,
     /// and `showpage` may be the program's own procedure).
-    fn abandon_job(&mut self) {
+    ///
+    /// Returns the caller's deadline, which the caller of this puts back once
+    /// that code has run: [`Context::set_timeout`] is absolute, so the flush's
+    /// own would otherwise outlive the call and stop a later one.
+    fn abandon_job(&mut self) -> Option<std::time::Instant> {
         self.ctx.o_stack.clear();
         self.ctx.e_stack.clear();
         self.ctx.loops.clear();
+        let callers = self.ctx.deadline;
         self.ctx.set_timeout(Some(FLUSH_DEADLINE));
+        callers
+    }
+
+    /// A job's result as the caller sees it. With partial pages kept, an
+    /// error ends the page being painted and is recorded in `last_error`
+    /// rather than failing the call; otherwise a clean run deactivates the
+    /// page device, which may transmit one more page.
+    fn finish_job(&mut self, exec_result: Result<(), StetError>) -> Result<(), StetError> {
+        let exec_result = match exec_result {
+            Err(e) if self.keep_partial => {
+                self.flush_partial_page();
+                Err(e)
+            }
+            r => r.and_then(|()| self.end_page_device()),
+        };
+        match exec_result.map_err(|e| self.named_error(e)) {
+            Err(e) if self.keep_partial => {
+                self.last_error = Some(e);
+                Ok(())
+            }
+            r => r,
+        }
     }
 
     /// The error a job ended in, by its PostScript name when the job ended in
@@ -486,24 +523,9 @@ impl Interpreter {
         self.ctx.output_path = Some("stet_output".to_string());
         let save_id = self.begin_job(dpi, page_w_pt, page_h_pt)?;
 
-        self.last_error = None;
         let exec_result = parse_and_exec(&mut self.ctx, ps_data);
         let exec_result = job_result(&self.ctx, exec_result);
-        let exec_result = match exec_result {
-            Err(e) if self.keep_partial => {
-                self.flush_partial_page();
-                Err(e)
-            }
-            r => r.and_then(|()| self.end_page_device()),
-        };
-        let exec_result = exec_result.map_err(|e| self.named_error(e));
-        let exec_result = match exec_result {
-            Err(e) if self.keep_partial => {
-                self.last_error = Some(e);
-                Ok(())
-            }
-            r => r,
-        };
+        let exec_result = self.finish_job(exec_result);
 
         self.record_end_of_job_warnings();
         finish_device(&mut self.ctx);
@@ -599,10 +621,10 @@ impl Interpreter {
         let wrapper = format!("gsave {} {} translate", -llx, -lly);
         parse_and_exec(&mut self.ctx, wrapper.as_bytes()).map_err(ps_err)?;
         let showpages_before = self.ctx.showpage_count;
-        self.last_error = None;
         let ran = parse_and_exec(&mut self.ctx, ps_data);
+        let mut callers_deadline = None;
         if let Err(e) = job_result(&self.ctx, ran) {
-            self.abandon_job();
+            callers_deadline = Some(self.abandon_job());
             if self.keep_partial {
                 self.last_error = Some(self.named_error(e));
             }
@@ -615,6 +637,9 @@ impl Interpreter {
             let _ = parse_and_exec(&mut self.ctx, b"showpage grestore");
         } else {
             let _ = parse_and_exec(&mut self.ctx, b"grestore");
+        }
+        if let Some(d) = callers_deadline {
+            self.ctx.deadline = d;
         }
         Ok(())
     }

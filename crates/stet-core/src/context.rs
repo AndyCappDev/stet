@@ -870,7 +870,9 @@ impl Context {
         let key = self.names.find(b"errorname")?;
         let obj = self.dicts.get(self.dollar_error, &DictKey::Name(key))?;
         match obj.value {
-            PsValue::Name(id) => Some(String::from_utf8_lossy(self.names.get_bytes(id)).into_owned()),
+            PsValue::Name(id) => {
+                Some(String::from_utf8_lossy(self.names.get_bytes(id)).into_owned())
+            }
             _ => None,
         }
     }
@@ -881,7 +883,9 @@ impl Context {
         let key = self.names.find(b"command")?;
         let obj = self.dicts.get(self.dollar_error, &DictKey::Name(key))?;
         match obj.value {
-            PsValue::Name(id) => Some(String::from_utf8_lossy(self.names.get_bytes(id)).into_owned()),
+            PsValue::Name(id) => {
+                Some(String::from_utf8_lossy(self.names.get_bytes(id)).into_owned())
+            }
             PsValue::Operator(op) => self
                 .operators
                 .get(op.0 as usize)
