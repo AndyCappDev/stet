@@ -119,6 +119,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A line end inside a PostScript string literal is one newline,
+  whether it is a CR, an LF or a CR LF**, as PLRM 3.2.2 has it and as in
+  Ghostscript. stet kept both bytes of a CR LF and left a lone CR as it
+  was, so in a file saved with Windows line ends each multi-line string
+  grew by a byte per line, and a program that walks a string character
+  by character went wrong. Both scanners are fixed, the one reading a
+  file and the one `token` and `cvx exec` use on a string. Contributed
+  by @nielsbosma (#31).
 - **A `findresource` that fails leaves its key and category on the
   operand stack**, as the PLRM has every failing operator do, and as
   Ghostscript does. stet left only the key (nothing for `/Category`), so
