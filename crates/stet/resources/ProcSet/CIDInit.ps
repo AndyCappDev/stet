@@ -45,6 +45,20 @@
         } if
     } bind
 
+    % arr key .appendmappings -
+    % A CMap writes its entries in blocks of at most 100: each block adds
+    % to the ones before it, under key in the CMap dictionary.
+    /.appendmappings {
+        exch currentdict 2 index known {
+            currentdict 2 index get exch
+            1 index length 1 index length add array
+            dup 0 4 index putinterval
+            dup 3 index length 3 index putinterval
+            exch pop exch pop
+        } if
+        currentdict 3 1 roll put
+    } bind
+
     /begincodespacerange {
         % n begincodespacerange -
         /.codespacecount exch def
@@ -54,7 +68,7 @@
         % lo1 hi1 ... lon hin endcodespacerange -
         % Collect n pairs into CodeSpaceRange array
         .codespacecount 2 mul array astore
-        currentdict exch /CodeSpaceRange exch put
+        /CodeSpaceRange .appendmappings
     } bind
 
     /usefont {
@@ -70,7 +84,7 @@
     /endcidchar {
         % src1 dst1 ... srcn dstn endcidchar -
         .cidcharcount 2 mul array astore
-        currentdict exch /CIDCharMappings exch put
+        /CIDCharMappings .appendmappings
     } bind
 
     /begincidrange {
@@ -81,7 +95,7 @@
     /endcidrange {
         % srclo1 srchi1 dstcid1 ... srclon srhin dstcidn endcidrange -
         .cidrangecount 3 mul array astore
-        currentdict exch /CIDRangeMappings exch put
+        /CIDRangeMappings .appendmappings
     } bind
 
     /beginbfchar {
@@ -92,7 +106,7 @@
     /endbfchar {
         % src1 dst1 ... srcn dstn endbfchar -
         .bfcharcount 2 mul array astore
-        currentdict exch /BFCharMappings exch put
+        /BFCharMappings .appendmappings
     } bind
 
     /beginbfrange {
@@ -103,7 +117,7 @@
     /endbfrange {
         % srclo1 srchi1 dst1 ... srclon srhin dstn endbfrange -
         .bfrangecount 3 mul array astore
-        currentdict exch /BFRangeMappings exch put
+        /BFRangeMappings .appendmappings
     } bind
 
     /beginnotdefchar {
@@ -114,7 +128,7 @@
     /endnotdefchar {
         % src1 dst1 ... srcn dstn endnotdefchar -
         .notdefcharcount 2 mul array astore
-        currentdict exch /NotDefCharMappings exch put
+        /NotDefCharMappings .appendmappings
     } bind
 
     /beginnotdefrange {
@@ -125,7 +139,7 @@
     /endnotdefrange {
         % srclo1 srchi1 dst1 ... srclon srhin dstn endnotdefrange -
         .notdefrangecount 3 mul array astore
-        currentdict exch /NotDefRangeMappings exch put
+        /NotDefRangeMappings .appendmappings
     } bind
 
     /beginusematrix {
