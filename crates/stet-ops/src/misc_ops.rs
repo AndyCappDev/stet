@@ -903,6 +903,27 @@ pub fn op_internaldict(ctx: &mut Context) -> Result<(), PsError> {
     Ok(())
 }
 
+/// `.break`: — → —, a place for a native debugger to stop.
+///
+/// It does nothing. Write `.break` in a PostScript program and set a
+/// breakpoint on this function, by its full path (in gdb,
+/// `break stet_ops::misc_ops::op_dot_break`): the debugger stops when the
+/// program reaches that point, with the interpreter's state there to
+/// inspect. It works in a release build too.
+///
+/// It was `break` until programs were found to rely on `break` being
+/// undefined, as it is in Ghostscript and on Adobe's printers:
+/// Illustrator's Adobe_pattern_AI3 prolog leaves a loop by calling it
+/// inside `stopped`, and with it defined the loop never ended. The dot
+/// keeps it among the interpreter's own names, which no program uses.
+#[inline(never)]
+pub fn op_dot_break(ctx: &mut Context) -> Result<(), PsError> {
+    // A body of its own, so the compiler does not merge it with another
+    // operator that does nothing and the breakpoint stops only here.
+    std::hint::black_box(ctx.e_stack.len());
+    Ok(())
+}
+
 /// `setoverprint`: bool → —
 pub fn op_setoverprint(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {

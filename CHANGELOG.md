@@ -137,6 +137,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`break` is no longer defined, so Illustrator 3 to 5.5 EPS files
+  finish.** Their pattern prolog, Adobe_pattern_AI3, leaves a loop by
+  calling `break` inside `stopped`, relying on it being undefined, as it
+  is on Adobe's printers and in Ghostscript. stet defined it as a
+  debugging no-op, so the loop never ended and the file ran until the
+  time limit. The debugging hook is now `.break`: it still does nothing,
+  and a native debugger can stop on `stet_ops::misc_ops::op_dot_break`
+  where a program calls it. Contributed by @nielsbosma (#39).
 - **Text in a PDF font that isn't embedded is no longer lost when the
   machine's copy of the stand-in font is OpenType.** The PDF reader
   draws such a font, Helvetica say, with a Nimbus font, and looks for it

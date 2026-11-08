@@ -1,3 +1,7 @@
+// stet - A PostScript Interpreter
+// Copyright (c) 2026 Scott Bowman
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 // `break` is not a PostScript operator: neither the PLRM nor Ghostscript
 // defines it, and Adobe's own prologs rely on that. Adobe_pattern_AI3 (the
 // pattern procset Illustrator 3 to 5.5 writes into every EPS) raises the font
@@ -38,5 +42,14 @@ fn the_illustrator_pattern_prolog_leaves_its_cache_loop() {
         "mark cachestatus 7 1 roll pop pop pop pop exch pop exch \
          { { 10000 add dup 2 index gt { break } if dup setcachelimit } loop } stopped \
          cleartomark true"
+    ));
+}
+
+/// The debugger hook `break` was is `.break`: defined, and it leaves the
+/// stack as it was.
+#[test]
+fn dot_break_does_nothing() {
+    assert!(probe(
+        "systemdict /.break known 1 2 .break 2 eq exch 1 eq and and"
     ));
 }
