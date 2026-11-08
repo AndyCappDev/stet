@@ -15,8 +15,6 @@ userdict /$unittest known not {(unit_tests/unittest.ps) run} if
 {/StandardEncoding /Encoding findresource length} [256] assert
 
 %% findresource - error for unknown resource %%
-% Note: findresource pops category before calling FindResource proc,
-% so only the key remains on stack when error fires
 % A failed findresource leaves key and category on the stack, as Ghostscript does.
 /NonexistentXYZ123 /Encoding /findresource [/NonexistentXYZ123 /Encoding /undefinedresource] assert
 
