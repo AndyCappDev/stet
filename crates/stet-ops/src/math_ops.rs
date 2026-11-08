@@ -390,19 +390,31 @@ pub fn op_atan(ctx: &mut Context) -> Result<(), PsError> {
     Ok(())
 }
 
-/// `rand`: → int (random integer 0..2^31-1)
+/// `rand`: → int (1..2^31-2)
+///
+/// The "minimal standard" generator of Park and Miller (multiplier 16807, modulus 2^31-1, Schrage's
+/// method), the one Adobe documents and Ghostscript implements: a program that draws with `rand` and
+/// no `srand` comes out as it does there. The state starts at 1.
 pub fn op_rand(ctx: &mut Context) -> Result<(), PsError> {
-    // Simple LCG RNG
-    ctx.rand_state = ctx
-        .rand_state
-        .wrapping_mul(6364136223846793005)
-        .wrapping_add(1);
-    let val = ((ctx.rand_state >> 33) as i32).abs();
-    ctx.o_stack.push(PsObject::int(val))?;
+    const A: i64 = 16807;
+    const M: i64 = 0x7fff_ffff;
+    const Q: i64 = M / A;
+    const R: i64 = M % A;
+    let state = ctx.rand_state as i64;
+    let mut next = A * (state % Q) - R * (state / Q);
+    if next <= 0 {
+        next += M;
+    }
+    ctx.rand_state = next as u64;
+    ctx.rand_seed = next;
+    ctx.o_stack.push(PsObject::int(next))?;
     Ok(())
 }
 
 /// `srand`: int → — (seed RNG)
+///
+/// Seeds are brought into the generator's range as Adobe describes (and Ghostscript does): below 1,
+/// `-(seed mod 2^31-2) + 1`; above 2^31-2, 2^31-2.
 pub fn op_srand(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
@@ -412,14 +424,20 @@ pub fn op_srand(ctx: &mut Context) -> Result<(), PsError> {
         _ => return Err(PsError::TypeCheck),
     };
     ctx.o_stack.pop()?;
-    ctx.rand_seed = seed;
-    ctx.rand_state = seed as u64;
+    let state = if seed < 1 {
+        -(seed % 0x7fff_fffe) + 1
+    } else {
+        seed.min(0x7fff_fffe)
+    };
+    ctx.rand_seed = state;
+    ctx.rand_state = state as u64;
     Ok(())
 }
 
-/// `rrand`: → int (return last seed set by srand)
+/// `rrand`: → int, the generator's current state (PLRM): handed to `srand`, it resumes the sequence
+/// where it is.
 pub fn op_rrand(ctx: &mut Context) -> Result<(), PsError> {
-    ctx.o_stack.push(PsObject::int(ctx.rand_seed))?;
+    ctx.o_stack.push(PsObject::int(ctx.rand_state as i64))?;
     Ok(())
 }
 
