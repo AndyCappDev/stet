@@ -119,6 +119,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`closepath` does nothing when the path is empty or the current
+  subpath is already closed**, as the PLRM says and as in Ghostscript.
+  stet added a close either way. Rendered pages didn't change, but the
+  path did: `pathforall` reported the extra closes, `pathbbox` of an
+  empty path returned a box instead of raising `nocurrentpoint`, and
+  SVG output dropped every shape whose path began with a stray close,
+  925 of 1,515 in one sign-making EPS. Contributed by @nielsbosma (#35).
 - **A line end inside a PostScript string literal is one newline,
   whether it is a CR, an LF or a CR LF**, as PLRM 3.2.2 has it and as in
   Ghostscript. stet kept both bytes of a CR LF and left a lone CR as it
