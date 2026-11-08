@@ -1,3 +1,7 @@
+// stet - A PostScript Interpreter
+// Copyright (c) 2026 Scott Bowman
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 // Mesh shadings (Types 4-7) whose DataSource is a string or file gave every
 // vertex the colour its component count suggested: one component became a
 // gray, so a full Separation or DeviceN tint was white, and four went

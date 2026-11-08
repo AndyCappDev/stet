@@ -137,6 +137,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Mesh shadings (Types 4 to 7) read from a string or file give each
+  vertex the colour its colour space gives it.** stet took the colour
+  from the number of components alone: one component became a gray, so a
+  full Separation or DeviceN tint drew white, and four went through a
+  rough CMYK formula rather than the CMYK profile fills and the other
+  shadings use. Each vertex now goes through the tint transform and the
+  colour space, as a fill does. Illustrator's gradient meshes, in a
+  Separation space read through a filter, drew white where Ghostscript
+  draws them in their spot colour. An array `DataSource` in DeviceCMYK or
+  an ICC space also changes: one ICCBased mesh that drew blue to red now
+  draws cyan to yellow, as Ghostscript does. Contributed by @nielsbosma
+  (#41).
 - **ASCII85Decode, ASCIIHexDecode and RunLengthDecode take their
   end-of-data marker when the data fills their buffer exactly.** Each
   decodes 4096 bytes at a time. When a program's data came to a multiple
