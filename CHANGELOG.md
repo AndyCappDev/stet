@@ -68,6 +68,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the command that raised it, such as `PostScript error: undefined in
   nosuchoperator`. Code that matched the text `stop` needs updating.
   Contributed by @nielsbosma (#22).
+- **`stet_core::file_store::FilterKind::SubFileDecode` has two new
+  public fields, `matched` and `found`**, the filter's progress through
+  its end-of-data marker (see Fixed). Code that builds the variant with a
+  struct literal needs them; `FilterKind::sub_file_decode` builds one
+  without naming them. Contributed by @nielsbosma (#26).
 - **`stet_core::file_store::FileHandle::StringSource`'s `data` is an
   `Arc<Vec<u8>>`**, so the scanner can hold a source's bytes while it
   allocates (see Fixed); `FileStore::shared_remaining` hands out that
@@ -104,6 +109,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`SubFileDecode` finds its end-of-data marker wherever it falls.**
+  The filter reads its source 4096 bytes at a time and forgot a partial
+  match between reads, so a marker that crossed that boundary was missed
+  and the filter read to the end of its source. A marker straight after a
+  false start, such as `%  &&end` inside `%%  &&end`, was also missed.
+  Illustrator EPS files skip their XMP packet with
+  `currentfile 0 (%  &&end XMP packet marker&&) /SubFileDecode filter
+  flushfile`, and when either case hit, the rest of the file was
+  skipped and the page came out blank, with no error. A partial marker at
+  the end of the source is now passed through as data, and with
+  `EODCount` above 0 the count carries across reads. Contributed by
+  @nielsbosma (#26).
 - **`findcolorrendering` returns a name and a boolean, as the PLRM
   defines it, and the `/ColorRendering /ProcSet` resource exists.**
   `intent findcolorrendering` gives the name `intent.device.halftone` and
