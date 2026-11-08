@@ -246,6 +246,13 @@ pub fn op_rcurveto(ctx: &mut Context) -> Result<(), PsError> {
 
 /// `closepath`: — → —
 pub fn op_closepath(ctx: &mut Context) -> Result<(), PsError> {
+    // PLRM: "If the current subpath is already closed or the current path is
+    // empty, closepath does nothing." A ClosePath with no subpath before it
+    // reached devices as a path that starts by closing.
+    match ctx.gstate.path.segments.last() {
+        None | Some(PathSegment::ClosePath) => return Ok(()),
+        Some(_) => {}
+    }
     ctx.gstate.path.segments.push(PathSegment::ClosePath);
     // Set current point to subpath start
     if let Some(start) = find_subpath_start(&ctx.gstate.path.segments) {

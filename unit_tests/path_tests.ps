@@ -75,6 +75,10 @@ gsave nulldevice
 
 %% closepath %%
 10 10 moveto 10 20 lineto /closepath [] assert newpath
+    % on an empty path, or a subpath already closed, closepath does nothing (PLRM)
+    newpath {closepath 0 {pop pop 1 add} {pop pop 1 add} {6 {pop} repeat 1 add} {1 add} pathforall} [0] assert
+    newpath 0 0 moveto 10 0 lineto
+    {closepath closepath 0 {pop pop 1 add} {pop pop 1 add} {6 {pop} repeat 1 add} {1 add} pathforall} [3] assert newpath
 
 
 %% arct %%
