@@ -675,6 +675,10 @@ fn get_char_count(ctx: &Context, bytes: &[u8]) -> usize {
         .and_then(|obj| obj.as_i32())
         .unwrap_or(1);
     if font_type == 0 {
+        // A CMap's codes can differ in length (Shift-JIS).
+        if let Some((codes, _)) = decode_cmap_codes(ctx, font_entity, bytes) {
+            return codes.len();
+        }
         get_type0_byte_width(ctx, font_entity)
             .map(|bw| bytes.len() / bw)
             .unwrap_or(bytes.len())
@@ -683,13 +687,9 @@ fn get_char_count(ctx: &Context, bytes: &[u8]) -> usize {
     }
 }
 
-/// Get the byte width per character for a Type 0 composite font.
-/// Checks CMap CodeSpaceRange first, then FMapType (2 = 2-byte).
+/// Get the byte width per character for a Type 0 composite font without a
+/// CMap: FMapType 2 and 5 take two bytes.
 fn get_type0_byte_width(ctx: &Context, font_entity: EntityId) -> Option<usize> {
-    // Try CMap-based byte width first
-    if let Some((_, byte_width, _)) = decode_cmap_characters(ctx, font_entity) {
-        return Some(byte_width);
-    }
     // FMapType 2 = 2-byte encoding (high byte = sub-font index, low byte = char code)
     let fmap_name = ctx.names.find(b"FMapType")?;
     let fmap_type = ctx
