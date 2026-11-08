@@ -267,7 +267,6 @@ pub fn build_system_dict(ctx: &mut Context) {
         "currentoverprintmode",
         misc_ops::op_currentoverprintmode,
     );
-    register(ctx, sd, "break", misc_ops::op_break);
     register(ctx, sd, "setcacheparams", misc_ops::op_setcacheparams);
     register(
         ctx,

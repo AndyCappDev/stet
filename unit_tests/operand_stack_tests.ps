@@ -76,7 +76,7 @@ userdict /$unittest known not {(unit_tests/unittest.ps) run} if
 %<</Duplex true /PageSize [612 792] /Collate false>> 5 dict /copy [<</Duplex true /PageSize [612 792] /Collate false>>] assert
     % copy error tests
     /copy [/stackunderflow] assert
-    null break /copy [null /typecheck] assert
+    null /copy [null /typecheck] assert
     (a) (b) 3 /copy [(a) (b) 3 /stackoverflow] assert
     (a) (b) -3 /copy [(a) (b) -3 /rangecheck] assert
     (abc) [123] /copy [(abc) [123] /typecheck] assert

@@ -876,11 +876,6 @@ pub fn op_internaldict(ctx: &mut Context) -> Result<(), PsError> {
     Ok(())
 }
 
-/// `break`: — → — (debugging no-op)
-pub fn op_break(_ctx: &mut Context) -> Result<(), PsError> {
-    Ok(())
-}
-
 /// `setoverprint`: bool → —
 pub fn op_setoverprint(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
