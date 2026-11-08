@@ -361,6 +361,16 @@ impl<'a> Lexer<'a> {
     }
 
     /// Read a literal string `(...)` with escapes and nested parens.
+    ///
+    /// An unescaped CR or CR LF is kept as it is, although ISO 32000-1
+    /// 7.3.4.2 reads any end-of-line marker in a literal string as one LF.
+    /// Writers put binary character codes straight into literal strings, and
+    /// a CR byte there is part of a code, not a line end: `pdf_samples/3107.pdf`
+    /// shows `(\x00\x14\x00\r\x00\x14) Tj` in an Identity-H font, and read the
+    /// spec's way, CID 0x000D becomes 0x000A and draws a missing glyph. poppler
+    /// and pdf.js keep the bytes too; MuPDF, qpdf and Ghostscript follow the
+    /// spec. PostScript differs (PLRM 3.2.2, `stet_core::tokenizer`), its
+    /// strings being written as text.
     fn read_literal_string(&mut self) -> Result<Token, PdfError> {
         self.pos += 1; // skip '('
         let mut result = Vec::new();
@@ -857,6 +867,26 @@ mod tests {
         assert_eq!(
             tokenize(b"(octal\\101)"),
             vec![Token::LitString(b"octalA".to_vec())]
+        );
+    }
+
+    /// An unescaped CR or CR LF stays as written: in a string of binary
+    /// character codes it is part of a code (see `read_literal_string`).
+    #[test]
+    fn a_raw_cr_in_a_string_is_kept() {
+        // The 2-byte Identity-H codes of pdf_samples/3107.pdf: 0x0014 0x000D 0x0014.
+        assert_eq!(
+            tokenize(b"(\x00\x14\x00\r\x00\x14)"),
+            vec![Token::LitString(b"\x00\x14\x00\r\x00\x14".to_vec())]
+        );
+        assert_eq!(
+            tokenize(b"(a\r\nb\rc)"),
+            vec![Token::LitString(b"a\r\nb\rc".to_vec())]
+        );
+        // A backslash before the end of a line still continues the line.
+        assert_eq!(
+            tokenize(b"(a\\\r\nb)"),
+            vec![Token::LitString(b"ab".to_vec())]
         );
     }
 
