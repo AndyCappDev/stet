@@ -3717,6 +3717,21 @@ fn register_shading_icc_profiles(list: &DisplayList, cache: &mut IccCache) {
     let mut seen = HashSet::new();
     scan(list.elements(), &mut seen, cache);
 }
+/// An image's samples as premultiplied RGBA, `width` x `height` x 4 bytes,
+/// as the renderer paints them: colour converted through `icc` (the device
+/// formulas without one), then the pixels the colour key (`/MaskColor`)
+/// names cleared. For a consumer that takes images out of a display list.
+///
+/// No transfer function is applied, and overprint is not simulated: a CMYK
+/// sample that paints nothing under OPM 1 still comes out opaque.
+pub fn image_samples_to_rgba(
+    sample_data: &[u8],
+    params: &ImageParams,
+    icc: Option<&IccCache>,
+) -> Vec<u8> {
+    image_to_rgba(sample_data, params, icc, false, None)
+}
+
 /// An image's samples as premultiplied RGBA: [`samples_to_rgba`], then the
 /// transfer function the paint applies (see [`paint_transfer`]) on each
 /// pixel's colour, then the colour key's pixels cleared.
@@ -15422,8 +15437,51 @@ pub fn render_region(
     image_cache: Option<&ImageCache>,
     no_aa: bool,
 ) -> Vec<u8> {
+    render_region_with_background(
+        list,
+        vp_x,
+        vp_y,
+        vp_w,
+        vp_h,
+        pixel_w,
+        pixel_h,
+        dpi,
+        icc,
+        image_cache,
+        no_aa,
+        PageBackground::White,
+    )
+}
+
+/// [`render_region`] with the page background chosen, as
+/// [`render_to_rgba_with_background`] chooses it for a whole page:
+/// [`PageBackground::White`] composites onto white paper (what
+/// `render_region` does), [`PageBackground::Transparent`] leaves the
+/// unpainted area clear and returns straight-alpha RGBA, for a consumer that
+/// places the region over other content.
+#[expect(clippy::too_many_arguments)]
+pub fn render_region_with_background(
+    list: &DisplayList,
+    vp_x: f64,
+    vp_y: f64,
+    vp_w: f64,
+    vp_h: f64,
+    pixel_w: u32,
+    pixel_h: u32,
+    dpi: f64,
+    icc: Option<&IccCache>,
+    image_cache: Option<&ImageCache>,
+    no_aa: bool,
+    page_background: PageBackground,
+) -> Vec<u8> {
     if pixel_w == 0 || pixel_h == 0 || vp_w <= 0.0 || vp_h <= 0.0 {
-        return vec![0xFF; pixel_w as usize * pixel_h as usize * 4];
+        // Nothing to paint: white paper is opaque, a transparent page clear.
+        let fill = if page_background.is_transparent() {
+            0x00
+        } else {
+            0xFF
+        };
+        return vec![fill; pixel_w as usize * pixel_h as usize * 4];
     }
 
     let layer_set = LayerSet::new();
@@ -15543,11 +15601,12 @@ pub fn render_region(
         }
     }
 
-    composite_onto_white(pixmap.data_mut());
     // Extract only the requested pixel_h rows (skip OVERLAP padding).
     let row_bytes = pixel_w as usize * 4;
     let end = pixel_h as usize * row_bytes;
-    pixmap.data()[..end].to_vec()
+    let mut rgba = pixmap.data()[..end].to_vec();
+    finish_page_pixels(&mut rgba, page_background);
+    rgba
 }
 /// Copy a rectangular region from parent pixmap into a smaller crop pixmap.
 fn copy_backdrop_crop(
