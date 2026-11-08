@@ -77,6 +77,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A TrueType or OpenType font added to an on-disk `resources/Font`
+  folder loads.** `findfont` found it there but then looked for the file
+  in the working directory, so the font was reported not found and
+  substituted. `.t1` fonts in the same folder were not affected. It is
+  now found where `status` and `run` find a file.
+
 - **A resource or font name no longer reaches a file outside its folder.**
   A resource not yet loaded is looked for in `resources/<Category>/<key>`,
   and a font in `resources/Font/<name>`, so a key such as

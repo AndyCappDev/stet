@@ -470,7 +470,8 @@ const FONT_FOLDER: &str = "resources/Font/";
 /// that path is taken before the disk is tried, as `run` and `file` do.
 /// On disk it reads only a file directly in that folder,
 /// `resources/Font/` and a [plain](stet_core::font_loader::is_plain_file_name)
-/// file name, which is what fontcategory.ps passes; any other path is
+/// file name, which is what fontcategory.ps passes, found as `run` finds
+/// a file (so in the on-disk resource folder); any other path is
 /// `false`. It is a systemdict operator, so a program can call it too, and
 /// would otherwise load any file it names as a font.
 pub fn op_loadbinaryfontfile(ctx: &mut Context) -> Result<(), PsError> {
@@ -493,15 +494,17 @@ pub fn op_loadbinaryfontfile(ctx: &mut Context) -> Result<(), PsError> {
     } else if !path_str
         .strip_prefix(FONT_FOLDER)
         .is_some_and(stet_core::font_loader::is_plain_file_name)
-        || !ctx.host_policy().allows(
-            std::path::Path::new(path_str.as_ref()),
-            stet_core::file_access::Access::Read,
-        )
     {
         false
     } else {
-        let path = std::path::Path::new(path_str.as_ref());
-        stet_core::system_font_loader::load_binary_font(ctx, path)
+        // Found where `status` found it for fontcategory.ps, and `run`
+        // finds a `.t1` font: in the on-disk resource folder, not the
+        // working directory.
+        let resolved = crate::file_ops::resolve_filename(ctx, &path_str);
+        let path = std::path::Path::new(&resolved);
+        ctx.host_policy()
+            .allows(path, stet_core::file_access::Access::Read)
+            && stet_core::system_font_loader::load_binary_font(ctx, path)
     };
     ctx.o_stack.push(PsObject::bool(ok))?;
     Ok(())
@@ -1836,6 +1839,26 @@ mod tests {
         op_loadbinaryfontfile(&mut ctx).unwrap();
         let loaded = ctx.o_stack.pop().unwrap();
         assert!(matches!(loaded.value, PsValue::Bool(false)));
+    }
+
+    /// A font in the on-disk resource folder loads by the path
+    /// fontcategory.ps passes, `resources/Font/<name>.ttf`, found where
+    /// `status` and `run` find it rather than in the working directory.
+    #[test]
+    fn test_loadbinaryfontfile_reads_the_resource_folder_on_disk() {
+        let base = std::env::temp_dir().join(format!("stet-binres-{}", std::process::id()));
+        std::fs::create_dir_all(base.join("Font")).unwrap();
+        std::fs::write(base.join("Font/Probe.ttf"), probe_sfnt()).unwrap();
+        let mut ctx = test_ctx();
+        ctx.resource_base_path = Some(base.to_string_lossy().into_owned());
+
+        push_loadbinaryfontfile_operands(&mut ctx, b"resources/Font/Probe.ttf");
+        op_loadbinaryfontfile(&mut ctx).unwrap();
+        let loaded = ctx.o_stack.pop().unwrap();
+        assert!(matches!(loaded.value, PsValue::Bool(true)));
+        let key = DictKey::Name(ctx.names.intern(b"Probe"));
+        assert!(ctx.dicts.get(ctx.font_directory, &key).is_some());
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// On disk, only a file directly in the font folder is read: a font
