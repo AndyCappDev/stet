@@ -14,13 +14,27 @@ use crate::object::{PsObject, PsValue};
 // Re-export font substitution data from stet-fonts for backward compatibility.
 pub use stet_fonts::{FONT_SUBSTITUTIONS, find_substitution};
 
+/// True when `name` names no folder: it holds neither `/` nor `\`.
+///
+/// A font or resource is looked for in a file named after it, so a name
+/// with a separator in it, such as `../../x`, would reach a file outside
+/// the folder it is looked for in. The PostScript resource lookups make the
+/// same check with `.plainfilename` (`sysdict.ps`).
+pub fn is_plain_file_name(name: &str) -> bool {
+    !name.contains(['/', '\\'])
+}
+
 /// Try to load a font by name, using the substitution table.
 /// Checks embedded files first (for WASM), then falls back to disk.
+/// A name that is not [plain](is_plain_file_name) is not looked for.
 pub fn load_font_file(
     font_name: &str,
     resource_path: &str,
     files: &crate::file_store::FileStore,
 ) -> Option<Vec<u8>> {
+    if !is_plain_file_name(font_name) {
+        return None;
+    }
     // Try embedded files first (for WASM builds)
     let direct_path = format!("{}/{}.t1", resource_path, font_name);
     if let Some(data) = files.get_embedded_file(&direct_path) {
@@ -252,6 +266,35 @@ fn get_font_name(ctx: &Context, font_obj: PsObject) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A font name holding a folder separator is not looked for: not on
+    /// disk, where `../outside/Planted` would reach beside the font folder,
+    /// and not among the embedded files. A plain name in the folder loads.
+    #[test]
+    fn test_load_font_file_refuses_a_name_naming_a_folder() {
+        let root = std::env::temp_dir().join(format!("stet-fontname-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("Font")).unwrap();
+        std::fs::create_dir_all(root.join("outside")).unwrap();
+        std::fs::write(root.join("Font/Plain.t1"), b"plain").unwrap();
+        std::fs::write(root.join("outside/Planted.t1"), b"planted").unwrap();
+        let font_dir = root.join("Font").to_string_lossy().into_owned();
+        let files = crate::file_store::FileStore::new();
+
+        assert_eq!(
+            load_font_file("Plain", &font_dir, &files).as_deref(),
+            Some(&b"plain"[..])
+        );
+        for name in ["../outside/Planted", "..\\outside\\Planted"] {
+            assert_eq!(load_font_file(name, &font_dir, &files), None, "{name}");
+        }
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(is_plain_file_name("ABCDEF+Arial,Bold"));
+        assert!(is_plain_file_name("Times New Roman"));
+        assert!(is_plain_file_name("..."));
+        assert!(!is_plain_file_name("/etc/x"));
+        assert!(!is_plain_file_name("a\\b"));
+    }
 
     #[test]
     fn test_font_substitution() {

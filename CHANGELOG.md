@@ -61,6 +61,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A resource or font name no longer reaches a file outside its folder.**
+  A resource not yet loaded is looked for in `resources/<Category>/<key>`,
+  and a font in `resources/Font/<name>`, so a key such as
+  `(../../x) cvn` ran a file beside the folder. A name holding `/` or `\`
+  is now not looked for on disk: `findresource` raises
+  `undefinedresource` and `findfont` substitutes, as for any resource or
+  font not found. `.loadfont` refuses such a name too, and
+  `.loadbinaryfontfile` reads from disk only a file directly in
+  `resources/Font/`. Real font and resource names never hold a separator.
+  PostScript can open files with `file` and `run` anyway, so this closes
+  nothing today. It matters for the restricted mode planned next, which
+  refuses those but keeps font lookups.
+
 - **Print drivers' Level 1 tray and duplex calls work.** A job calling
   `0 statusdict /setpapertray get exec`, as Oracle Toolkit's output does,
   stopped at `undefined`: statusdict had only `setjobtimeout` and

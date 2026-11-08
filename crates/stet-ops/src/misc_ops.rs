@@ -453,11 +453,21 @@ pub fn op_loadbinarysystemfont(ctx: &mut Context) -> Result<(), PsError> {
     Ok(())
 }
 
+/// The folder fontcategory.ps looks for fonts in, its `ResourceDir`, with
+/// the separator it adds: the only folder [`op_loadbinaryfontfile`] reads
+/// from disk.
+const FONT_FOLDER: &str = "resources/Font/";
+
 /// `.loadbinaryfontfile`: name path → true | false
 ///
 /// Load a binary font from an explicit file path. Used by fontcategory.ps
 /// when .ttf/.otf files are found in resources/Font/. An embedded file of
 /// that path is taken before the disk is tried, as `run` and `file` do.
+/// On disk it reads only a file directly in that folder,
+/// `resources/Font/` and a [plain](stet_core::font_loader::is_plain_file_name)
+/// file name, which is what fontcategory.ps passes; any other path is
+/// `false`. It is a systemdict operator, so a program can call it too, and
+/// would otherwise load any file it names as a font.
 pub fn op_loadbinaryfontfile(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.len() < 2 {
         return Err(PsError::StackUnderflow);
@@ -475,6 +485,11 @@ pub fn op_loadbinaryfontfile(ctx: &mut Context) -> Result<(), PsError> {
     // Check embedded files first (for WASM builds where no real filesystem exists).
     let ok = if let Some(data) = ctx.files.get_embedded_file(path_str.as_ref()) {
         stet_core::system_font_loader::load_binary_font_from_data(ctx, data)
+    } else if !path_str
+        .strip_prefix(FONT_FOLDER)
+        .is_some_and(stet_core::font_loader::is_plain_file_name)
+    {
+        false
     } else {
         let path = std::path::Path::new(path_str.as_ref());
         stet_core::system_font_loader::load_binary_font(ctx, path)
@@ -1812,6 +1827,30 @@ mod tests {
         op_loadbinaryfontfile(&mut ctx).unwrap();
         let loaded = ctx.o_stack.pop().unwrap();
         assert!(matches!(loaded.value, PsValue::Bool(false)));
+    }
+
+    /// On disk, only a file directly in the font folder is read: a font
+    /// anywhere else is `false`, named by its own path or through the font
+    /// folder, and nothing is loaded.
+    #[test]
+    fn test_loadbinaryfontfile_reads_no_font_outside_the_font_folder() {
+        let dir = std::env::temp_dir().join(format!("stet-binfont-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("Probe.ttf");
+        std::fs::write(&file, probe_sfnt()).unwrap();
+        let absolute = file.to_string_lossy().into_owned();
+        let through = format!("resources/Font/../../../../../../../../../..{absolute}");
+
+        for path in [absolute.as_str(), through.as_str()] {
+            let mut ctx = test_ctx();
+            push_loadbinaryfontfile_operands(&mut ctx, path.as_bytes());
+            op_loadbinaryfontfile(&mut ctx).unwrap();
+            let loaded = ctx.o_stack.pop().unwrap();
+            assert!(matches!(loaded.value, PsValue::Bool(false)), "{path}");
+            let key = DictKey::Name(ctx.names.intern(b"Probe"));
+            assert!(ctx.dicts.get(ctx.font_directory, &key).is_none(), "{path}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

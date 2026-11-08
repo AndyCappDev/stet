@@ -186,7 +186,9 @@ true setglobal
         } if
 
         % ---- STEP 2: Search resources/Font/ directory (multiple extensions) ----
-        loaded_font null eq {
+        % Not for a name naming a folder, which would reach outside it (see
+        % .plainfilename in sysdict.ps); such a font is substituted.
+        loaded_font null eq font_name =fstring cvs //.plainfilename exec and {
             /file_path null def
             /file_ext null def
 
