@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Scott Bowman
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! `stet_fonts::host::deny_host_access` — a program rendering untrusted
+//! `stet::deny_host_access` — a program rendering untrusted
 //! documents keeps PostScript away from the computer.
 //!
 //! The switch is process-wide and one-way, so this file holds a single test
@@ -34,8 +34,9 @@ fn denied_host_access_refuses_files_and_runs() {
     assert!(!stops(&format!("({name}) (r) file closefile")));
     assert!(!stops(&format!("({name}) run")));
 
-    stet_fonts::host::deny_host_access();
-    assert!(!stet_fonts::host::host_access_allowed());
+    assert!(stet::host_access_allowed());
+    stet::deny_host_access();
+    assert!(!stet::host_access_allowed());
 
     assert!(stops(&format!("({name}) (r) file")), "file must refuse");
     assert!(stops(&format!("({name}) run")), "run must refuse");

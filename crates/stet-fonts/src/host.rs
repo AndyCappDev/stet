@@ -21,7 +21,25 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static DENIED: AtomicBool = AtomicBool::new(false);
 
-/// Deny every host access for the rest of the process (see the module documentation).
+/// Keep stet away from the computer it runs on, for the rest of the process.
+///
+/// For a program that renders documents it did not write. Call it once,
+/// before the first document. From then on:
+///
+/// * PostScript `file` opens only embedded resources and in-memory sources,
+///   and `run`, `deletefile` and `renamefile` refuse; each raises
+///   `invalidfileaccess`. `status` and `filenameforall` see only embedded
+///   resources;
+/// * `%stdin` reads as empty, and a `%stdout` or `%stderr` file discards
+///   what is written to it. `print` and `=` still write where the
+///   interpreter's output goes;
+/// * no installed font, CMap file or system color profile is read, by the
+///   PostScript interpreter or the PDF reader: the ones stet bundles are
+///   used instead.
+///
+/// It cannot be undone: nothing grants access again in the same process.
+/// A system font or color profile read before the call may still be used,
+/// which is why it comes first.
 pub fn deny_host_access() {
     DENIED.store(true, Ordering::SeqCst);
 }

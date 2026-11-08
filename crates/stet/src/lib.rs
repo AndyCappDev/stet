@@ -66,6 +66,27 @@
 //!
 //! See [`diagnostics`] for the warning types.
 //!
+//! # Untrusted Documents
+//!
+//! PostScript is a programming language with file access: by default a
+//! program can read, write, delete and rename files with `file`, `run`,
+//! `deletefile` and `renamefile`, as it can in Ghostscript with
+//! `-dNOSAFER`. A program that renders documents it did not write calls
+//! [`deny_host_access`] once, before the first one. It holds for the rest
+//! of the process and keeps every document, PostScript or PDF, from the
+//! machine's files, installed fonts and color profiles.
+//!
+//! ```no_run
+//! stet::deny_host_access();
+//! let mut interp = stet::Interpreter::new();
+//! let result = interp.render(b"(/etc/passwd) (r) file", 72.0);
+//! assert!(result.is_err()); // invalidfileaccess
+//! ```
+//!
+//! It limits what a document can reach, not how long it runs or how much
+//! memory it takes. For those, set [`PsContext::set_timeout`] before each
+//! job and [`PsContext::max_local_vm`], through [`Interpreter::context`].
+//!
 //! # Feature Flags
 //!
 //! Both features are enabled by default. Use `default-features = false` for
@@ -98,6 +119,7 @@ pub use diagnostics::{ExecWarning, ExecWarningKind};
 // Re-exports for power users
 pub use stet_core::context::Context as PsContext;
 pub use stet_engine::eval::parse_and_exec as ps_exec;
+pub use stet_fonts::host::{deny_host_access, host_access_allowed};
 pub use stet_graphics::device::{ShownGlyph, TextExtraction, TextRunParams, UnicodeSource};
 pub use stet_graphics::display_list::{DisplayElement, DisplayList as PsDisplayList};
 pub use stet_graphics::icc::IccCache;

@@ -159,6 +159,26 @@ let mut interp = stet::Interpreter::builder()
     .build();
 ```
 
+## Untrusted Documents
+
+PostScript has file access: by default a program can read, write, delete
+and rename files with `file`, `run`, `deletefile` and `renamefile`, as it
+can in Ghostscript with `-dNOSAFER`. A program that renders documents it
+did not write calls `deny_host_access()` once, before the first one:
+
+```rust
+stet::deny_host_access();
+```
+
+For the rest of the process those operators raise `invalidfileaccess`,
+`%stdin` reads as empty, a `%stdout` or `%stderr` file discards what is
+written to it, and no installed font, CMap file or system color profile is
+read, by the PostScript interpreter or the PDF reader; stet's bundled ones
+are used instead. It cannot be undone. It limits what a document can reach,
+not how long it runs or how much memory it takes: set
+`PsContext::set_timeout` before each job, and `PsContext::max_local_vm`,
+through `interp.context()`.
+
 ## Text Extraction
 
 ```rust

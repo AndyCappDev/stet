@@ -234,6 +234,7 @@ pub use outline::{OutlineItem, OutlineStyle};
 pub use page_boxes::{PageArea, PageBoxes};
 pub use page_tree::PageInfo;
 pub use resolver::PdfBytes;
+pub use stet_fonts::host::{deny_host_access, host_access_allowed};
 /// The level for [`PdfDocument::set_text_extraction`], from `stet-graphics`.
 pub use stet_graphics::device::TextExtraction;
 pub use stet_graphics::rendering_intent::RenderingIntent;
@@ -604,7 +605,7 @@ impl<'a> PdfDocument<'a> {
         let output_intent_icc = parse_output_intent_icc(&resolver);
 
         let page_annotations_cache = (0..pages.len()).map(|_| OnceCell::new()).collect();
-        Ok(Self {
+        let mut doc = Self {
             resolver,
             pages,
             icc_cache,
@@ -631,7 +632,11 @@ impl<'a> PdfDocument<'a> {
             embedded_files_cache: OnceCell::new(),
             layers_cache: OnceCell::new(),
             configurations_cache: OnceCell::new(),
-        })
+        };
+        if !stet_fonts::host::host_access_allowed() {
+            doc.set_host_files(false);
+        }
+        Ok(doc)
     }
 
     /// Enable or disable PDF overprint simulation.
@@ -947,6 +952,11 @@ impl<'a> PdfDocument<'a> {
     /// CMYK profile, and so does a cache given with no CMYK profile in it;
     /// a cache given with one is used as it is.
     ///
+    /// A program that reads only files it did not write can call
+    /// [`deny_host_access`] once instead, before the first document: every
+    /// document opened after it is switched off from the start, and none
+    /// can be switched on again.
+    ///
     /// **Turn it off before anything else is asked of the document**: before
     /// any page is read (every `render_page…` call, and every call that
     /// extracts text, reads one), and before
@@ -963,6 +973,7 @@ impl<'a> PdfDocument<'a> {
     /// cannot be undone. stet's profile, once put in a cache given, stays
     /// there.
     pub fn set_host_files(&mut self, enabled: bool) {
+        let enabled = enabled && stet_fonts::host::host_access_allowed();
         if enabled == self.host_files {
             return;
         }
@@ -981,9 +992,10 @@ impl<'a> PdfDocument<'a> {
     }
 
     /// Whether the reader may read files from the machine: see
-    /// [`set_host_files`](Self::set_host_files).
+    /// [`set_host_files`](Self::set_host_files). False once the process
+    /// has called [`deny_host_access`].
     pub fn host_files(&self) -> bool {
-        self.host_files
+        self.host_files && stet_fonts::host::host_access_allowed()
     }
 
     /// Leave out the text in a font whose CMap is missing, or read it as
@@ -1482,7 +1494,7 @@ impl<'a> PdfDocument<'a> {
     /// files before its first page never does.
     fn icc(&self) -> &IccCache {
         self.icc_cache.get_or_init(|| {
-            let mut cache = if self.host_files {
+            let mut cache = if self.host_files() {
                 default_icc_cache()
             } else {
                 own_icc_cache()

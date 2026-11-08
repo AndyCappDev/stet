@@ -111,6 +111,11 @@ doc.set_host_files(false); // before the first page is read
 let (rgba, w, h) = doc.render_page_to_rgba(0, 300.0)?;
 ```
 
+A program that reads only such files can instead call
+`stet_pdf_reader::deny_host_access()` once, before the first document. It
+holds for the rest of the process: every document is read as if switched
+off, and none can be switched on again.
+
 ### Extracting text
 
 The assembly helpers live in `stet-graphics`, the display-list crate this

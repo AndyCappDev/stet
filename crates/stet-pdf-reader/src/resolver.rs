@@ -410,9 +410,10 @@ impl<'a> Resolver<'a> {
             .set(pixels.min(stet_graphics::image_limits::MAX_IMAGE_PIXELS));
     }
 
-    /// Whether fonts and CMaps may be read from the machine's files.
+    /// Whether fonts and CMaps may be read from the machine's files: not
+    /// once the process has denied host access, whatever the document says.
     pub(crate) fn host_files(&self) -> bool {
-        self.host_files.get()
+        self.host_files.get() && stet_fonts::host::host_access_allowed()
     }
 
     /// Set [`host_files`](Self::host_files).

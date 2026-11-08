@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`deny_host_access()` keeps documents away from the computer stet runs
+  on.** By default PostScript can read, write, delete and rename files,
+  as in Ghostscript with `-dNOSAFER`. A program rendering documents it did
+  not write calls `stet::deny_host_access()` (also in `stet_pdf_reader`
+  and `stet_fonts::host`) once, before the first document. For the rest of
+  the process, `file`, `run`, `deletefile` and `renamefile` raise
+  `invalidfileaccess`, `status` and `filenameforall` see only embedded
+  resources, `%stdin` reads as empty and a `%stdout` or `%stderr` file
+  discards what is written to it. No installed font, CMap file or system
+  color profile is read, by the PostScript interpreter or the PDF reader.
+  It cannot be undone. In the PDF reader it switches every document's
+  `set_host_files` off, and `host_files()` reports it. Contributed by
+  @nielsbosma (#21).
+
 ### Changed
 
 - **`stet_core::file_store::FileHandle::StringSource`'s `data` is an
