@@ -137,6 +137,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **ASCII85Decode, ASCIIHexDecode and RunLengthDecode take their
+  end-of-data marker when the data fills their buffer exactly.** Each
+  decodes 4096 bytes at a time. When a program's data came to a multiple
+  of that and it read exactly that much, the filter never read again, so
+  the marker (`~>`, `>` or the byte 128) stayed in the file. The
+  interpreter then read it as program text and stopped with `undefined`
+  or `syntaxerror`, and every page after was lost. Illustrator's images
+  and GIMP's EPS, which opens a new filter for each row, hit this. After
+  a full buffer, each filter now looks for its marker, as Ghostscript
+  does. Contributed by @nielsbosma (#40), for ASCII85Decode.
 - **Reading from `%stdin` or a pipe no longer loses a byte after a token
   or a line.** The scanner reads one byte past a token to find its end,
   and `readline` one past a CR to see whether an LF follows. Each then

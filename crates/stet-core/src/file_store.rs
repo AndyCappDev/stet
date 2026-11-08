@@ -1896,6 +1896,23 @@ impl FileStore {
                 }
             }
         }
+        // A full buffer ends on a whole byte, so no nibble is pending. Take a
+        // `>` that follows it, for the reason `refill_ascii85` takes its `~>`:
+        // a reader that wants exactly these bytes never asks again, and the
+        // `>` left in the source is a syntax error to the interpreter.
+        loop {
+            match self.read_byte(source)? {
+                Some(b) if b.is_ascii_whitespace() => {}
+                Some(b'>') | None => {
+                    *eof = true;
+                    break;
+                }
+                Some(b) => {
+                    self.putback_bytes(source, &[b]);
+                    break;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -2067,6 +2084,26 @@ impl FileStore {
                 RleState::Eod => {
                     *eof = true;
                     return Ok(());
+                }
+            }
+        }
+        // A full buffer that ends a run: take the end-of-data byte (128) if
+        // it comes next, for the reason `refill_ascii85` takes its `~>`. Left
+        // in the source, it reaches the interpreter as program text.
+        if matches!(
+            rle_state,
+            RleState::Init
+                | RleState::Literal { remaining: 0 }
+                | RleState::Repeat { remaining: 0, .. }
+        ) {
+            match self.read_byte(source)? {
+                Some(128) | None => {
+                    *rle_state = RleState::Eod;
+                    *eof = true;
+                }
+                Some(b) => {
+                    self.putback_bytes(source, &[b]);
+                    *rle_state = RleState::Init;
                 }
             }
         }
@@ -3328,6 +3365,115 @@ mod tests {
             n += 1;
         }
         assert_eq!(n, 4100);
+    }
+
+    /// `src` through `kind`: what the filter gives, and what is left in
+    /// the source after the filter's first 4096 bytes are read.
+    fn after_a_full_buffer(src: Vec<u8>, kind: FilterKind) -> (usize, Vec<u8>) {
+        let mut store = FileStore::new();
+        let src = store.create_string_source(src);
+        let filt = store.create_filter(src, kind);
+        for _ in 0..4096 {
+            assert!(store.read_byte(filt).unwrap().is_some());
+        }
+        let mut rest = Vec::new();
+        while let Some(b) = store.read_byte(src).unwrap() {
+            rest.push(b);
+        }
+        let mut more = 0;
+        while store.read_byte(filt).unwrap().is_some() {
+            more += 1;
+        }
+        (4096 + more, rest)
+    }
+
+    /// Everything `src` gives through `kind`.
+    fn all_of(src: Vec<u8>, kind: FilterKind) -> Vec<u8> {
+        let mut store = FileStore::new();
+        let src = store.create_string_source(src);
+        let filt = store.create_filter(src, kind);
+        let mut out = Vec::new();
+        while let Some(b) = store.read_byte(filt).unwrap() {
+            out.push(b);
+        }
+        out
+    }
+
+    #[test]
+    fn test_asciihex_full_buffer_takes_the_eod_after_it() {
+        let mut src = b"4142".repeat(2048);
+        src.extend_from_slice(b"\r\n>\r\nrest");
+        let (n, rest) = after_a_full_buffer(src, FilterKind::ASCIIHexDecode);
+        assert_eq!((n, rest.as_slice()), (4096, &b"\r\nrest"[..]));
+    }
+
+    #[test]
+    fn test_asciihex_full_buffer_leaves_what_is_not_eod() {
+        let mut src = b"4142".repeat(2048);
+        src.extend_from_slice(b"\n4344>");
+        let out = all_of(src, FilterKind::ASCIIHexDecode);
+        assert_eq!(out.len(), 4098);
+        assert_eq!(&out[4096..], b"CD");
+    }
+
+    /// 4096 bytes as 32 literal runs of 128.
+    fn rle_runs() -> Vec<u8> {
+        let mut src = Vec::new();
+        for run in 0..32u8 {
+            src.push(127);
+            src.extend(std::iter::repeat_n(run, 128));
+        }
+        src
+    }
+
+    #[test]
+    fn test_rle_full_buffer_takes_the_eod_after_it() {
+        let mut src = rle_runs();
+        src.extend_from_slice(b"\x80rest");
+        let (n, rest) = after_a_full_buffer(
+            src,
+            FilterKind::RunLengthDecode {
+                state: RleState::Init,
+            },
+        );
+        assert_eq!((n, rest.as_slice()), (4096, &b"rest"[..]));
+    }
+
+    #[test]
+    fn test_rle_full_buffer_leaves_what_is_not_eod() {
+        // A literal run and a repeated one after the full buffer.
+        let mut src = rle_runs();
+        src.extend_from_slice(&[1, b'x', b'y', 254, b'z', 128]);
+        let out = all_of(
+            src,
+            FilterKind::RunLengthDecode {
+                state: RleState::Init,
+            },
+        );
+        assert_eq!(out.len(), 4096 + 5);
+        assert_eq!(&out[4096..], b"xyzzz");
+    }
+
+    #[test]
+    fn test_rle_run_across_a_full_buffer_is_whole() {
+        // 4000 literal bytes, then a 200-byte repeat that the full buffer
+        // splits: nothing is looked past while a run is still going.
+        let mut src = Vec::new();
+        for _ in 0..31 {
+            src.push(127);
+            src.extend(std::iter::repeat_n(b'a', 128));
+        }
+        src.push(31);
+        src.extend(std::iter::repeat_n(b'a', 32));
+        src.extend_from_slice(&[129, b'b', 129, b'b', 128]);
+        let out = all_of(
+            src,
+            FilterKind::RunLengthDecode {
+                state: RleState::Init,
+            },
+        );
+        assert_eq!(out.len(), 4000 + 256);
+        assert!(out[4000..].iter().all(|&b| b == b'b'));
     }
 
     // --- RunLengthDecode tests ---
