@@ -16,7 +16,7 @@ use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
 use stet_graphics::color::{DeviceColor, FillRule};
 use stet_graphics::device::{
     AxialShadingParams, ClipParams, ColorStop, ImageParams, MeshShadingParams, PatchShadingParams,
-    RadialShadingParams, ShadingColorSpace,
+    RadialShadingParams, ShadingColorSpace, ShadingPatch, ShadingTriangle,
 };
 use stet_graphics::display_list::{DisplayElement, DisplayList};
 use stet_graphics::icc::{IccRenderingIntent, intent_from_byte};
@@ -581,7 +581,7 @@ fn build_type4_shading(
 ) -> Result<(), PsError> {
     let ds_obj = get_dict_obj(ctx, dict, b"DataSource").ok_or(PsError::Undefined)?;
 
-    let triangles = match ds_obj.value {
+    let (mut triangles, in_alt) = match ds_obj.value {
         PsValue::String { .. } | PsValue::File(_) => {
             let bpc =
                 get_dict_int(ctx, dict, b"BitsPerCoordinate").ok_or(PsError::Undefined)? as usize;
@@ -593,18 +593,22 @@ fn build_type4_shading(
             if !mesh_shading::mesh_layout_is_readable(bpc, bpco, Some(bpfl), &decode) {
                 return Err(PsError::RangeCheck);
             }
-            mesh_shading::parse_type4_mesh(&data, bpc, bpco, bpfl, &decode, n_comps)
+            (
+                mesh_shading::parse_type4_mesh(&data, bpc, bpco, bpfl, &decode, n_comps),
+                false,
+            )
         }
         PsValue::Array { entity, start, len } => {
             let values = extract_float_array(ctx, entity, start, len);
             // Convert DeviceN/Separation colors to device color space
             let (values, eff_n) =
                 convert_vertex_array_colors(ctx, values, n_comps, color_space, 3)?;
-            mesh_shading::build_type4_from_array(&values, eff_n)
+            (mesh_shading::build_type4_from_array(&values, eff_n), true)
         }
         _ => return Err(PsError::TypeCheck),
     };
 
+    recolor_triangles(ctx, color_space, &mut triangles, in_alt)?;
     if !triangles.is_empty() {
         let gs_alpha = ctx.gstate.fill_opacity;
         let gs_blend_mode = ctx.gstate.blend_mode;
@@ -648,7 +652,7 @@ fn build_type5_shading(
         get_dict_int(ctx, dict, b"VerticesPerRow").ok_or(PsError::Undefined)? as usize;
     let ds_obj = get_dict_obj(ctx, dict, b"DataSource").ok_or(PsError::Undefined)?;
 
-    let triangles = match ds_obj.value {
+    let (mut triangles, in_alt) = match ds_obj.value {
         PsValue::String { .. } | PsValue::File(_) => {
             let bpc =
                 get_dict_int(ctx, dict, b"BitsPerCoordinate").ok_or(PsError::Undefined)? as usize;
@@ -659,17 +663,24 @@ fn build_type5_shading(
             if !mesh_shading::mesh_layout_is_readable(bpc, bpco, None, &decode) {
                 return Err(PsError::RangeCheck);
             }
-            mesh_shading::parse_type5_mesh(&data, bpc, bpco, &decode, n_comps, verts_per_row)
+            (
+                mesh_shading::parse_type5_mesh(&data, bpc, bpco, &decode, n_comps, verts_per_row),
+                false,
+            )
         }
         PsValue::Array { entity, start, len } => {
             let values = extract_float_array(ctx, entity, start, len);
             let (values, eff_n) =
                 convert_vertex_array_colors(ctx, values, n_comps, color_space, 2)?;
-            mesh_shading::build_type5_from_array(&values, eff_n, verts_per_row)
+            (
+                mesh_shading::build_type5_from_array(&values, eff_n, verts_per_row),
+                true,
+            )
         }
         _ => return Err(PsError::TypeCheck),
     };
 
+    recolor_triangles(ctx, color_space, &mut triangles, in_alt)?;
     if !triangles.is_empty() {
         let gs_alpha = ctx.gstate.fill_opacity;
         let gs_blend_mode = ctx.gstate.blend_mode;
@@ -713,7 +724,7 @@ fn build_type6_shading(
 ) -> Result<(), PsError> {
     let ds_obj = get_dict_obj(ctx, dict, b"DataSource").ok_or(PsError::Undefined)?;
 
-    let patches = match ds_obj.value {
+    let (mut patches, in_alt) = match ds_obj.value {
         PsValue::String { .. } | PsValue::File(_) => {
             let bpc =
                 get_dict_int(ctx, dict, b"BitsPerCoordinate").ok_or(PsError::Undefined)? as usize;
@@ -725,16 +736,20 @@ fn build_type6_shading(
             if !mesh_shading::mesh_layout_is_readable(bpc, bpco, Some(bpfl), &decode) {
                 return Err(PsError::RangeCheck);
             }
-            mesh_shading::parse_type6_patches(&data, bpc, bpco, bpfl, &decode, n_comps)
+            (
+                mesh_shading::parse_type6_patches(&data, bpc, bpco, bpfl, &decode, n_comps),
+                false,
+            )
         }
         PsValue::Array { entity, start, len } => {
             let values = extract_float_array(ctx, entity, start, len);
             let (values, eff_n) = convert_type6_array_colors(ctx, values, n_comps, color_space)?;
-            mesh_shading::build_type6_from_array(&values, eff_n)
+            (mesh_shading::build_type6_from_array(&values, eff_n), true)
         }
         _ => return Err(PsError::TypeCheck),
     };
 
+    recolor_patches(ctx, color_space, &mut patches, in_alt)?;
     if !patches.is_empty() {
         let gs_alpha = ctx.gstate.fill_opacity;
         let gs_blend_mode = ctx.gstate.blend_mode;
@@ -776,7 +791,7 @@ fn build_type7_shading(
 ) -> Result<(), PsError> {
     let ds_obj = get_dict_obj(ctx, dict, b"DataSource").ok_or(PsError::Undefined)?;
 
-    let patches = match ds_obj.value {
+    let (mut patches, in_alt) = match ds_obj.value {
         PsValue::String { .. } | PsValue::File(_) => {
             let bpc =
                 get_dict_int(ctx, dict, b"BitsPerCoordinate").ok_or(PsError::Undefined)? as usize;
@@ -788,16 +803,20 @@ fn build_type7_shading(
             if !mesh_shading::mesh_layout_is_readable(bpc, bpco, Some(bpfl), &decode) {
                 return Err(PsError::RangeCheck);
             }
-            mesh_shading::parse_type7_patches(&data, bpc, bpco, bpfl, &decode, n_comps)
+            (
+                mesh_shading::parse_type7_patches(&data, bpc, bpco, bpfl, &decode, n_comps),
+                false,
+            )
         }
         PsValue::Array { entity, start, len } => {
             let values = extract_float_array(ctx, entity, start, len);
             let (values, eff_n) = convert_type7_array_colors(ctx, values, n_comps, color_space)?;
-            mesh_shading::build_type7_from_array(&values, eff_n)
+            (mesh_shading::build_type7_from_array(&values, eff_n), true)
         }
         _ => return Err(PsError::TypeCheck),
     };
 
+    recolor_patches(ctx, color_space, &mut patches, in_alt)?;
     if !patches.is_empty() {
         let gs_alpha = ctx.gstate.fill_opacity;
         let gs_blend_mode = ctx.gstate.blend_mode;
@@ -903,6 +922,72 @@ fn shading_color(
             &mut ctx.icc_cache,
         ))
     }
+}
+
+/// The device colour of a mesh vertex from its components.
+///
+/// The mesh parsers know only how many components a vertex has, so they
+/// took a Separation or DeviceN tint for a gray (a full tint came out
+/// white) and converted DeviceCMYK by the naive formula rather than through
+/// the CMYK profile, as fills and the other shadings do. `in_alt` says the
+/// components are already in the alternate space (an array `DataSource`,
+/// converted while it was read).
+fn mesh_vertex_color(
+    ctx: &mut Context,
+    color_space: &ColorSpace,
+    comps: &[f64],
+    in_alt: bool,
+    memo: &mut std::collections::HashMap<Vec<u64>, DeviceColor>,
+) -> Result<DeviceColor, PsError> {
+    let key: Vec<u64> = comps.iter().map(|c| c.to_bits()).collect();
+    if let Some(c) = memo.get(&key) {
+        return Ok(c.clone());
+    }
+    let intent = intent_from_byte(ctx.gstate.rendering_intent);
+    let color = if needs_tint_conversion(color_space) {
+        let alt = if in_alt {
+            comps.to_vec()
+        } else {
+            convert_tint_color(ctx, comps, color_space)?
+        };
+        components_to_device_color(&alt, get_alt_space(color_space), intent, &mut ctx.icc_cache)
+    } else {
+        components_to_device_color(comps, color_space, intent, &mut ctx.icc_cache)
+    };
+    memo.insert(key, color.clone());
+    Ok(color)
+}
+
+/// Gives each vertex of a Type 4/5 mesh its colour; see [`mesh_vertex_color`].
+fn recolor_triangles(
+    ctx: &mut Context,
+    color_space: &ColorSpace,
+    triangles: &mut [ShadingTriangle],
+    in_alt: bool,
+) -> Result<(), PsError> {
+    let mut memo = std::collections::HashMap::new();
+    for t in triangles {
+        for v in [&mut t.v0, &mut t.v1, &mut t.v2] {
+            v.color = mesh_vertex_color(ctx, color_space, &v.raw_components, in_alt, &mut memo)?;
+        }
+    }
+    Ok(())
+}
+
+/// Gives each corner of a Type 6/7 patch its colour; see [`mesh_vertex_color`].
+fn recolor_patches(
+    ctx: &mut Context,
+    color_space: &ColorSpace,
+    patches: &mut [ShadingPatch],
+    in_alt: bool,
+) -> Result<(), PsError> {
+    let mut memo = std::collections::HashMap::new();
+    for p in patches {
+        for i in 0..4 {
+            p.colors[i] = mesh_vertex_color(ctx, color_space, &p.raw_colors[i], in_alt, &mut memo)?;
+        }
+    }
+    Ok(())
 }
 
 /// Pre-process Type 4/5 array DataSource: convert colors from source color
