@@ -93,7 +93,7 @@ mysave restore
 
 %% Edge cases and validation %%
 % Ensure packing mode changes don't affect existing arrays
-false setpacking [1 2 3] /test_array exch break def
+false setpacking [1 2 3] /test_array exch def
 save /mysave exch def true setpacking
 test_array length 3 eq [true] assert  % Array should be unaffected
 mysave restore
