@@ -665,10 +665,6 @@ pub fn op_arcto(ctx: &mut Context) -> Result<(), PsError> {
         let (dx, dy) = ctm.transform_point(x, y);
         finite_point(dx, dy)?;
     }
-    for _ in 0..5 {
-        ctx.o_stack.pop()?;
-    }
-    reopen_closed_subpath(ctx);
 
     // Vectors from vertex (x1,y1) toward the other points (user space)
     let u1x = x0 - x1;
@@ -679,17 +675,18 @@ pub fn op_arcto(ctx: &mut Context) -> Result<(), PsError> {
     let u1_len = (u1x * u1x + u1y * u1y).sqrt();
     let u2_len = (u2x * u2x + u2y * u2y).sqrt();
 
+    // A tangent leg of zero length, the current point or (x2,y2) lying on the
+    // corner (x1,y1), has no direction, so there is no tangent line for the
+    // arc to meet. Ghostscript raises undefinedresult here "for CET 11-04",
+    // a test in Adobe's conformance suite, so Adobe's interpreter does too.
     if u1_len < 1e-10 || u2_len < 1e-10 {
-        // Degenerate: just lineto x1,y1 (device space)
-        let (dx1, dy1) = ctm.transform_point(x1, y1);
-        ctx.gstate.path.segments.push(PathSegment::LineTo(dx1, dy1));
-        ctx.gstate.current_point = Some((dx1, dy1));
-        ctx.o_stack.push(PsObject::real(x1))?;
-        ctx.o_stack.push(PsObject::real(y1))?;
-        ctx.o_stack.push(PsObject::real(x1))?;
-        ctx.o_stack.push(PsObject::real(y1))?;
-        return Ok(());
+        return Err(PsError::UndefinedResult);
     }
+
+    for _ in 0..5 {
+        ctx.o_stack.pop()?;
+    }
+    reopen_closed_subpath(ctx);
 
     // Normalize
     let u1x = u1x / u1_len;

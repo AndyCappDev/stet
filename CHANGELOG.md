@@ -134,6 +134,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returned a subpath with no `moveto`, `reversepath` joined the two into
   one open subpath and lost the close, and `strokepath` outlined them as
   one subpath.
+- **`arcto` and `arct` raise `undefinedresult` when a tangent line has no
+  direction**, because the current point, or the second point, lies on
+  the corner. Ghostscript raises the same error, citing Adobe's
+  conformance tests. stet drew a straight line to the corner instead.
+  The operands and the current path are left as they were. No file in
+  our 6,239-file PostScript corpus reaches this case.
 - **A line end inside a PostScript string literal is one newline,
   whether it is a CR, an LF or a CR LF**, as PLRM 3.2.2 has it and as in
   Ghostscript. stet kept both bytes of a CR LF and left a lone CR as it

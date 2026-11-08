@@ -116,6 +116,13 @@ stroke
     newpath 100 100 moveto 200 100 300 100 10 /arct [] assert
     stroke
     50 50 moveto 60 60 70 70 -5 /arct [] assert  % Negative radius
+    % a tangent leg of zero length has no direction: undefinedresult, as in
+    % Ghostscript (CET 11-04)
+    newpath 10 10 moveto 10 10 50 50 5 /arct [10 10 50 50 5 /undefinedresult] assert
+    newpath 10 10 moveto 50 10 50 10 5 /arct [50 10 50 10 5 /undefinedresult] assert
+    % the path is left as it was, even after a closepath
+    {$closed {10 10 50 50 5 arct} stopped 6 {pop} repeat $segs} [[/m /l /l /h]] assert
+    newpath
 
 %% arcto %%
 % Basic arcto functionality - should return tangent points on stack
@@ -136,6 +143,9 @@ stroke
     100 100 moveto 200 100 300 100 10 /arcto [200 100 200 100] assert  % collinear lines
     stroke showpage
     50 50 moveto 60 60 70 70 -5 /arcto [60 60 60 60] assert  % Negative radius
+    newpath 10 10 moveto 10 10 50 50 5 /arcto [10 10 50 50 5 /undefinedresult] assert
+    newpath 10 10 moveto 50 10 50 10 5 /arcto [50 10 50 10 5 /undefinedresult] assert
+    newpath 10 10 moveto 10 10 10 10 5 /arcto [10 10 10 10 5 /undefinedresult] assert
     stroke
 
 
