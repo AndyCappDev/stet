@@ -26,7 +26,9 @@ fn denied_host_access_refuses_files_and_runs() {
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("secret.ps");
     std::fs::write(&file, b"/secret 42 def\n").unwrap();
-    let name = file.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+    let name = file
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
 
     // Allowed by default: the file opens and runs.
     assert!(!stops(&format!("({name}) (r) file closefile")));
@@ -37,10 +39,36 @@ fn denied_host_access_refuses_files_and_runs() {
 
     assert!(stops(&format!("({name}) (r) file")), "file must refuse");
     assert!(stops(&format!("({name}) run")), "run must refuse");
-    assert!(stops(&format!("({name}) deletefile")), "deletefile must refuse");
+    assert!(
+        stops(&format!("({name}) deletefile")),
+        "deletefile must refuse"
+    );
     assert!(file.exists(), "the file is still there");
-    let out = dir.join("written.ps").to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
-    assert!(stops(&format!("({out}) (w) file")), "file for writing must refuse");
+    // renamefile refuses before it looks at the disk, so the error is the
+    // same whether or not the file exists: nothing to probe paths with.
+    let missing = dir
+        .join("missing.ps")
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    for old in [&name, &missing] {
+        let probe = format!(
+            "{{ ({old}) ({old}.moved) renamefile }} stopped \
+             {{ $error /errorname get /invalidfileaccess ne {{ 1 0 div }} if }} {{ 1 0 div }} ifelse"
+        );
+        let mut interp = Interpreter::builder().suppress_output().build();
+        assert!(
+            interp.exec(probe.as_bytes()).is_ok(),
+            "renamefile of {old} must be invalidfileaccess"
+        );
+    }
+    let out = dir
+        .join("written.ps")
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    assert!(
+        stops(&format!("({out}) (w) file")),
+        "file for writing must refuse"
+    );
     assert!(!dir.join("written.ps").exists());
     // status sees nothing on disk.
     let mut interp = Interpreter::builder().suppress_output().build();

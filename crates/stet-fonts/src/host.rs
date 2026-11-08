@@ -1,3 +1,7 @@
+// stet - A PostScript Interpreter
+// Copyright (c) 2026 Scott Bowman
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
 //! Whether stet may touch the host computer.
 //!
 //! By default stet behaves like a desktop interpreter: PostScript `file`, `run`, `deletefile` and

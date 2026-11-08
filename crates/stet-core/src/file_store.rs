@@ -909,7 +909,9 @@ impl FileStore {
         let entry = &mut self.files[entity.raw_index()];
         match &mut entry.handle {
             FileHandle::Real(f) => f.get_mut().write_all(buf),
-            FileHandle::Stdout | FileHandle::Stderr if !stet_fonts::host::host_access_allowed() => Ok(()),
+            FileHandle::Stdout | FileHandle::Stderr if !stet_fonts::host::host_access_allowed() => {
+                Ok(())
+            }
             FileHandle::Stdout => io::stdout().write_all(buf),
             FileHandle::Stderr => io::stderr().write_all(buf),
             FileHandle::Closed => Err(io::Error::other("file closed")),

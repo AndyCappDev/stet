@@ -24,7 +24,9 @@ pub fn get_system_font_cache() -> &'static SystemFontCache {
     if !crate::host::host_access_allowed() {
         // No system fonts when the host is off limits (see `crate::host`).
         static NONE: OnceLock<SystemFontCache> = OnceLock::new();
-        return NONE.get_or_init(|| SystemFontCache { fonts: HashMap::new() });
+        return NONE.get_or_init(|| SystemFontCache {
+            fonts: HashMap::new(),
+        });
     }
     SYSTEM_FONT_CACHE.get_or_init(SystemFontCache::load_or_build)
 }
