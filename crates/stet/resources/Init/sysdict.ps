@@ -519,7 +519,7 @@ true setglobal
         } if
         (/) [ResourceDir () [5 index =string cvs ResourceExtension] =string join] =string join
         dup status {4 {pop} repeat}
-            {pop exch pop /findresource /undefinedresource .error} ifelse
+            {pop exch pop Category /findresource /undefinedresource .error} ifelse
         run
         counttomark 2 eq { %ifelse
             % The file left the instance's value behind — register it.
@@ -535,7 +535,7 @@ true setglobal
                 1 index known { %ifelse
                     Category localresourcedict pop exch get
                 } {
-                    exch pop /findresource /undefinedresource .error
+                    exch pop Category /findresource /undefinedresource .error
                 } ifelse
             } ifelse
         } ifelse
@@ -697,7 +697,14 @@ true setglobal
     } bind def
 
     % Encoding category convenience operator
-    /findencoding { /Encoding findresource } bind def
+    % key findencoding encoding. Its own error, so a failure leaves just the key, as Ghostscript does (a
+    % failed findresource leaves key and category).
+    /findencoding {
+        dup /Encoding resourcestatus
+            { pop pop /Encoding findresource }
+            { /findencoding cvx errordict /undefinedresource get exec }
+        ifelse
+    } bind def
 
     % ColorRendering category convenience operator
     % intent findcolorrendering name bool (PLRM 3rd ed.): the CRD named intent.pagedevice.halftone if that

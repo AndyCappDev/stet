@@ -33,16 +33,16 @@ pub fn op_findresource(ctx: &mut Context) -> Result<(), PsError> {
     // Special case: /Category findresource → look up directly in category_registry
     if cat_name == category_name_id {
         let key = ctx.make_dict_key(&key_obj)?;
-        let result = ctx.dicts.get(ctx.category_registry, &key);
+        // On failure the operands stay, as for any operator (PLRM 3.11.1): prologs probe with
+        // `{/Name /Category findresource} stopped {pop pop ...}`.
+        let val = ctx
+            .dicts
+            .get(ctx.category_registry, &key)
+            .ok_or(PsError::UndefinedResource)?;
         ctx.o_stack.pop()?; // category
         ctx.o_stack.pop()?; // key
-        match result {
-            Some(val) => {
-                ctx.o_stack.push(val)?;
-                Ok(())
-            }
-            None => Err(PsError::UndefinedResource),
-        }
+        ctx.o_stack.push(val)?;
+        Ok(())
     } else {
         // Get the category implementation dict
         let impl_dict_obj = ctx.dicts.get(ctx.category_registry, &cat_key);
@@ -110,9 +110,7 @@ fn findresource_direct(
         return Ok(());
     }
 
-    // Not found
-    ctx.o_stack.pop()?; // category
-    // Leave key on stack for error reporting
+    // Not found: key and category stay on the stack, as for any operator that fails.
     Err(PsError::UndefinedResource)
 }
 

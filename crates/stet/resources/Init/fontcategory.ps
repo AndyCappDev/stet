@@ -125,7 +125,7 @@ true setglobal
     % Helper to handle font fallback when a font is not found
     /FontFallback {
         FallbackInProgress {
-            /findresource /undefinedresource .error
+            Category /findresource /undefinedresource .error
         } {
             dup WarnedFonts exch known not {
                 (Warning: Font ) print dup =string cvs print ( not found, substituting ) print
