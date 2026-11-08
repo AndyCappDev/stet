@@ -196,12 +196,18 @@ pub struct Interpreter {
     #[cfg(feature = "render")]
     page_background: PageBackground,
     warnings: Vec<ExecWarning>,
+    keep_partial: bool,
+    last_error: Option<StetError>,
 }
+
+/// How long the `showpage` that ends a job cut short by an error may take.
+const FLUSH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Builder for configuring an [`Interpreter`] before creation.
 pub struct InterpreterBuilder {
     use_icc: bool,
     suppress_output: bool,
+    keep_partial: bool,
     text_extraction: TextExtraction,
     default_rendering_intent: RenderingIntent,
     file_access: FileAccess,
@@ -223,6 +229,7 @@ impl Interpreter {
         InterpreterBuilder {
             use_icc: true,
             suppress_output: false,
+            keep_partial: false,
             text_extraction: TextExtraction::Off,
             default_rendering_intent: RenderingIntent::RelativeColorimetric,
             file_access: FileAccess::Full,
@@ -299,6 +306,7 @@ impl Interpreter {
         dpi: f64,
     ) -> Result<Vec<DisplayListPage>, StetError> {
         self.warnings.clear();
+        self.last_error = None;
         let ps_data = strip_dos_eps_header(ps_data);
         let is_eps = content_is_epsf(ps_data);
 
@@ -323,6 +331,7 @@ impl Interpreter {
     #[cfg(feature = "pdf-output")]
     pub fn render_to_pdf(&mut self, ps_data: &[u8], dpi: f64) -> Result<Vec<u8>, StetError> {
         self.warnings.clear();
+        self.last_error = None;
         self.ctx.null_device_used = false;
         let ps_data = strip_dos_eps_header(ps_data);
         let is_eps = content_is_epsf(ps_data);
@@ -365,7 +374,7 @@ impl Interpreter {
             let result = parse_and_exec(&mut self.ctx, ps_data);
             job_result(&self.ctx, result)
         };
-        let exec_result = exec_result.and_then(|()| self.end_page_device());
+        let exec_result = self.finish_job(exec_result);
 
         self.record_end_of_job_warnings();
 
@@ -395,6 +404,8 @@ impl Interpreter {
     ///
     /// Useful for running test suites or scripts that don't produce pages.
     pub fn exec(&mut self, ps_data: &[u8]) -> Result<(), StetError> {
+        // `exec` keeps no pages and returns its error itself.
+        self.last_error = None;
         let save_obj = self.ctx.vm_save();
         let save_id = extract_save_id(&save_obj);
 
@@ -435,6 +446,79 @@ impl Interpreter {
     /// [`exec`]: Interpreter::exec
     pub fn warnings(&self) -> &[ExecWarning] {
         &self.warnings
+    }
+
+    /// The error that ended the most recent call early, when the interpreter
+    /// keeps partial pages ([`InterpreterBuilder::keep_partial_pages`]); the
+    /// pages it returned are those shown before the error, plus the one being
+    /// painted when it happened.
+    ///
+    /// Cleared at the start of every [`render`](Interpreter::render),
+    /// [`render_to_display_list`](Interpreter::render_to_display_list),
+    /// `render_to_pdf` and [`exec`](Interpreter::exec) call. `exec` keeps no
+    /// pages and returns its error, so after it this is always `None`.
+    pub fn last_error(&self) -> Option<&StetError> {
+        self.last_error.as_ref()
+    }
+
+    /// End a page cut short by an error, so the marks painted so far are kept.
+    fn flush_partial_page(&mut self) {
+        let callers = self.abandon_job();
+        let _ = parse_and_exec(&mut self.ctx, b"{ showpage } stopped pop");
+        self.ctx.deadline = callers;
+    }
+
+    /// After an error that left the job mid-flight: drop what it was running,
+    /// so code run now does not resume it, and give that code a deadline of its
+    /// own (a job that ran out of time would otherwise run out again at once,
+    /// and `showpage` may be the program's own procedure).
+    ///
+    /// Returns the caller's deadline, which the caller of this puts back once
+    /// that code has run: [`Context::set_timeout`] is absolute, so the flush's
+    /// own would otherwise outlive the call and stop a later one.
+    fn abandon_job(&mut self) -> Option<std::time::Instant> {
+        self.ctx.o_stack.clear();
+        self.ctx.e_stack.clear();
+        self.ctx.loops.clear();
+        let callers = self.ctx.deadline;
+        self.ctx.set_timeout(Some(FLUSH_DEADLINE));
+        callers
+    }
+
+    /// A job's result as the caller sees it. With partial pages kept, an
+    /// error ends the page being painted and is recorded in `last_error`
+    /// rather than failing the call; otherwise a clean run deactivates the
+    /// page device, which may transmit one more page.
+    fn finish_job(&mut self, exec_result: Result<(), StetError>) -> Result<(), StetError> {
+        let exec_result = match exec_result {
+            Err(e) if self.keep_partial => {
+                self.flush_partial_page();
+                Err(e)
+            }
+            r => r.and_then(|()| self.end_page_device()),
+        };
+        match exec_result.map_err(|e| self.named_error(e)) {
+            Err(e) if self.keep_partial => {
+                self.last_error = Some(e);
+                Ok(())
+            }
+            r => r,
+        }
+    }
+
+    /// The error a job ended in, by its PostScript name when the job ended in
+    /// `stop` after an error (`PostScript error: VMerror` rather than `stop`).
+    fn named_error(&self, e: StetError) -> StetError {
+        match &e {
+            StetError::PostScript(m) if m == "stop" => match self.ctx.error_name() {
+                Some(n) => match self.ctx.error_command() {
+                    Some(c) => StetError::PostScript(format!("{n} in {c}")),
+                    None => StetError::PostScript(n),
+                },
+                None => e,
+            },
+            _ => e,
+        }
     }
 
     /// Access the underlying Context for power-user operations.
@@ -511,7 +595,7 @@ impl Interpreter {
 
         let exec_result = parse_and_exec(&mut self.ctx, ps_data);
         let exec_result = job_result(&self.ctx, exec_result);
-        let exec_result = exec_result.and_then(|()| self.end_page_device());
+        let exec_result = self.finish_job(exec_result);
 
         self.record_end_of_job_warnings();
         finish_device(&mut self.ctx);
@@ -607,7 +691,14 @@ impl Interpreter {
         let wrapper = format!("gsave {} {} translate", -llx, -lly);
         parse_and_exec(&mut self.ctx, wrapper.as_bytes()).map_err(ps_err)?;
         let showpages_before = self.ctx.showpage_count;
-        let _ = parse_and_exec(&mut self.ctx, ps_data);
+        let ran = parse_and_exec(&mut self.ctx, ps_data);
+        let mut callers_deadline = None;
+        if let Err(e) = job_result(&self.ctx, ran) {
+            callers_deadline = Some(self.abandon_job());
+            if self.keep_partial {
+                self.last_error = Some(self.named_error(e));
+            }
+        }
         if self.ctx.showpage_count == showpages_before {
             // `showpage` first, as the EPS would have called it: on the
             // page device it left current. One that called `setpagedevice`
@@ -616,6 +707,9 @@ impl Interpreter {
             let _ = parse_and_exec(&mut self.ctx, b"showpage grestore");
         } else {
             let _ = parse_and_exec(&mut self.ctx, b"grestore");
+        }
+        if let Some(d) = callers_deadline {
+            self.ctx.deadline = d;
         }
         Ok(())
     }
@@ -733,6 +827,14 @@ impl InterpreterBuilder {
         self.file_access(FileAccess::Safer)
     }
 
+    /// Keep the pages a program painted before an error: the render returns
+    /// them, the page being painted included, and [`Interpreter::last_error`]
+    /// says what went wrong. Off by default: an error fails the render.
+    pub fn keep_partial_pages(mut self) -> Self {
+        self.keep_partial = true;
+        self
+    }
+
     /// Build the interpreter.
     pub fn build(self) -> Interpreter {
         let mut ctx = init::create_initialized_context(self.use_icc, self.suppress_output)
@@ -746,6 +848,8 @@ impl InterpreterBuilder {
             #[cfg(feature = "render")]
             page_background: self.page_background,
             warnings: Vec::new(),
+            keep_partial: self.keep_partial,
+            last_error: None,
         }
     }
 }
