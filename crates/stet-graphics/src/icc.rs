@@ -2171,6 +2171,9 @@ pub fn find_system_cmyk_profile_bytes() -> Option<Arc<Vec<u8>>> {
 
 /// Search common system paths for a CMYK ICC profile.
 fn find_system_cmyk_profile() -> Option<Vec<u8>> {
+    if !stet_fonts::host::host_access_allowed() {
+        return None;
+    }
     #[cfg(target_os = "linux")]
     {
         let paths = [

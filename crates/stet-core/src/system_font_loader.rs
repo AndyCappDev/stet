@@ -25,7 +25,7 @@ use crate::truetype::{find_table, get_units_per_em, read_i16};
 /// Extracts the CFF table, parses it, and registers fonts via the CFF pipeline.
 /// Returns true on success.
 pub fn load_otf_cff(ctx: &mut Context, path: &Path) -> bool {
-    let data = match std::fs::read(path) {
+    let data = match stet_fonts::host::read(path) {
         Ok(d) => d,
         Err(_) => return false,
     };
@@ -81,7 +81,7 @@ pub fn load_otf_cff_from_data(ctx: &mut Context, data: &[u8]) -> bool {
 ///
 /// Returns true on success.
 pub fn load_ttf(ctx: &mut Context, path: &Path) -> bool {
-    let data = match std::fs::read(path) {
+    let data = match stet_fonts::host::read(path) {
         Ok(d) => d,
         Err(_) => return false,
     };
@@ -557,7 +557,7 @@ pub fn is_cff_font(data: &[u8]) -> bool {
 
 /// Load a binary font file (TTF or OTF), auto-detecting the format.
 pub fn load_binary_font(ctx: &mut Context, path: &Path) -> bool {
-    let data = match std::fs::read(path) {
+    let data = match stet_fonts::host::read(path) {
         Ok(d) => d,
         Err(_) => return false,
     };

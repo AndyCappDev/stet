@@ -67,6 +67,7 @@ pub mod cid_type0;
 pub mod cid_unicode;
 pub mod encoding;
 pub mod geometry;
+pub mod host;
 pub mod system_fonts;
 pub mod to_unicode;
 pub mod truetype;

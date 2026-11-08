@@ -34,12 +34,12 @@ pub fn load_font_file(
     }
 
     // Fall back to disk I/O
-    if let Ok(data) = std::fs::read(&direct_path) {
+    if let Ok(data) = stet_fonts::host::read(&direct_path) {
         return Some(data);
     }
     if let Some(urw_name) = find_substitution(font_name) {
         let sub_path = format!("{}/{}.t1", resource_path, urw_name);
-        if let Ok(data) = std::fs::read(&sub_path) {
+        if let Ok(data) = stet_fonts::host::read(&sub_path) {
             return Some(data);
         }
     }
