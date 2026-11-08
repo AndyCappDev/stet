@@ -344,6 +344,7 @@ pub(crate) fn push_fill_element(ctx: &mut Context, path: PsPath, fill_rule: Fill
             xstep: pat.xstep,
             ystep: pat.ystep,
             paint_type: pat.paint_type,
+            tiling_type: pat.tiling_type,
             underlying_color: ctx.gstate.pattern_underlying_color.clone(),
             pattern_id,
             device_space_tile: false,

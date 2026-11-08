@@ -2980,6 +2980,7 @@ impl<'a> ContentInterpreter<'a> {
                     xstep: pattern.x_step,
                     ystep: pattern.y_step,
                     paint_type: pattern.paint_type,
+                    tiling_type: pattern.tiling_type,
                     underlying_color: if pattern.paint_type == 2 {
                         Some(self.gstate.fill_color.clone())
                     } else {
@@ -3035,6 +3036,7 @@ impl<'a> ContentInterpreter<'a> {
                     xstep: pattern.x_step,
                     ystep: pattern.y_step,
                     paint_type: pattern.paint_type,
+                    tiling_type: pattern.tiling_type,
                     underlying_color: if pattern.paint_type == 2 {
                         Some(self.gstate.stroke_color.clone())
                     } else {
@@ -4810,6 +4812,7 @@ impl<'a> ContentInterpreter<'a> {
                     xstep: pattern.x_step,
                     ystep: pattern.y_step,
                     paint_type: pattern.paint_type,
+                    tiling_type: pattern.tiling_type,
                     underlying_color: if pattern.paint_type == 2 {
                         Some(self.gstate.fill_color.clone())
                     } else {
@@ -4889,6 +4892,7 @@ impl<'a> ContentInterpreter<'a> {
                     xstep: pattern.x_step,
                     ystep: pattern.y_step,
                     paint_type: pattern.paint_type,
+                    tiling_type: pattern.tiling_type,
                     underlying_color: if pattern.paint_type == 2 {
                         Some(self.gstate.stroke_color.clone())
                     } else {
@@ -8808,6 +8812,7 @@ impl<'a> ContentInterpreter<'a> {
             return Err(PdfError::Other("pattern recursion limit".into()));
         }
         let paint_type = pat_dict.get_int(b"PaintType").unwrap_or(1) as i32;
+        let tiling_type = pat_dict.get_int(b"TilingType").unwrap_or(1) as i32;
 
         let bbox = deref_num_array(self.resolver, pat_dict, b"BBox")
             .map(|v| {
@@ -8914,6 +8919,7 @@ impl<'a> ContentInterpreter<'a> {
             y_step,
             pattern_matrix: combined_matrix,
             paint_type,
+            tiling_type,
             pattern_id: 0,
             flip_tile_y: false,
         })

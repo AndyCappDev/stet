@@ -177,6 +177,8 @@ pub struct PatternRef {
     pub ystep: f64,
     /// Paint type: 1 = colored, 2 = uncolored.
     pub paint_type: i32,
+    /// Tiling type, as the pattern gave it: 1, 2 or 3.
+    pub tiling_type: i32,
     /// Painted inside a Form, whose space is device space, rather than on
     /// the page, whose default space is the initial `cm`'s.
     pub in_form: bool,
@@ -2243,6 +2245,7 @@ fn emit_pattern_fill(
             xstep: params.xstep,
             ystep: params.ystep,
             paint_type: params.paint_type,
+            tiling_type: params.tiling_type,
             in_form,
         });
         pattern_map.insert(key, idx);

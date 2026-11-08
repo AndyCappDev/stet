@@ -1239,6 +1239,10 @@ pub struct PatternFillParams {
     pub ystep: f64,
     /// Paint type: 1 = colored, 2 = uncolored.
     pub paint_type: i32,
+    /// Tiling type: 1 = constant spacing (a device may round the step to
+    /// whole device pixels), 2 = no distortion (the exact step), 3 = faster
+    /// tiling. A vector writer uses it to know whether the step is exact.
+    pub tiling_type: i32,
     /// For uncolored patterns, the fill color.
     pub underlying_color: Option<DeviceColor>,
     /// Unique pattern ID from pattern_store (for dedup in PDF output).
