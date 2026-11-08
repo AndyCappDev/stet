@@ -47,8 +47,5 @@ fn a_missing_instance_of_an_implicit_category_leaves_key_and_category() {
 
 #[test]
 fn a_found_procset_is_still_one_object() {
-    assert_eq!(
-        leaves("/CIDInit /ProcSet findresource", 1),
-        [0, 0, 255]
-    );
+    assert_eq!(leaves("/CIDInit /ProcSet findresource", 1), [0, 0, 255]);
 }

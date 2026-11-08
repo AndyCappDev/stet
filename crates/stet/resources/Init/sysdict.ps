@@ -679,7 +679,14 @@ true setglobal
     } bind def
 
     % Encoding category convenience operator
-    /findencoding { /Encoding findresource } bind def
+    % key findencoding encoding. Its own error, so a failure leaves just the key, as Ghostscript does (a
+    % failed findresource leaves key and category).
+    /findencoding {
+        dup /Encoding resourcestatus
+            { pop pop /Encoding findresource }
+            { /findencoding cvx errordict /undefinedresource get exec }
+        ifelse
+    } bind def
 
     % ColorRendering category convenience operator
     /findcolorrendering { /ColorRendering findresource } bind def
