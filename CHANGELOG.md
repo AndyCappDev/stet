@@ -62,6 +62,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`rand` gives Ghostscript's sequence, so a program drawing with it
+  draws what Ghostscript draws.** It is now Park and Miller's "minimal
+  standard" generator (multiplier 16807, modulus 2³¹−1), the one Adobe
+  documents and Ghostscript implements, starting from 1. `srand` brings
+  its seed into range as Ghostscript does, and `rrand` returns the
+  generator's current state, so handing it back to `srand` resumes the
+  sequence; it returned the last seed before. Any page drawn with
+  `rand` comes out differently from earlier versions of stet.
+  `stet_core::context::Context::rand_seed` is gone; `rand_state` holds
+  the state. Contributed by @nielsbosma (#30).
 - **A failed render names its PostScript error.** `render`,
   `render_to_display_list` and `render_to_pdf` reported any error a
   program raised as `PostScript error: stop`. They now give its name and

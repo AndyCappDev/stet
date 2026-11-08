@@ -406,7 +406,6 @@ pub fn op_rand(ctx: &mut Context) -> Result<(), PsError> {
         next += M;
     }
     ctx.rand_state = next as u64;
-    ctx.rand_seed = next;
     ctx.o_stack.push(PsObject::int(next))?;
     Ok(())
 }
@@ -429,7 +428,6 @@ pub fn op_srand(ctx: &mut Context) -> Result<(), PsError> {
     } else {
         seed.min(0x7fff_fffe)
     };
-    ctx.rand_seed = state;
     ctx.rand_state = state as u64;
     Ok(())
 }

@@ -150,8 +150,6 @@ pub struct Context {
     // State
     /// State of `rand`'s generator (1..2^31-2), returned by `rrand`.
     pub rand_state: u64,
-    /// The same state as `rand_state`, kept for callers that read it.
-    pub rand_seed: i64,
     /// Current source line number (1-based), updated during scanning.
     pub current_source_line: u32,
     /// Packing mode for array/procedure creation (setpacking/currentpacking).
@@ -1362,7 +1360,6 @@ impl Context {
             errordict,
             dollar_error,
             rand_state: 1,
-            rand_seed: 1,
             current_source_line: 1,
             packing_mode: false,
             echo: false,
