@@ -46,15 +46,15 @@ pub use skia_device::RegionRender;
 #[cfg(feature = "ps-device")]
 pub use skia_device::SkiaDevice;
 pub use skia_device::debug_bbox_comparison;
+pub use skia_device::image_samples_to_rgba;
 pub use skia_device::prepare_display_list;
-pub use skia_device::image_to_rgba;
 pub use skia_device::render_region;
-pub use skia_device::render_region_transparent;
 pub use skia_device::render_region_prepared;
 pub use skia_device::render_region_prepared_parallel;
 pub use skia_device::render_region_prepared_parallel_cancellable;
 pub use skia_device::render_region_prepared_parallel_with_progress;
 pub use skia_device::render_region_single_band;
+pub use skia_device::render_region_with_background;
 pub use skia_device::render_to_rgba;
 pub use skia_device::render_to_rgba_viewport;
 pub use skia_device::render_to_rgba_with_background;
