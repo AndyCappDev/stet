@@ -29,10 +29,10 @@ pub fn new_page_collection() -> Arc<Mutex<Vec<PageData>>> {
 }
 
 /// The device installed while interpreting: it records each page's size and
-/// drops its display list, which the page-boundary capture has already kept
-/// for `render_viewport()`. Rendering pages here as well — as a
-/// `SkiaDevice` into a discarding sink once did — rasterised every page once
-/// for nothing.
+/// does not read the display list, so the page-boundary capture keeps the
+/// list itself for `render_viewport()` rather than a copy. Rendering pages
+/// here as well — as a `SkiaDevice` into a discarding sink once did —
+/// rasterised every page once for nothing.
 pub struct PageSizeRecorder {
     width: u32,
     height: u32,
@@ -62,6 +62,9 @@ impl OutputDevice for PageSizeRecorder {
     fn draw_image(&mut self, _sample_data: &[u8], _params: &ImageParams) {}
     fn page_size(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+    fn reads_display_list(&self) -> bool {
+        false
     }
     fn replay_and_show(&mut self, _list: DisplayList, _output_path: &str) -> Result<(), String> {
         self.pages

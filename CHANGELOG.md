@@ -62,6 +62,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`render_to_display_list` no longer holds each page twice.** The
+  page's display list goes to the caller, not a copy of it, so a page
+  with millions of marks needs far less memory: `mandelbrot.ps`, with
+  1,098,304 `rectfill`s, peaked at 1.6 GB rather than 2.7 GB. The browser
+  build keeps its pages the same way. A custom `OutputDevice` can take
+  part through the new `reads_display_list()`, which defaults to `true`;
+  a device that answers `false` is handed an empty list when display lists
+  are being captured. `DisplayList::shrink_to_fit` is also new.
+  Contributed by @nielsbosma (#37).
 - **`rand` gives Ghostscript's sequence, so a program drawing with it
   draws what Ghostscript draws.** It is now Park and Miller's "minimal
   standard" generator (multiplier 16807, modulus 2³¹−1), the one Adobe
