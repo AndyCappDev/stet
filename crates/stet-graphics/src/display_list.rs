@@ -390,6 +390,49 @@ impl DisplayList {
     pub fn into_elements(self) -> Vec<DisplayElement> {
         self.elements
     }
+
+    /// Decode the images kept as JPEG data ([`ImageParams::jpeg`]), here and
+    /// in every nested list, into the samples a renderer reads: for a list
+    /// made with JPEG data kept that is then rasterised. An image whose data
+    /// does not decode to its size is left out, as the `image` operator
+    /// would have stopped on it.
+    ///
+    /// [`ImageParams::jpeg`]: crate::device::ImageParams::jpeg
+    pub fn decode_kept_jpeg(&mut self) {
+        let elements = std::mem::take(&mut self.elements);
+        self.elements = elements
+            .into_iter()
+            .filter_map(|mut e| {
+                match &mut e {
+                    DisplayElement::Group { elements, .. }
+                    | DisplayElement::OcgGroup { elements, .. } => elements.decode_kept_jpeg(),
+                    DisplayElement::SoftMasked { mask, content, .. } => {
+                        mask.decode_kept_jpeg();
+                        content.decode_kept_jpeg();
+                    }
+                    DisplayElement::PatternFill { params } => params.tile.decode_kept_jpeg(),
+                    DisplayElement::Image {
+                        sample_data,
+                        params,
+                    } if sample_data.is_empty() => {
+                        if let Some(jpeg) = params.jpeg.take() {
+                            let n = params.color_space.num_components() as usize;
+                            let want = params.width as usize * params.height as usize * n;
+                            match crate::jpeg::decode(&jpeg) {
+                                Ok(mut px) if px.len() >= want => {
+                                    px.truncate(want);
+                                    *sample_data = Arc::new(px);
+                                }
+                                _ => return None,
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                Some(e)
+            })
+            .collect();
+    }
 }
 
 impl Default for DisplayList {

@@ -215,6 +215,7 @@ pub struct InterpreterBuilder {
     default_rendering_intent: RenderingIntent,
     file_access: FileAccess,
     max_page_size_points: f64,
+    keep_jpeg: bool,
     #[cfg(feature = "render")]
     page_background: PageBackground,
 }
@@ -238,6 +239,7 @@ impl Interpreter {
             default_rendering_intent: RenderingIntent::RelativeColorimetric,
             file_access: FileAccess::Full,
             max_page_size_points: stet_core::context::DEFAULT_MAX_PAGE_SIZE_POINTS,
+            keep_jpeg: false,
             #[cfg(feature = "render")]
             page_background: PageBackground::White,
         }
@@ -861,6 +863,19 @@ impl InterpreterBuilder {
         self
     }
 
+    /// Keep JPEG images in display lists as their JPEG data, not their
+    /// samples, where that draws the same: see
+    /// [`ImageParams::jpeg`](stet_graphics::device::ImageParams::jpeg). For a
+    /// consumer that writes JPEG out as it is, such as an SVG or PDF writer;
+    /// a page with hundreds of photographs then never holds them decoded.
+    /// Before rasterising such a list, decode them with
+    /// [`DisplayList::decode_kept_jpeg`](stet_graphics::display_list::DisplayList::decode_kept_jpeg).
+    /// Off by default.
+    pub fn keep_jpeg_data(mut self) -> Self {
+        self.keep_jpeg = true;
+        self
+    }
+
     /// Build the interpreter.
     pub fn build(self) -> Interpreter {
         let mut ctx = init::create_initialized_context(self.use_icc, self.suppress_output)
@@ -870,6 +885,7 @@ impl InterpreterBuilder {
         ctx.text_extraction = self.text_extraction;
         ctx.set_default_rendering_intent(self.default_rendering_intent);
         ctx.max_page_size_points = self.max_page_size_points;
+        ctx.keep_jpeg = self.keep_jpeg;
         Interpreter {
             ctx,
             #[cfg(feature = "render")]

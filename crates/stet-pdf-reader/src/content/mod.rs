@@ -5506,6 +5506,7 @@ impl<'a> ContentInterpreter<'a> {
             .unwrap_or(false);
 
         let params = ImageParams {
+            jpeg: None,
             width,
             height,
             color_space,
@@ -5921,6 +5922,7 @@ impl<'a> ContentInterpreter<'a> {
             mask_dl.push(DisplayElement::Image {
                 sample_data: Arc::new(gray),
                 params: ImageParams {
+                    jpeg: None,
                     width,
                     height,
                     color_space: ImageColorSpace::DeviceGray,
@@ -6023,6 +6025,7 @@ impl<'a> ContentInterpreter<'a> {
             mask_dl.push(DisplayElement::Image {
                 sample_data: Arc::new(gray),
                 params: ImageParams {
+                    jpeg: None,
                     width,
                     height,
                     color_space: ImageColorSpace::DeviceGray,
@@ -6390,6 +6393,7 @@ impl<'a> ContentInterpreter<'a> {
             mask_dl.push(DisplayElement::Image {
                 sample_data: smask_arc,
                 params: ImageParams {
+                    jpeg: None,
                     width,
                     height,
                     color_space: ImageColorSpace::DeviceGray,
@@ -6495,6 +6499,7 @@ impl<'a> ContentInterpreter<'a> {
         let image_matrix =
             Matrix::new(width as f64, 0.0, 0.0, -(height as f64), 0.0, height as f64);
         let image_params = ImageParams {
+            jpeg: None,
             width,
             height,
             color_space: cached.color_space,
@@ -6525,6 +6530,7 @@ impl<'a> ContentInterpreter<'a> {
             mask_dl.push(DisplayElement::Image {
                 sample_data: smask_data,
                 params: ImageParams {
+                    jpeg: None,
                     width: sw,
                     height: sh,
                     color_space: ImageColorSpace::DeviceGray,
@@ -7679,6 +7685,7 @@ impl<'a> ContentInterpreter<'a> {
             mask_dl.push(DisplayElement::Image {
                 sample_data: Arc::new(gray),
                 params: ImageParams {
+                    jpeg: None,
                     width,
                     height,
                     color_space: ImageColorSpace::DeviceGray,
@@ -7745,6 +7752,7 @@ impl<'a> ContentInterpreter<'a> {
             self.display_list.push(DisplayElement::Image {
                 sample_data: Arc::new(sample_data),
                 params: ImageParams {
+                    jpeg: None,
                     width,
                     height,
                     color_space: ImageColorSpace::Mask {

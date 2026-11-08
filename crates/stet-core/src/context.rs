@@ -476,6 +476,10 @@ pub struct Context {
     /// `f64::INFINITY` lifts the limit; a value that is not greater than zero
     /// (NaN included) counts as [`DEFAULT_MAX_PAGE_SIZE_POINTS`].
     pub max_page_size_points: f64,
+    /// Whether `image` keeps a JPEG image as its JPEG data instead of its
+    /// samples, for a display-list consumer that writes JPEG out as it is
+    /// (see `ImageParams::jpeg`). Off by default.
+    pub keep_jpeg: bool,
 
     /// The program's own `MaxLocalVM`, from `setuserparams`; `None` until it
     /// sets one. Kept apart from [`Self::max_local_vm`] rather than written
@@ -1453,6 +1457,7 @@ impl Context {
             exec_sync_depth: 0,
             max_local_vm: DEFAULT_MAX_LOCAL_VM,
             max_page_size_points: DEFAULT_MAX_PAGE_SIZE_POINTS,
+            keep_jpeg: false,
             program_max_vm: None,
             deadline: None,
             steps_to_deadline_check: DEADLINE_CHECK_INTERVAL,

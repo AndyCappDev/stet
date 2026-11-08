@@ -930,6 +930,15 @@ pub struct ImageParams {
     /// (see [`TransferState`]). Front ends leave it at the default for an
     /// image with a soft mask, which is never fully opaque.
     pub transfer: TransferState,
+    /// The image as JPEG data, when the interpreter was asked to keep JPEG
+    /// images so (`InterpreterBuilder::keep_jpeg_data`): the samples are then
+    /// empty, and these bytes decode to exactly them. Only for an 8-bit
+    /// DeviceGray or DeviceRGB image with the default `Decode`, whose JPEG
+    /// has the image's size and component count and stores its colour the
+    /// usual way (YCbCr for three components), so any JPEG reader shows it
+    /// as the interpreter would. A consumer that needs the samples decodes
+    /// it with [`crate::jpeg::decode`].
+    pub jpeg: Option<Arc<Vec<u8>>>,
 }
 
 /// A spot/DeviceN tint transform reduced to a uniform sampled grid.
@@ -1370,6 +1379,7 @@ impl Default for TextParams {
 impl Default for ImageParams {
     fn default() -> Self {
         Self {
+            jpeg: None,
             width: 0,
             height: 0,
             color_space: ImageColorSpace::default(),
