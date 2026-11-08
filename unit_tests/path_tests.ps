@@ -79,6 +79,22 @@ gsave nulldevice
     newpath {closepath 0 {pop pop 1 add} {pop pop 1 add} {6 {pop} repeat 1 add} {1 add} pathforall} [0] assert
     newpath 0 0 moveto 10 0 lineto
     {closepath closepath 0 {pop pop 1 add} {pop pop 1 add} {6 {pop} repeat 1 add} {1 add} pathforall} [3] assert newpath
+    % a segment appended after closepath begins a new subpath at the closed
+    % subpath's start, recorded as a moveto (PLRM; as in Ghostscript)
+    /$segs { [ {pop pop /m} {pop pop /l} {6 {pop} repeat /c} {/h} pathforall ] } def
+    /$closed { newpath 10 10 moveto 50 10 lineto 50 50 lineto closepath } def
+    {$closed 30 30 lineto $segs} [[/m /l /l /h /m /l]] assert
+    {$closed 5 5 rlineto $segs} [[/m /l /l /h /m /l]] assert
+    {$closed 1 1 2 2 3 3 curveto $segs} [[/m /l /l /h /m /c]] assert
+    {$closed 1 1 2 2 3 3 rcurveto $segs} [[/m /l /l /h /m /c]] assert
+    {$closed 30 30 5 0 90 arc $segs} [[/m /l /l /h /m /l /c]] assert
+    {$closed 30 30 5 90 0 arcn $segs} [[/m /l /l /h /m /l /c]] assert
+    {$closed 10 50 50 50 5 arct $segs} [[/m /l /l /h /m /l /c]] assert
+    {$closed 30 30 lineto closepath $segs} [[/m /l /l /h /m /l /h]] assert
+    {$closed 30 30 moveto 40 40 lineto $segs} [[/m /l /l /h /m /l]] assert
+    % the new subpath starts at the closed one's start
+    {$closed 30 30 lineto [ {} {pop pop} {6 {pop} repeat} {} pathforall ]} [[10.0 10.0 10.0 10.0]] assert
+    newpath
 
 
 %% arct %%

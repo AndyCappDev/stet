@@ -117,6 +117,24 @@ pub fn path_moveto(path: &mut PsPath, x: f64, y: f64) {
     }
 }
 
+/// Start a new subpath at the current point if the current one is closed.
+///
+/// PLRM: "closepath terminates the current subpath; appending another
+/// segment to the current path will begin a new subpath". It begins at the
+/// closed subpath's start, which `closepath` made the current point.
+/// Recording that as an explicit `MoveTo`, as Ghostscript does, keeps every
+/// subpath starting with one: `pathforall`, `reversepath` and `strokepath`
+/// walk the segments and would otherwise run the new segments on from the
+/// closed subpath.
+/// Call it after validation, just before appending a segment.
+fn reopen_closed_subpath(ctx: &mut Context) {
+    if let (Some(PathSegment::ClosePath), Some((x, y))) =
+        (ctx.gstate.path.segments.last(), ctx.gstate.current_point)
+    {
+        ctx.gstate.path.segments.push(PathSegment::MoveTo(x, y));
+    }
+}
+
 /// `lineto`: x y → —
 ///
 /// Transform user-space operands through CTM → store device-space coordinates.
@@ -135,6 +153,7 @@ pub fn op_lineto(ctx: &mut Context) -> Result<(), PsError> {
     let (dx, dy) = finite_point(tx, ty)?;
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
+    reopen_closed_subpath(ctx);
     ctx.gstate.path.segments.push(PathSegment::LineTo(dx, dy));
     ctx.gstate.current_point = Some((dx, dy));
     Ok(())
@@ -156,6 +175,7 @@ pub fn op_rlineto(ctx: &mut Context) -> Result<(), PsError> {
     let (nx, ny) = finite_point(cx + ddx, cy + ddy)?;
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
+    reopen_closed_subpath(ctx);
     ctx.gstate.path.segments.push(PathSegment::LineTo(nx, ny));
     ctx.gstate.current_point = Some((nx, ny));
     Ok(())
@@ -191,6 +211,7 @@ pub fn op_curveto(ctx: &mut Context) -> Result<(), PsError> {
     for _ in 0..6 {
         ctx.o_stack.pop()?;
     }
+    reopen_closed_subpath(ctx);
     ctx.gstate.path.segments.push(PathSegment::CurveTo {
         x1: dx1,
         y1: dy1,
@@ -232,6 +253,7 @@ pub fn op_rcurveto(ctx: &mut Context) -> Result<(), PsError> {
     for _ in 0..6 {
         ctx.o_stack.pop()?;
     }
+    reopen_closed_subpath(ctx);
     ctx.gstate.path.segments.push(PathSegment::CurveTo {
         x1: px1,
         y1: py1,
@@ -553,6 +575,7 @@ pub fn op_arc(ctx: &mut Context) -> Result<(), PsError> {
     for _ in 0..5 {
         ctx.o_stack.pop()?;
     }
+    reopen_closed_subpath(ctx);
     let has_cp = ctx.gstate.current_point.is_some();
     let (ex, ey) = arc_segments(
         cx,
@@ -589,6 +612,7 @@ pub fn op_arcn(ctx: &mut Context) -> Result<(), PsError> {
     for _ in 0..5 {
         ctx.o_stack.pop()?;
     }
+    reopen_closed_subpath(ctx);
     let has_cp = ctx.gstate.current_point.is_some();
     let (ex, ey) = arc_segments(
         cx,
@@ -644,6 +668,7 @@ pub fn op_arcto(ctx: &mut Context) -> Result<(), PsError> {
     for _ in 0..5 {
         ctx.o_stack.pop()?;
     }
+    reopen_closed_subpath(ctx);
 
     // Vectors from vertex (x1,y1) toward the other points (user space)
     let u1x = x0 - x1;
@@ -979,6 +1004,28 @@ mod tests {
         op_lineto(&mut ctx).unwrap();
         op_closepath(&mut ctx).unwrap();
         assert_eq!(ctx.gstate.current_point, Some((10.0, 20.0)));
+    }
+
+    #[test]
+    fn a_lineto_after_closepath_begins_a_subpath() {
+        let mut ctx = setup();
+        for (x, y) in [(10.0, 20.0), (100.0, 200.0)] {
+            ctx.o_stack.push(PsObject::real(x)).unwrap();
+            ctx.o_stack.push(PsObject::real(y)).unwrap();
+            if ctx.gstate.current_point.is_none() {
+                op_moveto(&mut ctx).unwrap();
+            } else {
+                op_lineto(&mut ctx).unwrap();
+            }
+        }
+        op_closepath(&mut ctx).unwrap();
+        ctx.o_stack.push(PsObject::real(50.0)).unwrap();
+        ctx.o_stack.push(PsObject::real(60.0)).unwrap();
+        op_lineto(&mut ctx).unwrap();
+        let segs = &ctx.gstate.path.segments;
+        assert_eq!(segs.len(), 5);
+        assert!(matches!(segs[3], PathSegment::MoveTo(x, y) if x == 10.0 && y == 20.0));
+        assert!(matches!(segs[4], PathSegment::LineTo(x, y) if x == 50.0 && y == 60.0));
     }
 
     #[test]

@@ -126,6 +126,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   empty path returned a box instead of raising `nocurrentpoint`, and
   SVG output dropped every shape whose path began with a stray close,
   925 of 1,515 in one sign-making EPS. Contributed by @nielsbosma (#35).
+- **A segment appended straight after `closepath` begins a new subpath
+  with a `moveto`**, at the closed subpath's start, as the PLRM says and
+  as Ghostscript records it. This covers `lineto`, `rlineto`, `curveto`,
+  `rcurveto`, `arc`, `arcn`, `arcto` and `arct`. stet ran the new
+  segments on from the closed subpath, so `pathforall` and `upath`
+  returned a subpath with no `moveto`, `reversepath` joined the two into
+  one open subpath and lost the close, and `strokepath` outlined them as
+  one subpath.
 - **A line end inside a PostScript string literal is one newline,
   whether it is a CR, an LF or a CR LF**, as PLRM 3.2.2 has it and as in
   Ghostscript. stet kept both bytes of a CR LF and left a lone CR as it
