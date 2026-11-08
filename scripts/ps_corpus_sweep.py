@@ -143,7 +143,8 @@ def run_one(path, args, spool):
     started = time.time()
     mem_bytes = parse_mem(args.mem_max)
 
-    argv = confine([str(STET), "--device", "null", str(path)], args.mem_max)
+    argv = confine([str(STET), "--device", "null", *args.stet_arg, str(path)],
+                   args.mem_max)
     kwargs = {}
     if not HAVE_SYSTEMD_RUN:
         kwargs["preexec_fn"] = rlimit_fallback(int(mem_bytes * 1.5))
@@ -210,6 +211,9 @@ def main():
                     help="stratified sample per variant (0 = whole corpus)")
     ap.add_argument("--min-mb", type=float, default=0.0,
                     help="only files at least this large")
+    ap.add_argument("--stet-arg", action="append", default=[],
+                    help="pass this argument to stet as well (repeatable), "
+                         "e.g. --stet-arg=--safer")
     ap.add_argument("--keep-output", action="store_true",
                     help="retain per-file stdout/stderr spool files")
     # Defaults live beside the corpus (already outside the repo), so a sweep

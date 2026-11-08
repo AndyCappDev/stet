@@ -38,6 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   itself are read as before, and `%stdin`, `%stdout` and `%stderr` work.
   `stet_core::file_access` holds the rule; `Context` carries it as
   `file_access` and `file_permits`, with `Context::permit`.
+- **`--safer`, `--permit-read`, `--permit-write`, `--permit-control` and
+  `--permit-all` on the command line**, for `stet` and `stet text`: the
+  same restriction, with Ghostscript's `-dSAFER` and `--permit-file-…`
+  meaning. Each permit takes a folder or one file, may be repeated, and
+  implies `--safer`; one naming a folder that does not exist stops the
+  command with an error. stet's own output (`-o`) is unaffected.
 
 ### Changed
 

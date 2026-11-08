@@ -163,19 +163,38 @@ let mut interp = stet::Interpreter::builder()
 
 PostScript has file access: by default a program can read, write, delete
 and rename files with `file`, `run`, `deletefile` and `renamefile`, as it
-can in Ghostscript with `-dNOSAFER`. A program that renders documents it
-did not write calls `deny_host_access()` once, before the first one:
+can in Ghostscript with `-dNOSAFER`. There are two ways to restrict it.
+
+**`safer()`** is Ghostscript's `-dSAFER`, for one interpreter. A program
+reads only stet's own resources and the installed fonts, and writes,
+deletes and renames nothing, except what the interpreter's permits allow:
+a folder and everything in it, or one file, like Ghostscript's
+`--permit-file-read`, `--permit-file-write` and `--permit-file-control`.
+
+```rust
+let mut interp = stet::Interpreter::builder().safer().build();
+interp.permit_read("job/prologs")?; // also permit_write, permit_control, permit_all
+```
+
+Anything else raises `invalidfileaccess`, whether or not the file exists,
+and `status` and `filenameforall` do not see it. Fonts, CMaps and colour
+profiles stet finds itself are read as before, so pages render the same,
+and `%stdin`, `%stdout` and `%stderr` still work. Any `permit_…` call turns
+`safer()` on, and fails when the folder it names does not exist.
+
+**`deny_host_access()`** goes further, for the whole process. Called once,
+before the first document, it refuses every file a document names, empties
+`%stdin`, discards what is written to a `%stdout` or `%stderr` file, and
+reads no installed font, CMap file or system color profile, in the
+PostScript interpreter or the PDF reader: stet's bundled ones are used, so
+output is the same on every machine. It cannot be undone, and no permit
+lifts it.
 
 ```rust
 stet::deny_host_access();
 ```
 
-For the rest of the process those operators raise `invalidfileaccess`,
-`%stdin` reads as empty, a `%stdout` or `%stderr` file discards what is
-written to it, and no installed font, CMap file or system color profile is
-read, by the PostScript interpreter or the PDF reader; stet's bundled ones
-are used instead. It cannot be undone. It limits what a document can reach,
-not how long it runs or how much memory it takes: set
+Neither limits how long a document runs or how much memory it takes: set
 `PsContext::set_timeout` before each job, and `PsContext::max_local_vm`,
 through `interp.context()`.
 

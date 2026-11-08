@@ -11,7 +11,8 @@
 use std::collections::HashSet;
 use std::io::Write;
 
-use stet::{Interpreter, TextExtraction};
+use stet::{FileAccess, Interpreter, TextExtraction};
+use stet_core::file_access::FilePermits;
 use stet_graphics::display_list::DisplayList;
 use stet_graphics::icc::IccCache;
 use stet_graphics::layer_set::LayerSet;
@@ -29,6 +30,10 @@ pub struct TextOptions {
     pub word_boxes: bool,
     /// Write to this file instead of stdout.
     pub output: Option<String>,
+    /// What a PostScript file's own file operators reach (`--safer`,
+    /// `--permit-…`). A PDF reads no file but itself either way.
+    pub file_access: FileAccess,
+    pub file_permits: FilePermits,
 }
 
 /// One page's text.
@@ -64,7 +69,7 @@ pub fn run_text(path: &str, options: &TextOptions) -> i32 {
     let pages = if is_pdf(path, &data) {
         pdf_pages(path, &data, options.password.as_deref(), level, &wanted)
     } else {
-        ps_pages(path, &data, level, &wanted)
+        ps_pages(path, &data, level, options, &wanted)
     };
     let Some(pages) = pages else {
         return 1;
@@ -171,6 +176,7 @@ fn ps_pages(
     path: &str,
     data: &[u8],
     level: TextExtraction,
+    options: &TextOptions,
     wanted: &dyn Fn(usize) -> bool,
 ) -> Option<Vec<PageText>> {
     // The program's own output (`print`, `==`) would mix with the text,
@@ -179,7 +185,9 @@ fn ps_pages(
         .suppress_output()
         .no_icc()
         .text_extraction(level)
+        .file_access(options.file_access)
         .build();
+    interp.context().file_permits = options.file_permits.clone();
     let rendered = match interp.render_to_display_list(data, 72.0) {
         Ok(pages) => pages,
         Err(e) => {
@@ -205,6 +213,7 @@ fn ps_pages(
 pub fn print_text_help() {
     println!(
         "stet text <FILE> [-o <PATH>] [--pages <SPEC>] [--password <PW>] [--json [--word-boxes]]
+          [--safer] [--permit-read|--permit-write|--permit-control|--permit-all <PATH>]
 
 Prints the text a PDF, PostScript or EPS file shows, a line at a time in
 the order the file draws it, each page ending with a form feed.
@@ -226,7 +235,11 @@ Options:
                      from the page's top-left corner, y downward; a bbox is
                      [x0, y0, x1, y1].
     --word-boxes     With --json, give each word a \"bbox\" too. Records
-                     every glyph's position, which takes more memory."
+                     every glyph's position, which takes more memory.
+    --safer, --permit-read <PATH>, --permit-write <PATH>,
+    --permit-control <PATH>, --permit-all <PATH>
+                     What a PostScript file's own file operators reach, as
+                     for `stet` itself (see `stet --help`)."
     );
 }
 

@@ -208,6 +208,11 @@ zoom presets, minimap navigation, and drag-and-drop.
 | `--default-intent <relative\|perceptual\|saturation\|absolute>` | Rendering intent pages start with (default: `relative`): which of a CMYK profile's tables converts CMYK colour. A document's own intent (`ri`, `/RI`, an image's `/Intent`, `setrenderingintent`) still wins |
 | `--password <PW>` | Password for encrypted PDF input |
 | `--timeout <SECONDS>` | Abort a job running longer than this. No limit by default — PostScript is Turing-complete and legitimate jobs run for minutes. Set one for untrusted input |
+| `--safer` | Restrict PostScript's file operators as Ghostscript's `-dSAFER` does: a program reads only stet's resources and the installed fonts, and writes, deletes and renames nothing. Fonts and colour profiles stet finds itself are still used, so pages render the same. Output (`-o`) is not affected |
+| `--permit-read <PATH>` | Let programs read `PATH`, a folder and everything in it or one file. Implies `--safer`; may be repeated. Ghostscript's `--permit-file-read` |
+| `--permit-write <PATH>` | Let programs write `PATH` (a file need not exist yet). Implies `--safer`; may be repeated |
+| `--permit-control <PATH>` | Let programs delete and rename files in `PATH`. Implies `--safer`; may be repeated |
+| `--permit-all <PATH>` | `--permit-read`, `--permit-write` and `--permit-control` at once |
 | `--json` | `stet text` only: print JSON with each line's position instead of plain text. See [`stet text`](#stet-text-file) |
 | `--word-boxes` | `stet text --json` only: give each word its position too |
 | `--max-vm <MB>` | Ceiling on PostScript VM — strings, arrays, dictionaries (default 8192). Exceeding it raises `VMerror` instead of aborting. Separate from the renderer's image and band buffers, so it does **not** cap rendering resolution |

@@ -83,15 +83,29 @@ input the size comes from the document, so use `--width` / `--height` instead.
 
 ### Untrusted input
 
-PostScript is Turing-complete, so there is no time limit by default and a
-hostile program can loop forever. Set one, and cap PostScript VM, when the
-input is not yours:
+PostScript is a programming language. By default a program can read,
+write, delete and rename files, as in Ghostscript with `-dNOSAFER`, and
+it can loop forever. When the input is not yours, restrict its files with
+`--safer`, set a time limit, and cap PostScript VM:
 
 ```bash
-stet --device png --timeout 30 --max-vm 2048 untrusted.ps
+stet --device png --safer --timeout 30 --max-vm 2048 untrusted.ps
 ```
 
-Both are ceilings on the interpreter, not on rendering resolution. Run
+`--safer` is Ghostscript's `-dSAFER`: the program reads only stet's own
+resources and the installed fonts, and writes, deletes and renames
+nothing. stet's own output (`-o`) is unaffected, and so is rendering:
+fonts and colour profiles stet finds itself are used as before. A job that
+`run`s its own files needs them permitted:
+
+```bash
+stet --device png --permit-read job/prologs job/main.ps
+```
+
+`--permit-read`, `--permit-write`, `--permit-control` and `--permit-all`
+take a folder (everything in it) or one file, may be repeated, and imply
+`--safer`, like Ghostscript's `--permit-file-…`. The time and VM limits
+are ceilings on the interpreter, not on rendering resolution. Run
 untrusted input inside an OS-level sandbox as well.
 
 ### Inspecting a PDF
@@ -175,6 +189,15 @@ Resource limits (for untrusted input):
   --timeout <SECONDS>        Abort a job running longer than this. No limit
                              by default — PostScript is Turing-complete and
                              legitimate jobs can run for minutes
+  --safer                    Restrict PostScript's file operators as
+                             Ghostscript's -dSAFER does: read only stet's
+                             resources and installed fonts; write, delete
+                             and rename nothing. Pages render the same
+  --permit-read <PATH>       Let programs read PATH (a folder, or one file).
+                             Implies --safer; may be repeated
+  --permit-write <PATH>      Let programs write PATH (need not exist yet)
+  --permit-control <PATH>    Let programs delete and rename files in PATH
+  --permit-all <PATH>        All three
   --max-vm <MB>              Ceiling on PostScript VM: strings, arrays, and
                              dictionaries (default 8192). Exceeding it raises
                              VMerror instead of aborting. Separate from the
