@@ -319,6 +319,14 @@ impl<'a> Tokenizer<'a> {
                         }
                     }
                 }
+                b'\r' => {
+                    // PLRM 3.2.2: an end-of-line (CR, LF or CR LF) in a string is one newline.
+                    result.push(b'\n');
+                    self.pos += 1;
+                    if self.input.get(self.pos) == Some(&b'\n') {
+                        self.pos += 1;
+                    }
+                }
                 _ => {
                     result.push(b);
                     self.pos += 1;
@@ -828,6 +836,15 @@ fn stream_scan_string(files: &mut FileStore, entity: EntityId) -> Result<Token, 
                     _ => result.push(esc),
                 }
             }
+            Some(b'\r') => {
+                // PLRM 3.2.2: an end-of-line (CR, LF or CR LF) in a string is one newline.
+                result.push(b'\n');
+                if let Some(next) = files.read_byte(entity).map_err(|_| PsError::IOError)?
+                    && next != b'\n'
+                {
+                    files.putback_bytes(entity, &[next]);
+                }
+            }
             Some(b) => result.push(b),
         }
     }
@@ -1013,6 +1030,28 @@ mod tests {
         assert_eq!(
             tokenize_all(b"(\\110\\145\\154\\154\\157)"),
             vec![Token::String(b"Hello".to_vec())]
+        );
+    }
+
+    #[test]
+    fn test_string_end_of_line_is_one_newline() {
+        // PLRM 3.2.2: CR, LF and CR LF inside a string are each one newline; LF CR is two.
+        assert_eq!(
+            tokenize_all(b"(a\rb)"),
+            vec![Token::String(b"a\nb".to_vec())]
+        );
+        assert_eq!(
+            tokenize_all(b"(a\r\nb)"),
+            vec![Token::String(b"a\nb".to_vec())]
+        );
+        assert_eq!(
+            tokenize_all(b"(a\n\rb)"),
+            vec![Token::String(b"a\n\nb".to_vec())]
+        );
+        // A backslash before the end-of-line still continues the line.
+        assert_eq!(
+            tokenize_all(b"(a\\\r\nb)"),
+            vec![Token::String(b"ab".to_vec())]
         );
     }
 
