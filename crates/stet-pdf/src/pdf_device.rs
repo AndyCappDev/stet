@@ -946,7 +946,14 @@ impl PdfDevice {
                         b"PaintType".to_vec(),
                         PdfObj::Int(pat_ref.paint_type as i64),
                     ),
-                    (b"TilingType".to_vec(), PdfObj::Int(1)),
+                    (
+                        b"TilingType".to_vec(),
+                        PdfObj::Int(if (1..=3).contains(&pat_ref.tiling_type) {
+                            pat_ref.tiling_type as i64
+                        } else {
+                            1
+                        }),
+                    ),
                     (
                         b"BBox".to_vec(),
                         // Expand BBox slightly beyond XStep/YStep so adjacent tiles

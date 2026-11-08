@@ -106,6 +106,8 @@ pub struct TilingPattern {
     pub pattern_matrix: Matrix,
     /// Paint type: 1 = colored, 2 = uncolored.
     pub paint_type: i32,
+    /// Tiling type: 1 = constant spacing, 2 = no distortion, 3 = faster tiling.
+    pub tiling_type: i32,
     /// Unique pattern ID for dedup.
     pub pattern_id: u32,
     /// True when the PDF pattern matrix had a Y-flip (negative d component).
