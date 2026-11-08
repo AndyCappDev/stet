@@ -213,7 +213,8 @@ userdict /$unittest known not {(unit_tests/unittest.ps) run} if
 
 
 %% srand and rand %%
-28790653 {srand rand rand} [302400654 1182077843] assert
+% Ghostscript 10.02.1 gives the same: 28790653 srand rand == rand == rrand ==
+28790653 {srand rand rand} [700684396 1749807071] assert
     % srand tests
     /srand [/stackunderflow] assert
     (a) /srand [(a) /typecheck] assert
@@ -221,7 +222,8 @@ userdict /$unittest known not {(unit_tests/unittest.ps) run} if
     true /srand [true /typecheck] assert
 
 %% rrand %%
-/rrand [28790653] assert
+% rrand returns the generator's state, which is the last value rand returned.
+/rrand [1749807071] assert
 
 
 %% Division by zero %%
