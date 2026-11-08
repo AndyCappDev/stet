@@ -9,7 +9,8 @@ use stet::Interpreter;
 
 /// Runs `body`; it divides by zero when a check fails, so a passing program renders one page.
 fn passes(body: &str) {
-    let src = format!("%!PS-Adobe-3.0\n{body}\n0 0 1 setrgbcolor 20 20 100 100 rectfill showpage\n");
+    let src =
+        format!("%!PS-Adobe-3.0\n{body}\n0 0 1 setrgbcolor 20 20 100 100 rectfill showpage\n");
     let mut interp = Interpreter::builder().suppress_output().build();
     match interp.render(src.as_bytes(), 18.0) {
         Ok(pages) => assert_eq!(pages.len(), 1),
@@ -50,5 +51,40 @@ fn a_crd_named_for_the_intent_is_found() {
          end
          << /ColorRenderingType 1 /WhitePoint [0.9505 1 1.089] >> /ColorRendering defineresource pop
          /RelativeColorimetric findcolorrendering not { 1 0 div } if pop",
+    );
+}
+
+#[test]
+fn a_long_intent_is_not_cut_short() {
+    // 300 characters: past any fixed buffer. The CRD is found under the whole name.
+    let intent = "I".repeat(300);
+    passes(&format!(
+        "/ColorRendering /ProcSet findresource begin
+         GetPageDeviceName dup length string cvs GetHalftoneName dup length string cvs
+         end
+         /ht exch def /dev exch def
+         /n 302 dev length add ht length add string def
+         n 0 ({intent}) putinterval
+         n 300 (.) putinterval
+         n 301 dev putinterval
+         n 301 dev length add (.) putinterval
+         n 302 dev length add ht putinterval
+         n cvn << /ColorRenderingType 1 /WhitePoint [0.9505 1 1.089] >> /ColorRendering defineresource pop
+         /{intent} findcolorrendering not {{ 1 0 div }} if
+         n cvn ne {{ 1 0 div }} if"
+    ));
+}
+
+/// `findcolorrendering` raises its own errors, with an empty stack or an
+/// operand that is neither a name nor a string.
+#[test]
+fn findcolorrendering_checks_its_operand() {
+    passes(
+        "{ findcolorrendering } stopped not { 1 0 div } if
+         $error /errorname get /stackunderflow ne { 1 0 div } if clear
+         { 42 findcolorrendering } stopped not { 1 0 div } if
+         $error /errorname get /typecheck ne { 1 0 div } if
+         $error /command get /findcolorrendering ne { 1 0 div } if clear
+         (Perceptual) findcolorrendering pop pop",
     );
 }

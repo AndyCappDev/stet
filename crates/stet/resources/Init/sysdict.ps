@@ -685,19 +685,28 @@ true setglobal
     % intent findcolorrendering name bool (PLRM 3rd ed.): the CRD named intent.pagedevice.halftone if that
     % resource exists (true), else the ColorRendering ProcSet's GetSubstituteCRD (false).
     /findcolorrendering {
+        count 1 lt { /findcolorrendering cvx errordict /stackunderflow get exec } if
+        dup type dup /nametype ne exch /stringtype ne and
+            { /findcolorrendering cvx errordict /typecheck get exec } if
         /ColorRendering /ProcSet findresource begin
-        dup
+        dup GetPageDeviceName GetHalftoneName
+        % intent intent device halftone: each as a string of its own length (a name's length is its
+        % text's), then joined with dots into a buffer sized from the three, so no name is cut short.
+        3 {
+            dup type /nametype eq { dup length string cvs } {
+                dup type /stringtype ne { 32 string cvs } if
+            } ifelse
+            3 1 roll
+        } repeat
         3 dict begin
-            /.s 256 string def
-            /.n 0 def
-            /.add {
-                dup type /stringtype ne { 128 string cvs } if
-                dup length .n add .s length gt { pop } {
-                    dup .s exch .n exch putinterval length .n add /.n exch def
-                } ifelse
-            } def
-            .add (.) .add GetPageDeviceName .add (.) .add GetHalftoneName .add
-            .s 0 .n getinterval cvn
+            /.h exch def /.d exch def /.i exch def
+            .i length 1 add .d length add 1 add .h length add string
+            dup 0 .i putinterval
+            dup .i length (.) putinterval
+            dup .i length 1 add .d putinterval
+            dup .i length 1 add .d length add (.) putinterval
+            dup .i length 2 add .d length add .h putinterval
+            cvn
         end
         dup /ColorRendering resourcestatus
             { pop pop exch pop true }
