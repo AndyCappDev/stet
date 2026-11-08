@@ -37,6 +37,16 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: wasm-pack@0.15.0
+      # wasm-pack fetches binaryen from GitHub's release downloads and builds
+      # wasm-bindgen-cli on every run unless they are already in its cache.
+      # That download returned 504 on three deploys in a row (2026-11-08),
+      # failing each. Keyed on the wasm-pack version and the lock (which
+      # pins wasm-bindgen), so the tools are fetched again only when one of
+      # those moves.
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/.wasm-pack
+          key: wasm-pack-0.15.0-${{ runner.os }}-${{ hashFiles('crates/stet-wasm/Cargo.lock') }}
       - name: Build WASM bundle
         run: bash web/build.sh
       - uses: actions/configure-pages@v6
