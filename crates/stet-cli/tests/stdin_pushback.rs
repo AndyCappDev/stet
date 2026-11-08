@@ -38,6 +38,20 @@ impl Drop for TempPath {
     }
 }
 
+/// `path` as the body of a PostScript string literal. A backslash in a
+/// literal starts an escape, so a Windows path's separators must be
+/// doubled, or `C:\Users` reaches `file` as `C:Users`.
+fn ps_string(path: &std::path::Path) -> String {
+    let mut out = String::new();
+    for c in path.display().to_string().chars() {
+        if matches!(c, '\\' | '(' | ')') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Run `program` with `input` on standard input; what it prints.
 fn run(program: &str, input: &[u8]) -> String {
     let file = TempPath::new("job.ps");
@@ -135,7 +149,7 @@ fn a_token_read_from_a_pipe_keeps_the_byte_after_it() {
     let out = run(
         &format!(
             "%!PS\n/f ({}) (r) file def f token pop == f token pop ==\n",
-            fifo.0.display()
+            ps_string(&fifo.0)
         ),
         b"",
     );
@@ -152,7 +166,7 @@ fn a_disk_file_reports_its_position_after_a_byte_is_put_back() {
         &format!(
             "%!PS\n/f ({}) (r) file def f token pop pop f fileposition = \
              f bytesavailable = f token pop == f fileposition =\n",
-            data.0.display()
+            ps_string(&data.0)
         ),
         b"",
     );
