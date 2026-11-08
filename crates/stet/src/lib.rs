@@ -201,6 +201,7 @@ pub struct Interpreter {
     warnings: Vec<ExecWarning>,
     keep_partial: bool,
     last_error: Option<StetError>,
+    default_page: (f64, f64),
 }
 
 /// How long the `showpage` that ends a job cut short by an error may take.
@@ -215,6 +216,7 @@ pub struct InterpreterBuilder {
     default_rendering_intent: RenderingIntent,
     file_access: FileAccess,
     max_page_size_points: f64,
+    default_page: (f64, f64),
     #[cfg(feature = "render")]
     page_background: PageBackground,
 }
@@ -238,6 +240,7 @@ impl Interpreter {
             default_rendering_intent: RenderingIntent::RelativeColorimetric,
             file_access: FileAccess::Full,
             max_page_size_points: stet_core::context::DEFAULT_MAX_PAGE_SIZE_POINTS,
+            default_page: (612.0, 792.0),
             #[cfg(feature = "render")]
             page_background: PageBackground::White,
         }
@@ -323,7 +326,8 @@ impl Interpreter {
             }
         }
 
-        self.render_ps(ps_data, dpi, 612.0, 792.0)
+        let (w, h) = self.default_page;
+        self.render_ps(ps_data, dpi, w, h)
     }
 
     /// Render PostScript data to a PDF document.
@@ -345,10 +349,10 @@ impl Interpreter {
             if let Some((llx, lly, urx, ury)) = read_eps_bounding_box(ps_data) {
                 (urx - llx, ury - lly)
             } else {
-                (612.0, 792.0)
+                self.default_page
             }
         } else {
-            (612.0, 792.0)
+            self.default_page
         };
 
         // Set up PdfDevice as the device factory
@@ -861,6 +865,20 @@ impl InterpreterBuilder {
         self
     }
 
+    /// The page a PostScript job starts on, in points (default Letter,
+    /// 612 x 792). The program's own `setpagedevice` still changes it; an EPS
+    /// with a bounding box gets its box instead.
+    ///
+    /// For a caller that knows the page better than the printer default,
+    /// such as one that read it from the file's DSC comments and checked
+    /// them against what the program draws.
+    pub fn default_page_size(mut self, width: f64, height: f64) -> Self {
+        if width > 0.0 && height > 0.0 {
+            self.default_page = (width, height);
+        }
+        self
+    }
+
     /// Build the interpreter.
     pub fn build(self) -> Interpreter {
         let mut ctx = init::create_initialized_context(self.use_icc, self.suppress_output)
@@ -877,6 +895,7 @@ impl InterpreterBuilder {
             warnings: Vec::new(),
             keep_partial: self.keep_partial,
             last_error: None,
+            default_page: self.default_page,
         }
     }
 }
