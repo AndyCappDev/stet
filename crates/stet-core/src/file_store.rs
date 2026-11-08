@@ -284,7 +284,15 @@ pub struct FileStore {
     /// Virtual filesystem: maps paths to embedded byte data.
     /// Used in WASM builds to serve resources without real filesystem access.
     embedded_files: HashMap<String, &'static [u8]>,
+    /// Asked for an embedded file the map does not hold, with the normalized
+    /// path (`resources/CMap/90ms-RKSJ-H`): a program embedding stet can
+    /// supply resources on demand. See [`FileStore::set_embedded_provider`].
+    embedded_provider: Option<EmbeddedProvider>,
 }
+
+/// Supplies embedded files on demand: the normalized path in, the file's
+/// bytes out, or `None` when there is no such file.
+pub type EmbeddedProvider = Box<dyn Fn(&str) -> Option<&'static [u8]> + Send + Sync>;
 
 /// Well-known file entity IDs. The standard files are in global VM, as in
 /// Ghostscript: no `restore` closes them.
@@ -299,6 +307,7 @@ impl FileStore {
             files: Vec::new(),
             pending_procs: 0,
             embedded_files: HashMap::new(),
+            embedded_provider: None,
         };
         // Pre-allocate standard streams at known positions
         store.files.push(FileEntry {
@@ -349,10 +358,22 @@ impl FileStore {
         }
         // Normalize: strip leading "/" and collapse "//" → "/"
         let normalized = path.trim_start_matches('/').replace("//", "/");
-        if normalized != path {
-            return self.embedded_files.get(normalized.as_str()).copied();
+        if normalized != path
+            && let Some(data) = self.embedded_files.get(normalized.as_str())
+        {
+            return Some(*data);
         }
-        None
+        self.embedded_provider.as_ref().and_then(|p| p(&normalized))
+    }
+
+    /// Supply embedded files on demand: `provider` is asked for each path
+    /// the embedded map does not hold (normalized: no leading `/`, no `//`),
+    /// before the file system. A program embedding stet uses it for
+    /// resources too many or too large to register up front, such as CMaps.
+    /// The provider is asked again on each lookup, so it caches what it
+    /// builds itself.
+    pub fn set_embedded_provider(&mut self, provider: Option<EmbeddedProvider>) {
+        self.embedded_provider = provider;
     }
 
     /// Open a file, returning its EntityId.
@@ -435,7 +456,7 @@ impl FileStore {
 
         // Check embedded files for read access
         if mode == "r"
-            && let Some(data) = self.embedded_files.get(name)
+            && let Some(data) = self.get_embedded_file(name)
         {
             let id = EntityId(self.files.len() as u32);
             self.files.push(FileEntry {
