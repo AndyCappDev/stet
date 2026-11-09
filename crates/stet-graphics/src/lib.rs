@@ -30,6 +30,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod ccitt;
 pub mod color;
 pub mod device;
 pub mod display_list;

@@ -24,8 +24,6 @@ stet-render = { workspace = true, optional = true, default-features = false, fea
     "parallel",
 ] }
 hayro-jpeg2000 = { version = "0.4.1", optional = true }
-hayro-ccitt = "0.4.0"
-fax = "0.2.6"
 hayro-jbig2 = "0.3.1"
 skrifa = "0.40"
 sha2 = "0.10"

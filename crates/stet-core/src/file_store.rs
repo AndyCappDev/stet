@@ -1864,17 +1864,28 @@ impl FileStore {
                     state.eof = true;
                 }
             }
-            FilterKind::CCITTFaxDecode { decoded, .. } => {
+            FilterKind::CCITTFaxDecode {
+                decoded,
+                k,
+                columns,
+                rows,
+                encoded_byte_align,
+                end_of_block,
+                black_is1,
+                ..
+            } => {
                 if !*decoded {
-                    let source = state.source;
-                    let ccitt_data = self.read_all(source)?;
-                    let decoded_bytes = Self::decode_ccittfax(&ccitt_data, &mut state.kind)?;
-                    state.output_buf = decoded_bytes;
+                    let params = stet_graphics::ccitt::CcittParams {
+                        k: *k,
+                        columns: *columns,
+                        rows: *rows,
+                        end_of_block: *end_of_block,
+                        encoded_byte_align: *encoded_byte_align,
+                        black_is1: *black_is1,
+                    };
+                    *decoded = true;
+                    state.output_buf = self.read_ccitt(state.source, &params)?;
                     state.output_pos = 0;
-                    // Mark as decoded (re-borrow after decode_ccittfax)
-                    if let FilterKind::CCITTFaxDecode { decoded, .. } = &mut state.kind {
-                        *decoded = true;
-                    }
                 } else {
                     state.eof = true;
                 }
@@ -2445,84 +2456,50 @@ impl FileStore {
         Ok(())
     }
 
-    /// Decode CCITT Group 3 or Group 4 fax data using the `fax` crate.
-    fn decode_ccittfax(data: &[u8], kind: &mut FilterKind) -> io::Result<Vec<u8>> {
-        let FilterKind::CCITTFaxDecode {
-            k,
-            columns,
-            rows,
-            end_of_block,
-            black_is1,
-            ..
-        } = kind
-        else {
-            return Err(io::Error::other("not a CCITTFaxDecode filter"));
-        };
-        let k = *k;
-        let width = *columns as u16;
-        let rows_limit = *rows;
-        let end_of_block = *end_of_block;
-        let black_is1 = *black_is1;
-
-        // Bytes per scan line (1 bit per pixel, padded to byte boundary)
-        let row_bytes = (width as usize).div_ceil(8);
-        let mut output = Vec::new();
-        let mut line_count: u32 = 0;
-
-        // Callback to process each decoded line
-        let mut process_line = |transitions: &[u16]| {
-            // Stop after Rows lines if EndOfBlock is false and Rows > 0
-            if !end_of_block && rows_limit > 0 && line_count >= rows_limit {
-                return;
-            }
-
-            // Convert transitions to pixels and pack into bytes
-            let line = fax::decoder::Line { transitions, width };
-            let mut row = vec![0u8; row_bytes];
-            for (i, color) in line.pels().enumerate() {
-                if i >= width as usize {
-                    break;
-                }
-                // fax crate: Color::Black = mark bit, Color::White = no bit
-                // Pack MSB-first: pixel 0 in bit 7
-                let is_set = matches!(color, fax::Color::Black);
-                if is_set {
-                    row[i / 8] |= 0x80 >> (i % 8);
+    /// Decode a fax image from `source`, reading only as far as it goes:
+    /// the data ends at its end-of-block code, or after its last row, and
+    /// what follows is left in the source, as Ghostscript leaves it.
+    ///
+    /// The source is read in chunks, each twice the last, until the decoder
+    /// finishes inside what has been read, and the bytes past its end are
+    /// put back. Reading the whole source instead made an image read
+    /// straight from `currentfile` swallow the rest of the program. When the
+    /// data is malformed, where it ends is unknown, and the whole source is
+    /// the image's, as before.
+    fn read_ccitt(
+        &mut self,
+        source: EntityId,
+        params: &stet_graphics::ccitt::CcittParams,
+    ) -> io::Result<Vec<u8>> {
+        use stet_graphics::ccitt::CcittEnd;
+        let mut data = Vec::new();
+        let mut want = 16 * 1024;
+        let mut exhausted = false;
+        loop {
+            while !exhausted && data.len() < want {
+                match self.read_byte(source)? {
+                    Some(b) => data.push(b),
+                    None => exhausted = true,
                 }
             }
-
-            // Apply BlackIs1 polarity:
-            // CCITT convention: 1 = black (mark). fax crate follows this.
-            // PostScript convention (BlackIs1=false, default): 0 = black, 1 = white
-            // So when BlackIs1 is false, we invert all bits.
-            if !black_is1 {
-                for byte in &mut row {
-                    *byte = !*byte;
+            let image = stet_graphics::ccitt::decode(&data, params);
+            match image.end {
+                // Ended inside what was read: the rest goes back.
+                CcittEnd::Finished(n) if n < data.len() => {
+                    self.putback_bytes(source, &data[n..]);
+                    return Ok(image.data);
                 }
+                // Ended at the end of the source, or had too little.
+                _ if exhausted => return Ok(image.data),
+                CcittEnd::Malformed => {
+                    data.extend(self.read_all(source)?);
+                    return Ok(stet_graphics::ccitt::decode(&data, params).data);
+                }
+                // Ran out, or ended exactly where the reading stopped,
+                // which may be a row boundary with more rows to come.
+                _ => want *= 2,
             }
-
-            output.extend_from_slice(&row);
-            line_count += 1;
-        };
-
-        if k < 0 {
-            // Group 4
-            let height = if rows_limit > 0 {
-                Some(rows_limit as u16)
-            } else {
-                None
-            };
-            fax::decoder::decode_g4(data.iter().copied(), width, height, |transitions| {
-                process_line(transitions)
-            });
-        } else {
-            // Group 3 (K=0: 1-D only, K>0: mixed 1-D/2-D)
-            fax::decoder::decode_g3(data.iter().copied(), |transitions| {
-                process_line(transitions);
-            });
         }
-
-        Ok(output)
     }
 
     /// Refill EexecDecode: read from source, decrypt with eexec cipher.
@@ -3378,6 +3355,80 @@ mod tests {
             result.push(b);
         }
         assert_eq!(result.len(), 1);
+    }
+
+    /// A noisy Group 4 image `w` x `h` (`w` a multiple of 8), encoded with
+    /// the `fax` crate, and its rows as `CCITTFaxDecode` gives them: a
+    /// black pixel is a 0 bit.
+    fn g4_noise(w: u16, h: u16) -> (Vec<u8>, Vec<u8>) {
+        let mut seed = 12345u32;
+        let mut rows = Vec::new();
+        let mut encoder = fax::encoder::Encoder::new(fax::VecWriter::new());
+        for _ in 0..h {
+            let black: Vec<bool> = (0..w)
+                .map(|_| {
+                    seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+                    (seed >> 16) & 3 == 0
+                })
+                .collect();
+            let pels = black.iter().map(|&b| {
+                if b {
+                    fax::Color::Black
+                } else {
+                    fax::Color::White
+                }
+            });
+            encoder.encode_line(pels, w).unwrap();
+            let mut row = vec![0u8; w as usize / 8];
+            for (i, _) in black.iter().enumerate().filter(|(_, b)| !**b) {
+                row[i / 8] |= 0x80 >> (i % 8);
+            }
+            rows.extend(row);
+        }
+        (encoder.finish().unwrap().finish(), rows)
+    }
+
+    /// A fax image read through `CCITTFaxDecode` from `data` followed by
+    /// `tail`: what the filter gives, and what is left in the source.
+    fn ccitt_from(data: &[u8], tail: &[u8], kind: FilterKind) -> (Vec<u8>, Vec<u8>) {
+        let mut store = FileStore::new();
+        let src = store.create_string_source([data, tail].concat());
+        let filt = store.create_filter(src, kind);
+        let mut out = Vec::new();
+        while let Some(b) = store.read_byte(filt).unwrap() {
+            out.push(b);
+        }
+        let mut rest = Vec::new();
+        while let Some(b) = store.read_byte(src).unwrap() {
+            rest.push(b);
+        }
+        (out, rest)
+    }
+
+    /// An image larger than the first chunks read is decoded whole, and
+    /// the source is left just after its end-of-block code.
+    #[test]
+    fn test_ccitt_reads_only_the_image() {
+        let (data, rows) = g4_noise(1200, 400);
+        assert!(
+            data.len() > 64 * 1024,
+            "spans several chunks: {}",
+            data.len()
+        );
+        let kind = FilterKind::ccittfax_decode(-1, 1200, 400, false, false, true, false);
+        let (out, rest) = ccitt_from(&data, b"\nrest of the program", kind);
+        assert!(out == rows, "the image decodes whole");
+        assert_eq!(rest, b"\nrest of the program");
+    }
+
+    /// Without `Rows`, the end-of-block code alone ends it.
+    #[test]
+    fn test_ccitt_without_rows_ends_at_its_end_of_block() {
+        let (data, rows) = g4_noise(64, 40);
+        let kind = FilterKind::ccittfax_decode(-1, 64, 0, false, false, true, false);
+        let (out, rest) = ccitt_from(&data, b"rest", kind);
+        assert!(out == rows);
+        assert_eq!(rest, b"rest");
     }
 
     #[test]

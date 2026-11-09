@@ -457,7 +457,6 @@ dependencies = [
 name = "stet-core"
 version = "0.9.0"
 dependencies = [
- "fax",
  "flate2",
  "glob",
  "hayro-jbig2",
@@ -497,7 +496,9 @@ dependencies = [
 name = "stet-graphics"
 version = "0.9.0"
 dependencies = [
+ "fax",
  "glob",
+ "hayro-ccitt",
  "jpeg-decoder",
  "moxcms",
  "sha2",
@@ -521,9 +522,7 @@ dependencies = [
 name = "stet-pdf-reader"
 version = "0.9.0"
 dependencies = [
- "fax",
  "flate2",
- "hayro-ccitt",
  "hayro-jbig2",
  "hayro-jpeg2000",
  "md5",

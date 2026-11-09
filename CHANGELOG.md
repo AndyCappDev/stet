@@ -137,6 +137,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `CCITTFaxDecode` filter's data ends with the image.** Like
+  `DCTDecode`, the filter read its whole source before decoding, so a fax
+  image read straight from `currentfile` swallowed the rest of the
+  program and the page was never output. It now reads in growing chunks
+  until the image ends, at its end-of-block code or after its last row,
+  and leaves what follows, as Ghostscript does. PostScript and the PDF
+  reader now decode fax images with the same code, in a new
+  `stet_graphics::ccitt` module (hayro-ccitt, then the `fax` crate when
+  hayro rejects the data), so a fax image gives the same samples in both.
+  PostScript used only the `fax` crate before, which dropped the last
+  rows of an image with neither `Rows` nor an end-of-block code: the
+  glyphs of Type 3 fonts in Ghostscript's ps2write output lost up to six
+  rows each, and several pdftops pages with fax images that were mostly
+  wrong now match Ghostscript closely. A two-dimensional Group 3 image's
+  end-of-block code is read whole, where hayro-ccitt stopped after its
+  first EOL.
 - **A `DCTDecode` filter's data ends at the JPEG's end-of-image
   marker.** The filter read its whole source before decoding, so a JPEG
   read straight from `currentfile`, as an EPS can inline one, swallowed
