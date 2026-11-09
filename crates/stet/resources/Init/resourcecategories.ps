@@ -110,8 +110,10 @@ end
 
 % --- Integer-keyed implicit categories ---
 
-% FontType: supported font dictionary types
-<< 0 true 1 true 2 true 3 true >>
+% FontType: supported font dictionary types. 2 is CFF (Type 2 charstrings),
+% 9 and 11 are CIDFontType 0 and 2, 42 is TrueType. CIDFontType 1 (10) and
+% 4 (32) are not supported.
+<< 0 true 1 true 2 true 3 true 9 true 11 true 42 true >>
 /FontType createimplicitcategory
 
 % FormType

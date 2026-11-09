@@ -137,6 +137,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`42 /FontType resourcestatus` reports that stet draws TrueType fonts.**
+  The `FontType` category listed only types 0 to 3, so a document asking
+  whether Type 42 fonts are supported was told no. Finale's PostScript
+  embeds each font both ways and keeps the Type 1 copy then, where
+  Ghostscript keeps the TrueType one. It now lists 2 (CFF), 9 and 11
+  (CIDFontType 0 and 2) and 42 as well.
 - **An unknown resource category is an `undefined` error.** `findresource`,
   `defineresource` and `undefineresource` raised `undefinedresource` for a
   category that does not exist, and `resourcestatus` and `resourceforall`

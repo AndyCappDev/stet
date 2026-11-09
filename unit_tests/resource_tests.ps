@@ -215,6 +215,13 @@ found_nonmatch [0] assert
 { [ /FunctionType /ShadingType /IODevice /TrappingType /InkParams /TrapParams ]
   true exch { /Category resourcestatus {pop pop true} {false} ifelse and } forall } [true] assert
 {3 /FunctionType resourcestatus 3 1 roll pop pop} [true] assert
+
+%% FontType lists the font types stet draws %%
+% Finale's EPS embeds each font twice and keeps the TrueType copy only when
+% `42 /FontType resourcestatus` says Type 42 is supported.
+% resourceforall sorts the names as strings, so 11 comes before 2.
+{ [ (*) {cvi} 10 string /FontType resourceforall ] } [[0 1 11 2 3 42 9]] assert
+/10 /FontType /resourcestatus [false] assert
 /4 /FunctionType /resourcestatus [false] assert
 
 
