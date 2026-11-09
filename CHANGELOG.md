@@ -138,6 +138,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than 1.0 s, unchanged in output. Code that builds either struct
   makes the field from a `Vec<ColorStop>` with `.into()`; code reading it
   is unchanged.
+- **A display-list element takes 496 bytes rather than 752.** Every element
+  is the size of the largest kind, and the largest were the rare ones, so
+  `DisplayElement::Text` and `DisplayElement::PatternFill` now hold a
+  `Box` of their params, and `ClipParams::stroke_params` is an
+  `Option<Box<StrokeParams>>`. A page of a million fills holds about
+  250 MB less. Code that builds one of these wraps the params in
+  `Box::new`; code reading them is unchanged.
 - **`stet_core::graphics_state::PatternData` is `#[non_exhaustive]`.** It
   gained `shading_background` in 0.8.5, a break accepted then with the
   marker deferred to a breaking release. Build one from the new `Default`

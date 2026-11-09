@@ -2970,7 +2970,7 @@ impl<'a> ContentInterpreter<'a> {
             });
         } else if let Some(pattern) = self.gstate.fill_pattern.clone() {
             self.display_list.push(DisplayElement::PatternFill {
-                params: PatternFillParams {
+                params: Box::new(PatternFillParams {
                     path,
                     fill_rule,
                     tile: pattern.tile,
@@ -2994,7 +2994,7 @@ impl<'a> ContentInterpreter<'a> {
                     } else {
                         0
                     },
-                },
+                }),
             });
         } else {
             self.display_list.push(DisplayElement::Fill {
@@ -3026,7 +3026,7 @@ impl<'a> ContentInterpreter<'a> {
             let mut sp = self.gstate.stroke_params_with_ctm();
             sp.ctm = ctm;
             self.display_list.push(DisplayElement::PatternFill {
-                params: PatternFillParams {
+                params: Box::new(PatternFillParams {
                     path: user_path,
                     fill_rule: FillRule::NonZeroWinding,
                     tile: pattern.tile,
@@ -3050,7 +3050,7 @@ impl<'a> ContentInterpreter<'a> {
                     } else {
                         0
                     },
-                },
+                }),
             });
             return;
         }
@@ -3074,7 +3074,7 @@ impl<'a> ContentInterpreter<'a> {
                 params: ClipParams {
                     fill_rule: FillRule::NonZeroWinding,
                     ctm: Matrix::identity(),
-                    stroke_params: Some(sp),
+                    stroke_params: Some(Box::new(sp)),
                 },
             });
             for elem in shading_box.0.elements() {
@@ -4802,7 +4802,7 @@ impl<'a> ContentInterpreter<'a> {
             });
         } else if let Some(pattern) = self.gstate.fill_pattern.clone() {
             self.display_list.push(DisplayElement::PatternFill {
-                params: PatternFillParams {
+                params: Box::new(PatternFillParams {
                     path,
                     fill_rule: FillRule::NonZeroWinding,
                     tile: pattern.tile,
@@ -4826,7 +4826,7 @@ impl<'a> ContentInterpreter<'a> {
                     } else {
                         0
                     },
-                },
+                }),
             });
         } else {
             let mut params = self.gstate.fill_params(FillRule::NonZeroWinding);
@@ -4856,7 +4856,7 @@ impl<'a> ContentInterpreter<'a> {
                 params: ClipParams {
                     fill_rule: FillRule::NonZeroWinding,
                     ctm: Matrix::identity(),
-                    stroke_params: Some(sp),
+                    stroke_params: Some(Box::new(sp)),
                 },
             });
             for elem in shading_box.0.elements() {
@@ -4882,7 +4882,7 @@ impl<'a> ContentInterpreter<'a> {
             let mut sp = self.gstate.stroke_params();
             sp.is_text_glyph = true;
             self.display_list.push(DisplayElement::PatternFill {
-                params: PatternFillParams {
+                params: Box::new(PatternFillParams {
                     path,
                     fill_rule: FillRule::NonZeroWinding,
                     tile: pattern.tile,
@@ -4906,7 +4906,7 @@ impl<'a> ContentInterpreter<'a> {
                     } else {
                         0
                     },
-                },
+                }),
             });
             return;
         }

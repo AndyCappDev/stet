@@ -82,7 +82,7 @@ fn texts(pages: &Rc<RefCell<Vec<DisplayList>>>) -> Vec<TextParams> {
     fn collect(list: &DisplayList, out: &mut Vec<TextParams>) {
         for element in list.elements() {
             if let DisplayElement::Text { params } = element {
-                out.push(params.clone());
+                out.push((**params).clone());
             }
         }
     }

@@ -356,7 +356,9 @@ pub(crate) fn push_fill_element(ctx: &mut Context, path: PsPath, fill_rule: Fill
             overprint_mode: 0,
         };
         ctx.current_display_list_mut()
-            .push(DisplayElement::PatternFill { params });
+            .push(DisplayElement::PatternFill {
+                params: Box::new(params),
+            });
         return;
     }
     let paint = capture_paint_color(ctx);

@@ -246,9 +246,9 @@ pub enum DisplayElement {
     /// Coons/tensor-product patch mesh.
     PatchShading { params: PatchShadingParams },
     /// Tiled pattern fill.
-    PatternFill { params: PatternFillParams },
+    PatternFill { params: Box<PatternFillParams> },
     /// Text element from show operators (used by PDF device, ignored by rasterizer).
-    Text { params: TextParams },
+    Text { params: Box<TextParams> },
     /// Transparency group: render children offscreen, composite with blend mode + alpha.
     Group {
         elements: DisplayList,

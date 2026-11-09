@@ -9,6 +9,15 @@ output. Elements are in painter's order (back to front). All coordinates
 are in **device space** — paths have already been transformed through the
 CTM at the DPI specified during interpretation.
 
+Every element in the `Vec` takes the size of the largest variant, so the
+large and uncommon payloads are boxed: `Text` and `PatternFill` hold a
+`Box` of their params, and a clip's stroke parameters are an
+`Option<Box<StrokeParams>>`. That keeps an element at 496 bytes, sized by
+`Stroke`, rather than 752; a page of a million fills is about 250 MB
+smaller for it. Build one with `Box::new(params)`; reading needs no change:
+field access goes through the box, and a `&Box<T>` coerces to `&T` where
+one is expected.
+
 ## Element Types
 
 ### Fill
@@ -131,7 +140,7 @@ program or PDF:
 ### Text
 
 ```rust
-Text { params: TextParams }
+Text { params: Box<TextParams> }
 ```
 
 A text run from a PostScript show operator. Used by the PDF output device
@@ -332,7 +341,8 @@ InitClip
 the clip to the full page. These are control elements — they have no
 visual output but affect all subsequent paint elements.
 
-When `ClipParams.stroke_params` is `Some`, the clip path is a stroke
+When `ClipParams.stroke_params` (an `Option<Box<StrokeParams>>`) is
+`Some`, the clip path is a stroke
 centerline rather than a fill path. The renderer expands it to a stroke
 outline before rasterizing the clip mask. Used for shading pattern strokes.
 
@@ -397,7 +407,7 @@ pre-converted ones.
 ### PatternFill
 
 ```rust
-PatternFill { params: PatternFillParams }
+PatternFill { params: Box<PatternFillParams> }
 ```
 
 A path filled or stroked with a tiling pattern. Contains a pre-rendered

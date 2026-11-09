@@ -5556,8 +5556,9 @@ fn emit_text_element_with_fm(
         alpha_is_shape: ctx.gstate.alpha_is_shape,
         text_knockout: ctx.gstate.text_knockout,
     };
-    ctx.current_display_list_mut()
-        .push(DisplayElement::Text { params });
+    ctx.current_display_list_mut().push(DisplayElement::Text {
+        params: Box::new(params),
+    });
 }
 
 fn push_glyph_element(

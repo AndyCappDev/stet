@@ -648,7 +648,7 @@ pub struct ClipParams {
     pub ctm: Matrix,
     /// For stroke-based clips: stroke parameters to expand the clip path
     /// from a centerline to a stroke outline before rasterizing.
-    pub stroke_params: Option<StrokeParams>,
+    pub stroke_params: Option<Box<StrokeParams>>,
 }
 
 /// Pre-sampled tint transform: maps input tint values to alt-space components.
