@@ -1033,17 +1033,17 @@ pub fn op_makepattern(ctx: &mut Context) -> Result<(), PsError> {
 
     // Build PatternData and store
     let pattern_id = ctx.pattern_store.len() as u32;
-    ctx.pattern_store.push(PatternData {
-        pattern_type,
-        paint_type,
-        tiling_type,
-        bbox,
-        xstep,
-        ystep,
-        pattern_matrix,
-        cached_display_list,
-        shading_background,
-    });
+    let mut pattern = PatternData::default();
+    pattern.pattern_type = pattern_type;
+    pattern.paint_type = paint_type;
+    pattern.tiling_type = tiling_type;
+    pattern.bbox = bbox;
+    pattern.xstep = xstep;
+    pattern.ystep = ystep;
+    pattern.pattern_matrix = pattern_matrix;
+    pattern.cached_display_list = cached_display_list;
+    pattern.shading_background = shading_background;
+    ctx.pattern_store.push(pattern);
 
     // Store Implementation in the copied dict
     let impl_key = DictKey::Name(ctx.names.intern(b"Implementation"));

@@ -720,7 +720,11 @@ impl Default for CieAParams {
 ///
 /// A colour runs DEF → clipped to `range_def` → `decode_def` → HIJ, clipped
 /// to `range_hij` → the table, interpolated → ABC → [`CieAbcParams`].
+///
+/// New fields may be added, so outside this crate start from
+/// [`Default`] and set the fields.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct CieDefParams {
     pub range_def: [f64; 6],
     /// `/RangeHIJ`: the span of each table axis, `[0 1]` for each by default.
@@ -738,10 +742,14 @@ pub struct CieDefParams {
 }
 
 /// Parameters for CIEBasedDEFG color space (4D table → ABC → CIE pipeline).
-#[derive(Clone, Debug)]
 ///
 /// A colour runs DEFG → clipped to `range_defg` → `decode_defg` → HIJK,
 /// clipped to `range_hijk` → the table, interpolated → ABC → [`CieAbcParams`].
+///
+/// New fields may be added, so outside this crate start from
+/// [`Default`] and set the fields.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct CieDefgParams {
     pub range_defg: [f64; 8],
     /// `/RangeHIJK`: the span of each table axis, `[0 1]` for each by default.
@@ -757,6 +765,43 @@ pub struct CieDefgParams {
     pub b_table: Vec<f64>,
     pub c_table: Vec<f64>,
     pub abc_params: CieAbcParams,
+}
+
+impl Default for CieDefParams {
+    /// Identity ranges and decoding, and no table yet.
+    fn default() -> Self {
+        Self {
+            range_def: [0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+            range_hij: [0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+            decode_def: None,
+            m1: 0,
+            m2: 0,
+            m3: 0,
+            a_table: Vec::new(),
+            b_table: Vec::new(),
+            c_table: Vec::new(),
+            abc_params: CieAbcParams::default(),
+        }
+    }
+}
+
+impl Default for CieDefgParams {
+    /// Identity ranges and decoding, and no table yet.
+    fn default() -> Self {
+        Self {
+            range_defg: [0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+            range_hijk: [0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+            decode_defg: None,
+            m1: 0,
+            m2: 0,
+            m3: 0,
+            m4: 0,
+            a_table: Vec::new(),
+            b_table: Vec::new(),
+            c_table: Vec::new(),
+            abc_params: CieAbcParams::default(),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1751,18 +1751,8 @@ fn parse_cie_def_colorspace(
     if range_def_vec.len() >= 6 {
         range_def.copy_from_slice(&range_def_vec[..6]);
     }
-    let params = CieDefParams {
-        range_def,
-        range_hij: [0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
-        decode_def: None,
-        m1: 0,
-        m2: 0,
-        m3: 0,
-        a_table: Vec::new(),
-        b_table: Vec::new(),
-        c_table: Vec::new(),
-        abc_params: CieAbcParams::default(),
-    };
+    let mut params = CieDefParams::default();
+    params.range_def = range_def;
     Ok(ColorSpace::CIEBasedDEF {
         params: Arc::new(params),
         dict_entity,
@@ -1797,19 +1787,8 @@ fn parse_cie_defg_colorspace(
     if range_defg_vec.len() >= 8 {
         range_defg.copy_from_slice(&range_defg_vec[..8]);
     }
-    let params = CieDefgParams {
-        range_defg,
-        range_hijk: [0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
-        decode_defg: None,
-        m1: 0,
-        m2: 0,
-        m3: 0,
-        m4: 0,
-        a_table: Vec::new(),
-        b_table: Vec::new(),
-        c_table: Vec::new(),
-        abc_params: CieAbcParams::default(),
-    };
+    let mut params = CieDefgParams::default();
+    params.range_defg = range_defg;
     Ok(ColorSpace::CIEBasedDEFG {
         params: Arc::new(params),
         dict_entity,
@@ -2868,18 +2847,16 @@ fn precompute_cie_def_table(
     let (dims, [a_table, b_table, c_table]) =
         read_cie_table(ctx, dict_entity, 3, &abc_params.range_abc)?;
     let decode_def = sample_decode_procs::<3>(ctx, dict_entity, b"DecodeDEF", &range_def)?;
-    Ok(CieDefParams {
-        range_def,
-        range_hij,
-        decode_def,
-        m1: dims[0],
-        m2: dims[1],
-        m3: dims[2],
-        a_table,
-        b_table,
-        c_table,
-        abc_params,
-    })
+    let mut params = CieDefParams::default();
+    params.range_def = range_def;
+    params.range_hij = range_hij;
+    params.decode_def = decode_def;
+    [params.m1, params.m2, params.m3] = [dims[0], dims[1], dims[2]];
+    params.a_table = a_table;
+    params.b_table = b_table;
+    params.c_table = c_table;
+    params.abc_params = abc_params;
+    Ok(params)
 }
 
 /// Read a CIEBasedDEFG space's table and decode stages: DEFG → DecodeDEFG →
@@ -2894,19 +2871,16 @@ fn precompute_cie_defg_table(
     let (dims, [a_table, b_table, c_table]) =
         read_cie_table(ctx, dict_entity, 4, &abc_params.range_abc)?;
     let decode_defg = sample_decode_procs::<4>(ctx, dict_entity, b"DecodeDEFG", &range_defg)?;
-    Ok(CieDefgParams {
-        range_defg,
-        range_hijk,
-        decode_defg,
-        m1: dims[0],
-        m2: dims[1],
-        m3: dims[2],
-        m4: dims[3],
-        a_table,
-        b_table,
-        c_table,
-        abc_params,
-    })
+    let mut params = CieDefgParams::default();
+    params.range_defg = range_defg;
+    params.range_hijk = range_hijk;
+    params.decode_defg = decode_defg;
+    [params.m1, params.m2, params.m3, params.m4] = [dims[0], dims[1], dims[2], dims[3]];
+    params.a_table = a_table;
+    params.b_table = b_table;
+    params.c_table = c_table;
+    params.abc_params = abc_params;
+    Ok(params)
 }
 
 /// Get a dict entry as a PsObject.

@@ -124,8 +124,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   public fields:** `range_hij` and `decode_def`, and `range_hijk` and
   `decode_defg` — the `/RangeHIJ(K)` and `/DecodeDEF(G)` stages of their
   colour spaces (see Fixed). Code that builds either with a struct literal
-  needs the fields. Both become `#[non_exhaustive]` at the next breaking
-  release, as `GraphicsState` did in 0.9.0.
+  needs the fields. Both are now `#[non_exhaustive]`, as this entry
+  promised when the fields were added, so a later field is not a breaking
+  change: build one from `Default` (identity ranges and decoding, no table)
+  and set its fields.
+- **`stet_core::graphics_state::PatternData` is `#[non_exhaustive]`.** It
+  gained `shading_background` in 0.8.5, a break accepted then with the
+  marker deferred to a breaking release. Build one from the new `Default`
+  (a coloured tiling pattern with an empty tile) and set its fields.
 - **JPEG decoding moved into `stet-graphics` as `stet_graphics::jpeg`**
   (`decode`, `jpeg_dimensions`, `patch_jpeg_sof_height`), so the
   PostScript `DCTDecode` filter and the PDF reader share it (see Fixed).

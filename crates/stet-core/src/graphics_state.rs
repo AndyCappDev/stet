@@ -192,7 +192,11 @@ impl PartialEq for ColorSpace {
 }
 
 /// Pattern instance data created by `makepattern`.
+///
+/// New fields may be added, so outside this crate start from
+/// [`Default`] and set the fields.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct PatternData {
     /// Pattern type: 1 = tiling, 2 = shading.
     pub pattern_type: i32,
@@ -215,6 +219,24 @@ pub struct PatternData {
     /// across the whole of what the pattern fills. `None` for a tiling
     /// pattern and for a shading without one.
     pub shading_background: Option<DeviceColor>,
+}
+
+impl Default for PatternData {
+    /// A coloured tiling pattern with an empty tile, no step and the
+    /// identity matrix.
+    fn default() -> Self {
+        Self {
+            pattern_type: 1,
+            paint_type: 1,
+            tiling_type: 1,
+            bbox: [0.0; 4],
+            xstep: 0.0,
+            ystep: 0.0,
+            pattern_matrix: Matrix::identity(),
+            cached_display_list: DisplayList::new(),
+            shading_background: None,
+        }
+    }
 }
 
 /// Entry on the graphics state stack, tracking whether it was created by
