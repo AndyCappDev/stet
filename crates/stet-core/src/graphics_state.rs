@@ -25,8 +25,11 @@ pub enum ColorSpace {
     DeviceRGB,
     DeviceCMYK,
     /// Indexed color space: `[/Indexed base hival lookup]`.
-    /// `lookup_proc` is `Some(proc_object)` when the lookup is a procedure that
-    /// needs to be pre-evaluated via exec_sync during setcolorspace.
+    /// `lookup_proc` is `Some(proc_object)` when the lookup is a procedure.
+    /// `setcolorspace` also samples it into `lookup`, each component clipped
+    /// to 0-1 and scaled to a byte, for a consumer that reads the palette
+    /// as bytes; the procedure stays, because its results are in the base
+    /// space's ranges, which a byte cannot hold for a CIE-based base.
     Indexed {
         base: Box<ColorSpace>,
         hival: u32,

@@ -1485,49 +1485,16 @@ fn samples_to_rgba(
     let mut rgba = vec![255u8; pixel_count * 4]; // Pre-fill alpha = 255
     let intent = intent_from_byte(ctx.gstate.rendering_intent);
 
-    // Check for Indexed color space
-    if let ColorSpace::Indexed {
-        ref base,
-        hival,
-        ref lookup,
-        ..
-    } = ctx.gstate.color_space
-    {
-        // Each sample is an index into the lookup table
-        for i in 0..pixel_count {
-            let idx = samples.get(i).copied().unwrap_or(0) as usize;
-            let idx = idx.min(hival as usize);
-            let base_ncomp = match base.as_ref() {
-                ColorSpace::DeviceGray => 1,
-                ColorSpace::DeviceRGB => 3,
-                ColorSpace::DeviceCMYK => 4,
-                _ => 3,
-            };
-            let offset = idx * base_ncomp;
-            let color = match base.as_ref() {
-                ColorSpace::DeviceGray => {
-                    let g = lookup.get(offset).copied().unwrap_or(0) as f64 / 255.0;
-                    DeviceColor::from_gray(g)
-                }
-                ColorSpace::DeviceRGB => {
-                    let r = lookup.get(offset).copied().unwrap_or(0) as f64 / 255.0;
-                    let g = lookup.get(offset + 1).copied().unwrap_or(0) as f64 / 255.0;
-                    let b = lookup.get(offset + 2).copied().unwrap_or(0) as f64 / 255.0;
-                    DeviceColor::from_rgb(r, g, b)
-                }
-                ColorSpace::DeviceCMYK => {
-                    let c = lookup.get(offset).copied().unwrap_or(0) as f64 / 255.0;
-                    let m = lookup.get(offset + 1).copied().unwrap_or(0) as f64 / 255.0;
-                    let y = lookup.get(offset + 2).copied().unwrap_or(0) as f64 / 255.0;
-                    let k = lookup.get(offset + 3).copied().unwrap_or(0) as f64 / 255.0;
-                    DeviceColor::from_cmyk_icc_with_intent(c, m, y, k, intent, &mut ctx.icc_cache)
-                }
-                _ => DeviceColor::from_gray(0.0),
-            };
-            let pi = i * 4;
-            rgba[pi] = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
-            rgba[pi + 1] = (color.g * 255.0).round().clamp(0.0, 255.0) as u8;
-            rgba[pi + 2] = (color.b * 255.0).round().clamp(0.0, 255.0) as u8;
+    // Each sample is an index into the palette.
+    if let ColorSpace::Indexed { hival, .. } = ctx.gstate.color_space {
+        let space = ctx.gstate.color_space.clone();
+        let palette = indexed_rgb_palette(ctx, &space);
+        for (i, px) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let idx = (samples.get(i).copied().unwrap_or(0) as usize).min(hival as usize);
+            let color = &palette[idx];
+            px[0] = (color.r * 255.0).round().clamp(0.0, 255.0) as u8;
+            px[1] = (color.g * 255.0).round().clamp(0.0, 255.0) as u8;
+            px[2] = (color.b * 255.0).round().clamp(0.0, 255.0) as u8;
         }
         return rgba;
     }
@@ -1978,7 +1945,13 @@ fn draw_image_to_device(
 /// For CIE ABC/A, clones Arc params.
 /// For CIE DEF/DEFG and Separation/DeviceN, returns None (caller pre-converts).
 fn capture_image_color_space(ctx: &mut Context) -> Option<ImageColorSpace> {
-    match ctx.gstate.color_space.clone() {
+    let cs = ctx.gstate.color_space.clone();
+    capture_image_cs(ctx, cs)
+}
+
+/// [`capture_image_color_space`] for `cs`.
+fn capture_image_cs(ctx: &mut Context, cs: ColorSpace) -> Option<ImageColorSpace> {
+    match cs {
         ColorSpace::DeviceGray => Some(ImageColorSpace::DeviceGray),
         ColorSpace::DeviceRGB => Some(ImageColorSpace::DeviceRGB),
         ColorSpace::DeviceCMYK => Some(ImageColorSpace::DeviceCMYK),
@@ -2014,24 +1987,7 @@ fn capture_image_color_space(ctx: &mut Context) -> Option<ImageColorSpace> {
                 }
             }
         }
-        ColorSpace::Indexed {
-            base,
-            hival,
-            lookup,
-            ..
-        } => {
-            let base_cs = match base.as_ref() {
-                ColorSpace::DeviceGray => ImageColorSpace::DeviceGray,
-                ColorSpace::DeviceRGB => ImageColorSpace::DeviceRGB,
-                ColorSpace::DeviceCMYK => ImageColorSpace::DeviceCMYK,
-                _ => ImageColorSpace::DeviceRGB, // fallback
-            };
-            Some(ImageColorSpace::Indexed {
-                base: Box::new(base_cs),
-                hival,
-                lookup: lookup.clone(),
-            })
-        }
+        indexed @ ColorSpace::Indexed { .. } => indexed_image_space(ctx, &indexed),
         ColorSpace::CIEBasedABC { params, .. } => Some(ImageColorSpace::CIEBasedABC {
             params: params.clone(),
         }),
@@ -2084,6 +2040,81 @@ fn capture_image_color_space(ctx: &mut Context) -> Option<ImageColorSpace> {
         // CIE DEF/DEFG: pre-convert at op time
         _ => None,
     }
+}
+
+/// An Indexed image's colour space as the renderer and the PDF writer read
+/// it: the palette's bytes over the base space when they are that space's
+/// components, else the palette converted to RGB.
+///
+/// A lookup string's bytes divided by 255 are the base's components (PLRM
+/// 3e §4.8.4), and the renderer reads 8-bit samples that way in a device
+/// space, a Separation or DeviceN one, and an ICCBased one whose `Range`
+/// is 0 to 1; such a base is kept, so PDF output keeps a spot colour's
+/// palette in its Separation space. A lookup procedure has been sampled
+/// into the bytes clipped to 0-1, which is what `setcolor` takes in those
+/// spaces. A CIE-based base, or an ICCBased one with another `Range`,
+/// takes components the bytes do not hold, so its palette is converted to
+/// RGB through it, entry by entry as `setcolor` converts one. The base
+/// was taken for DeviceRGB, and such a palette's bytes were drawn as RGB.
+fn indexed_image_space(ctx: &mut Context, space: &ColorSpace) -> Option<ImageColorSpace> {
+    let ColorSpace::Indexed {
+        base,
+        hival,
+        lookup,
+        ..
+    } = space
+    else {
+        return None;
+    };
+    let kept = match base.as_ref() {
+        ColorSpace::DeviceGray => Some(ImageColorSpace::DeviceGray),
+        ColorSpace::DeviceRGB => Some(ImageColorSpace::DeviceRGB),
+        ColorSpace::DeviceCMYK => Some(ImageColorSpace::DeviceCMYK),
+        ColorSpace::ICCBased { dict_entity, n, .. }
+            if crate::color_ops::icc_range(ctx, *dict_entity, *n)
+                .chunks(2)
+                .all(|r| r == [0.0, 1.0]) =>
+        {
+            capture_image_cs(ctx, (**base).clone())
+        }
+        ColorSpace::Separation { .. } | ColorSpace::DeviceN { .. } => {
+            capture_image_cs(ctx, (**base).clone())
+        }
+        _ => None,
+    };
+    if let Some(base_cs) = kept {
+        return Some(ImageColorSpace::Indexed {
+            base: Box::new(base_cs),
+            hival: *hival,
+            lookup: lookup.clone(),
+        });
+    }
+    let to_byte = |v: f64| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+    let lookup = indexed_rgb_palette(ctx, space)
+        .iter()
+        .flat_map(|c| [to_byte(c.r), to_byte(c.g), to_byte(c.b)])
+        .collect();
+    Some(ImageColorSpace::Indexed {
+        base: Box::new(ImageColorSpace::DeviceRGB),
+        hival: *hival,
+        lookup,
+    })
+}
+
+/// The device colour of each palette entry of an Indexed space, as
+/// `setcolor` gives it ([`crate::color_ops::resolve_components_color`]);
+/// black for an entry whose lookup procedure or tint transform fails.
+fn indexed_rgb_palette(ctx: &mut Context, space: &ColorSpace) -> Vec<DeviceColor> {
+    let ColorSpace::Indexed { hival, .. } = space else {
+        return Vec::new();
+    };
+    (0..=*hival)
+        .map(|i| {
+            crate::color_ops::resolve_components_color(ctx, &[i as f64], space)
+                .map(|(c, _)| c)
+                .unwrap_or_else(|_| DeviceColor::black())
+        })
+        .collect()
 }
 
 /// The device space a Separation or DeviceN image's tint table is in; see

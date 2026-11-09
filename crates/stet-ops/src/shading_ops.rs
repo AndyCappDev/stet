@@ -25,7 +25,8 @@ use stet_graphics::icc::intent_from_byte;
 use stet_graphics::mesh_shading;
 
 use crate::color_ops::{
-    components_to_device_color, precompute_cie_decode_tables, resolve_color_space_from_obj,
+    components_to_device_color, convert_tint_color, precompute_cie_decode_tables,
+    resolve_color_space_from_obj, resolve_components_color,
 };
 
 // Number of samples for function-based gradients.
@@ -204,7 +205,7 @@ pub(crate) fn build_pattern_shading(
                 return Err(PsError::RangeCheck);
             }
             let color_space = precompute_cie_decode_tables(ctx, color_space)?;
-            Some(shading_components_color(ctx, &comps, &color_space)?.0)
+            Some(resolve_components_color(ctx, &comps, &color_space)?.0)
         }
         None => None,
     };
@@ -403,7 +404,7 @@ fn build_type1_shading(
             let x_val = x_min + (col as f64 + 0.5) * dx;
 
             let color = match eval_shading_function(ctx, function, &[x_val, y_val], n_comps)
-                .and_then(|comps| shading_components_color(ctx, &comps, color_space))
+                .and_then(|comps| resolve_components_color(ctx, &comps, color_space))
             {
                 Ok((color, _)) => color,
                 Err(_) => continue,
@@ -917,37 +918,6 @@ fn get_alt_space(cs: &ColorSpace) -> &ColorSpace {
     }
 }
 
-/// Convert color components from Separation/DeviceN to the alternative
-/// device color space by running the tint transform via exec_sync.
-fn convert_tint_color(
-    ctx: &mut Context,
-    comps: &[f64],
-    color_space: &ColorSpace,
-) -> Result<Vec<f64>, PsError> {
-    let (tint_transform, num_alt) = match color_space {
-        ColorSpace::Separation {
-            tint_transform,
-            num_alt_components,
-            ..
-        } => (*tint_transform, *num_alt_components as usize),
-        ColorSpace::DeviceN {
-            tint_transform,
-            num_alt_components,
-            ..
-        } => (*tint_transform, *num_alt_components as usize),
-        _ => return Ok(comps.to_vec()),
-    };
-    for c in comps {
-        ctx.o_stack.push(PsObject::real(*c))?;
-    }
-    ctx.exec_sync(tint_transform)?;
-    let mut result = vec![0.0; num_alt];
-    for i in (0..num_alt).rev() {
-        result[i] = ctx.o_stack.pop()?.as_f64().unwrap_or(0.0);
-    }
-    Ok(result)
-}
-
 /// The colour components a shading's `Function` gives at `inputs`.
 ///
 /// PLRM 3e §4.9.3 allows one function with as many outputs as the colour
@@ -987,30 +957,6 @@ fn eval_shading_function(
             }
             Ok(comps)
         }
-    }
-}
-
-/// The device colour of `comps` in `color_space`, and the components it
-/// was converted from: the alternate space's, after the tint transform,
-/// for a Separation or DeviceN space, else `comps` themselves.
-fn shading_components_color(
-    ctx: &mut Context,
-    comps: &[f64],
-    color_space: &ColorSpace,
-) -> Result<(DeviceColor, Vec<f64>), PsError> {
-    let intent = intent_from_byte(ctx.gstate.rendering_intent);
-    if needs_tint_conversion(color_space) {
-        let alt = convert_tint_color(ctx, comps, color_space)?;
-        let color = components_to_device_color(
-            &alt,
-            get_alt_space(color_space),
-            intent,
-            &mut ctx.icc_cache,
-        );
-        Ok((color, alt))
-    } else {
-        let color = components_to_device_color(comps, color_space, intent, &mut ctx.icc_cache);
-        Ok((color, comps.to_vec()))
     }
 }
 
@@ -1057,7 +1003,7 @@ fn mesh_function_lut(
     for i in 0..MESH_FUNCTION_LUT_SIZE {
         let t = lo + i as f64 / last * span;
         let comps = eval_shading_function(ctx, function, &[t], n_comps)?;
-        let (color, raw) = shading_components_color(ctx, &comps, color_space)?;
+        let (color, raw) = resolve_components_color(ctx, &comps, color_space)?;
         lut.push(color);
         lut_raw.push(raw);
     }
@@ -1069,7 +1015,7 @@ fn mesh_function_lut(
             Some(c) => c.clone(),
             None => {
                 let comps = eval_shading_function(ctx, function, &[t], n_comps)?;
-                let (c, _) = shading_components_color(ctx, &comps, color_space)?;
+                let (c, _) = resolve_components_color(ctx, &comps, color_space)?;
                 memo.insert(t.to_bits(), c.clone());
                 c
             }
@@ -1142,7 +1088,7 @@ fn mesh_vertex_color(
             &mut ctx.icc_cache,
         )
     } else {
-        shading_components_color(ctx, comps, color_space)?.0
+        resolve_components_color(ctx, comps, color_space)?.0
     };
     memo.insert(key, color.clone());
     Ok(color)
@@ -1325,7 +1271,7 @@ fn sample_shading_function(
         let t_domain = d_min + t_norm * d_range;
 
         let comps = eval_shading_function(ctx, function, &[t_domain], n_comps)?;
-        let (color, raw_components) = shading_components_color(ctx, &comps, color_space)?;
+        let (color, raw_components) = resolve_components_color(ctx, &comps, color_space)?;
 
         stops.push(ColorStop {
             position: t_norm,
@@ -1472,10 +1418,10 @@ fn capture_shading_color_space(ctx: &Context, color_space: &ColorSpace) -> Shadi
             // After tint conversion, use the alt space
             capture_shading_color_space(ctx, alt_space)
         }
-        ColorSpace::Indexed { base, .. } => {
-            // Shouldn't appear in shadings, but handle gracefully
-            capture_shading_color_space(ctx, base)
-        }
+        // A mesh without a `Function` may be in an Indexed space; its
+        // vertices are resolved through the palette to the base space's
+        // components (see `resolve_components_color`).
+        ColorSpace::Indexed { base, .. } => capture_shading_color_space(ctx, base),
         ColorSpace::Pattern { base } => {
             // PLRM 4.9.3 forbids a Pattern space in a shading dictionary; if one
             // turns up, describe its base rather than failing the whole shading.

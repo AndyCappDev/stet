@@ -137,6 +137,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An Indexed colour over a CIE-based, ICCBased, Separation or DeviceN
+  base is drawn in that base.** Only a DeviceGray, DeviceRGB or
+  DeviceCMYK base was looked up: over any other a fill came out black,
+  an image drew the palette's bytes as RGB, and a mesh shading drew the
+  index as a gray. A lookup procedure's results were also clipped to
+  0-1, so a Lab palette, which PLRM 3e §4.8.4 says to give as a
+  procedure, lost its values. Fills, the initial colour, images and mesh
+  shadings now take each entry through the base space, running its tint
+  transform where it has one, and PDF output keeps a palette over a spot
+  colour or an ICC profile in that space.
 - **A spot colour whose alternate space is CIE-based is drawn in that
   space.** The tint transform's results were taken by their number
   alone, as one gray, three RGB or four CMYK values clamped to 0-1.
