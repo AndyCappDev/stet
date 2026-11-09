@@ -831,6 +831,97 @@ struct ProcessColorants {
     native_fallback: Option<(f64, f64, f64, f64)>,
 }
 
+/// The device colour of `comps` in `color_space`, as `setcolor` gives
+/// one: clamped to 0-1 in a device space, through the CMYK profile for
+/// DeviceCMYK, through its profile for ICCBased, and by the CIE
+/// equations for a CIE-based space.
+///
+/// Shadings use it for their colours.
+pub(crate) fn components_to_device_color(
+    comps: &[f64],
+    color_space: &ColorSpace,
+    intent: IccRenderingIntent,
+    icc_cache: &mut stet_graphics::icc::IccCache,
+) -> DeviceColor {
+    match color_space {
+        ColorSpace::DeviceGray => {
+            DeviceColor::from_gray(comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0))
+        }
+        ColorSpace::DeviceRGB if comps.len() >= 3 => DeviceColor::from_rgb(
+            comps[0].clamp(0.0, 1.0),
+            comps[1].clamp(0.0, 1.0),
+            comps[2].clamp(0.0, 1.0),
+        ),
+        ColorSpace::DeviceCMYK if comps.len() >= 4 => DeviceColor::from_cmyk_icc_with_intent(
+            comps[0].clamp(0.0, 1.0),
+            comps[1].clamp(0.0, 1.0),
+            comps[2].clamp(0.0, 1.0),
+            comps[3].clamp(0.0, 1.0),
+            intent,
+            icc_cache,
+        ),
+        ColorSpace::CIEBasedABC { params, .. } if comps.len() >= 3 => {
+            DeviceColor::from_cie_abc(comps[0], comps[1], comps[2], params)
+        }
+        ColorSpace::CIEBasedA { params, .. } => {
+            DeviceColor::from_cie_a(comps.first().copied().unwrap_or(0.0), params)
+        }
+        ColorSpace::CIEBasedDEF { params, .. } if comps.len() >= 3 => {
+            DeviceColor::from_cie_def(comps[0], comps[1], comps[2], params)
+        }
+        ColorSpace::CIEBasedDEFG { params, .. } if comps.len() >= 4 => {
+            DeviceColor::from_cie_defg(comps[0], comps[1], comps[2], comps[3], params)
+        }
+        ColorSpace::ICCBased {
+            n, profile_hash, ..
+        } => {
+            if let Some(hash) = profile_hash
+                && let Some((r, g, b)) = icc_cache.convert_color_with_intent(hash, comps, intent)
+            {
+                return DeviceColor::from_rgb(r, g, b);
+            }
+            match n {
+                1 => DeviceColor::from_gray(comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0)),
+                3 if comps.len() >= 3 => DeviceColor::from_rgb(
+                    comps[0].clamp(0.0, 1.0),
+                    comps[1].clamp(0.0, 1.0),
+                    comps[2].clamp(0.0, 1.0),
+                ),
+                4 if comps.len() >= 4 => DeviceColor::from_cmyk_icc_with_intent(
+                    comps[0].clamp(0.0, 1.0),
+                    comps[1].clamp(0.0, 1.0),
+                    comps[2].clamp(0.0, 1.0),
+                    comps[3].clamp(0.0, 1.0),
+                    intent,
+                    icc_cache,
+                ),
+                _ => DeviceColor::from_gray(0.0),
+            }
+        }
+        _ => {
+            // Fallback: heuristic based on count
+            if comps.len() >= 4 {
+                DeviceColor::from_cmyk_icc_with_intent(
+                    comps[0].clamp(0.0, 1.0),
+                    comps[1].clamp(0.0, 1.0),
+                    comps[2].clamp(0.0, 1.0),
+                    comps[3].clamp(0.0, 1.0),
+                    intent,
+                    icc_cache,
+                )
+            } else if comps.len() >= 3 {
+                DeviceColor::from_rgb(
+                    comps[0].clamp(0.0, 1.0),
+                    comps[1].clamp(0.0, 1.0),
+                    comps[2].clamp(0.0, 1.0),
+                )
+            } else {
+                DeviceColor::from_gray(comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0))
+            }
+        }
+    }
+}
+
 /// Pop tint transform results from the stack and set the device color.
 fn set_color_from_tint_result(
     ctx: &mut Context,

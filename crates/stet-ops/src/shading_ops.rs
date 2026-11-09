@@ -7,6 +7,8 @@
 //! Extracts shading parameters from a PostScript dict, samples the shading
 //! function where needed, and pushes display list elements for rendering.
 
+use std::sync::Arc;
+
 use stet_core::context::Context;
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
@@ -19,10 +21,12 @@ use stet_graphics::device::{
     RadialShadingParams, ShadingColorSpace, ShadingPatch, ShadingTriangle,
 };
 use stet_graphics::display_list::{DisplayElement, DisplayList};
-use stet_graphics::icc::{IccRenderingIntent, intent_from_byte};
+use stet_graphics::icc::intent_from_byte;
 use stet_graphics::mesh_shading;
 
-use crate::color_ops::{precompute_cie_decode_tables, resolve_color_space_from_obj};
+use crate::color_ops::{
+    components_to_device_color, precompute_cie_decode_tables, resolve_color_space_from_obj,
+};
 
 // Number of samples for function-based gradients.
 const NUM_GRADIENT_SAMPLES: usize = 64;
@@ -200,7 +204,7 @@ pub(crate) fn build_pattern_shading(
                 return Err(PsError::RangeCheck);
             }
             let color_space = precompute_cie_decode_tables(ctx, color_space)?;
-            Some(shading_color(ctx, &comps, &color_space)?)
+            Some(shading_components_color(ctx, &comps, &color_space)?.0)
         }
         None => None,
     };
@@ -390,12 +394,6 @@ fn build_type1_shading(
     let dx = (x_max - x_min) / size as f64;
     let dy = (y_max - y_min) / size as f64;
 
-    // Check if function is a dict (native eval) or procedure (exec_sync)
-    let func_dict = match function.value {
-        PsValue::Dict(entity) => Some(entity),
-        _ => None,
-    };
-
     // Pre-rasterize to RGB pixel buffer (3 components, no alpha for shadings)
     let mut rgb_data = vec![255u8; size * size * 3];
 
@@ -404,53 +402,11 @@ fn build_type1_shading(
         for col in 0..size {
             let x_val = x_min + (col as f64 + 0.5) * dx;
 
-            let color = if let Some(func_entity) = func_dict {
-                match evaluate_ps_function(ctx, func_entity, &[x_val, y_val]) {
-                    Ok(results) => {
-                        if needs_tint_conversion(color_space) {
-                            match convert_tint_color(ctx, &results, color_space) {
-                                Ok(alt) => components_to_device_color(
-                                    &alt,
-                                    get_alt_space(color_space),
-                                    intent_from_byte(ctx.gstate.rendering_intent),
-                                    &mut ctx.icc_cache,
-                                ),
-                                Err(_) => continue,
-                            }
-                        } else {
-                            components_to_device_color(
-                                &results,
-                                color_space,
-                                intent_from_byte(ctx.gstate.rendering_intent),
-                                &mut ctx.icc_cache,
-                            )
-                        }
-                    }
-                    Err(_) => continue,
-                }
-            } else {
-                ctx.o_stack.push(PsObject::real(x_val))?;
-                ctx.o_stack.push(PsObject::real(y_val))?;
-                if ctx.exec_sync(function).is_err() {
-                    continue;
-                }
-                if needs_tint_conversion(color_space) {
-                    let mut comps = vec![0.0; n_comps];
-                    for i in (0..n_comps).rev() {
-                        comps[i] = ctx.o_stack.pop()?.as_f64().unwrap_or(0.0);
-                    }
-                    match convert_tint_color(ctx, &comps, color_space) {
-                        Ok(alt) => components_to_device_color(
-                            &alt,
-                            get_alt_space(color_space),
-                            intent_from_byte(ctx.gstate.rendering_intent),
-                            &mut ctx.icc_cache,
-                        ),
-                        Err(_) => continue,
-                    }
-                } else {
-                    pop_color_components(ctx, n_comps, color_space)
-                }
+            let color = match eval_shading_function(ctx, function, &[x_val, y_val], n_comps)
+                .and_then(|comps| shading_components_color(ctx, &comps, color_space))
+            {
+                Ok((color, _)) => color,
+                Err(_) => continue,
             };
 
             let offset = (row * size + col) * 3;
@@ -580,6 +536,10 @@ fn build_type4_shading(
     shading_cs: ShadingColorSpace,
 ) -> Result<(), PsError> {
     let ds_obj = get_dict_obj(ctx, dict, b"DataSource").ok_or(PsError::Undefined)?;
+    // With a Function, each vertex carries one parametric value t, not
+    // colour components (PLRM 3e §4.9.3).
+    let function = get_dict_obj(ctx, dict, b"Function");
+    let vertex_comps = if function.is_some() { 1 } else { n_comps };
 
     let (mut triangles, in_alt) = match ds_obj.value {
         PsValue::String { .. } | PsValue::File(_) => {
@@ -594,21 +554,38 @@ fn build_type4_shading(
                 return Err(PsError::RangeCheck);
             }
             (
-                mesh_shading::parse_type4_mesh(&data, bpc, bpco, bpfl, &decode, n_comps),
+                mesh_shading::parse_type4_mesh(&data, bpc, bpco, bpfl, &decode, vertex_comps),
                 false,
             )
         }
         PsValue::Array { entity, start, len } => {
             let values = extract_float_array(ctx, entity, start, len);
-            // Convert DeviceN/Separation colors to device color space
-            let (values, eff_n) =
-                convert_vertex_array_colors(ctx, values, n_comps, color_space, 3)?;
-            (mesh_shading::build_type4_from_array(&values, eff_n), true)
+            if function.is_some() {
+                (mesh_shading::build_type4_from_array(&values, 1), true)
+            } else {
+                // Convert DeviceN/Separation colors to device color space
+                let (values, eff_n) =
+                    convert_vertex_array_colors(ctx, values, n_comps, color_space, 3)?;
+                (mesh_shading::build_type4_from_array(&values, eff_n), true)
+            }
         }
         _ => return Err(PsError::TypeCheck),
     };
 
-    recolor_triangles(ctx, color_space, &mut triangles, in_alt)?;
+    let (color_lut, color_lut_components) = match function {
+        Some(function) => {
+            let vertices = triangles
+                .iter_mut()
+                .flat_map(|t| [&mut t.v0, &mut t.v1, &mut t.v2])
+                .map(|v| (&mut v.raw_components, &mut v.color))
+                .collect();
+            mesh_function_lut(ctx, function, color_space, n_comps, &shading_cs, vertices)?
+        }
+        None => {
+            recolor_triangles(ctx, color_space, &mut triangles, in_alt)?;
+            (None, None)
+        }
+    };
     if !triangles.is_empty() {
         let gs_alpha = ctx.gstate.fill_opacity;
         let gs_blend_mode = ctx.gstate.blend_mode;
@@ -625,8 +602,8 @@ fn build_type4_shading(
                     overprint: false,
                     overprint_mode: 0,
                     painted_channels: 0,
-                    color_lut: None,
-                    color_lut_components: None,
+                    color_lut,
+                    color_lut_components,
                     alpha: gs_alpha,
                     blend_mode: gs_blend_mode,
                     alpha_is_shape: gs_alpha_is_shape,
@@ -651,6 +628,10 @@ fn build_type5_shading(
     let verts_per_row =
         get_dict_int(ctx, dict, b"VerticesPerRow").ok_or(PsError::Undefined)? as usize;
     let ds_obj = get_dict_obj(ctx, dict, b"DataSource").ok_or(PsError::Undefined)?;
+    // With a Function, each vertex carries one parametric value t, not
+    // colour components (PLRM 3e §4.9.3).
+    let function = get_dict_obj(ctx, dict, b"Function");
+    let vertex_comps = if function.is_some() { 1 } else { n_comps };
 
     let (mut triangles, in_alt) = match ds_obj.value {
         PsValue::String { .. } | PsValue::File(_) => {
@@ -664,23 +645,50 @@ fn build_type5_shading(
                 return Err(PsError::RangeCheck);
             }
             (
-                mesh_shading::parse_type5_mesh(&data, bpc, bpco, &decode, n_comps, verts_per_row),
+                mesh_shading::parse_type5_mesh(
+                    &data,
+                    bpc,
+                    bpco,
+                    &decode,
+                    vertex_comps,
+                    verts_per_row,
+                ),
                 false,
             )
         }
         PsValue::Array { entity, start, len } => {
             let values = extract_float_array(ctx, entity, start, len);
-            let (values, eff_n) =
-                convert_vertex_array_colors(ctx, values, n_comps, color_space, 2)?;
-            (
-                mesh_shading::build_type5_from_array(&values, eff_n, verts_per_row),
-                true,
-            )
+            if function.is_some() {
+                (
+                    mesh_shading::build_type5_from_array(&values, 1, verts_per_row),
+                    true,
+                )
+            } else {
+                let (values, eff_n) =
+                    convert_vertex_array_colors(ctx, values, n_comps, color_space, 2)?;
+                (
+                    mesh_shading::build_type5_from_array(&values, eff_n, verts_per_row),
+                    true,
+                )
+            }
         }
         _ => return Err(PsError::TypeCheck),
     };
 
-    recolor_triangles(ctx, color_space, &mut triangles, in_alt)?;
+    let (color_lut, color_lut_components) = match function {
+        Some(function) => {
+            let vertices = triangles
+                .iter_mut()
+                .flat_map(|t| [&mut t.v0, &mut t.v1, &mut t.v2])
+                .map(|v| (&mut v.raw_components, &mut v.color))
+                .collect();
+            mesh_function_lut(ctx, function, color_space, n_comps, &shading_cs, vertices)?
+        }
+        None => {
+            recolor_triangles(ctx, color_space, &mut triangles, in_alt)?;
+            (None, None)
+        }
+    };
     if !triangles.is_empty() {
         let gs_alpha = ctx.gstate.fill_opacity;
         let gs_blend_mode = ctx.gstate.blend_mode;
@@ -697,8 +705,8 @@ fn build_type5_shading(
                     overprint: false,
                     overprint_mode: 0,
                     painted_channels: 0,
-                    color_lut: None,
-                    color_lut_components: None,
+                    color_lut,
+                    color_lut_components,
                     alpha: gs_alpha,
                     blend_mode: gs_blend_mode,
                     alpha_is_shape: gs_alpha_is_shape,
@@ -723,6 +731,10 @@ fn build_type6_shading(
     shading_cs: ShadingColorSpace,
 ) -> Result<(), PsError> {
     let ds_obj = get_dict_obj(ctx, dict, b"DataSource").ok_or(PsError::Undefined)?;
+    // With a Function, each vertex carries one parametric value t, not
+    // colour components (PLRM 3e §4.9.3).
+    let function = get_dict_obj(ctx, dict, b"Function");
+    let vertex_comps = if function.is_some() { 1 } else { n_comps };
 
     let (mut patches, in_alt) = match ds_obj.value {
         PsValue::String { .. } | PsValue::File(_) => {
@@ -737,19 +749,36 @@ fn build_type6_shading(
                 return Err(PsError::RangeCheck);
             }
             (
-                mesh_shading::parse_type6_patches(&data, bpc, bpco, bpfl, &decode, n_comps),
+                mesh_shading::parse_type6_patches(&data, bpc, bpco, bpfl, &decode, vertex_comps),
                 false,
             )
         }
         PsValue::Array { entity, start, len } => {
             let values = extract_float_array(ctx, entity, start, len);
-            let (values, eff_n) = convert_type6_array_colors(ctx, values, n_comps, color_space)?;
-            (mesh_shading::build_type6_from_array(&values, eff_n), true)
+            if function.is_some() {
+                (mesh_shading::build_type6_from_array(&values, 1), true)
+            } else {
+                let (values, eff_n) =
+                    convert_type6_array_colors(ctx, values, n_comps, color_space)?;
+                (mesh_shading::build_type6_from_array(&values, eff_n), true)
+            }
         }
         _ => return Err(PsError::TypeCheck),
     };
 
-    recolor_patches(ctx, color_space, &mut patches, in_alt)?;
+    let (color_lut, color_lut_components) = match function {
+        Some(function) => {
+            let vertices = patches
+                .iter_mut()
+                .flat_map(|p| p.raw_colors.iter_mut().zip(p.colors.iter_mut()))
+                .collect();
+            mesh_function_lut(ctx, function, color_space, n_comps, &shading_cs, vertices)?
+        }
+        None => {
+            recolor_patches(ctx, color_space, &mut patches, in_alt)?;
+            (None, None)
+        }
+    };
     if !patches.is_empty() {
         let gs_alpha = ctx.gstate.fill_opacity;
         let gs_blend_mode = ctx.gstate.blend_mode;
@@ -766,8 +795,8 @@ fn build_type6_shading(
                     overprint: false,
                     overprint_mode: 0,
                     painted_channels: 0,
-                    color_lut: None,
-                    color_lut_components: None,
+                    color_lut,
+                    color_lut_components,
                     alpha: gs_alpha,
                     blend_mode: gs_blend_mode,
                     alpha_is_shape: gs_alpha_is_shape,
@@ -790,6 +819,10 @@ fn build_type7_shading(
     shading_cs: ShadingColorSpace,
 ) -> Result<(), PsError> {
     let ds_obj = get_dict_obj(ctx, dict, b"DataSource").ok_or(PsError::Undefined)?;
+    // With a Function, each vertex carries one parametric value t, not
+    // colour components (PLRM 3e §4.9.3).
+    let function = get_dict_obj(ctx, dict, b"Function");
+    let vertex_comps = if function.is_some() { 1 } else { n_comps };
 
     let (mut patches, in_alt) = match ds_obj.value {
         PsValue::String { .. } | PsValue::File(_) => {
@@ -804,19 +837,36 @@ fn build_type7_shading(
                 return Err(PsError::RangeCheck);
             }
             (
-                mesh_shading::parse_type7_patches(&data, bpc, bpco, bpfl, &decode, n_comps),
+                mesh_shading::parse_type7_patches(&data, bpc, bpco, bpfl, &decode, vertex_comps),
                 false,
             )
         }
         PsValue::Array { entity, start, len } => {
             let values = extract_float_array(ctx, entity, start, len);
-            let (values, eff_n) = convert_type7_array_colors(ctx, values, n_comps, color_space)?;
-            (mesh_shading::build_type7_from_array(&values, eff_n), true)
+            if function.is_some() {
+                (mesh_shading::build_type7_from_array(&values, 1), true)
+            } else {
+                let (values, eff_n) =
+                    convert_type7_array_colors(ctx, values, n_comps, color_space)?;
+                (mesh_shading::build_type7_from_array(&values, eff_n), true)
+            }
         }
         _ => return Err(PsError::TypeCheck),
     };
 
-    recolor_patches(ctx, color_space, &mut patches, in_alt)?;
+    let (color_lut, color_lut_components) = match function {
+        Some(function) => {
+            let vertices = patches
+                .iter_mut()
+                .flat_map(|p| p.raw_colors.iter_mut().zip(p.colors.iter_mut()))
+                .collect();
+            mesh_function_lut(ctx, function, color_space, n_comps, &shading_cs, vertices)?
+        }
+        None => {
+            recolor_patches(ctx, color_space, &mut patches, in_alt)?;
+            (None, None)
+        }
+    };
     if !patches.is_empty() {
         let gs_alpha = ctx.gstate.fill_opacity;
         let gs_blend_mode = ctx.gstate.blend_mode;
@@ -833,8 +883,8 @@ fn build_type7_shading(
                     overprint: false,
                     overprint_mode: 0,
                     painted_channels: 0,
-                    color_lut: None,
-                    color_lut_components: None,
+                    color_lut,
+                    color_lut_components,
                     alpha: gs_alpha,
                     blend_mode: gs_blend_mode,
                     alpha_is_shape: gs_alpha_is_shape,
@@ -898,30 +948,170 @@ fn convert_tint_color(
     Ok(result)
 }
 
-/// One colour of a shading's colour space as a device colour, a Separation
-/// or DeviceN colour going through its tint transform.
-fn shading_color(
+/// The colour components a shading's `Function` gives at `inputs`.
+///
+/// PLRM 3e §4.9.3 allows one function with as many outputs as the colour
+/// space has components, or an array of that many one-output functions,
+/// one per component; a procedure that pushes the components is accepted
+/// too. The array form was taken for a procedure and executed, which left
+/// the stack short (`stackunderflow`).
+fn eval_shading_function(
+    ctx: &mut Context,
+    function: PsObject,
+    inputs: &[f64],
+    n_comps: usize,
+) -> Result<Vec<f64>, PsError> {
+    match function.value {
+        PsValue::Dict(entity) => evaluate_ps_function(ctx, entity, inputs),
+        PsValue::Array { entity, start, len } if !function.flags.is_executable() => {
+            let mut out = Vec::with_capacity(len as usize);
+            for i in 0..len {
+                match ctx.arrays.get_element(entity, start + i).value {
+                    PsValue::Dict(f) => {
+                        let value = evaluate_ps_function(ctx, f, inputs)?;
+                        out.push(value.first().copied().unwrap_or(0.0));
+                    }
+                    _ => return Err(PsError::TypeCheck),
+                }
+            }
+            Ok(out)
+        }
+        _ => {
+            for &v in inputs {
+                ctx.o_stack.push(PsObject::real(v))?;
+            }
+            ctx.exec_sync(function)?;
+            let mut comps = vec![0.0; n_comps];
+            for c in comps.iter_mut().rev() {
+                *c = ctx.o_stack.pop()?.as_f64().unwrap_or(0.0);
+            }
+            Ok(comps)
+        }
+    }
+}
+
+/// The device colour of `comps` in `color_space`, and the components it
+/// was converted from: the alternate space's, after the tint transform,
+/// for a Separation or DeviceN space, else `comps` themselves.
+fn shading_components_color(
     ctx: &mut Context,
     comps: &[f64],
     color_space: &ColorSpace,
-) -> Result<DeviceColor, PsError> {
+) -> Result<(DeviceColor, Vec<f64>), PsError> {
     let intent = intent_from_byte(ctx.gstate.rendering_intent);
     if needs_tint_conversion(color_space) {
         let alt = convert_tint_color(ctx, comps, color_space)?;
-        Ok(components_to_device_color(
+        let color = components_to_device_color(
             &alt,
             get_alt_space(color_space),
             intent,
             &mut ctx.icc_cache,
-        ))
+        );
+        Ok((color, alt))
     } else {
-        Ok(components_to_device_color(
-            comps,
-            color_space,
-            intent,
-            &mut ctx.icc_cache,
-        ))
+        let color = components_to_device_color(comps, color_space, intent, &mut ctx.icc_cache);
+        Ok((color, comps.to_vec()))
     }
+}
+
+/// How many entries the colour table of a mesh shading with a `Function`
+/// has, as the PDF reader samples one.
+const MESH_FUNCTION_LUT_SIZE: usize = 256;
+
+/// A mesh shading with a `Function`: each vertex carries a parametric
+/// value t rather than colour components, and the function gives its
+/// colour (PLRM 3e §4.9.3, Types 4 to 7).
+///
+/// Takes each vertex's t from `raw[0]`, and returns the colour table the
+/// renderer interpolates t into, sampled over the vertices' range of t,
+/// with the same table as components of `shading_cs` for a writer that
+/// emits the function again. Each vertex is left with t normalised to that
+/// range in `raw`, and its own colour, for a consumer that does not read
+/// the table. This is the form the PDF reader gives such a shading, so a
+/// function with several stops is not flattened to the colours at the
+/// vertices.
+#[expect(clippy::type_complexity)]
+fn mesh_function_lut(
+    ctx: &mut Context,
+    function: PsObject,
+    color_space: &ColorSpace,
+    n_comps: usize,
+    shading_cs: &ShadingColorSpace,
+    vertices: Vec<(&mut Vec<f64>, &mut DeviceColor)>,
+) -> Result<(Option<Arc<Vec<DeviceColor>>>, Option<Arc<Vec<Vec<f64>>>>), PsError> {
+    let ts = || {
+        vertices
+            .iter()
+            .map(|(raw, _)| raw.first().copied().unwrap_or(0.0))
+    };
+    let lo = ts().fold(f64::INFINITY, f64::min);
+    let hi = ts().fold(f64::NEG_INFINITY, f64::max);
+    if !lo.is_finite() || !hi.is_finite() {
+        return Ok((None, None));
+    }
+    let span = if hi - lo > 1e-12 { hi - lo } else { 1.0 };
+
+    let mut lut = Vec::with_capacity(MESH_FUNCTION_LUT_SIZE);
+    let mut lut_raw = Vec::with_capacity(MESH_FUNCTION_LUT_SIZE);
+    let last = (MESH_FUNCTION_LUT_SIZE - 1) as f64;
+    for i in 0..MESH_FUNCTION_LUT_SIZE {
+        let t = lo + i as f64 / last * span;
+        let comps = eval_shading_function(ctx, function, &[t], n_comps)?;
+        let (color, raw) = shading_components_color(ctx, &comps, color_space)?;
+        lut.push(color);
+        lut_raw.push(raw);
+    }
+
+    let mut memo: std::collections::HashMap<u64, DeviceColor> = std::collections::HashMap::new();
+    for (raw, color) in vertices {
+        let t = raw.first().copied().unwrap_or(0.0);
+        *color = match memo.get(&t.to_bits()) {
+            Some(c) => c.clone(),
+            None => {
+                let comps = eval_shading_function(ctx, function, &[t], n_comps)?;
+                let (c, _) = shading_components_color(ctx, &comps, color_space)?;
+                memo.insert(t.to_bits(), c.clone());
+                c
+            }
+        };
+        *raw = vec![((t - lo) / span).clamp(0.0, 1.0)];
+    }
+
+    let components = lut_components(color_space, shading_cs, &lut, lut_raw);
+    Ok((Some(Arc::new(lut)), components))
+}
+
+/// A mesh function's colour table as components of `shading_cs`, the
+/// space the display list names, for a writer that emits the function
+/// again (see `MeshShadingParams::color_lut_components`). Those are the
+/// function's own outputs, after any tint transform, where `shading_cs`
+/// is that space; the converted colours where it is the DeviceRGB stand-in
+/// for a space it cannot name; none otherwise, and the writer then writes
+/// the vertex colours.
+fn lut_components(
+    color_space: &ColorSpace,
+    shading_cs: &ShadingColorSpace,
+    lut: &[DeviceColor],
+    raw: Vec<Vec<f64>>,
+) -> Option<Arc<Vec<Vec<f64>>>> {
+    let space = if needs_tint_conversion(color_space) {
+        get_alt_space(color_space)
+    } else {
+        color_space
+    };
+    let n = shading_cs.num_components();
+    let samples = match (space, shading_cs) {
+        (ColorSpace::DeviceGray, ShadingColorSpace::DeviceGray)
+        | (ColorSpace::DeviceRGB, ShadingColorSpace::DeviceRGB)
+        | (ColorSpace::DeviceCMYK, ShadingColorSpace::DeviceCMYK)
+        | (ColorSpace::ICCBased { .. }, ShadingColorSpace::ICCBased { .. }) => raw,
+        (_, ShadingColorSpace::DeviceRGB) => lut.iter().map(|c| vec![c.r, c.g, c.b]).collect(),
+        _ => return None,
+    };
+    samples
+        .iter()
+        .all(|s| s.len() == n)
+        .then(|| Arc::new(samples))
 }
 
 /// The device colour of a mesh vertex from its components.
@@ -943,16 +1133,16 @@ fn mesh_vertex_color(
     if let Some(c) = memo.get(&key) {
         return Ok(c.clone());
     }
-    let intent = intent_from_byte(ctx.gstate.rendering_intent);
-    let color = if needs_tint_conversion(color_space) {
-        let alt = if in_alt {
-            comps.to_vec()
-        } else {
-            convert_tint_color(ctx, comps, color_space)?
-        };
-        components_to_device_color(&alt, get_alt_space(color_space), intent, &mut ctx.icc_cache)
+    let color = if in_alt && needs_tint_conversion(color_space) {
+        let intent = intent_from_byte(ctx.gstate.rendering_intent);
+        components_to_device_color(
+            comps,
+            get_alt_space(color_space),
+            intent,
+            &mut ctx.icc_cache,
+        )
     } else {
-        components_to_device_color(comps, color_space, intent, &mut ctx.icc_cache)
+        shading_components_color(ctx, comps, color_space)?.0
     };
     memo.insert(key, color.clone());
     Ok(color)
@@ -1130,71 +1320,12 @@ fn sample_shading_function(
     let d_max = domain[1];
     let d_range = d_max - d_min;
 
-    // Check if function is a dict (PostScript function dict) or a procedure
-    let func_dict = match function.value {
-        PsValue::Dict(entity) => Some(entity),
-        _ => None,
-    };
-
     for i in 0..=num_samples {
         let t_norm = i as f64 / num_samples as f64;
         let t_domain = d_min + t_norm * d_range;
 
-        let (color, raw_components) = if let Some(func_entity) = func_dict {
-            let results = evaluate_ps_function(ctx, func_entity, &[t_domain])?;
-            if needs_tint_conversion(color_space) {
-                let alt = convert_tint_color(ctx, &results, color_space)?;
-                let color = components_to_device_color(
-                    &alt,
-                    get_alt_space(color_space),
-                    intent_from_byte(ctx.gstate.rendering_intent),
-                    &mut ctx.icc_cache,
-                );
-                (color, alt)
-            } else {
-                let color = components_to_device_color(
-                    &results,
-                    color_space,
-                    intent_from_byte(ctx.gstate.rendering_intent),
-                    &mut ctx.icc_cache,
-                );
-                (color, results)
-            }
-        } else {
-            ctx.o_stack.push(PsObject::real(t_domain))?;
-            ctx.exec_sync(function)?;
-            if needs_tint_conversion(color_space) {
-                let mut comps = vec![0.0; n_comps];
-                for i in (0..n_comps).rev() {
-                    comps[i] = ctx.o_stack.pop()?.as_f64().unwrap_or(0.0);
-                }
-                let alt = convert_tint_color(ctx, &comps, color_space)?;
-                let color = components_to_device_color(
-                    &alt,
-                    get_alt_space(color_space),
-                    intent_from_byte(ctx.gstate.rendering_intent),
-                    &mut ctx.icc_cache,
-                );
-                (color, alt)
-            } else {
-                let mut comps = vec![0.0; n_comps];
-                for j in (0..n_comps).rev() {
-                    comps[j] = ctx
-                        .o_stack
-                        .pop()
-                        .ok()
-                        .and_then(|o| o.as_f64())
-                        .unwrap_or(0.0);
-                }
-                let color = components_to_device_color(
-                    &comps,
-                    color_space,
-                    intent_from_byte(ctx.gstate.rendering_intent),
-                    &mut ctx.icc_cache,
-                );
-                (color, comps)
-            }
-        };
+        let comps = eval_shading_function(ctx, function, &[t_domain], n_comps)?;
+        let (color, raw_components) = shading_components_color(ctx, &comps, color_space)?;
 
         stops.push(ColorStop {
             position: t_norm,
@@ -1351,92 +1482,6 @@ fn capture_shading_color_space(ctx: &Context, color_space: &ColorSpace) -> Shadi
             match base {
                 Some(base) => capture_shading_color_space(ctx, base),
                 None => ShadingColorSpace::DeviceRGB,
-            }
-        }
-    }
-}
-
-/// Convert component values to DeviceColor based on color space.
-fn components_to_device_color(
-    comps: &[f64],
-    color_space: &ColorSpace,
-    intent: IccRenderingIntent,
-    icc_cache: &mut stet_graphics::icc::IccCache,
-) -> DeviceColor {
-    match color_space {
-        ColorSpace::DeviceGray => {
-            DeviceColor::from_gray(comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0))
-        }
-        ColorSpace::DeviceRGB if comps.len() >= 3 => DeviceColor::from_rgb(
-            comps[0].clamp(0.0, 1.0),
-            comps[1].clamp(0.0, 1.0),
-            comps[2].clamp(0.0, 1.0),
-        ),
-        ColorSpace::DeviceCMYK if comps.len() >= 4 => DeviceColor::from_cmyk_icc_with_intent(
-            comps[0].clamp(0.0, 1.0),
-            comps[1].clamp(0.0, 1.0),
-            comps[2].clamp(0.0, 1.0),
-            comps[3].clamp(0.0, 1.0),
-            intent,
-            icc_cache,
-        ),
-        ColorSpace::CIEBasedABC { params, .. } if comps.len() >= 3 => {
-            DeviceColor::from_cie_abc(comps[0], comps[1], comps[2], params)
-        }
-        ColorSpace::CIEBasedA { params, .. } => {
-            DeviceColor::from_cie_a(comps.first().copied().unwrap_or(0.0), params)
-        }
-        ColorSpace::CIEBasedDEF { params, .. } if comps.len() >= 3 => {
-            DeviceColor::from_cie_def(comps[0], comps[1], comps[2], params)
-        }
-        ColorSpace::CIEBasedDEFG { params, .. } if comps.len() >= 4 => {
-            DeviceColor::from_cie_defg(comps[0], comps[1], comps[2], comps[3], params)
-        }
-        ColorSpace::ICCBased {
-            n, profile_hash, ..
-        } => {
-            if let Some(hash) = profile_hash
-                && let Some((r, g, b)) = icc_cache.convert_color_with_intent(hash, comps, intent)
-            {
-                return DeviceColor::from_rgb(r, g, b);
-            }
-            match n {
-                1 => DeviceColor::from_gray(comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0)),
-                3 if comps.len() >= 3 => DeviceColor::from_rgb(
-                    comps[0].clamp(0.0, 1.0),
-                    comps[1].clamp(0.0, 1.0),
-                    comps[2].clamp(0.0, 1.0),
-                ),
-                4 if comps.len() >= 4 => DeviceColor::from_cmyk_icc_with_intent(
-                    comps[0].clamp(0.0, 1.0),
-                    comps[1].clamp(0.0, 1.0),
-                    comps[2].clamp(0.0, 1.0),
-                    comps[3].clamp(0.0, 1.0),
-                    intent,
-                    icc_cache,
-                ),
-                _ => DeviceColor::from_gray(0.0),
-            }
-        }
-        _ => {
-            // Fallback: heuristic based on count
-            if comps.len() >= 4 {
-                DeviceColor::from_cmyk_icc_with_intent(
-                    comps[0].clamp(0.0, 1.0),
-                    comps[1].clamp(0.0, 1.0),
-                    comps[2].clamp(0.0, 1.0),
-                    comps[3].clamp(0.0, 1.0),
-                    intent,
-                    icc_cache,
-                )
-            } else if comps.len() >= 3 {
-                DeviceColor::from_rgb(
-                    comps[0].clamp(0.0, 1.0),
-                    comps[1].clamp(0.0, 1.0),
-                    comps[2].clamp(0.0, 1.0),
-                )
-            } else {
-                DeviceColor::from_gray(comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0))
             }
         }
     }
@@ -1790,129 +1835,6 @@ fn eval_type3_stitching(
 /// Look up a single float value from a dict.
 fn get_dict_float(ctx: &Context, dict: EntityId, key: &[u8]) -> Option<f64> {
     get_dict_obj(ctx, dict, key)?.as_f64()
-}
-
-/// Pop n_comps values from the operand stack and convert to DeviceColor.
-fn pop_color_components(
-    ctx: &mut Context,
-    n_comps: usize,
-    color_space: &ColorSpace,
-) -> DeviceColor {
-    let mut comps = vec![0.0f64; n_comps];
-    // Components are pushed in order, so last pushed is on top
-    for i in (0..n_comps).rev() {
-        comps[i] = ctx
-            .o_stack
-            .pop()
-            .ok()
-            .and_then(|o| o.as_f64())
-            .unwrap_or(0.0);
-    }
-
-    let intent = intent_from_byte(ctx.gstate.rendering_intent);
-    match color_space {
-        ColorSpace::DeviceGray => {
-            DeviceColor::from_gray(comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0))
-        }
-        ColorSpace::DeviceRGB => {
-            if comps.len() >= 3 {
-                DeviceColor::from_rgb(
-                    comps[0].clamp(0.0, 1.0),
-                    comps[1].clamp(0.0, 1.0),
-                    comps[2].clamp(0.0, 1.0),
-                )
-            } else {
-                DeviceColor::from_gray(0.0)
-            }
-        }
-        ColorSpace::DeviceCMYK => {
-            if comps.len() >= 4 {
-                DeviceColor::from_cmyk_icc_with_intent(
-                    comps[0].clamp(0.0, 1.0),
-                    comps[1].clamp(0.0, 1.0),
-                    comps[2].clamp(0.0, 1.0),
-                    comps[3].clamp(0.0, 1.0),
-                    intent,
-                    &mut ctx.icc_cache,
-                )
-            } else {
-                DeviceColor::from_gray(0.0)
-            }
-        }
-        ColorSpace::CIEBasedABC { params, .. } => {
-            if comps.len() >= 3 {
-                DeviceColor::from_cie_abc(comps[0], comps[1], comps[2], params)
-            } else {
-                DeviceColor::from_gray(0.0)
-            }
-        }
-        ColorSpace::CIEBasedA { params, .. } => {
-            DeviceColor::from_cie_a(comps.first().copied().unwrap_or(0.0), params)
-        }
-        ColorSpace::CIEBasedDEF { params, .. } => {
-            if comps.len() >= 3 {
-                DeviceColor::from_cie_def(comps[0], comps[1], comps[2], params)
-            } else {
-                DeviceColor::from_gray(0.0)
-            }
-        }
-        ColorSpace::CIEBasedDEFG { params, .. } => {
-            if comps.len() >= 4 {
-                DeviceColor::from_cie_defg(comps[0], comps[1], comps[2], comps[3], params)
-            } else {
-                DeviceColor::from_gray(0.0)
-            }
-        }
-        ColorSpace::ICCBased {
-            n, profile_hash, ..
-        } => {
-            if let Some(hash) = profile_hash
-                && let Some((r, g, b)) = ctx
-                    .icc_cache
-                    .convert_color_with_intent(hash, &comps, intent)
-            {
-                return DeviceColor::from_rgb(r, g, b);
-            }
-            match n {
-                1 => DeviceColor::from_gray(comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0)),
-                3 if comps.len() >= 3 => DeviceColor::from_rgb(
-                    comps[0].clamp(0.0, 1.0),
-                    comps[1].clamp(0.0, 1.0),
-                    comps[2].clamp(0.0, 1.0),
-                ),
-                4 if comps.len() >= 4 => DeviceColor::from_cmyk_icc_with_intent(
-                    comps[0].clamp(0.0, 1.0),
-                    comps[1].clamp(0.0, 1.0),
-                    comps[2].clamp(0.0, 1.0),
-                    comps[3].clamp(0.0, 1.0),
-                    intent,
-                    &mut ctx.icc_cache,
-                ),
-                _ => DeviceColor::from_gray(0.0),
-            }
-        }
-        _ => {
-            // Separation/DeviceN/Indexed: use component count heuristic
-            if comps.len() >= 4 {
-                DeviceColor::from_cmyk_icc_with_intent(
-                    comps[0].clamp(0.0, 1.0),
-                    comps[1].clamp(0.0, 1.0),
-                    comps[2].clamp(0.0, 1.0),
-                    comps[3].clamp(0.0, 1.0),
-                    intent,
-                    &mut ctx.icc_cache,
-                )
-            } else if comps.len() >= 3 {
-                DeviceColor::from_rgb(
-                    comps[0].clamp(0.0, 1.0),
-                    comps[1].clamp(0.0, 1.0),
-                    comps[2].clamp(0.0, 1.0),
-                )
-            } else {
-                DeviceColor::from_gray(comps.first().copied().unwrap_or(0.0).clamp(0.0, 1.0))
-            }
-        }
-    }
 }
 
 // ---- Dict helpers ----

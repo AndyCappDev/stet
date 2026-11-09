@@ -137,6 +137,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Mesh shadings (Types 4 to 7) with a `Function` are drawn.** Each
+  vertex of such a shading carries a parametric value t, and the function
+  gives its colour. stet read t as colour components and drew nothing
+  where Ghostscript draws the gradient. The shading now gets a colour
+  table over t, as the PDF reader gives one, so a function with several
+  stops is drawn through all of them, not only at the vertices, and PDF
+  output keeps the function.
+- **A shading's `Function` may be an array of functions**, one
+  per colour component, as PLRM 3e §4.9.3 allows. stet ran the array as
+  a procedure and stopped with `stackunderflow`. This applies to every
+  shading type.
 - **Mesh shadings (Types 4 to 7) read from a string or file give each
   vertex the colour its colour space gives it.** stet took the colour
   from the number of components alone: one component became a gray, so a
