@@ -6,7 +6,7 @@
 //!
 //! ImageMagick writes an image as `{ DirectClassPacket } false 3 colorimage`,
 //! a procedure called once per pixel that runs a `for` each time: 31 million
-//! loops for an A4 page at 400 dpi. Every loop state used to be kept until the
+//! loops for an A3 page at 400 dpi. Every loop state used to be kept until the
 //! job ended (some 300 bytes each), so such a page ran out of memory.
 
 use stet_core::context::Context;

@@ -137,6 +137,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A loop run inside a procedure called many times no longer exhausts
+  memory.** The state of every `for`, `repeat`, `loop`, `forall` and
+  `pathforall` was kept until the job ended. ImageMagick writes a colour
+  image as `{ DirectClassPacket } false 3 colorimage`, a procedure called
+  once per pixel that runs a `for` each time, so an A3 page at 400 dpi
+  made 31 million loops, about 10 GB of state, and ran out of memory. The
+  states of loops that have ended are now dropped as the store grows: a
+  1000 × 1000 image of that shape peaks at 25 MB rather than 324 MB, and
+  the A3 page at 457 MB. Contributed by @nielsbosma (#43).
 - **A `CCITTFaxDecode` filter's data ends with the image.** Like
   `DCTDecode`, the filter read its whole source before decoding, so a fax
   image read straight from `currentfile` swallowed the rest of the
