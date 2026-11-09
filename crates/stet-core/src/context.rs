@@ -1553,10 +1553,41 @@ impl Context {
     }
 
     /// Allocate a new loop state, returning its EntityId.
+    ///
+    /// The states of loops that have ended are dropped from time to time (each
+    /// time the store reaches a power of two from 1,024 up), so a program that
+    /// runs a loop per call of a procedure called millions of times, such as
+    /// ImageMagick's image data procedure with its `for` per pixel, does not
+    /// keep every one of them.
     pub fn alloc_loop(&mut self, state: LoopState) -> EntityId {
+        let n = self.loops.len();
+        if n >= 1024 && n.is_power_of_two() {
+            self.drop_ended_loops();
+        }
         let id = EntityId(self.loops.len() as u32);
         self.loops.push(state);
         id
+    }
+
+    /// Drop the states of loops that have ended.
+    ///
+    /// A loop's state is reached only through its mark on the execution stack
+    /// (`execstack` shows a mark as a string). A mark is pushed when its loop
+    /// is allocated, and pushed back only right after it was popped, so the
+    /// marks on the stack have rising ids from the bottom up and every state
+    /// above the topmost mark's belongs to a loop that has ended.
+    fn drop_ended_loops(&mut self) {
+        let live = self
+            .e_stack
+            .as_slice()
+            .iter()
+            .rev()
+            .find_map(|o| match o.value {
+                PsValue::Loop(e) => Some(e.0 as usize + 1),
+                _ => None,
+            })
+            .unwrap_or(0);
+        self.loops.truncate(live);
     }
 
     /// Get a loop state by EntityId.
