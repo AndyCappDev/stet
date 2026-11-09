@@ -1684,7 +1684,60 @@ impl FileStore {
         }
     }
 
-    /// Read all remaining bytes from a source (used by DCTDecode at creation).
+    /// One JPEG from `source`, through its end-of-image marker (`FF D9`),
+    /// leaving whatever follows unread: a `DCTDecode` filter's data ends
+    /// there, as Ghostscript's does. Marker segments are skipped by their
+    /// length, so an `FF D9` inside one (in an embedded thumbnail, say) does
+    /// not end it, and in the entropy-coded data a stuffed `FF 00` and the
+    /// restart markers are data. Without an end-of-image marker, everything
+    /// up to the end of the source.
+    ///
+    /// Reading the whole source instead made a JPEG read straight from
+    /// `currentfile` swallow the rest of the program, and its page with it.
+    pub fn read_jpeg(&mut self, source: EntityId) -> io::Result<Vec<u8>> {
+        let mut data = Vec::new();
+        while let Some(b) = self.read_byte(source)? {
+            data.push(b);
+            if b != 0xFF {
+                continue;
+            }
+            // A marker, after any fill bytes.
+            let mut marker = 0xFF;
+            while marker == 0xFF {
+                let Some(c) = self.read_byte(source)? else {
+                    return Ok(data);
+                };
+                data.push(c);
+                marker = c;
+            }
+            match marker {
+                0xD9 => return Ok(data),
+                // A stuffed FF in entropy-coded data, a restart marker, the
+                // start of the image, or TEM: nothing follows them.
+                0x00 | 0xD0..=0xD8 | 0x01 => {}
+                // A segment, its length counting its own two bytes.
+                _ => {
+                    let mut len = 0usize;
+                    for _ in 0..2 {
+                        let Some(c) = self.read_byte(source)? else {
+                            return Ok(data);
+                        };
+                        data.push(c);
+                        len = (len << 8) | c as usize;
+                    }
+                    for _ in 0..len.saturating_sub(2) {
+                        let Some(c) = self.read_byte(source)? else {
+                            return Ok(data);
+                        };
+                        data.push(c);
+                    }
+                }
+            }
+        }
+        Ok(data)
+    }
+
+    /// Read all remaining bytes from a source.
     pub fn read_all(&mut self, entity: EntityId) -> io::Result<Vec<u8>> {
         let mut data = Vec::new();
         while let Some(b) = self.read_byte(entity)? {
@@ -1743,9 +1796,9 @@ impl FileStore {
             }
             FilterKind::DCTDecode { decoded, .. } => {
                 if !*decoded {
-                    // Lazy decode: read all JPEG data from source, then decode
+                    // Lazy decode: read the JPEG from the source, then decode
                     let source = state.source;
-                    let mut jpeg_data = self.read_all(source)?;
+                    let mut jpeg_data = self.read_jpeg(source)?;
                     // A JPEG stream inside PostScript or PDF routinely arrives
                     // without its end-of-image marker — the writer stops at the
                     // stream's length and leaves the two bytes off. Supplying

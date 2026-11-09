@@ -137,6 +137,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `DCTDecode` filter's data ends at the JPEG's end-of-image
+  marker.** The filter read its whole source before decoding, so a JPEG
+  read straight from `currentfile`, as an EPS can inline one, swallowed
+  the rest of the program, and the page was never output. It now reads
+  the JPEG through its end marker, skipping marker segments by their
+  length, and leaves what follows, as Ghostscript does.
 - **An Indexed space may have up to 4096 entries, and an image in one
   takes its indices through its `Decode`.** `setcolorspace` refused a
   palette past 256 entries with `rangecheck`, though PLRM 3e §4.8.4
