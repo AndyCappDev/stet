@@ -210,8 +210,7 @@ const DEFAULT_PAGE_H: f64 = 792.0;
 
 /// How [`run_viewer_with_options`] sets up the viewer.
 ///
-/// Build it with `..Default::default()` for the fields you don't set; the
-/// defaults match [`run_viewer`]'s behaviour.
+/// Build it with `..Default::default()` for the fields you don't set.
 #[derive(Clone, Debug, Default)]
 pub struct ViewerOptions {
     /// Render at this DPI instead of one derived from the monitor size.
@@ -232,46 +231,6 @@ pub struct ViewerOptions {
     /// lists were built with, or images render differently from the fills
     /// beside them.
     pub bpc_mode: BpcMode,
-}
-
-/// Run the viewer window on the current thread (must be main thread).
-///
-/// `dpi_override`: if `Some`, use this DPI instead of auto-calculating from
-/// monitor size. The chosen DPI is sent to the interpreter via the channel.
-///
-/// `page_size`: optional (width, height) in PostScript points for the first
-/// page. Used to compute the initial window aspect ratio so the compositor
-/// (especially Wayland, which ignores client-side repositioning) places the
-/// window correctly from the start.
-///
-/// Images and overprint are converted with the default black-point
-/// compensation, so display lists built with any other mode render
-/// inconsistently; [`run_viewer_with_options`] takes the mode.
-///
-/// This function blocks until the viewer window is closed.
-#[deprecated(
-    since = "0.8.4",
-    note = "use `run_viewer_with_options`, which also takes the black-point compensation mode"
-)]
-pub fn run_viewer(
-    viewer_end: ViewerEnd,
-    dpi_override: Option<f64>,
-    filename: Option<&str>,
-    page_size: Option<(f64, f64)>,
-    system_cmyk_bytes: Option<std::sync::Arc<Vec<u8>>>,
-    no_aa: bool,
-) {
-    run_viewer_with_options(
-        viewer_end,
-        filename,
-        ViewerOptions {
-            dpi_override,
-            page_size,
-            system_cmyk_bytes,
-            no_aa,
-            bpc_mode: BpcMode::default(),
-        },
-    )
 }
 
 /// Run the viewer window on the current thread (must be main thread),

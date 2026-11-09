@@ -7,7 +7,6 @@
 //! Converts PDF page content into a `DisplayList` for rendering through
 //! the existing SkiaDevice pipeline.
 
-pub mod cid_unicode;
 pub mod cmap;
 pub mod color_space;
 pub mod font;

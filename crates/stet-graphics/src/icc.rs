@@ -45,25 +45,6 @@ pub fn intent_from_byte(b: u8) -> IccRenderingIntent {
     }
 }
 
-/// Map a byte in the PDF reader's former private numbering (0=Perceptual,
-/// 1=RelCol, 2=Saturation, 3=AbsCol) to an [`IccRenderingIntent`].
-///
-/// Display lists no longer carry that numbering; every producer now uses
-/// [`crate::rendering_intent`]. Decode with [`intent_from_byte`] instead.
-#[deprecated(
-    since = "0.8.2",
-    note = "display lists use the `stet_graphics::rendering_intent` encoding; decode with `intent_from_byte`"
-)]
-#[inline]
-pub fn intent_from_pdf_byte(b: u8) -> IccRenderingIntent {
-    match b {
-        1 => IccRenderingIntent::RelativeColorimetric,
-        2 => IccRenderingIntent::Saturation,
-        3 => IccRenderingIntent::AbsoluteColorimetric,
-        _ => IccRenderingIntent::Perceptual,
-    }
-}
-
 /// SHA-256 hash used as profile key.
 pub type ProfileHash = [u8; 32];
 

@@ -141,6 +141,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   turns on: a reader built without `parallel` no longer starts threads for
   JPEGs, and `stet-core` no longer depends on `jpeg-decoder` itself.
 
+### Removed
+
+- **Three items deprecated since 0.8.2 and 0.8.4:**
+  - `stet_viewer::run_viewer`; use `run_viewer_with_options`, which also
+    takes the black-point compensation mode.
+  - `stet_pdf_reader::content::cid_unicode` and its `cid_to_unicode` and
+    `unicode_to_cid`, which forwarded to `stet_fonts::cid_unicode`.
+  - `stet_graphics::icc::intent_from_pdf_byte`; display lists carry the
+    `stet_graphics::rendering_intent` encoding, read with `intent_from_byte`.
+
 ### Fixed
 
 - **`42 /FontType resourcestatus` reports that stet draws TrueType fonts.**
