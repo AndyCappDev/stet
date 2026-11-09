@@ -491,16 +491,19 @@ fn install_initial_tints(ctx: &mut Context) {
 fn cache_tint_table(ctx: &mut Context) {
     match &ctx.gstate.color_space {
         ColorSpace::Separation {
+            alt_space,
             tint_transform,
             num_alt_components,
             ..
         } => {
             let tt = *tint_transform;
             let nac = *num_alt_components;
+            let alt = alt_space.clone();
             ctx.gstate.cached_tint_table =
-                crate::image_ops::sample_tint_transform(ctx, tt, 1, nac).map(Arc::new);
+                crate::image_ops::sample_device_tint_transform(ctx, tt, 1, &alt, nac).map(Arc::new);
         }
         ColorSpace::DeviceN {
+            alt_space,
             num_colorants,
             tint_transform,
             num_alt_components,
@@ -509,8 +512,10 @@ fn cache_tint_table(ctx: &mut Context) {
             let tt = *tint_transform;
             let nc = *num_colorants;
             let nac = *num_alt_components;
+            let alt = alt_space.clone();
             ctx.gstate.cached_tint_table =
-                crate::image_ops::sample_tint_transform(ctx, tt, nc, nac).map(Arc::new);
+                crate::image_ops::sample_device_tint_transform(ctx, tt, nc, &alt, nac)
+                    .map(Arc::new);
         }
         _ => {
             ctx.gstate.cached_tint_table = None;
@@ -751,6 +756,7 @@ fn set_color_in_space(ctx: &mut Context) -> Result<(), PsError> {
         }
         ColorSpace::Separation {
             name,
+            alt_space,
             tint_transform,
             num_alt_components,
             ..
@@ -777,10 +783,11 @@ fn set_color_in_space(ctx: &mut Context) -> Result<(), PsError> {
             };
             ctx.o_stack.push(PsObject::real(tint_clamped))?;
             ctx.exec_sync(tint_transform)?;
-            set_color_from_tint_result(ctx, num_alt_components, colorants)
+            set_color_from_tint_result(ctx, num_alt_components, &alt_space, colorants)
         }
         ColorSpace::DeviceN {
             names,
+            alt_space,
             num_colorants,
             tint_transform,
             num_alt_components,
@@ -807,7 +814,7 @@ fn set_color_in_space(ctx: &mut Context) -> Result<(), PsError> {
                 ctx.o_stack.push(PsObject::real(t))?;
             }
             ctx.exec_sync(tint_transform)?;
-            set_color_from_tint_result(ctx, num_alt_components, colorants)
+            set_color_from_tint_result(ctx, num_alt_components, &alt_space, colorants)
         }
         // `comp1 … compn pattern setcolor` — same as `setpattern` except that
         // the color space is already Pattern and stays as it is.
@@ -836,7 +843,8 @@ struct ProcessColorants {
 /// DeviceCMYK, through its profile for ICCBased, and by the CIE
 /// equations for a CIE-based space.
 ///
-/// Shadings use it for their colours.
+/// Shadings use it for their colours, and a Separation or DeviceN colour
+/// for its alternate space's components after the tint transform.
 pub(crate) fn components_to_device_color(
     comps: &[f64],
     color_space: &ColorSpace,
@@ -923,34 +931,30 @@ pub(crate) fn components_to_device_color(
 }
 
 /// Pop tint transform results from the stack and set the device color.
+///
+/// The components are the alternate space's, and are converted as that
+/// space converts them. Taking them by their number alone, as one gray,
+/// three RGB or four CMYK values clamped to 0-1, turned a CIE-based
+/// alternate's L* a* b* into RGB: a green spot colour whose alternate is
+/// Lab came out magenta.
 fn set_color_from_tint_result(
     ctx: &mut Context,
     n: u32,
+    alt_space: &ColorSpace,
     colorants: ProcessColorants,
 ) -> Result<(), PsError> {
     let n = n as usize;
     let mut components = vec![0.0f64; n];
     for i in (0..n).rev() {
         if !ctx.o_stack.is_empty() {
-            components[i] = ctx.o_stack.peek(0)?.as_f64().unwrap_or(0.0).clamp(0.0, 1.0);
+            components[i] = ctx.o_stack.peek(0)?.as_f64().unwrap_or(0.0);
             ctx.o_stack.pop()?;
         }
     }
 
     let intent = gstate_intent(ctx);
-    ctx.gstate.color = match n {
-        1 => DeviceColor::from_gray(components[0]),
-        3 => DeviceColor::from_rgb(components[0], components[1], components[2]),
-        4 => DeviceColor::from_cmyk_icc_with_intent(
-            components[0],
-            components[1],
-            components[2],
-            components[3],
-            intent,
-            &mut ctx.icc_cache,
-        ),
-        _ => DeviceColor::from_gray(0.0),
-    };
+    ctx.gstate.color =
+        components_to_device_color(&components, alt_space, intent, &mut ctx.icc_cache);
     if ctx.gstate.color.native_cmyk.is_none() {
         ctx.gstate.color.native_cmyk = colorants.native_fallback;
     }

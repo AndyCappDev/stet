@@ -132,13 +132,16 @@ pub(crate) fn capture_bg_ucr_state(ctx: &Context) -> BgUcrState {
     }
 }
 
-/// Map a ColorSpace alt_space to SimpleColorSpace.
+/// The device space a spot colour's tint table is in; see
+/// [`crate::image_ops::tint_table_space`]. An ICCBased or CIE-based
+/// alternate was taken for DeviceCMYK, so PDF output named a CMYK
+/// alternate for a table of RGB or Lab values.
 fn alt_space_to_simple(cs: &ColorSpace) -> SimpleColorSpace {
-    match cs {
-        ColorSpace::DeviceGray => SimpleColorSpace::DeviceGray,
-        ColorSpace::DeviceRGB => SimpleColorSpace::DeviceRGB,
-        ColorSpace::DeviceCMYK => SimpleColorSpace::DeviceCMYK,
-        _ => SimpleColorSpace::DeviceCMYK, // fallback
+    use crate::image_ops::TintTableSpace;
+    match crate::image_ops::tint_table_space(cs) {
+        TintTableSpace::Gray => SimpleColorSpace::DeviceGray,
+        TintTableSpace::Rgb | TintTableSpace::ConvertedRgb => SimpleColorSpace::DeviceRGB,
+        TintTableSpace::Cmyk => SimpleColorSpace::DeviceCMYK,
     }
 }
 

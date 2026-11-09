@@ -137,6 +137,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A spot colour whose alternate space is CIE-based is drawn in that
+  space.** The tint transform's results were taken by their number
+  alone, as one gray, three RGB or four CMYK values clamped to 0-1.
+  pdftops writes an InDesign spot colour as a Separation over a
+  CIEBasedABC space set up as Lab, so a green (L* 52, a* -67, b* 34)
+  became RGB (1, 0, 1): every green spot colour on such a page came out
+  magenta. Fills, images and PDF output now convert through the
+  alternate space, and a fill in a Separation or DeviceN colour over an
+  ICCBased space goes through its profile.
 - **Mesh shadings (Types 4 to 7) with a `Function` are drawn.** Each
   vertex of such a shading carries a parametric value t, and the function
   gives its colour. stet read t as colour components and drew nothing

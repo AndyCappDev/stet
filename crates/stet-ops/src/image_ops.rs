@@ -2045,7 +2045,13 @@ fn capture_image_color_space(ctx: &mut Context) -> Option<ImageColorSpace> {
             num_alt_components,
         } => {
             let alt_ics = alt_space_to_image_cs(&alt_space);
-            let table = sample_tint_transform(ctx, tint_transform, 1, num_alt_components)?;
+            let table = sample_device_tint_transform(
+                ctx,
+                tint_transform,
+                1,
+                &alt_space,
+                num_alt_components,
+            )?;
             Some(ImageColorSpace::Separation {
                 name,
                 alt_space: Box::new(alt_ics),
@@ -2062,8 +2068,13 @@ fn capture_image_color_space(ctx: &mut Context) -> Option<ImageColorSpace> {
             // More colorants than a table can span: `sample_tint_transform`
             // returns `None` and the caller falls back.
             let alt_ics = alt_space_to_image_cs(&alt_space);
-            let table =
-                sample_tint_transform(ctx, tint_transform, num_colorants, num_alt_components)?;
+            let table = sample_device_tint_transform(
+                ctx,
+                tint_transform,
+                num_colorants,
+                &alt_space,
+                num_alt_components,
+            )?;
             Some(ImageColorSpace::DeviceN {
                 names,
                 alt_space: Box::new(alt_ics),
@@ -2075,14 +2086,82 @@ fn capture_image_color_space(ctx: &mut Context) -> Option<ImageColorSpace> {
     }
 }
 
-/// Map a ColorSpace to the corresponding ImageColorSpace for alt-space usage.
+/// The device space a Separation or DeviceN image's tint table is in; see
+/// [`tint_table_space`].
 fn alt_space_to_image_cs(cs: &ColorSpace) -> ImageColorSpace {
-    match cs {
-        ColorSpace::DeviceGray => ImageColorSpace::DeviceGray,
-        ColorSpace::DeviceRGB => ImageColorSpace::DeviceRGB,
-        ColorSpace::DeviceCMYK => ImageColorSpace::DeviceCMYK,
-        _ => ImageColorSpace::DeviceRGB, // fallback
+    match tint_table_space(cs) {
+        TintTableSpace::Gray => ImageColorSpace::DeviceGray,
+        TintTableSpace::Rgb | TintTableSpace::ConvertedRgb => ImageColorSpace::DeviceRGB,
+        TintTableSpace::Cmyk => ImageColorSpace::DeviceCMYK,
     }
+}
+
+/// The device space a tint table is read in, by its alternate space.
+pub(crate) enum TintTableSpace {
+    Gray,
+    Rgb,
+    Cmyk,
+    /// A CIE-based alternate: the table is converted to RGB when sampled.
+    ConvertedRgb,
+}
+
+/// The renderer, the overprint simulation and the PDF writer read a tint
+/// table as components of a device space. A device alternate is one; an
+/// ICCBased one is read as the device space of its size, as the PDF reader
+/// reads it, which keeps a CMYK alternate's values; a CIE-based one has
+/// its table converted to RGB (see [`sample_device_tint_transform`]).
+pub(crate) fn tint_table_space(alt: &ColorSpace) -> TintTableSpace {
+    match alt {
+        ColorSpace::DeviceGray => TintTableSpace::Gray,
+        ColorSpace::DeviceRGB => TintTableSpace::Rgb,
+        ColorSpace::DeviceCMYK => TintTableSpace::Cmyk,
+        ColorSpace::ICCBased { n: 1, .. } => TintTableSpace::Gray,
+        ColorSpace::ICCBased { n: 4, .. } => TintTableSpace::Cmyk,
+        ColorSpace::ICCBased { .. } => TintTableSpace::Rgb,
+        _ => TintTableSpace::ConvertedRgb,
+    }
+}
+
+/// [`sample_tint_transform`], with the table in a device space
+/// ([`tint_table_space`]).
+///
+/// When the alternate is CIE-based, each sample is converted to RGB
+/// through that space, as `setcolor` converts one colour, and the table
+/// has three outputs. Left as they were, a Lab alternate's L* a* b* were
+/// read as RGB, and a green spot colour came out magenta. The PDF reader
+/// converts such a table the same way.
+pub(crate) fn sample_device_tint_transform(
+    ctx: &mut Context,
+    tint_transform: PsObject,
+    num_inputs: u32,
+    alt_space: &ColorSpace,
+    num_alt_components: u32,
+) -> Option<stet_graphics::device::TintLookupTable> {
+    let table = sample_tint_transform(ctx, tint_transform, num_inputs, num_alt_components)?;
+    if !matches!(tint_table_space(alt_space), TintTableSpace::ConvertedRgb) {
+        return Some(table);
+    }
+    let intent = stet_graphics::icc::intent_from_byte(ctx.gstate.rendering_intent);
+    let n = num_alt_components.max(1) as usize;
+    let mut data = Vec::with_capacity(table.data.len() / n * 3);
+    let mut comps = vec![0.0f64; n];
+    for sample in table.data.chunks(n) {
+        for (c, &v) in comps.iter_mut().zip(sample) {
+            *c = v as f64;
+        }
+        let color = crate::color_ops::components_to_device_color(
+            &comps,
+            alt_space,
+            intent,
+            &mut ctx.icc_cache,
+        );
+        data.extend([color.r as f32, color.g as f32, color.b as f32]);
+    }
+    Some(stet_graphics::device::TintLookupTable {
+        num_outputs: 3,
+        data,
+        ..table
+    })
 }
 
 /// Sample a tint transform into a lookup table by evaluating it at grid points.
