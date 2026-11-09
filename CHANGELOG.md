@@ -137,6 +137,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An unknown resource category is an `undefined` error.** `findresource`,
+  `defineresource` and `undefineresource` raised `undefinedresource` for a
+  category that does not exist, and `resourcestatus` and `resourceforall`
+  raised nothing, answering `false` and listing nothing. The PLRM (§3.9.2)
+  and Ghostscript give `undefined` for all five, keeping `undefinedresource`
+  for a known category without the instance asked for, and the operands now
+  stay on the stack as they do. `Category` itself now behaves as a category:
+  `/Category /Category findresource` finds it, `resourcestatus` and
+  `resourceforall` report the categories, and `undefineresource` removes
+  one. `resourceforall` lists the instances of an implicit category such as
+  `Filter` or `FontType`, which it listed none of before. The PLRM's
+  standard categories that were missing are defined: `FunctionType` (0, 2,
+  3), `ShadingType` (1–7), and `IODevice`, `TrappingType`, `InkParams` and
+  `TrapParams`, which have no instances, so a program probing them gets
+  `false` rather than an error.
 - **A loop run inside a procedure called many times no longer exhausts
   memory.** The state of every `for`, `repeat`, `loop`, `forall` and
   `pathforall` was kept until the job ended. ImageMagick writes a colour

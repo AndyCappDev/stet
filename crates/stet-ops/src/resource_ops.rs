@@ -8,7 +8,27 @@
 use stet_core::context::Context;
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
-use stet_core::object::{PsObject, PsValue};
+use stet_core::object::{EntityId, NameId, PsObject, PsValue};
+
+/// The implementation dictionary of `category`, or `undefined` if there is no
+/// such category.
+///
+/// Every resource operator reports an unknown category this way, after trying
+/// `category /Category findresource` (PLRM 3e §3.9.2); `undefinedresource` is
+/// for a known category without the instance asked for. stet keeps no
+/// category definitions in resource files, so that lookup is the registry.
+fn category_impl(ctx: &Context, cat_name: NameId) -> Result<EntityId, PsError> {
+    match ctx
+        .dicts
+        .get(ctx.category_registry, &DictKey::Name(cat_name))
+    {
+        Some(PsObject {
+            value: PsValue::Dict(e),
+            ..
+        }) => Ok(e),
+        _ => Err(PsError::Undefined),
+    }
+}
 
 /// `findresource`: key category → instance
 ///
@@ -27,7 +47,6 @@ pub fn op_findresource(ctx: &mut Context) -> Result<(), PsError> {
         _ => return Err(PsError::TypeCheck),
     };
 
-    let cat_key = DictKey::Name(cat_name);
     let category_name_id = ctx.name_cache.n_category;
 
     // Special case: /Category findresource → look up directly in category_registry
@@ -44,15 +63,7 @@ pub fn op_findresource(ctx: &mut Context) -> Result<(), PsError> {
         ctx.o_stack.push(val)?;
         Ok(())
     } else {
-        // Get the category implementation dict
-        let impl_dict_obj = ctx.dicts.get(ctx.category_registry, &cat_key);
-        let impl_entity = match impl_dict_obj {
-            Some(obj) => match obj.value {
-                PsValue::Dict(e) => e,
-                _ => return Err(PsError::UndefinedResource),
-            },
-            None => return Err(PsError::UndefinedResource),
-        };
+        let impl_entity = category_impl(ctx, cat_name)?;
 
         // Look up FindResource in the impl dict
         let find_key = DictKey::Name(ctx.name_cache.n_find_resource);
@@ -79,10 +90,7 @@ pub fn op_findresource(ctx: &mut Context) -> Result<(), PsError> {
 }
 
 /// Direct resource lookup (no PS dispatch) — searches local then global resource dicts.
-fn findresource_direct(
-    ctx: &mut Context,
-    cat_name: stet_core::object::NameId,
-) -> Result<(), PsError> {
+fn findresource_direct(ctx: &mut Context, cat_name: NameId) -> Result<(), PsError> {
     let key_obj = ctx.o_stack.peek(1)?;
     let key = ctx.make_dict_key(&key_obj)?;
     let cat_key = DictKey::Name(cat_name);
@@ -131,6 +139,14 @@ pub fn op_defineresource(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::Name(id) => id,
         _ => return Err(PsError::TypeCheck),
     };
+    let category_name_id = ctx.name_cache.n_category;
+    // Before the key below is replaced on the stack, so a failure leaves the
+    // operands as they were.
+    let impl_entity = if cat_name == category_name_id {
+        None
+    } else {
+        Some(category_impl(ctx, cat_name)?)
+    };
 
     // Handle dict-as-key (common in dvips Type 3 bitmap fonts: "fontdict dup definefont").
     // Extract /FontName or /FID from the dict, or generate a unique name.
@@ -158,10 +174,8 @@ pub fn op_defineresource(ctx: &mut Context) -> Result<(), PsError> {
     // Re-read key after possible replacement
     let key_obj = ctx.o_stack.peek(2)?;
 
-    let category_name_id = ctx.name_cache.n_category;
-
     // Special case: /Category defineresource → register in category_registry
-    if cat_name == category_name_id {
+    let Some(impl_entity) = impl_entity else {
         let instance = ctx.o_stack.peek(1)?;
         let key = ctx.make_dict_key(&key_obj)?;
         ctx.o_stack.pop()?; // category
@@ -179,17 +193,6 @@ pub fn op_defineresource(ctx: &mut Context) -> Result<(), PsError> {
         ctx.dicts.put(ctx.category_registry, key, instance);
         ctx.o_stack.push(instance)?;
         return Ok(());
-    }
-
-    // Get category impl dict
-    let cat_key = DictKey::Name(cat_name);
-    let impl_dict_obj = ctx.dicts.get(ctx.category_registry, &cat_key);
-    let impl_entity = match impl_dict_obj {
-        Some(obj) => match obj.value {
-            PsValue::Dict(e) => e,
-            _ => return Err(PsError::UndefinedResource),
-        },
-        None => return Err(PsError::UndefinedResource),
     };
 
     // Look up DefineResource in impl dict
@@ -214,10 +217,7 @@ pub fn op_defineresource(ctx: &mut Context) -> Result<(), PsError> {
 }
 
 /// Direct resource registration (no PS dispatch).
-fn defineresource_direct(
-    ctx: &mut Context,
-    cat_name: stet_core::object::NameId,
-) -> Result<(), PsError> {
+fn defineresource_direct(ctx: &mut Context, cat_name: NameId) -> Result<(), PsError> {
     let instance = ctx.o_stack.peek(1)?;
     let key_obj = ctx.o_stack.peek(2)?;
     let key = ctx.make_dict_key(&key_obj)?;
@@ -282,15 +282,15 @@ pub fn op_undefineresource(ctx: &mut Context) -> Result<(), PsError> {
         _ => return Err(PsError::TypeCheck),
     };
 
-    let cat_key = DictKey::Name(cat_name);
-    let impl_dict_obj = ctx.dicts.get(ctx.category_registry, &cat_key);
-    let impl_entity = match impl_dict_obj {
-        Some(obj) => match obj.value {
-            PsValue::Dict(e) => e,
-            _ => return Err(PsError::UndefinedResource),
-        },
-        None => return Err(PsError::UndefinedResource),
-    };
+    // `/Name /Category undefineresource` removes a category.
+    if cat_name == ctx.name_cache.n_category {
+        let key = ctx.make_dict_key(&key_obj)?;
+        ctx.o_stack.pop()?;
+        ctx.o_stack.pop()?;
+        ctx.dicts.remove(ctx.category_registry, &key);
+        return Ok(());
+    }
+    let impl_entity = category_impl(ctx, cat_name)?;
 
     // Look up UndefineResource in impl dict
     let undef_key = DictKey::Name(ctx.name_cache.n_undef_resource);
@@ -344,16 +344,28 @@ pub fn op_resourcestatus(ctx: &mut Context) -> Result<(), PsError> {
         _ => return Err(PsError::TypeCheck),
     };
 
-    let cat_key = DictKey::Name(cat_name);
+    // The categories themselves: built in, size unknown, as Ghostscript
+    // reports them.
+    if cat_name == ctx.name_cache.n_category {
+        let key = ctx.make_dict_key(&key_obj)?;
+        ctx.o_stack.pop()?;
+        ctx.o_stack.pop()?;
+        if ctx.dicts.known(ctx.category_registry, &key) {
+            ctx.o_stack.push(PsObject::int(0))?;
+            ctx.o_stack.push(PsObject::int(-1))?;
+            ctx.o_stack.push(PsObject::bool(true))?;
+        } else {
+            ctx.o_stack.push(PsObject::bool(false))?;
+        }
+        return Ok(());
+    }
+    let impl_entity = category_impl(ctx, cat_name)?;
 
     // Check if the category has a ResourceStatus procedure
-    if let Some(obj) = ctx.dicts.get(ctx.category_registry, &cat_key)
-        && let PsValue::Dict(impl_entity) = obj.value
-        && let Some(proc) = ctx.dicts.get(
-            impl_entity,
-            &DictKey::Name(ctx.name_cache.n_resource_status),
-        )
-        && proc.is_array_type()
+    if let Some(proc) = ctx.dicts.get(
+        impl_entity,
+        &DictKey::Name(ctx.name_cache.n_resource_status),
+    ) && proc.is_array_type()
         && proc.flags.is_executable()
     {
         ctx.o_stack.pop()?; // category
@@ -381,7 +393,7 @@ pub fn op_resourcestatus(ctx: &mut Context) -> Result<(), PsError> {
 }
 
 /// Check if a resource exists in local or global dicts.
-fn resource_exists(ctx: &Context, cat_name: stet_core::object::NameId, key: &DictKey) -> bool {
+fn resource_exists(ctx: &Context, cat_name: NameId, key: &DictKey) -> bool {
     let cat_key = DictKey::Name(cat_name);
 
     if let Some(local_cat_obj) = ctx.dicts.get(ctx.local_resources, &cat_key)
@@ -399,7 +411,24 @@ fn resource_exists(ctx: &Context, cat_name: stet_core::object::NameId, key: &Dic
     false
 }
 
-/// `resourceforall`: template proc scratch category → —
+/// Add the keys of `dict` to `names`, as the strings `resourceforall` hands its
+/// procedure, skipping those already there.
+fn add_instance_names(ctx: &Context, dict: EntityId, names: &mut Vec<Vec<u8>>) {
+    for key in ctx.dicts.keys(dict) {
+        let bytes = match key {
+            DictKey::Name(nid) => ctx.names.get_bytes(*nid).to_vec(),
+            DictKey::String(b) => b.clone(),
+            // FontType, FunctionType and the other integer-keyed implicit
+            // categories, as `cvs` writes them.
+            DictKey::Int(i) => i.to_string().into_bytes(),
+            _ => continue,
+        };
+        if !names.contains(&bytes) {
+            names.push(bytes);
+        }
+    }
+}
+
 /// Match a resource name against a PostScript template pattern.
 /// Supports `*` (match any sequence) and `?` (match single char).
 fn template_matches(template: &[u8], name: &[u8]) -> bool {
@@ -435,8 +464,6 @@ fn template_matches(template: &[u8], name: &[u8]) -> bool {
 /// Native implementation that enumerates resource names without pushing
 /// category impl dicts onto d_stack (avoids dict stack pollution in callbacks).
 pub fn op_resourceforall(ctx: &mut Context) -> Result<(), PsError> {
-    use stet_core::object::NameId;
-
     if ctx.o_stack.len() < 4 {
         return Err(PsError::StackUnderflow);
     }
@@ -461,6 +488,11 @@ pub fn op_resourceforall(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::String { entity, start, len } => ctx.strings.get(entity, start, len).to_vec(),
         _ => return Err(PsError::TypeCheck),
     };
+    let impl_entity = if cat_name == ctx.name_cache.n_category {
+        None
+    } else {
+        Some(category_impl(ctx, cat_name)?)
+    };
 
     // Pop all 4 operands
     let _cat = ctx.o_stack.pop()?;
@@ -470,70 +502,61 @@ pub fn op_resourceforall(ctx: &mut Context) -> Result<(), PsError> {
 
     let cat_key = DictKey::Name(cat_name);
 
-    // Collect matching resource names from global (and local if in local mode) dicts.
-    // We collect NameIds first to avoid borrowing issues during iteration.
-    let mut name_ids: Vec<NameId> = Vec::new();
+    // The names of the instances, as resourceforall hands them to `proc`.
+    let mut names: Vec<Vec<u8>> = Vec::new();
 
-    // Global resources
-    if let Some(dict_obj) = ctx.dicts.get(ctx.global_resources, &cat_key)
-        && let PsValue::Dict(res_dict) = dict_obj.value
-    {
-        for key in ctx.dicts.keys(res_dict) {
-            if let DictKey::Name(nid) = key {
-                name_ids.push(*nid);
-            }
-        }
-    }
-
-    // Local resources (only when in local VM mode)
-    if !ctx.vm_alloc_mode
-        && let Some(dict_obj) = ctx.dicts.get(ctx.local_resources, &cat_key)
-        && let PsValue::Dict(res_dict) = dict_obj.value
-    {
-        for key in ctx.dicts.keys(res_dict) {
-            if let DictKey::Name(nid) = key
-                && !name_ids.contains(nid)
+    match impl_entity {
+        // The categories themselves.
+        None => add_instance_names(ctx, ctx.category_registry, &mut names),
+        Some(impl_entity) => {
+            // Global resources
+            if let Some(dict_obj) = ctx.dicts.get(ctx.global_resources, &cat_key)
+                && let PsValue::Dict(res_dict) = dict_obj.value
             {
-                name_ids.push(*nid);
+                add_instance_names(ctx, res_dict, &mut names);
             }
-        }
-    }
 
-    // Also check FontDirectory for Font category
-    let font_name_id = ctx.names.find(b"Font");
-    if font_name_id == Some(cat_name)
-        && let Some(font_dir_obj) = ctx.dicts.get(
-            ctx.systemdict,
-            &DictKey::Name(ctx.names.intern(b"FontDirectory")),
-        )
-        && let PsValue::Dict(font_dir) = font_dir_obj.value
-    {
-        for key in ctx.dicts.keys(font_dir) {
-            if let DictKey::Name(nid) = key
-                && !name_ids.contains(nid)
+            // Local resources (only when in local VM mode)
+            if !ctx.vm_alloc_mode
+                && let Some(dict_obj) = ctx.dicts.get(ctx.local_resources, &cat_key)
+                && let PsValue::Dict(res_dict) = dict_obj.value
             {
-                name_ids.push(*nid);
+                add_instance_names(ctx, res_dict, &mut names);
+            }
+
+            // An implicit category's instances are the capabilities listed
+            // in its implementation dict (`createimplicitcategory`).
+            if let Some(inst_obj) = ctx
+                .dicts
+                .get(impl_entity, &DictKey::Name(ctx.names.intern(b"Instances")))
+                && let PsValue::Dict(instances) = inst_obj.value
+            {
+                add_instance_names(ctx, instances, &mut names);
+            }
+
+            // Also check FontDirectory for Font category
+            if ctx.names.find(b"Font") == Some(cat_name)
+                && let Some(font_dir_obj) = ctx.dicts.get(
+                    ctx.systemdict,
+                    &DictKey::Name(ctx.names.intern(b"FontDirectory")),
+                )
+                && let PsValue::Dict(font_dir) = font_dir_obj.value
+            {
+                add_instance_names(ctx, font_dir, &mut names);
             }
         }
     }
 
     // Filter by template pattern and sort
-    let mut matching_names: Vec<(NameId, Vec<u8>)> = name_ids
+    let mut matching_names: Vec<Vec<u8>> = names
         .into_iter()
-        .filter_map(|nid| {
-            let bytes = ctx.names.get_bytes(nid).to_vec();
-            if template_matches(&template_bytes, &bytes) {
-                Some((nid, bytes))
-            } else {
-                None
-            }
-        })
+        .filter(|bytes| template_matches(&template_bytes, bytes))
         .collect();
-    matching_names.sort_by(|a, b| a.1.cmp(&b.1));
+    matching_names.sort();
 
     // Execute callback for each matching name.
     // Write name into scratch string and push substring onto o_stack.
-    for (_nid, name_bytes) in &matching_names {
+    for name_bytes in &matching_names {
         let copy_len = name_bytes.len().min(scratch_len as usize);
         let scratch_slice = ctx
             .strings

@@ -151,6 +151,74 @@ found_nonmatch [0] assert
 
 
 %% =============================================================================
+%% Unknown categories (PLRM 3e §3.9.2)
+%% =============================================================================
+
+% A category that does not exist is `undefined` for every resource operator;
+% `undefinedresource` is for a known category without the instance. The
+% operands stay on the stack.
+
+%% findresource - unknown category %%
+/Foo /NoSuchCat /findresource [/Foo /NoSuchCat /undefined] assert
+
+%% defineresource - unknown category %%
+/Foo 5 /NoSuchCat /defineresource [/Foo 5 /NoSuchCat /undefined] assert
+
+%% defineresource - unknown category leaves a dictionary key as it was %%
+{ 1 dict dup 5 /NoSuchCat {defineresource} stopped 4 1 roll pop pop 3 -1 roll eq } [true true] assert
+
+%% undefineresource - unknown category %%
+/Foo /NoSuchCat /undefineresource [/Foo /NoSuchCat /undefined] assert
+
+%% resourcestatus - unknown category %%
+/Foo /NoSuchCat /resourcestatus [/Foo /NoSuchCat /undefined] assert
+
+%% resourceforall - unknown category %%
+{ (*) {pop} 10 string /NoSuchCat {resourceforall} stopped 5 1 roll pop pop pop pop } [true] assert
+
+%% an unknown instance of Category is undefinedresource %%
+/NoSuchCat /Category /findresource [/NoSuchCat /Category /undefinedresource] assert
+
+
+%% =============================================================================
+%% Category is a category like any other
+%% =============================================================================
+
+%% Category is an instance of itself %%
+{/Category /Category findresource type} [/dicttype] assert
+
+%% resourcestatus reports a category %%
+{/Font /Category resourcestatus 3 1 roll pop pop} [true] assert
+/NoSuchCat /Category /resourcestatus [false] assert
+
+%% resourceforall lists the categories %%
+{ [ (Fo*) {dup length string copy} 20 string /Category resourceforall ] } [[(Font) (FontSet) (FontType) (Form) (FormType)]] assert
+
+%% undefineresource removes a category %%
+{ true setglobal /TestCat43 /Generic /Category findresource dup length dict copy /Category defineresource pop
+  false setglobal /TestCat43 /Category undefineresource
+  /TestCat43 /Category resourcestatus } [false] assert
+
+%% undefineresource of a category that is not there is no error %%
+{ /NoSuchCat /Category undefineresource true } [true] assert
+
+
+%% =============================================================================
+%% Implicit categories
+%% =============================================================================
+
+%% resourceforall lists an implicit category's instances %%
+{ [ (Flate*) {dup length string copy} 20 string /Filter resourceforall ] } [[(FlateDecode) (FlateEncode)]] assert
+{ [ (*) {dup length string copy} 20 string /ShadingType resourceforall ] } [[(1) (2) (3) (4) (5) (6) (7)]] assert
+
+%% the PLRM's standard categories are defined %%
+{ [ /FunctionType /ShadingType /IODevice /TrappingType /InkParams /TrapParams ]
+  true exch { /Category resourcestatus {pop pop true} {false} ifelse and } forall } [true] assert
+{3 /FunctionType resourcestatus 3 1 roll pop pop} [true] assert
+/4 /FunctionType /resourcestatus [false] assert
+
+
+%% =============================================================================
 %% Resource files that register themselves
 %% =============================================================================
 

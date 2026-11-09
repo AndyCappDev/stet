@@ -28,6 +28,13 @@ setglobal
 currentglobal
 true setglobal
 
+% Category itself, so `/Category /Category findresource` finds it and
+% `resourceforall` over Category lists it. The resource operators handle this
+% category themselves; nothing in its dictionary is called.
+/Category /Generic /Category findresource dup length 1 add dict copy
+dup /InstanceType /dicttype put
+/Category defineresource pop
+
 /OutputDevice /dicttype (resources/OutputDevice) (.ps) createresourcecategory
 
 % Standard PostScript Level 2 Categories
@@ -52,6 +59,8 @@ true setglobal
 /Localization /dicttype (resources/Localization) (.ps) createresourcecategory
 /PDL null (resources/PDL) (.ps) createresourcecategory
 /HWOptions null (resources/HWOptions) (.ps) createresourcecategory
+/InkParams /dicttype (resources/InkParams) (.ps) createresourcecategory
+/TrapParams /dicttype (resources/TrapParams) (.ps) createresourcecategory
 
 % Level 2/3 Color Management Categories
 /Halftone /dicttype (resources/Halftone) (.ps) createresourcecategory
@@ -125,6 +134,14 @@ end
 << 1 true >>
 /ColorRenderingType createimplicitcategory
 
+% FunctionType (PLRM 3e Table 3.8; type 4 is PDF only)
+<< 0 true 2 true 3 true >>
+/FunctionType createimplicitcategory
+
+% ShadingType
+<< 1 true 2 true 3 true 4 true 5 true 6 true 7 true >>
+/ShadingType createimplicitcategory
+
 % FMapType
 << 2 true 3 true 4 true 5 true 6 true 7 true 8 true 9 true >>
 /FMapType createimplicitcategory
@@ -157,5 +174,13 @@ end
 % Emulator: no emulators supported
 << >>
 /Emulator createimplicitcategory
+
+% IODevice: no %device% file names are supported
+<< >>
+/IODevice createimplicitcategory
+
+% TrappingType: no trapping
+<< >>
+/TrappingType createimplicitcategory
 
 setglobal
