@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-11-09
+
+### Breaking
+
+- **A tiling pattern's `TilingType` reaches the display list and the
+  PDF output.** `PatternFillParams` and `stet_pdf_reader`'s
+  `TilingPattern` have a new `tiling_type` field, set from a PostScript
+  pattern and from a PDF pattern's `/TilingType`: 1 lets a device round
+  the step to whole pixels, 2 asks for the exact step. PostScript converted to PDF wrote `/TilingType 1` for every
+  pattern and now keeps the pattern's own. Rendering is unchanged, since
+  the rasteriser does not read it; a vector writer can. A PDF value
+  outside 1 to 3 is read as 1. Code that builds either struct itself
+  needs to set the new field. Contributed by @nielsbosma (#38).
+- **`stet_core::file_store::FilterKind::SubFileDecode` has two new
+  public fields, `matched` and `found`**, the filter's progress through
+  its end-of-data marker (see Fixed). Code that builds the variant with a
+  struct literal needs them; `FilterKind::sub_file_decode` builds one
+  without naming them. Contributed by @nielsbosma (#26).
+- **`stet_core::file_store::FileHandle::StringSource`'s `data` is an
+  `Arc<Vec<u8>>`**, so the scanner can hold a source's bytes while it
+  allocates (see Fixed); `FileStore::shared_remaining` hands out that
+  share. Code matching the variant reads the bytes through the `Arc`
+  unchanged. Contributed by @nielsbosma (#20).
+- **`stet_graphics::color::CieDefParams` and `CieDefgParams` have new
+  public fields:** `range_hij` and `decode_def`, and `range_hijk` and
+  `decode_defg` — the `/RangeHIJ(K)` and `/DecodeDEF(G)` stages of their
+  colour spaces (see Fixed). Code that builds either with a struct literal
+  needs the fields. Both are now `#[non_exhaustive]`, as this entry
+  promised when the fields were added, so a later field is not a breaking
+  change: build one from `Default` (identity ranges and decoding, no table)
+  and set its fields.
+- **An axial or radial shading's colour stops are shared, so a page that
+  draws the same gradient many times holds it once.**
+  `AxialShadingParams::color_stops` and `RadialShadingParams::color_stops`
+  are `Arc<[ColorStop]>` rather than `Vec<ColorStop>`, and the PDF reader
+  hands every use of a shading the stops it sampled the first time, where
+  it copied them for each. Page 16 of a Keynote export drawing 4,524
+  gradients peaks at 224 MB rather than 1,068 MB and renders in 0.6 s
+  rather than 1.0 s, unchanged in output. Code that builds either struct
+  makes the field from a `Vec<ColorStop>` with `.into()`; code reading it
+  is unchanged.
+- **A display-list element takes 496 bytes rather than 752.** Every element
+  is the size of the largest kind, and the largest were the rare ones, so
+  `DisplayElement::Text` and `DisplayElement::PatternFill` now hold a
+  `Box` of their params, and `ClipParams::stroke_params` is an
+  `Option<Box<StrokeParams>>`. A page of a million fills holds about
+  250 MB less. Code that builds one of these wraps the params in
+  `Box::new`; code reading them is unchanged.
+- **`stet_core::graphics_state::PatternData` is `#[non_exhaustive]`.** It
+  gained `shading_background` in 0.8.5, a break accepted then with the
+  marker deferred to a breaking release. Build one from the new `Default`
+  (a coloured tiling pattern with an empty tile) and set its fields.
+- **`stet_core::context::Context::rand_seed` is gone**, replaced by
+  `rand_state` when `rand` became Ghostscript's generator (see Changed).
+- **`stet_ops::misc_ops::op_break` is gone**, with the `break` operator
+  it implemented (see Fixed).
+- **Three deprecated items are removed** (see Removed):
+  `stet_viewer::run_viewer`, `stet_pdf_reader::content::cid_unicode`, and
+  `stet_graphics::icc::intent_from_pdf_byte`.
+
 ### Added
 
 - **`deny_host_access()` keeps documents away from the computer stet runs
@@ -62,15 +122,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **A tiling pattern's `TilingType` reaches the display list and the
-  PDF output.** `PatternFillParams` has a new `tiling_type` field, set
-  from a PostScript pattern and from a PDF pattern's `/TilingType`: 1
-  lets a device round the step to whole pixels, 2 asks for the exact
-  step. PostScript converted to PDF wrote `/TilingType 1` for every
-  pattern and now keeps the pattern's own. Rendering is unchanged, since
-  the rasteriser does not read it; a vector writer can. A PDF value
-  outside 1 to 3 is read as 1. Code that builds `PatternFillParams`
-  itself needs to set the new field. Contributed by @nielsbosma (#38).
 - **`render_to_display_list` no longer holds each page twice.** The
   page's display list goes to the caller, not a copy of it, so a page
   with millions of marks needs far less memory: `mandelbrot.ps`, with
@@ -96,16 +147,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the command that raised it, such as `PostScript error: undefined in
   nosuchoperator`. Code that matched the text `stop` needs updating.
   Contributed by @nielsbosma (#22).
-- **`stet_core::file_store::FilterKind::SubFileDecode` has two new
-  public fields, `matched` and `found`**, the filter's progress through
-  its end-of-data marker (see Fixed). Code that builds the variant with a
-  struct literal needs them; `FilterKind::sub_file_decode` builds one
-  without naming them. Contributed by @nielsbosma (#26).
-- **`stet_core::file_store::FileHandle::StringSource`'s `data` is an
-  `Arc<Vec<u8>>`**, so the scanner can hold a source's bytes while it
-  allocates (see Fixed); `FileStore::shared_remaining` hands out that
-  share. Code matching the variant reads the bytes through the `Arc`
-  unchanged. Contributed by @nielsbosma (#20).
 - **`stet-fonts`, `stet-graphics`, `stet-pdf-reader` and `stet` are
   `#![forbid(unsafe_code)]`.** None contained any; the attribute keeps it
   that way.
@@ -120,35 +161,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and Twardoch's archive, which offers the same files byte for byte under
   all three licences. The READMEs, which stated the OFL licensing without
   its basis, now point to it. The fonts are unchanged.
-- **`stet_graphics::color::CieDefParams` and `CieDefgParams` have new
-  public fields:** `range_hij` and `decode_def`, and `range_hijk` and
-  `decode_defg` — the `/RangeHIJ(K)` and `/DecodeDEF(G)` stages of their
-  colour spaces (see Fixed). Code that builds either with a struct literal
-  needs the fields. Both are now `#[non_exhaustive]`, as this entry
-  promised when the fields were added, so a later field is not a breaking
-  change: build one from `Default` (identity ranges and decoding, no table)
-  and set its fields.
-- **An axial or radial shading's colour stops are shared, so a page that
-  draws the same gradient many times holds it once.**
-  `AxialShadingParams::color_stops` and `RadialShadingParams::color_stops`
-  are `Arc<[ColorStop]>` rather than `Vec<ColorStop>`, and the PDF reader
-  hands every use of a shading the stops it sampled the first time, where
-  it copied them for each. Page 16 of a Keynote export drawing 4,524
-  gradients peaks at 224 MB rather than 1,068 MB and renders in 0.6 s
-  rather than 1.0 s, unchanged in output. Code that builds either struct
-  makes the field from a `Vec<ColorStop>` with `.into()`; code reading it
-  is unchanged.
-- **A display-list element takes 496 bytes rather than 752.** Every element
-  is the size of the largest kind, and the largest were the rare ones, so
-  `DisplayElement::Text` and `DisplayElement::PatternFill` now hold a
-  `Box` of their params, and `ClipParams::stroke_params` is an
-  `Option<Box<StrokeParams>>`. A page of a million fills holds about
-  250 MB less. Code that builds one of these wraps the params in
-  `Box::new`; code reading them is unchanged.
-- **`stet_core::graphics_state::PatternData` is `#[non_exhaustive]`.** It
-  gained `shading_background` in 0.8.5, a break accepted then with the
-  marker deferred to a breaking release. Build one from the new `Default`
-  (a coloured tiling pattern with an empty tile) and set its fields.
 - **JPEG decoding moved into `stet-graphics` as `stet_graphics::jpeg`**
   (`decode`, `jpeg_dimensions`, `patch_jpeg_sof_height`), so the
   PostScript `DCTDecode` filter and the PDF reader share it (see Fixed).

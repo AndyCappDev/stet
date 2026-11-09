@@ -6,7 +6,7 @@ install options, and what stet is, see the [README](../README.md).
 
 ```toml
 [dependencies]
-stet = "0.9"
+stet = "0.10"
 ```
 
 > **Upgrading?** Cargo will not auto-bump across these pre-1.0 minors, each
@@ -298,7 +298,7 @@ For the smallest dependency footprint (display lists only):
 
 ```toml
 [dependencies]
-stet = { version = "0.9", default-features = false }
+stet = { version = "0.10", default-features = false }
 ```
 
 ## Configuration
