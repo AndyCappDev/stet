@@ -87,8 +87,14 @@ jobs:
             ext: ""
             cross: false
 
+          # Pinned, like the Linux legs, and moved when GitHub retires the
+          # image: macos-14 was withdrawn before v0.10.0, and its legs were
+          # cancelled with "The configuration 'macos-14-arm64-us-default' is
+          # not supported" before a step ran. The image does not set the
+          # oldest macOS the binaries run on; rustc's default deployment
+          # target does (11.0 on arm64, 10.12 on Intel).
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-26
             features: ""
             archive: tar.gz
             ext: ""
@@ -117,7 +123,7 @@ jobs:
           # exercised --version and a render. Treat the cross-build as proven
           # rather than provisional; a spot check per release is enough.
           - target: x86_64-apple-darwin
-            os: macos-14
+            os: macos-26
             features: ""
             archive: tar.gz
             ext: ""
