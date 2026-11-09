@@ -1045,7 +1045,9 @@ pub struct AxialShadingParams {
     pub y0: f64,
     pub x1: f64,
     pub y1: f64,
-    pub color_stops: Vec<ColorStop>,
+    /// The function sampled at increasing positions. Shared, so a shading
+    /// drawn many times holds one copy of its stops.
+    pub color_stops: Arc<[ColorStop]>,
     pub extend_start: bool,
     pub extend_end: bool,
     pub ctm: Matrix,
@@ -1094,7 +1096,9 @@ pub struct RadialShadingParams {
     pub x1: f64,
     pub y1: f64,
     pub r1: f64,
-    pub color_stops: Vec<ColorStop>,
+    /// The function sampled at increasing positions. Shared, so a shading
+    /// drawn many times holds one copy of its stops.
+    pub color_stops: Arc<[ColorStop]>,
     pub extend_start: bool,
     pub extend_end: bool,
     pub ctm: Matrix,
@@ -1405,7 +1409,7 @@ impl Default for AxialShadingParams {
             y0: 0.0,
             x1: 0.0,
             y1: 0.0,
-            color_stops: Vec::new(),
+            color_stops: Arc::from([]),
             extend_start: false,
             extend_end: false,
             ctm: Matrix::default(),
@@ -1433,7 +1437,7 @@ impl Default for RadialShadingParams {
             x1: 0.0,
             y1: 0.0,
             r1: 0.0,
-            color_stops: Vec::new(),
+            color_stops: Arc::from([]),
             extend_start: false,
             extend_end: false,
             ctm: Matrix::default(),

@@ -128,6 +128,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   promised when the fields were added, so a later field is not a breaking
   change: build one from `Default` (identity ranges and decoding, no table)
   and set its fields.
+- **An axial or radial shading's colour stops are shared, so a page that
+  draws the same gradient many times holds it once.**
+  `AxialShadingParams::color_stops` and `RadialShadingParams::color_stops`
+  are `Arc<[ColorStop]>` rather than `Vec<ColorStop>`, and the PDF reader
+  hands every use of a shading the stops it sampled the first time, where
+  it copied them for each. Page 16 of a Keynote export drawing 4,524
+  gradients peaks at 224 MB rather than 1,068 MB and renders in 0.6 s
+  rather than 1.0 s, unchanged in output. Code that builds either struct
+  makes the field from a `Vec<ColorStop>` with `.into()`; code reading it
+  is unchanged.
 - **`stet_core::graphics_state::PatternData` is `#[non_exhaustive]`.** It
   gained `shading_background` in 0.8.5, a break accepted then with the
   marker deferred to a breaking release. Build one from the new `Default`

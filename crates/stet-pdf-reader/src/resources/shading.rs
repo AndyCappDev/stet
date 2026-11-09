@@ -67,10 +67,11 @@ pub(crate) enum ShadingTarget {
 /// colour pipeline, and none of that depends on where the shading is
 /// drawn. A page that builds a gradient out of clipped strips draws the
 /// same few shadings thousands of times (pdf.js `bug1721218_reduced.pdf`:
-/// 41 shadings, 3,531 uses), so the stops are kept for the page.
+/// 41 shadings, 3,531 uses), so the stops are kept for the page, and every
+/// use shares them.
 #[derive(Default)]
 pub(crate) struct ShadingStops {
-    stops: std::collections::HashMap<(u32, u16, u8), Vec<ColorStop>>,
+    stops: std::collections::HashMap<(u32, u16, u8), Arc<[ColorStop]>>,
 }
 
 /// Shadings past this many on one page are sampled each time, as before:
@@ -87,15 +88,15 @@ impl ShadingStops {
         shading_obj: &PdfObj,
         intent: u8,
         sample: impl FnOnce() -> Result<Vec<ColorStop>, PdfError>,
-    ) -> Result<Vec<ColorStop>, PdfError> {
+    ) -> Result<Arc<[ColorStop]>, PdfError> {
         let PdfObj::Ref(num, generation) = shading_obj else {
-            return sample();
+            return sample().map(Arc::from);
         };
         let key = (*num, *generation, intent);
         if let Some(stops) = self.stops.get(&key) {
-            return Ok(stops.clone());
+            return Ok(Arc::clone(stops));
         }
-        let stops = sample()?;
+        let stops: Arc<[ColorStop]> = sample()?.into();
         if self.stops.len() < MAX_CACHED_SHADINGS {
             self.stops.insert(key, stops.clone());
         }

@@ -366,8 +366,12 @@ PatchShading { params: PatchShadingParams }     // Types 6/7: Coons/tensor patch
 
 All shading types carry their native `ShadingColorSpace` (DeviceGray,
 DeviceRGB, DeviceCMYK, or ICCBased with embedded profile data). Gradient
-color stops are pre-sampled from PostScript functions. Mesh and patch data
-includes per-vertex colors and coordinates in device space.
+color stops are pre-sampled from PostScript functions. An axial or radial
+shading's `color_stops` is an `Arc<[ColorStop]>`: the PDF reader samples a
+shading object once per page and every use of it shares the stops, so a
+gradient drawn thousands of times holds one copy. Build one from a
+`Vec<ColorStop>` with `.into()`. Mesh and patch data includes per-vertex
+colors and coordinates in device space.
 
 A mesh or patch shading whose colours come from a single-input function
 (PDF `/Function`) carries `color_lut`, the function sampled at 256 inputs
