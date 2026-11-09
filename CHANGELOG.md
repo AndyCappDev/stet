@@ -137,6 +137,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An Indexed space may have up to 4096 entries, and an image in one
+  takes its indices through its `Decode`.** `setcolorspace` refused a
+  palette past 256 entries with `rangecheck`, though PLRM 3e §4.8.4
+  allows `hival` up to 4095 for 12-bit images. An image's `Decode` was
+  ignored, and a 12- or 16-bit index was cut to its high 8 bits, so index
+  5 of a 16-bit image drew entry 0. Each sample is now decoded to an
+  index, rounded and clipped as `setcolor` takes one; an image over a
+  palette of more than 256 entries is drawn in the palette's base space.
 - **An Indexed colour over a CIE-based, ICCBased, Separation or DeviceN
   base is drawn in that base.** Only a DeviceGray, DeviceRGB or
   DeviceCMYK base was looked up: over any other a fill came out black,

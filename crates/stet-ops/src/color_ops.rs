@@ -1537,10 +1537,11 @@ fn parse_indexed_colorspace(
         _ => return Err(PsError::TypeCheck),
     };
 
-    // Element 2: hival (max index, 0–255)
+    // Element 2: hival, the largest index: up to 4095, enough for a
+    // 12-bit image (PLRM 3e §4.8.4).
     let hival_obj = ctx.arrays.get_element(entity, start + 2);
     let hival_i = hival_obj.as_i32().ok_or(PsError::TypeCheck)?;
-    if !(0..=255).contains(&hival_i) {
+    if !(0..=4095).contains(&hival_i) {
         return Err(PsError::RangeCheck);
     }
     let hival = hival_i as u32;
