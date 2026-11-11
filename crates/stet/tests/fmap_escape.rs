@@ -51,3 +51,30 @@ fn an_escape_selects_the_font_for_the_rest_of_the_string() {
         "font 0 by default: a small I"
     );
 }
+
+/// Runs `body`; it divides by zero when a check fails, so a passing program renders one page.
+fn passes(body: &str) {
+    let src = format!("{COMPOSITE}{body}\n0 0 1 setrgbcolor 20 20 100 100 rectfill showpage\n");
+    let mut interp = Interpreter::builder().suppress_output().build();
+    match interp.render(src.as_bytes(), 18.0) {
+        Ok(pages) => assert_eq!(pages.len(), 1),
+        Err(e) => panic!("{e:?}"),
+    }
+}
+
+/// `cshow` hands its procedure the decoded character code, one per character: escape and shift
+/// bytes select a font and are no character. The codes are Ghostscript 10.05.1's.
+#[test]
+fn cshow_gives_the_decoded_character_codes() {
+    passes(
+        "/buf 16 string def\n\
+         /codes { /n 0 def { pop pop buf n 3 -1 roll put /n n 1 add def } exch cshow\n\
+           buf 0 n getinterval } def\n\
+         <41 ff01 4142 ff00 41> codes (AABA) ne { 1 0 div } if\n\
+         12 dict begin /FontName /Shift def /FontType 0 def /WMode 0 def /FontMatrix matrix def\n\
+         /Encoding [0 1] def /FMapType 8 def /ShiftIn 15 def /ShiftOut 14 def\n\
+         /FDepVector [/Helvetica findfont dup] def FontName currentdict end definefont pop\n\
+         /Shift findfont 20 scalefont setfont\n\
+         <41 0e 42 0f 43> codes (ABC) ne { 1 0 div } if",
+    );
+}

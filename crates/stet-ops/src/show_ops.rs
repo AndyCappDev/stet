@@ -352,27 +352,37 @@ pub fn op_cshow(ctx: &mut Context) -> Result<(), PsError> {
         .unwrap_or(1);
 
     if font_type == 0 {
-        // Type 0: decode through CMap for proper CID mapping
-        let width = cshow_code_width(ctx, font_entity).max(1);
+        // Type 0: decode through the CMap or the FMapType mapping.
+        let cmap_width = decode_cmap_characters(ctx, font_entity).map(|(_, w, _)| w.max(1));
         let cid_pairs = decode_cmap_bytes(ctx, font_entity, &bytes);
         for (i, (cid, _font_idx)) in cid_pairs.into_iter().enumerate() {
-            // PLRM, cshow: when the mapping algorithm selects a CIDFont, what
-            // goes on the stack for proc is the character code from the string
-            // — its last byte if the code is longer than one — not the CID.
-            // Handing over the CID breaks the standard idiom
-            // `1 string dup 0 4 3 roll put ... show`, which `pdftops` emits for
-            // every clipped text run: any CID above 255 is a rangecheck in
-            // `put`. The CID is carried out of band instead, so a `show` inside
-            // proc still paints the right glyph.
-            let code = bytes.get((i + 1) * width - 1).copied().unwrap_or(0);
-            ctx.o_stack.push(PsObject::int(code as i32))?;
+            let (code, whole_code) = match cmap_width {
+                // PLRM, cshow: when the mapping algorithm selects a CIDFont,
+                // what goes on the stack for proc is the character code from
+                // the string — its last byte if the code is longer than one —
+                // not the CID. Handing over the CID breaks the standard idiom
+                // `1 string dup 0 4 3 roll put ... show`, which `pdftops`
+                // emits for every clipped text run: any CID above 255 is a
+                // rangecheck in `put`. The CID is carried out of band instead,
+                // so a `show` inside proc still paints the right glyph.
+                Some(width) => (
+                    bytes.get((i + 1) * width - 1).copied().unwrap_or(0) as i32,
+                    bytes
+                        .get(i * width..(i + 1) * width)
+                        .map(|code| code.iter().fold(0u32, |a, &b| (a << 8) | b as u32)),
+                ),
+                // The FMapType mappings: the decoded character code, as
+                // Ghostscript gives it. Escape and shift bytes select a font
+                // and are no character, so byte positions don't line up with
+                // characters.
+                None => (cid, u32::try_from(cid).ok()),
+            };
+            ctx.o_stack.push(PsObject::int(code))?;
             ctx.o_stack.push(PsObject::real(0.0))?; // wx
             ctx.o_stack.push(PsObject::real(0.0))?; // wy
 
             ctx.cshow_pending_cid = Some(cid);
-            ctx.cshow_pending_code = bytes
-                .get(i * width..(i + 1) * width)
-                .map(|code| code.iter().fold(0u32, |a, &b| (a << 8) | b as u32));
+            ctx.cshow_pending_code = whole_code;
             let result = ctx.exec_sync(proc);
             ctx.cshow_pending_cid = None;
             ctx.cshow_pending_code = None;
@@ -390,23 +400,6 @@ pub fn op_cshow(ctx: &mut Context) -> Result<(), PsError> {
     }
 
     Ok(())
-}
-
-/// Bytes per character code for a composite font, as the character-mapping
-/// algorithm consumes them. Mirrors the cases [`decode_cmap_bytes`] handles.
-fn cshow_code_width(ctx: &Context, font_entity: EntityId) -> usize {
-    if let Some((_, byte_width, _)) = decode_cmap_characters(ctx, font_entity) {
-        return byte_width;
-    }
-    let fmap_type = ctx
-        .names
-        .find(b"FMapType")
-        .and_then(|id| ctx.dicts.get(font_entity, &DictKey::Name(id)))
-        .and_then(|obj| obj.as_i32());
-    match fmap_type {
-        Some(2) | Some(5) => 2,
-        _ => 1,
-    }
 }
 
 /// Decode text bytes through a CMap, returning (CID, font_index) pairs.
