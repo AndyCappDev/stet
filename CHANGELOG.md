@@ -44,6 +44,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Type 0 fonts with the escape, 1/7, 9/7, double-escape and shift
+  mappings (`FMapType` 3, 4, 5, 7 and 8) choose their fonts as the PLRM
+  says.** The font number now selects a font through the font's
+  `Encoding`, an escape or shift byte switches fonts for the rest of the
+  string, and those bytes are not drawn as characters. `show` and
+  `xyshow` match Ghostscript for every mapping. `cshow` gives its
+  procedure the decoded character code, one per character, rather than
+  one entry per byte. Contributed by @nielsbosma (#29).
 - **A page built without the `render` feature reports its own size.**
   `render_to_display_list` in a `default-features = false` build gave
   every page Letter's dimensions, whatever an EPS bounding box or a
