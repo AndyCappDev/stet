@@ -50,3 +50,17 @@ fn an_eps_keeps_its_box() {
     let b = Interpreter::builder().default_page_size(842.0, 1191.0);
     assert_eq!(page(b, src), (100, 50));
 }
+
+#[test]
+fn a_size_that_is_not_finite_and_positive_is_ignored() {
+    for (w, h) in [
+        (f64::INFINITY, 792.0),
+        (612.0, f64::INFINITY),
+        (f64::NAN, 792.0),
+        (0.0, 792.0),
+        (612.0, -1.0),
+    ] {
+        let b = Interpreter::builder().default_page_size(w, h);
+        assert_eq!(page(b, PLAIN), (612, 792), "{w} x {h}");
+    }
+}
