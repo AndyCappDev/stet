@@ -242,6 +242,12 @@ fn user_bbox_to_device(ctx: &Context, dict: EntityId) -> Result<Option<[f64; 4]>
             .as_f64()
             .ok_or(PsError::TypeCheck)?;
     }
+    Ok(Some(user_rect_to_device(ctx, user)))
+}
+
+/// The device-space bounding box of the user-space rectangle
+/// `[llx lly urx ury]` under the current CTM.
+fn user_rect_to_device(ctx: &Context, user: [f64; 4]) -> [f64; 4] {
     let ctm = &ctx.gstate.ctm;
     let corners = [
         ctm.transform_point(user[0], user[1]),
@@ -255,7 +261,7 @@ fn user_bbox_to_device(ctx: &Context, dict: EntityId) -> Result<Option<[f64; 4]>
     let xmax = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let ymin = ys.iter().copied().fold(f64::INFINITY, f64::min);
     let ymax = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    Ok(Some([xmin, ymin, xmax, ymax]))
+    [xmin, ymin, xmax, ymax]
 }
 
 /// Default group bbox when the dict supplies none: the bbox of the clip,
@@ -288,30 +294,97 @@ pub fn op_begintransparencygroup(ctx: &mut Context) -> Result<(), PsError> {
         PsValue::Dict(e) => e,
         _ => return Err(PsError::TypeCheck),
     };
+    begin_group(ctx, dict, None, false)?;
+    ctx.o_stack.pop()?;
+    Ok(())
+}
+
+/// `.begintransparencygroup`: paramdict llx lly urx ury → — or paramdict → —
+///
+/// Ghostscript's group operator, as its `examples/transparency_example.ps`
+/// uses it. It takes the group's box as four numbers after the dict (or, as
+/// [`op_begintransparencygroup`] does, as the dict's `/BBox`), and
+/// composites the group with the fill opacity and blend mode current when it
+/// begins: Ghostscript's example sets `.5 .setfillconstantalpha` inside the
+/// group for the objects in it. They are recorded in the group's frame now,
+/// so [`op_endtransparencygroup`] leaves them in place, and a begin that
+/// fails records nothing.
+pub fn op_gs_begintransparencygroup(ctx: &mut Context) -> Result<(), PsError> {
+    if ctx.o_stack.is_empty() {
+        return Err(PsError::StackUnderflow);
+    }
+    if let PsValue::Dict(dict) = ctx.o_stack.peek(0)?.value {
+        begin_group(ctx, dict, None, true)?;
+        ctx.o_stack.pop()?;
+        return Ok(());
+    }
+    if ctx.o_stack.len() < 5 {
+        return Err(PsError::StackUnderflow);
+    }
+    let mut rect = [0.0f64; 4];
+    for (i, slot) in rect.iter_mut().enumerate() {
+        *slot = ctx
+            .o_stack
+            .peek(3 - i)?
+            .as_f64()
+            .ok_or(PsError::TypeCheck)?;
+    }
+    let dict = match ctx.o_stack.peek(4)?.value {
+        PsValue::Dict(e) => e,
+        _ => return Err(PsError::TypeCheck),
+    };
+    begin_group(ctx, dict, Some(rect), true)?;
+    for _ in 0..5 {
+        ctx.o_stack.pop()?;
+    }
+    Ok(())
+}
+
+/// Open a transparency-group frame for `dict`. `rect` is a user-space box
+/// that takes the place of the dict's `/BBox`. With `composite_at_begin`,
+/// the frame records the fill opacity and blend mode current now. The
+/// caller pops the operands once this has succeeded.
+fn begin_group(
+    ctx: &mut Context,
+    dict: EntityId,
+    rect: Option<[f64; 4]>,
+    composite_at_begin: bool,
+) -> Result<(), PsError> {
     let isolated = dict_get_bool(ctx, dict, b"Isolated", false);
     let knockout = dict_get_bool(ctx, dict, b"Knockout", false);
     let color_space = resolve_group_cs(ctx, dict)?;
-    let bbox = match user_bbox_to_device(ctx, dict)? {
-        Some(b) => b,
-        None => default_device_bbox(ctx),
+    let bbox = match rect {
+        Some(rect) => user_rect_to_device(ctx, rect),
+        None => match user_bbox_to_device(ctx, dict)? {
+            Some(b) => b,
+            None => default_device_bbox(ctx),
+        },
     };
-    ctx.o_stack.pop()?;
 
-    // alpha/blend_mode are placeholders here; op_endtransparencygroup
-    // overwrites them from the gstate active at end time.
+    // Without `composite_at_begin`, alpha and blend_mode are placeholders
+    // here; op_endtransparencygroup overwrites them from the gstate active
+    // at end time.
+    let (alpha, blend_mode) = if composite_at_begin {
+        (ctx.gstate.fill_opacity, ctx.gstate.blend_mode)
+    } else {
+        (1.0, 0)
+    };
     let params = GroupParams {
         bbox,
         isolated,
         knockout,
-        blend_mode: 0,
-        alpha: 1.0,
+        blend_mode,
+        alpha,
         color_space,
     };
     let saved_clip_path_version = ctx.gstate.clip_path_version;
     let saved_gsave_depth = ctx.gstate_stack.len();
     ctx.group_stack.push(GroupFrame {
         display_list: DisplayList::new(),
-        kind: GroupKind::Transparency { params },
+        kind: GroupKind::Transparency {
+            params,
+            composite_at_begin,
+        },
         saved_clip_path_version,
         saved_gsave_depth,
     });
@@ -326,9 +399,12 @@ pub fn op_begintransparencygroup(ctx: &mut Context) -> Result<(), PsError> {
 /// Raises `rangecheck` when no group is open. The compositing alpha and
 /// blend mode are read from the gstate at the moment this operator runs
 /// (matching PDF's "the q/Q around `Do` controls the group composite"
-/// model). `rangecheck` is also raised when the gsave depth at end
-/// differs from begin — a `gsave` made inside the group must be matched
-/// by a `grestore` before close.
+/// model), unless the group was opened by Ghostscript's
+/// `.begintransparencygroup` ([`op_gs_begintransparencygroup`]), which
+/// recorded them at begin. `.endtransparencygroup` is this operator.
+/// `rangecheck` is also raised when the gsave depth at end differs from
+/// begin — a `gsave` made inside the group must be matched by a `grestore`
+/// before close.
 pub fn op_endtransparencygroup(ctx: &mut Context) -> Result<(), PsError> {
     let Some(top) = ctx.group_stack.last() else {
         return Err(PsError::RangeCheck);
@@ -343,13 +419,19 @@ pub fn op_endtransparencygroup(ctx: &mut Context) -> Result<(), PsError> {
     }
     let mut frame = ctx.group_stack.pop().unwrap();
     let _ = frame.saved_clip_path_version; // informational
-    let mut params = match frame.kind {
-        GroupKind::Transparency { params } => params,
+    let params = match frame.kind {
+        GroupKind::Transparency {
+            params,
+            composite_at_begin: true,
+        } => params,
+        GroupKind::Transparency { mut params, .. } => {
+            params.alpha = ctx.gstate.fill_opacity;
+            params.blend_mode = ctx.gstate.blend_mode;
+            params
+        }
         // Shape was matches!-checked above.
         _ => unreachable!(),
     };
-    params.alpha = ctx.gstate.fill_opacity;
-    params.blend_mode = ctx.gstate.blend_mode;
     let elements = std::mem::take(&mut frame.display_list);
     ctx.current_display_list_mut()
         .push(DisplayElement::Group { elements, params });
@@ -517,6 +599,7 @@ pub fn op_endsoftmask(ctx: &mut Context) -> Result<(), PsError> {
                 alpha: 1.0,
                 color_space: GroupColorSpace::Inherited,
             },
+            composite_at_begin: false,
         },
     ) {
         GroupKind::SoftMask { params } => params,

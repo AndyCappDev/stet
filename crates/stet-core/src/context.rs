@@ -640,7 +640,16 @@ pub enum GroupKind {
     /// Opened by `begintransparencygroup`. On close, the captured
     /// `display_list` becomes the children of a
     /// `DisplayElement::Group` with these `params`.
-    Transparency { params: GroupParams },
+    ///
+    /// `composite_at_begin` is set by Ghostscript's
+    /// `.begintransparencygroup`, which composites the group with the fill
+    /// opacity and blend mode current when it began: they are in `params`
+    /// from the start and stay. Otherwise they are read from the gstate when
+    /// the group ends, as PDF's `q … Q` around `Do` needs.
+    Transparency {
+        params: GroupParams,
+        composite_at_begin: bool,
+    },
     /// Opened by `beginsoftmask`. While active, paint ops emit into the
     /// frame's `display_list` to build the mask form. `endsoftmask`
     /// transmutes the frame to [`Self::Masked`] without popping.

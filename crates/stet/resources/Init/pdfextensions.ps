@@ -25,8 +25,13 @@ systemdict begin
     /.currenttextknockout       /currenttextknockout load def
 
     % --- Phase 2: transparency groups ---
-    /.begintransparencygroup    /begintransparencygroup load def
-    /.endtransparencygroup      /endtransparencygroup load def
+    % .begintransparencygroup and .endtransparencygroup are operators of their own
+    % (transparency_ops.rs): Ghostscript's form takes the box as four numbers after the dict, and
+    % composites the group with the opacity and blend mode current when it began.
+    % Ghostscript brackets transparency with its pdf14 compositor (`depth .pushpdf14devicefilter`,
+    % `.poppdf14devicefilter`). stet's device composites transparency itself: nothing to push.
+    /.pushpdf14devicefilter     { pop } bind def
+    /.poppdf14devicefilter      { } bind def
 
     % --- Phase 3: soft masks ---
     /.beginsoftmask             /beginsoftmask load def

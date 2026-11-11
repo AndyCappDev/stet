@@ -779,6 +779,20 @@ pub fn build_system_dict(ctx: &mut Context) {
         "endtransparencygroup",
         transparency_ops::op_endtransparencygroup,
     );
+    // Ghostscript's forms (`pdfextensions.ps` aliases the rest of its
+    // dotted transparency operators).
+    register(
+        ctx,
+        sd,
+        ".begintransparencygroup",
+        transparency_ops::op_gs_begintransparencygroup,
+    );
+    register(
+        ctx,
+        sd,
+        ".endtransparencygroup",
+        transparency_ops::op_endtransparencygroup,
+    );
     register(ctx, sd, "beginsoftmask", transparency_ops::op_beginsoftmask);
     register(ctx, sd, "endsoftmask", transparency_ops::op_endsoftmask);
     register(ctx, sd, "clearsoftmask", transparency_ops::op_clearsoftmask);
