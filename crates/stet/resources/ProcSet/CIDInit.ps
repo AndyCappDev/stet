@@ -21,6 +21,7 @@
 
     /endcmap {
         % Finalize the CMap
+        .joinmappings
         % Build a CodeMap array from collected mappings if not already present
         currentdict /CIDCharMappings known
         currentdict /CIDRangeMappings known or
@@ -45,6 +46,44 @@
         } if
     } bind
 
+    % arr key .appendmappings -
+    % A CMap writes its entries in blocks of at most 100, and each block adds
+    % to the ones before it. The blocks are kept in order under key in the
+    % CMap's .MappingBlocks, and endcmap joins each key's blocks once
+    % (.joinmappings): copying every earlier block at each block left a large
+    % CMap's discarded copies in VM, tens of megabytes for UniJIS-UCS2-H.
+    /.appendmappings {
+        currentdict /.MappingBlocks known not {
+            currentdict /.MappingBlocks 8 dict put
+        } if
+        currentdict /.MappingBlocks get
+        dup 2 index known not { dup 2 index 8 dict put } if
+        exch get
+        dup length 3 -1 roll put
+    } bind
+
+    % - .joinmappings -
+    % Put under each key .appendmappings kept blocks for one array of all of
+    % them, in order, and remove .MappingBlocks.
+    /.joinmappings {
+        currentdict /.MappingBlocks known {
+            currentdict /.MappingBlocks get {
+                % key blocks
+                dup 0 exch { exch pop length add } forall
+                array 0
+                % key blocks joined offset
+                0 1 4 index length 1 sub {
+                    3 index exch get
+                    3 copy putinterval
+                    length add
+                } for
+                pop exch pop
+                currentdict 3 1 roll put
+            } forall
+            currentdict /.MappingBlocks undef
+        } if
+    } bind
+
     /begincodespacerange {
         % n begincodespacerange -
         /.codespacecount exch def
@@ -54,7 +93,7 @@
         % lo1 hi1 ... lon hin endcodespacerange -
         % Collect n pairs into CodeSpaceRange array
         .codespacecount 2 mul array astore
-        currentdict exch /CodeSpaceRange exch put
+        /CodeSpaceRange .appendmappings
     } bind
 
     /usefont {
@@ -70,7 +109,7 @@
     /endcidchar {
         % src1 dst1 ... srcn dstn endcidchar -
         .cidcharcount 2 mul array astore
-        currentdict exch /CIDCharMappings exch put
+        /CIDCharMappings .appendmappings
     } bind
 
     /begincidrange {
@@ -81,7 +120,7 @@
     /endcidrange {
         % srclo1 srchi1 dstcid1 ... srclon srhin dstcidn endcidrange -
         .cidrangecount 3 mul array astore
-        currentdict exch /CIDRangeMappings exch put
+        /CIDRangeMappings .appendmappings
     } bind
 
     /beginbfchar {
@@ -92,7 +131,7 @@
     /endbfchar {
         % src1 dst1 ... srcn dstn endbfchar -
         .bfcharcount 2 mul array astore
-        currentdict exch /BFCharMappings exch put
+        /BFCharMappings .appendmappings
     } bind
 
     /beginbfrange {
@@ -103,7 +142,7 @@
     /endbfrange {
         % srclo1 srchi1 dst1 ... srclon srhin dstn endbfrange -
         .bfrangecount 3 mul array astore
-        currentdict exch /BFRangeMappings exch put
+        /BFRangeMappings .appendmappings
     } bind
 
     /beginnotdefchar {
@@ -114,7 +153,7 @@
     /endnotdefchar {
         % src1 dst1 ... srcn dstn endnotdefchar -
         .notdefcharcount 2 mul array astore
-        currentdict exch /NotDefCharMappings exch put
+        /NotDefCharMappings .appendmappings
     } bind
 
     /beginnotdefrange {
@@ -125,7 +164,7 @@
     /endnotdefrange {
         % srclo1 srchi1 dst1 ... srclon srhin dstn endnotdefrange -
         .notdefrangecount 3 mul array astore
-        currentdict exch /NotDefRangeMappings exch put
+        /NotDefRangeMappings .appendmappings
     } bind
 
     /beginusematrix {

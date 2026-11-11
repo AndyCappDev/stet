@@ -803,3 +803,64 @@ showpage
     // The superscript joins its line and its word.
     assert_eq!(lines, ["Paper Title", "x2 y"]);
 }
+
+#[test]
+fn cmap_codes_take_their_length_from_the_codespace() {
+    // Shift-JIS: one-byte codes up to 0x80, two-byte codes from 0x8140. Each
+    // `cidrange` block adds to the ones before it, and a CMap that names
+    // another with `usecmap` falls back to its mappings and codespace.
+    let cmap = "/CIDInit /ProcSet findresource begin 12 dict begin begincmap \
+        /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 4 >> def \
+        /CMapName /SjisTest-H def /CMapType 1 def \
+        2 begincodespacerange <00> <80> <8140> <9FFC> endcodespacerange \
+        1 begincidrange <20> <7E> 1 endcidrange \
+        1 begincidrange <82A0> <82A0> 843 endcidrange \
+        endcmap CMapName currentdict /CMap defineresource pop end end \
+        /CIDInit /ProcSet findresource begin 12 dict begin begincmap \
+        /SjisTest-H usecmap /CMapName /SjisTest-V def /CMapType 1 def \
+        endcmap CMapName currentdict /CMap defineresource pop end end";
+    let runs = runs_of(&cid_font_ps(
+        cmap,
+        "72 700 moveto <4182A042> show \
+         /V /SjisTest-V [/CIDF /CIDFont findresource] composefont 12 scalefont setfont \
+         72 600 moveto <82A0> show",
+    ));
+    let summary: Vec<(Vec<&str>, Vec<u32>)> = runs
+        .iter()
+        .map(|r| (glyph_texts(r), r.glyphs.iter().map(|g| g.code).collect()))
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            (vec!["A", "あ", "B"], vec![0x41, 0x82A0, 0x42]),
+            (vec!["あ"], vec![0x82A0])
+        ]
+    );
+}
+
+#[test]
+fn glyphshow_takes_a_cid_when_the_font_is_a_cidfont() {
+    let runs = runs_of(&cid_font_ps(
+        "",
+        "/CIDF /CIDFont findresource 12 scalefont setfont 72 600 moveto 843 glyphshow",
+    ));
+    assert_eq!(runs.len(), 1, "{runs:#?}");
+    assert_eq!(runs[0].text, "あ");
+}
+
+/// `glyphshow` of a CID composes the CIDFont with Identity-H once, not once per
+/// glyph: a CID table of thousands of glyphs left one font per glyph in VM.
+#[test]
+fn glyphshow_of_a_cid_composes_one_font() {
+    let runs = runs_of(&cid_font_ps(
+        "",
+        "/CIDF /CIDFont findresource 12 scalefont setfont 72 600 moveto\n\
+         843 glyphshow\n\
+         currentfont /CIDFontType known not { nonexistent_font } if\n\
+         vmstatus pop exch pop /before exch def\n\
+         200 { 843 glyphshow } repeat\n\
+         vmstatus pop exch pop before sub 2000 gt { vm_grew } if",
+    ));
+    let glyphs: usize = runs.iter().map(|r| r.glyphs.len()).sum();
+    assert_eq!(glyphs, 201, "{runs:#?}");
+}
