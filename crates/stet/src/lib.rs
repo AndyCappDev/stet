@@ -211,6 +211,7 @@ pub struct InterpreterBuilder {
     text_extraction: TextExtraction,
     default_rendering_intent: RenderingIntent,
     file_access: FileAccess,
+    max_page_size_points: f64,
     #[cfg(feature = "render")]
     page_background: PageBackground,
 }
@@ -233,6 +234,7 @@ impl Interpreter {
             text_extraction: TextExtraction::Off,
             default_rendering_intent: RenderingIntent::RelativeColorimetric,
             file_access: FileAccess::Full,
+            max_page_size_points: stet_core::context::DEFAULT_MAX_PAGE_SIZE_POINTS,
             #[cfg(feature = "render")]
             page_background: PageBackground::White,
         }
@@ -761,6 +763,27 @@ impl InterpreterBuilder {
         self
     }
 
+    /// Allow pages up to `points` a side (default 14400, 200 inches).
+    ///
+    /// A file that declares a larger `PageSize` or EPS bounding box is
+    /// clamped to it, and loses what lies beyond. Raise it when pages are not
+    /// rasterised at the file's size, or memory is bounded another way:
+    /// Illustrator artboards reach 16383 pt and its large canvas ten times
+    /// that. `f64::INFINITY` lifts the limit. See
+    /// [`Context::max_page_size_points`].
+    ///
+    /// # Panics
+    ///
+    /// If `points` is not greater than zero, NaN included.
+    pub fn max_page_size(mut self, points: f64) -> Self {
+        assert!(
+            points > 0.0,
+            "max_page_size must be greater than zero, got {points}"
+        );
+        self.max_page_size_points = points;
+        self
+    }
+
     /// Record the text each page shows, for extraction, at `level`.
     ///
     /// Display lists then also carry [`DisplayElement::TextRun`] elements:
@@ -843,6 +866,7 @@ impl InterpreterBuilder {
         ctx.file_access = self.file_access;
         ctx.text_extraction = self.text_extraction;
         ctx.set_default_rendering_intent(self.default_rendering_intent);
+        ctx.max_page_size_points = self.max_page_size_points;
         Interpreter {
             ctx,
             #[cfg(feature = "render")]

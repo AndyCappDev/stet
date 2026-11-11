@@ -430,7 +430,7 @@ impl SkiaDevice {
         // prepress proof of a large-format page is a legitimate gigapixel
         // render, and refusing it is worse than the attack it prevents. The
         // page size is bounded upstream, in points, where the untrusted value
-        // actually enters (see `MAX_PAGE_SIZE_POINTS`).
+        // actually enters (see `Context::max_page_size_points`).
         //
         // Zero, on the other hand, is never meaningful: `Pixmap::new` returns
         // `None` for a zero dimension and the call below used to `.expect()`

@@ -46,3 +46,61 @@ fn an_eps_page_is_its_bounding_box() {
                1 0 0 setrgbcolor 10 20 120 50 rectfill\n";
     assert_eq!(sizes(eps, 72.0), [(120, 50, [255, 0, 0])]);
 }
+
+/// Pages are clamped to 14400 pt a side by default; a host may allow larger ones, as an Illustrator
+/// artboard of 204 inches declares.
+#[test]
+fn the_page_size_limit_is_the_hosts_to_raise() {
+    let eps = "%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 14688 20\n\
+               1 0 0 setrgbcolor 0 0 14688 20 rectfill\n";
+    let width = |interp: &mut Interpreter| {
+        interp.render_to_display_list(eps.as_bytes(), 72.0).unwrap()[0].width
+    };
+    assert_eq!(width(&mut Interpreter::new()), 14400);
+    assert_eq!(
+        width(&mut Interpreter::builder().max_page_size(16383.0).build()),
+        14688
+    );
+}
+
+/// `f64::INFINITY` lifts the limit.
+#[test]
+fn an_infinite_page_size_limit_lifts_it() {
+    let ps = "%!PS\n<< /PageSize [20000 30] >> setpagedevice\n\
+              1 0 0 setrgbcolor 0 0 20000 30 rectfill showpage\n";
+    let mut interp = Interpreter::builder().max_page_size(f64::INFINITY).build();
+    let pages = interp.render_to_display_list(ps.as_bytes(), 72.0).unwrap();
+    assert_eq!(pages[0].width, 20000);
+}
+
+/// `max_page_size` refuses a limit that is not greater than zero.
+#[test]
+#[should_panic(expected = "greater than zero")]
+fn a_page_size_limit_of_zero_is_refused() {
+    let _ = Interpreter::builder().max_page_size(0.0);
+}
+
+/// `max_page_size` refuses NaN, which `f64::min` would treat as no limit.
+#[test]
+#[should_panic(expected = "greater than zero")]
+fn a_nan_page_size_limit_is_refused() {
+    let _ = Interpreter::builder().max_page_size(f64::NAN);
+}
+
+/// A limit set on the context directly that is not greater than zero counts as the default,
+/// rather than giving 0x0 pages or none at all.
+#[test]
+fn a_page_size_limit_on_the_context_that_is_not_positive_is_the_default() {
+    let ps = "%!PS\n<< /PageSize [20000 30] >> setpagedevice\n\
+              1 0 0 setrgbcolor 0 0 20000 30 rectfill showpage\n";
+    for limit in [0.0, -100.0, f64::NAN] {
+        let mut interp = Interpreter::new();
+        interp.context().max_page_size_points = limit;
+        let pages = interp.render_to_display_list(ps.as_bytes(), 72.0).unwrap();
+        assert_eq!(
+            (pages[0].width, pages[0].height),
+            (14400, 30),
+            "limit {limit}"
+        );
+    }
+}
