@@ -196,7 +196,11 @@ stet::deny_host_access();
 
 Neither limits how long a document runs or how much memory it takes: set
 `PsContext::set_timeout` before each job, and `PsContext::max_local_vm`,
-through `interp.context()`.
+through `interp.context()`. The page a PostScript file may declare is
+bounded already, at 14400 pt (200 inches) a side, so
+`<< /PageSize [2000000 2000000] >> setpagedevice` is clamped rather than
+honoured; `max_page_size(points)` on the builder raises the limit for
+large-format artwork.
 
 ## Text Extraction
 

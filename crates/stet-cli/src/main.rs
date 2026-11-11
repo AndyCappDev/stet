@@ -149,6 +149,9 @@ fn main() {
     // Ceiling on PostScript VM. `None` keeps Context's own default, which is
     // generous rather than absent — see `Context::max_local_vm`.
     let mut max_vm_mb: Option<u64> = None;
+    // Largest page side a file may declare. `None` keeps Context's default,
+    // 14400 pt — see `Context::max_page_size_points`.
+    let mut max_page_size_points: Option<f64> = None;
     // `--safer` and the `--permit-…` flags: what PostScript's file
     // operators reach. Full by default, as before.
     let mut file_access = FileAccess::Full;
@@ -350,6 +353,28 @@ fn main() {
                     }
                 } else {
                     eprintln!("Error: --max-vm requires a value in megabytes");
+                    std::process::exit(1);
+                }
+            }
+            "--max-page-size" => {
+                if i + 1 < args.len() {
+                    // `f64` parsing takes "inf", which lifts the limit.
+                    match args[i + 1].parse::<f64>() {
+                        Ok(points) if points > 0.0 => {
+                            max_page_size_points = Some(points);
+                            i += 2;
+                            continue;
+                        }
+                        _ => {
+                            eprintln!(
+                                "Error: --max-page-size requires a positive size in points, \
+                                 or inf for no limit"
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    eprintln!("Error: --max-page-size requires a value in points");
                     std::process::exit(1);
                 }
             }
@@ -636,6 +661,7 @@ writes all pages to one file",
     let limits = JobLimits {
         timeout_secs,
         max_vm_mb,
+        max_page_size_points,
         file_access,
         file_permits,
     };
@@ -1374,6 +1400,13 @@ Common options:
                             Defaults to 8192; exceeding it raises VMerror
                             rather than aborting. Separate from the renderer's
                             image and band buffers.
+    --max-page-size <PT>    Largest page side PostScript/EPS input may
+                            declare, in points (default 14400, 200 inches).
+                            A larger page is clamped and loses what lies
+                            beyond it; \"inf\" removes the limit. Raise it
+                            for large-format artwork: Illustrator artboards
+                            reach 16383 pt. The render resolution is not
+                            capped either way.
     --timeout <SECONDS>     Abort a job running longer than this. PostScript is
                             Turing-complete, so there is no limit by default;
                             set one when the input is untrusted.
@@ -1648,6 +1681,8 @@ fn file_access_flag(
 struct JobLimits {
     timeout_secs: Option<f64>,
     max_vm_mb: Option<u64>,
+    /// `--max-page-size`, in points.
+    max_page_size_points: Option<f64>,
     /// `--safer` or any `--permit-…`.
     file_access: FileAccess,
     file_permits: FilePermits,
@@ -1660,6 +1695,9 @@ fn create_context(icc_cfg: &IccCliConfig, limits: &JobLimits) -> Context {
     ctx.set_timeout(limits.timeout_secs.map(std::time::Duration::from_secs_f64));
     if let Some(mb) = limits.max_vm_mb {
         ctx.max_local_vm = (mb as usize).saturating_mul(1024 * 1024);
+    }
+    if let Some(points) = limits.max_page_size_points {
+        ctx.max_page_size_points = points;
     }
     // Replace the default IccCache with one configured per the CLI options.
     // This is where `--bpc` lands; commits 2-3 of docs/PLAN-BPC.md will turn

@@ -98,6 +98,9 @@
 //! Either limits what a document can reach, not how long it runs or how much
 //! memory it takes. For those, set [`PsContext::set_timeout`] before each
 //! job and [`PsContext::max_local_vm`], through [`Interpreter::context`].
+//! The page a PostScript file may declare is bounded already, at 14400 pt
+//! (200 inches) a side; [`InterpreterBuilder::max_page_size`] raises that
+//! for large-format artwork.
 //!
 //! # Feature Flags
 //!

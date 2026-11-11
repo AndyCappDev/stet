@@ -216,6 +216,7 @@ zoom presets, minimap navigation, and drag-and-drop.
 | `--json` | `stet text` only: print JSON with each line's position instead of plain text. See [`stet text`](#stet-text-file) |
 | `--word-boxes` | `stet text --json` only: give each word its position too |
 | `--max-vm <MB>` | Ceiling on PostScript VM — strings, arrays, dictionaries (default 8192). Exceeding it raises `VMerror` instead of aborting. Separate from the renderer's image and band buffers, so it does **not** cap rendering resolution |
+| `--max-page-size <PT>` | Largest page side PostScript/EPS input may declare, in points (default 14400, 200 inches). A larger page is clamped and loses what lies beyond it; `inf` removes the limit. Raise it for large-format artwork — Illustrator artboards reach 16383 pt. Rendering resolution is not capped either way |
 
 ### Choosing where output goes
 

@@ -203,6 +203,10 @@ Resource limits (for untrusted input):
                              VMerror instead of aborting. Separate from the
                              renderer's image and band buffers, so this does
                              not cap rendering resolution
+  --max-page-size <PT>       Largest page side PostScript/EPS input may
+                             declare, in points (default 14400, 200 inches).
+                             A larger page is clamped; "inf" removes the
+                             limit. Raise it for large-format artwork
 
 Text extraction (stet text):
   --json                     Print JSON with each line's position instead

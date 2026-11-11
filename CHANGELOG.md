@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The largest page a PostScript or EPS file may declare can be
+  raised.** Pages are clamped to 14400 pt (200 inches) a side, which cut
+  off real large-format artwork: an Illustrator EPS of a 204-inch banner
+  lost its last 4 inches. `InterpreterBuilder::max_page_size(points)`,
+  `Context::max_page_size_points` and the CLI's `--max-page-size <PT>`
+  set the limit; `f64::INFINITY` (`inf` on the command line) removes it.
+  The default is unchanged. Contributed by @nielsbosma (#36).
+
 ### Fixed
 
 - **A `pdfmark` called without a test for it no longer stops the job when
