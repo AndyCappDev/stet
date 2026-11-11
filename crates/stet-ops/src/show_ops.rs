@@ -352,27 +352,37 @@ pub fn op_cshow(ctx: &mut Context) -> Result<(), PsError> {
         .unwrap_or(1);
 
     if font_type == 0 {
-        // Type 0: decode through CMap for proper CID mapping
-        let width = cshow_code_width(ctx, font_entity).max(1);
+        // Type 0: decode through the CMap or the FMapType mapping.
+        let cmap_width = decode_cmap_characters(ctx, font_entity).map(|(_, w, _)| w.max(1));
         let cid_pairs = decode_cmap_bytes(ctx, font_entity, &bytes);
         for (i, (cid, _font_idx)) in cid_pairs.into_iter().enumerate() {
-            // PLRM, cshow: when the mapping algorithm selects a CIDFont, what
-            // goes on the stack for proc is the character code from the string
-            // — its last byte if the code is longer than one — not the CID.
-            // Handing over the CID breaks the standard idiom
-            // `1 string dup 0 4 3 roll put ... show`, which `pdftops` emits for
-            // every clipped text run: any CID above 255 is a rangecheck in
-            // `put`. The CID is carried out of band instead, so a `show` inside
-            // proc still paints the right glyph.
-            let code = bytes.get((i + 1) * width - 1).copied().unwrap_or(0);
-            ctx.o_stack.push(PsObject::int(code as i32))?;
+            let (code, whole_code) = match cmap_width {
+                // PLRM, cshow: when the mapping algorithm selects a CIDFont,
+                // what goes on the stack for proc is the character code from
+                // the string — its last byte if the code is longer than one —
+                // not the CID. Handing over the CID breaks the standard idiom
+                // `1 string dup 0 4 3 roll put ... show`, which `pdftops`
+                // emits for every clipped text run: any CID above 255 is a
+                // rangecheck in `put`. The CID is carried out of band instead,
+                // so a `show` inside proc still paints the right glyph.
+                Some(width) => (
+                    bytes.get((i + 1) * width - 1).copied().unwrap_or(0) as i32,
+                    bytes
+                        .get(i * width..(i + 1) * width)
+                        .map(|code| code.iter().fold(0u32, |a, &b| (a << 8) | b as u32)),
+                ),
+                // The FMapType mappings: the decoded character code, as
+                // Ghostscript gives it. Escape and shift bytes select a font
+                // and are no character, so byte positions don't line up with
+                // characters.
+                None => (cid, u32::try_from(cid).ok()),
+            };
+            ctx.o_stack.push(PsObject::int(code))?;
             ctx.o_stack.push(PsObject::real(0.0))?; // wx
             ctx.o_stack.push(PsObject::real(0.0))?; // wy
 
             ctx.cshow_pending_cid = Some(cid);
-            ctx.cshow_pending_code = bytes
-                .get(i * width..(i + 1) * width)
-                .map(|code| code.iter().fold(0u32, |a, &b| (a << 8) | b as u32));
+            ctx.cshow_pending_code = whole_code;
             let result = ctx.exec_sync(proc);
             ctx.cshow_pending_cid = None;
             ctx.cshow_pending_code = None;
@@ -390,23 +400,6 @@ pub fn op_cshow(ctx: &mut Context) -> Result<(), PsError> {
     }
 
     Ok(())
-}
-
-/// Bytes per character code for a composite font, as the character-mapping
-/// algorithm consumes them. Mirrors the cases [`decode_cmap_bytes`] handles.
-fn cshow_code_width(ctx: &Context, font_entity: EntityId) -> usize {
-    if let Some((_, byte_width, _)) = decode_cmap_characters(ctx, font_entity) {
-        return byte_width;
-    }
-    let fmap_type = ctx
-        .names
-        .find(b"FMapType")
-        .and_then(|id| ctx.dicts.get(font_entity, &DictKey::Name(id)))
-        .and_then(|obj| obj.as_i32());
-    match fmap_type {
-        Some(2) | Some(5) => 2,
-        _ => 1,
-    }
 }
 
 /// Decode text bytes through a CMap, returning (CID, font_index) pairs.
@@ -537,23 +530,119 @@ fn decode_cmap_bytes(ctx: &Context, font_entity: EntityId, bytes: &[u8]) -> Vec<
         .and_then(|id| ctx.dicts.get(font_entity, &DictKey::Name(id)))
         .and_then(|obj| obj.as_i32());
 
+    let int_key = |key: &[u8], default: i32| {
+        ctx.names
+            .find(key)
+            .and_then(|id| ctx.dicts.get(font_entity, &DictKey::Name(id)))
+            .and_then(|obj| obj.as_i32())
+            .unwrap_or(default)
+    };
     match fmap_type {
-        Some(2) | Some(5) => {
-            // FMapType 2/5: 2-byte encoding (high byte = sub-font index, low byte = char code)
-            let mut result = Vec::new();
-            let mut pos = 0;
-            while pos + 2 <= bytes.len() {
-                let font_idx = bytes[pos] as usize;
-                let char_code = bytes[pos + 1] as i32;
-                result.push((char_code, font_idx));
-                pos += 2;
-            }
-            result
-        }
+        Some(t @ (2 | 3 | 4 | 5 | 7 | 8)) => decode_fmap(
+            t,
+            bytes,
+            int_key(b"EscChar", 255),
+            int_key(b"ShiftIn", 15),
+            int_key(b"ShiftOut", 14),
+        ),
         _ => {
             // No CMap, no FMapType — treat each byte as a CID (identity)
             bytes.iter().map(|&b| (b as i32, 0)).collect()
         }
+    }
+}
+
+/// The PLRM's character-mapping algorithms for Type 0 fonts with Type 1 descendants (5.10.1,
+/// table 5.11), as (character code, font number) pairs. The font number indexes the font's
+/// `Encoding`, whose entry indexes `FDepVector` ([`fdep_index`]). A font number selected by an
+/// escape or shift byte lasts to the end of the string; every string starts in font 0.
+fn decode_fmap(
+    fmap_type: i32,
+    bytes: &[u8],
+    esc: i32,
+    shift_in: i32,
+    shift_out: i32,
+) -> Vec<(i32, usize)> {
+    let mut result = Vec::new();
+    let mut font = 0usize;
+    let mut pos = 0;
+    while pos < bytes.len() {
+        let b = bytes[pos] as i32;
+        match fmap_type {
+            // 8/8: font number, then character code.
+            2 => {
+                if pos + 2 > bytes.len() {
+                    break;
+                }
+                result.push((bytes[pos + 1] as i32, b as usize));
+                pos += 2;
+            }
+            // 9/7: the first byte and the high bit of the second are the font number.
+            5 => {
+                if pos + 2 > bytes.len() {
+                    break;
+                }
+                let c = bytes[pos + 1] as i32;
+                result.push((c & 0x7f, ((b as usize) << 1) | (c as usize >> 7)));
+                pos += 2;
+            }
+            // 1/7: the high bit is the font number.
+            4 => {
+                result.push((b & 0x7f, (b >> 7) as usize));
+                pos += 1;
+            }
+            // Escape: EscChar and a font number. Double escape: EscChar EscChar n is font 256 + n.
+            3 | 7 if b == esc => match (bytes.get(pos + 1), bytes.get(pos + 2)) {
+                (Some(&e), Some(&n)) if fmap_type == 7 && e as i32 == esc => {
+                    font = 256 + n as usize;
+                    pos += 3;
+                }
+                (Some(&n), _) => {
+                    font = n as usize;
+                    pos += 2;
+                }
+                (None, _) => break,
+            },
+            // Shift: ShiftOut selects font 1, ShiftIn font 0.
+            8 if b == shift_out => {
+                font = 1;
+                pos += 1;
+            }
+            8 if b == shift_in => {
+                font = 0;
+                pos += 1;
+            }
+            _ => {
+                result.push((b, font));
+                pos += 1;
+            }
+        }
+    }
+    result
+}
+
+/// The `FDepVector` index for a font number: entry `font_num` of the Type 0 font's `Encoding`
+/// array (the font number itself when there is none).
+fn fdep_index(ctx: &Context, font_entity: EntityId, font_num: usize) -> u32 {
+    ctx.dicts
+        .get(font_entity, &DictKey::Name(ctx.name_cache.n_encoding))
+        .and_then(|enc| match enc.value {
+            PsValue::Array { entity, start, len } if (font_num as u32) < len => ctx
+                .arrays
+                .get_element(entity, start + font_num as u32)
+                .as_i32(),
+            _ => None,
+        })
+        .map_or(font_num as u32, |i| i.max(0) as u32)
+}
+
+/// The character code as the string spelled it, for the text record: FMapType 2 and 5 codes are
+/// two bytes (the font number, then the character code within that font).
+fn fmap_code(fmap_type: Option<i32>, font_num: usize, char_code: i32) -> u32 {
+    match fmap_type {
+        Some(2) => ((font_num as u32) << 8) | char_code as u32,
+        Some(5) => ((font_num as u32 >> 1) << 8) | ((font_num as u32 & 1) << 7) | char_code as u32,
+        _ => char_code as u32,
     }
 }
 
@@ -575,30 +664,10 @@ fn get_char_count(ctx: &Context, bytes: &[u8]) -> usize {
         .and_then(|obj| obj.as_i32())
         .unwrap_or(1);
     if font_type == 0 {
-        get_type0_byte_width(ctx, font_entity)
-            .map(|bw| bytes.len() / bw)
-            .unwrap_or(bytes.len())
+        // Escape and shift bytes select a font and are not characters.
+        decode_cmap_bytes(ctx, font_entity, bytes).len()
     } else {
         bytes.len()
-    }
-}
-
-/// Get the byte width per character for a Type 0 composite font.
-/// Checks CMap CodeSpaceRange first, then FMapType (2 = 2-byte).
-fn get_type0_byte_width(ctx: &Context, font_entity: EntityId) -> Option<usize> {
-    // Try CMap-based byte width first
-    if let Some((_, byte_width, _)) = decode_cmap_characters(ctx, font_entity) {
-        return Some(byte_width);
-    }
-    // FMapType 2 = 2-byte encoding (high byte = sub-font index, low byte = char code)
-    let fmap_name = ctx.names.find(b"FMapType")?;
-    let fmap_type = ctx
-        .dicts
-        .get(font_entity, &DictKey::Name(fmap_name))?
-        .as_i32()?;
-    match fmap_type {
-        2 | 5 => Some(2), // FMapType 2 (8/8 mapping) and 5 (escape mapping) use 2 bytes
-        _ => None,
     }
 }
 
@@ -4730,19 +4799,16 @@ fn render_fmap_type0(
     };
 
     let chars = decode_cmap_bytes(ctx, font_entity, bytes);
-    // FMapType 2 and 5 codes are two bytes: the font number, then the
-    // character code within that font.
-    let two_byte_codes = matches!(
-        ctx.names
-            .find(b"FMapType")
-            .and_then(|id| ctx.dicts.get(font_entity, &DictKey::Name(id)))
-            .and_then(|obj| obj.as_i32()),
-        Some(2) | Some(5)
-    );
+    let fmap_type = ctx
+        .names
+        .find(b"FMapType")
+        .and_then(|id| ctx.dicts.get(font_entity, &DictKey::Name(id)))
+        .and_then(|obj| obj.as_i32());
 
     for (char_code, font_idx) in &chars {
         // Get descendant font from FDepVector
-        let idx = fdep_start + (*font_idx as u32).min(fdep_len.saturating_sub(1));
+        let idx =
+            fdep_start + fdep_index(ctx, font_entity, *font_idx).min(fdep_len.saturating_sub(1));
         let desc_obj = ctx.arrays.get_element(fdep_entity, idx);
         let desc_entity = match desc_obj.value {
             PsValue::Dict(e) => e,
@@ -4807,11 +4873,7 @@ fn render_fmap_type0(
 
                 // Advance by glyph width through composed FontMatrix
                 let (wx, wy) = composed_fm.transform_delta(result.width_x, result.width_y);
-                let code = if two_byte_codes {
-                    ((*font_idx as u32) << 8) | *char_code as u32
-                } else {
-                    *char_code as u32
-                };
+                let code = fmap_code(fmap_type, *font_idx, *char_code);
                 text_record::record_glyph(
                     ctx,
                     text_record::Glyph {
@@ -4868,19 +4930,16 @@ fn render_fmap_type0_displaced(
     };
 
     let chars = decode_cmap_bytes(ctx, font_entity, bytes);
-    // FMapType 2 and 5 codes are two bytes: the font number, then the
-    // character code within that font.
-    let two_byte_codes = matches!(
-        ctx.names
-            .find(b"FMapType")
-            .and_then(|id| ctx.dicts.get(font_entity, &DictKey::Name(id)))
-            .and_then(|obj| obj.as_i32()),
-        Some(2) | Some(5)
-    );
+    let fmap_type = ctx
+        .names
+        .find(b"FMapType")
+        .and_then(|id| ctx.dicts.get(font_entity, &DictKey::Name(id)))
+        .and_then(|obj| obj.as_i32());
 
     for (i, (char_code, font_idx)) in chars.iter().enumerate() {
         // Get descendant font from FDepVector
-        let idx = fdep_start + (*font_idx as u32).min(fdep_len.saturating_sub(1));
+        let idx =
+            fdep_start + fdep_index(ctx, font_entity, *font_idx).min(fdep_len.saturating_sub(1));
         let desc_obj = ctx.arrays.get_element(fdep_entity, idx);
         let desc_entity = match desc_obj.value {
             PsValue::Dict(e) => e,
@@ -4946,11 +5005,7 @@ fn render_fmap_type0_displaced(
                     let device_path = ctm_transform_path(&user_path, ctm);
                     push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
                 }
-                let code = if two_byte_codes {
-                    ((*font_idx as u32) << 8) | *char_code as u32
-                } else {
-                    *char_code as u32
-                };
+                let code = fmap_code(fmap_type, *font_idx, *char_code);
                 text_record::record_glyph(
                     ctx,
                     text_record::Glyph {
