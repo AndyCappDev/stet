@@ -69,8 +69,8 @@ fn an_infinite_page_size_limit_lifts_it() {
     let ps = "%!PS\n<< /PageSize [20000 30] >> setpagedevice\n\
               1 0 0 setrgbcolor 0 0 20000 30 rectfill showpage\n";
     let mut interp = Interpreter::builder().max_page_size(f64::INFINITY).build();
-    let pages = interp.render_to_display_list(ps.as_bytes(), 1.0).unwrap();
-    assert_eq!(pages[0].width, 278);
+    let pages = interp.render_to_display_list(ps.as_bytes(), 72.0).unwrap();
+    assert_eq!(pages[0].width, 20000);
 }
 
 /// `max_page_size` refuses a limit that is not greater than zero.
@@ -96,7 +96,11 @@ fn a_page_size_limit_on_the_context_that_is_not_positive_is_the_default() {
     for limit in [0.0, -100.0, f64::NAN] {
         let mut interp = Interpreter::new();
         interp.context().max_page_size_points = limit;
-        let pages = interp.render_to_display_list(ps.as_bytes(), 1.0).unwrap();
-        assert_eq!((pages[0].width, pages[0].height), (200, 1), "limit {limit}");
+        let pages = interp.render_to_display_list(ps.as_bytes(), 72.0).unwrap();
+        assert_eq!(
+            (pages[0].width, pages[0].height),
+            (14400, 30),
+            "limit {limit}"
+        );
     }
 }
