@@ -803,6 +803,14 @@ pub fn build_system_dict(ctx: &mut Context) {
     register(ctx, sd, "a3", font_ops::op_a3);
     register(ctx, sd, "b5", font_ops::op_b5);
 
+    // --- pdfmark: in the operator table only ---
+    // `systemdict` gets it from `register_pdf_authoring_ops` for a PDF job.
+    // Without it, an unguarded call reaches this operator through the
+    // evaluator's stand-in for an undefined `pdfmark`, which checks the
+    // operands and clears to the mark.
+    let pdfmark = ctx.names.intern(b"pdfmark");
+    push_operator(ctx, pdfmark, pdfmark_ops::op_pdfmark);
+
     // --- Default error handlers in errordict ---
     setup_errordict(ctx);
 
