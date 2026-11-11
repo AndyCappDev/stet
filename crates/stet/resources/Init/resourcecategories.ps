@@ -50,6 +50,110 @@ dup /InstanceType /dicttype put
 /CMap /dicttype (resources/CMap) (.ps) createresourcecategory
 /CIDFont /dicttype (resources/CIDFont) (.ps) createresourcecategory
 
+% CIDFonts that are not present. A program embedding stet registers a
+% substitute per character collection in .CIDFontSubstitutes (Ordering name ->
+% CIDFont name, e.g. /Japan1 /MyMincho), as Ghostscript's cidfmap does.
+% A missing CIDFont is then replaced by the substitute for its collection: the
+% collection comes from the CMap when the font is named CIDFontName-CMapName,
+% else from .CIDFontOrderings, the collections of well-known CIDFont names.
+systemdict begin
+    /.CIDFontSubstitutes 8 dict def
+    /.CIDFontOrderings 64 dict begin
+        [ /Ryumin-Light /GothicBBB-Medium /HeiseiMin-W3 /HeiseiKakuGo-W5 /HeiseiMaruGo-W4
+          /MidashiMin-MA31 /MidashiGo-MB31 /FutoMinA101-Bold /FutoGoB101-Bold /Jun101-Light
+          /KozMinPr6N-Regular /KozGoPr6N-Medium /KozMinPro-Regular /KozGoPro-Medium
+          /MS-Mincho /MS-Gothic /MS-PMincho /MS-PGothic /MSMincho /MSGothic ]
+        { /Japan1 def } forall
+        [ /STSong-Light /STHeiti-Regular /STKaiti-Regular /STFangsong-Light /AdobeSongStd-Light
+          /SimSun /SimHei /KaiTi /FangSong ]
+        { /GB1 def } forall
+        [ /MSung-Light /MHei-Medium /MKai-Medium /AdobeMingStd-Light /MingLiU /PMingLiU
+          /DFKaiShu-SB-Estd-BF ]
+        { /CNS1 def } forall
+        [ /HYSMyeongJo-Medium /HYGoThic-Medium /HYRGoThic-Medium /AdobeMyungjoStd-Medium
+          /Batang /Dotum /Gulim /Gungsuh ]
+        { /Korea1 def } forall
+    currentdict end def
+
+    % key .cidfontsubstitute key' -- the substitute's name for a CIDFont that
+    % is not present and has one, else key.
+    /.cidfontsubstitute {
+        % Whether the CIDFont itself is there: the category's ResourceStatus
+        % also answers for names that have a substitute.
+        dup /CIDFont /Category findresource begin .GenericResourceStatus end { pop pop } {
+            .CIDFontOrderings 1 index known {
+                .CIDFontOrderings 1 index get
+                .CIDFontSubstitutes 1 index known {
+                    .CIDFontSubstitutes exch get exch pop
+                } { pop } ifelse
+            } if
+        } ifelse
+    } bind def
+
+    % key .cidkeyedparts cidfont cmap true | false -- for a font named
+    % CIDFontName-CMapName (Ryumin-Light-90ms-RKSJ-H), the CIDFont to use (it,
+    % or the substitute for the CMap's collection) and the CMap. The CMap is
+    % the longest suffix after a hyphen that names a CMap resource.
+    /.cidkeyedparts {
+        6 dict begin
+        /.key exch def
+        /.s .key dup type /stringtype eq { dup length string copy } { dup length string cvs } ifelse def
+        /.found false def
+        1 1 .s length 2 sub {
+            /.i exch def
+            .s .i get 45 eq {
+                .s .i 1 add .s length .i sub 1 sub getinterval cvn
+                dup /CMap resourcestatus {
+                    pop pop /.cmap exch def /.cid .s 0 .i getinterval cvn def
+                    /.found true def exit
+                } { pop } ifelse
+            } if
+        } for
+        .found {
+            .cid /CIDFont resourcestatus {
+                pop pop .cid
+            } {
+                .cmap /CMap findresource /CIDSystemInfo get
+                dup type /arraytype eq { 0 get } if
+                /Ordering get cvn
+                .CIDFontSubstitutes 1 index known { .CIDFontSubstitutes exch get } { pop .cid .cidfontsubstitute } ifelse
+            } ifelse
+            dup /CIDFont resourcestatus {
+                pop pop .cmap true
+            } { pop false } ifelse
+        } { false } ifelse
+        end
+    } bind def
+
+    % key .cidkeyedfont font true | false -- the font .cidkeyedparts names,
+    % composed (and so defined as a Font resource).
+    /.cidkeyedfont {
+        dup .cidkeyedparts {
+            exch /CIDFont findresource 1 array astore composefont true
+        } { pop false } ifelse
+    } bind def
+end
+
+% FindResource of a CIDFont that is not present finds its substitute.
+/CIDFont /Category findresource begin
+    /.GenericFindResource /FindResource load def
+    /FindResource { .cidfontsubstitute .GenericFindResource } bind def
+    % A CIDFont that is not there but has a substitute is there to be
+    % loaded (status 2): programs check resourcestatus before findresource.
+    /.GenericResourceStatus /ResourceStatus load def
+    /ResourceStatus {
+        dup .GenericResourceStatus { 3 -1 roll pop true } {
+            .CIDFontOrderings 1 index known {
+                .CIDFontOrderings exch get
+                .CIDFontSubstitutes 1 index known {
+                    .CIDFontSubstitutes exch get .GenericResourceStatus
+                    { pop pop 2 -1 true } { false } ifelse
+                } { pop false } ifelse
+            } { pop false } ifelse
+        } ifelse
+    } bind def
+end
+
 % Font Set Category
 /FontSet /dicttype (resources/FontSet) (.ps) createresourcecategory
 

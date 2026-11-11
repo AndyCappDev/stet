@@ -282,6 +282,11 @@ true setglobal
             } if
         } if
 
+        % ---- STEP 3b: a CID-keyed font name, CIDFontName-CMapName ----
+        loaded_font null eq {
+            original_font_name .cidkeyedfont { /loaded_font exch def } if
+        } if
+
         % ---- STEP 4: Fallback ----
         loaded_font null eq {
             original_font_name FontFallback /loaded_font exch def
@@ -337,7 +342,15 @@ true setglobal
         currentdict /font_key .systemundef
     } bind
 
-    /ResourceStatus {/Generic /Category findresource /ResourceStatus get exec}
+    % A CID-keyed name findfont can compose from a CIDFont (or its
+    % substitute) and a CMap is there to be loaded: status 2.
+    /ResourceStatus {
+        dup /Generic /Category findresource /ResourceStatus get exec {
+            3 -1 roll pop true
+        } {
+            .cidkeyedparts { pop pop 2 -1 true } { false } ifelse
+        } ifelse
+    }
 
 >> /Category defineresource pop
 
