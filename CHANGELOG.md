@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **`stet_core::context::GroupKind::Transparency` has a new field,
+  `composite_at_begin`**: set for a group opened with Ghostscript's
+  `.begintransparencygroup`, whose opacity and blend mode are recorded
+  when it begins (see Added). Code that builds the variant or matches it
+  without `..` needs the field. The variant is interpreter state that
+  `stet-ops` builds, so this is accepted in a patch release. Contributed
+  by @nielsbosma (#32).
+
 ### Added
 
 - **The largest page a PostScript or EPS file may declare can be
@@ -22,6 +32,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--page`: a program's own `setpagedevice` still changes the page, and an
   EPS file still gets its bounding box. `render_to_display_list`, `render`
   and `render_to_pdf` all use it. Contributed by @nielsbosma (#44).
+- **Ghostscript's transparency-group form, `dict llx lly urx ury
+  .begintransparencygroup`,** and its `.pushpdf14devicefilter` /
+  `.poppdf14devicefilter` brackets, which do nothing in stet. A group
+  opened with `.begintransparencygroup` is composited with the opacity
+  and blend mode current when it began, as in Ghostscript, so its
+  `examples/transparency_example.ps` now renders as `gs
+  -dALLOWPSTRANSPARENCY` does instead of stopping at
+  `.pushpdf14devicefilter`. `begintransparencygroup` is unchanged.
+  Contributed by @nielsbosma (#32).
 
 ### Fixed
 
