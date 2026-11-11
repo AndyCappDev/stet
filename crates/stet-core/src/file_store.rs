@@ -291,8 +291,31 @@ pub struct FileStore {
 }
 
 /// Supplies embedded files on demand: the normalized path in, the file's
-/// bytes out, or `None` when there is no such file.
-pub type EmbeddedProvider = Box<dyn Fn(&str) -> Option<&'static [u8]> + Send + Sync>;
+/// bytes out, or `None` when there is no such file. The bytes are shared, so
+/// a provider can hand over a file it builds or reads at run time and keep
+/// its own copy.
+pub type EmbeddedProvider = Box<dyn Fn(&str) -> Option<Arc<[u8]>> + Send + Sync>;
+
+/// An embedded file's bytes: built into the program, or supplied by the
+/// [`EmbeddedProvider`].
+#[derive(Debug, Clone)]
+pub enum EmbeddedFile {
+    /// Registered with [`FileStore::add_embedded_file`].
+    Static(&'static [u8]),
+    /// Supplied by the provider set with [`FileStore::set_embedded_provider`].
+    Shared(Arc<[u8]>),
+}
+
+impl std::ops::Deref for EmbeddedFile {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::Static(data) => data,
+            Self::Shared(data) => data,
+        }
+    }
+}
 
 /// Well-known file entity IDs. The standard files are in global VM, as in
 /// Ghostscript: no `restore` closes them.
@@ -352,18 +375,33 @@ impl FileStore {
     ///
     /// Normalizes the path by stripping leading `/` and collapsing `//` to `/`
     /// to handle paths like `/resources/Font//Helvetica.t1` built by PS code.
-    pub fn get_embedded_file(&self, path: &str) -> Option<&'static [u8]> {
-        if let Some(data) = self.embedded_files.get(path) {
-            return Some(*data);
+    pub fn get_embedded_file(&self, path: &str) -> Option<EmbeddedFile> {
+        if let Some(data) = self.embedded_file_named(path) {
+            return Some(data);
         }
         // Normalize: strip leading "/" and collapse "//" → "/"
         let normalized = path.trim_start_matches('/').replace("//", "/");
-        if normalized != path
-            && let Some(data) = self.embedded_files.get(normalized.as_str())
-        {
-            return Some(*data);
+        if normalized == path {
+            return None;
         }
-        self.embedded_provider.as_ref().and_then(|p| p(&normalized))
+        self.embedded_file_named(&normalized)
+    }
+
+    /// The embedded file `name` names exactly, built in or from the
+    /// provider. The provider is asked only for a name in its normalized
+    /// form: `open_with` decides by this lookup what is embedded, and a
+    /// spelling with a leading `/` or a `//` is a host path for its policy.
+    fn embedded_file_named(&self, name: &str) -> Option<EmbeddedFile> {
+        if let Some(data) = self.embedded_files.get(name) {
+            return Some(EmbeddedFile::Static(data));
+        }
+        if name.starts_with('/') || name.contains("//") {
+            return None;
+        }
+        self.embedded_provider
+            .as_ref()
+            .and_then(|p| p(name))
+            .map(EmbeddedFile::Shared)
     }
 
     /// Supply embedded files on demand: `provider` is asked for each path
@@ -454,9 +492,11 @@ impl FileStore {
             _ => {}
         }
 
-        // Check embedded files for read access
+        // Check embedded files for read access. The name must match exactly,
+        // a built-in file or one from the provider alike: any other spelling
+        // is a host path, which the policy below decides on.
         if mode == "r"
-            && let Some(data) = self.get_embedded_file(name)
+            && let Some(data) = self.embedded_file_named(name)
         {
             let id = EntityId(self.files.len() as u32);
             self.files.push(FileEntry {

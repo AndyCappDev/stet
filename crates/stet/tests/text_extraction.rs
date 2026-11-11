@@ -919,7 +919,7 @@ showpage
         .context()
         .files
         .set_embedded_provider(Some(Box::new(|path: &str| {
-            (path == "resources/CMap/HostTest-H.ps").then_some(CMAP)
+            (path == "resources/CMap/HostTest-H.ps").then(|| std::sync::Arc::from(CMAP))
         })));
     let pages = interp
         .render_to_display_list(ps.as_bytes(), 72.0)

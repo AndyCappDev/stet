@@ -237,7 +237,7 @@ pub fn op_run(ctx: &mut Context) -> Result<(), PsError> {
     // Check embedded files first (for WASM builds where no real filesystem exists).
     // get_embedded_file normalizes paths (strips leading "/", collapses "//").
     if let Some(data) = ctx.files.get_embedded_file(&filename) {
-        let ps_data = stet_core::eps::strip_dos_eps_header(data);
+        let ps_data = stet_core::eps::strip_dos_eps_header(&data);
         let file_entity = ctx.files.create_string_source(ps_data.to_vec());
         let file_entity = ctx.adopt_file(file_entity);
         ctx.e_stack.push(PsObject {
@@ -490,7 +490,7 @@ pub fn op_loadbinaryfontfile(ctx: &mut Context) -> Result<(), PsError> {
     let path_str = String::from_utf8_lossy(&path_bytes);
     // Check embedded files first (for WASM builds where no real filesystem exists).
     let ok = if let Some(data) = ctx.files.get_embedded_file(path_str.as_ref()) {
-        stet_core::system_font_loader::load_binary_font_from_data(ctx, data)
+        stet_core::system_font_loader::load_binary_font_from_data(ctx, &data)
     } else if !path_str
         .strip_prefix(FONT_FOLDER)
         .is_some_and(stet_core::font_loader::is_plain_file_name)

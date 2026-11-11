@@ -386,3 +386,35 @@ fn safer_renders_text_as_full_does() {
     assert!(interp.warnings().is_empty(), "{:?}", interp.warnings());
     assert_eq!(pages[0].rgba, full[0].rgba);
 }
+
+/// A file from the embedding program's provider is embedded as a built-in
+/// resource is: under `safer` it opens by its own name, and a spelling with
+/// a leading `/` is a host path, refused for both alike.
+#[test]
+fn safer_opens_a_provided_file_by_its_exact_name_only() {
+    let mut interp = safer();
+    interp
+        .context()
+        .files
+        .set_embedded_provider(Some(Box::new(|path: &str| {
+            (path == "resources/ProcSet/Provided.ps")
+                .then(|| std::sync::Arc::from(&b"/provided true def\n"[..]))
+        })));
+    expect(
+        &mut interp,
+        "(resources/ProcSet/Provided.ps) (r) file cvx exec provided not { 1 0 div } if",
+        None,
+    );
+    expect(
+        &mut interp,
+        "(resources/Init/sysdict.ps) (r) file closefile",
+        None,
+    );
+    for name in ["/resources/ProcSet/Provided.ps", "/resources/Init/sysdict.ps"] {
+        expect(
+            &mut interp,
+            &format!("({name}) (r) file"),
+            Some("invalidfileaccess"),
+        );
+    }
+}
