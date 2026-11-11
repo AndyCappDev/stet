@@ -121,7 +121,6 @@ mod init;
 use std::sync::{Arc, Mutex};
 
 use stet_core::context::Context;
-#[cfg(any(feature = "render", feature = "pdf-output"))]
 use stet_core::device::OutputDevice;
 use stet_core::eps::{content_is_epsf, read_eps_bounding_box, strip_dos_eps_header};
 use stet_core::error::PsError;
@@ -201,6 +200,7 @@ pub struct Interpreter {
     warnings: Vec<ExecWarning>,
     keep_partial: bool,
     last_error: Option<StetError>,
+    default_page: (f64, f64),
 }
 
 /// How long the `showpage` that ends a job cut short by an error may take.
@@ -215,6 +215,7 @@ pub struct InterpreterBuilder {
     default_rendering_intent: RenderingIntent,
     file_access: FileAccess,
     max_page_size_points: f64,
+    default_page: (f64, f64),
     #[cfg(feature = "render")]
     page_background: PageBackground,
 }
@@ -238,6 +239,7 @@ impl Interpreter {
             default_rendering_intent: RenderingIntent::RelativeColorimetric,
             file_access: FileAccess::Full,
             max_page_size_points: stet_core::context::DEFAULT_MAX_PAGE_SIZE_POINTS,
+            default_page: (612.0, 792.0),
             #[cfg(feature = "render")]
             page_background: PageBackground::White,
         }
@@ -323,7 +325,8 @@ impl Interpreter {
             }
         }
 
-        self.render_ps(ps_data, dpi, 612.0, 792.0)
+        let (w, h) = self.default_page;
+        self.render_ps(ps_data, dpi, w, h)
     }
 
     /// Render PostScript data to a PDF document.
@@ -345,10 +348,10 @@ impl Interpreter {
             if let Some((llx, lly, urx, ury)) = read_eps_bounding_box(ps_data) {
                 (urx - llx, ury - lly)
             } else {
-                (612.0, 792.0)
+                self.default_page
             }
         } else {
-            (612.0, 792.0)
+            self.default_page
         };
 
         // Set up PdfDevice as the device factory
@@ -584,16 +587,8 @@ impl Interpreter {
         self.ctx.capture_display_lists = Some(Vec::new());
         self.ctx.null_device_used = false;
 
-        #[cfg(feature = "render")]
-        let pages_ref = {
-            let (pages_ref, _) = shared_page_tracker();
-            self.setup_capture_device_factory(pages_ref.clone());
-            pages_ref
-        };
-        #[cfg(not(feature = "render"))]
-        {
-            self.setup_capture_device_factory(Arc::new(Mutex::new(Vec::<()>::new())));
-        }
+        let pages_ref = shared_page_tracker();
+        self.setup_capture_device_factory(pages_ref.clone());
 
         self.ctx.output_path = Some("stet_output".to_string());
         let save_id = self.begin_job(dpi, page_w_pt, page_h_pt)?;
@@ -605,13 +600,8 @@ impl Interpreter {
         self.record_end_of_job_warnings();
         finish_device(&mut self.ctx);
 
-        #[cfg(feature = "render")]
-        let result = {
-            let pages = take_pages(&pages_ref);
-            collect_display_lists(&mut self.ctx, &pages, dpi)
-        };
-        #[cfg(not(feature = "render"))]
-        let result = collect_display_lists_simple(&mut self.ctx, dpi);
+        let pages = take_pages(&pages_ref);
+        let result = collect_display_lists(&mut self.ctx, &pages, dpi, (page_w_pt, page_h_pt));
 
         end_job(&mut self.ctx, save_id);
 
@@ -631,16 +621,8 @@ impl Interpreter {
         self.ctx.capture_display_lists = Some(Vec::new());
         self.ctx.null_device_used = false;
 
-        #[cfg(feature = "render")]
-        let pages_ref = {
-            let (pages_ref, _) = shared_page_tracker();
-            self.setup_capture_device_factory(pages_ref.clone());
-            pages_ref
-        };
-        #[cfg(not(feature = "render"))]
-        {
-            self.setup_capture_device_factory(Arc::new(Mutex::new(Vec::<()>::new())));
-        }
+        let pages_ref = shared_page_tracker();
+        self.setup_capture_device_factory(pages_ref.clone());
 
         self.ctx.output_path = Some("stet_output".to_string());
         let save_id = self.begin_job(dpi, w, h)?;
@@ -655,13 +637,8 @@ impl Interpreter {
         self.record_end_of_job_warnings();
         finish_device(&mut self.ctx);
 
-        #[cfg(feature = "render")]
-        let result = {
-            let pages = take_pages(&pages_ref);
-            collect_display_lists(&mut self.ctx, &pages, dpi)
-        };
-        #[cfg(not(feature = "render"))]
-        let result = collect_display_lists_simple(&mut self.ctx, dpi);
+        let pages = take_pages(&pages_ref);
+        let result = collect_display_lists(&mut self.ctx, &pages, dpi, (w, h));
 
         end_job(&mut self.ctx, save_id);
 
@@ -728,7 +705,6 @@ impl Interpreter {
             .map_err(ps_err)
     }
 
-    #[cfg(feature = "render")]
     fn setup_capture_device_factory(&mut self, pages_ref: Arc<Mutex<Vec<PageDims>>>) {
         self.ctx.device_factory = Some(Box::new(move |w, h| {
             Box::new(PageSizeRecorder {
@@ -736,13 +712,6 @@ impl Interpreter {
                 height: h,
                 pages: pages_ref.clone(),
             }) as Box<dyn OutputDevice>
-        }));
-    }
-
-    #[cfg(not(feature = "render"))]
-    fn setup_capture_device_factory<T>(&mut self, _pages_ref: Arc<Mutex<Vec<T>>>) {
-        self.ctx.device_factory = Some(Box::new(|w, h| {
-            Box::new(stet_core::device::NullDevice::new(w, h))
         }));
     }
 }
@@ -861,6 +830,22 @@ impl InterpreterBuilder {
         self
     }
 
+    /// The page a PostScript job starts on, in points (default Letter,
+    /// 612 x 792). The program's own `setpagedevice` still changes it; an EPS
+    /// with a bounding box gets its box instead.
+    ///
+    /// For a caller that knows the page better than the printer default,
+    /// such as one that read it from the file's DSC comments and checked
+    /// them against what the program draws. A width or height that is not
+    /// finite and greater than zero is ignored; the largest page a file may
+    /// declare is a separate limit.
+    pub fn default_page_size(mut self, width: f64, height: f64) -> Self {
+        if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 {
+            self.default_page = (width, height);
+        }
+        self
+    }
+
     /// Build the interpreter.
     pub fn build(self) -> Interpreter {
         let mut ctx = init::create_initialized_context(self.use_icc, self.suppress_output)
@@ -877,6 +862,7 @@ impl InterpreterBuilder {
             warnings: Vec::new(),
             keep_partial: self.keep_partial,
             last_error: None,
+            default_page: self.default_page,
         }
     }
 }
@@ -884,7 +870,6 @@ impl InterpreterBuilder {
 // --- Page dimension tracking ---
 
 /// Recorded page dimensions, one per page the job sends.
-#[cfg(feature = "render")]
 struct PageDims {
     width: u32,
     height: u32,
@@ -895,14 +880,12 @@ struct PageDims {
 /// lists itself (`Context::capture_display_lists`), so a device that also
 /// rasterised them — as a `SkiaDevice` into a discarding sink once did —
 /// rendered every page twice.
-#[cfg(feature = "render")]
 struct PageSizeRecorder {
     width: u32,
     height: u32,
     pages: Arc<Mutex<Vec<PageDims>>>,
 }
 
-#[cfg(feature = "render")]
 impl OutputDevice for PageSizeRecorder {
     fn fill_path(
         &mut self,
@@ -959,12 +942,10 @@ pub struct DisplayListPage {
 
 // --- Helpers ---
 
-#[cfg(feature = "render")]
-fn shared_page_tracker() -> (Arc<Mutex<Vec<PageDims>>>, ()) {
-    (Arc::new(Mutex::new(Vec::new())), ())
+fn shared_page_tracker() -> Arc<Mutex<Vec<PageDims>>> {
+    Arc::new(Mutex::new(Vec::new()))
 }
 
-#[cfg(feature = "render")]
 fn take_pages(pages_ref: &Arc<Mutex<Vec<PageDims>>>) -> Vec<PageDims> {
     match pages_ref.lock() {
         Ok(mut guard) => std::mem::take(&mut *guard),
@@ -1011,11 +992,13 @@ fn finish_device(ctx: &mut Context) {
     }
 }
 
-#[cfg(feature = "render")]
+/// Pair each captured display list with the size its page was sent at. A
+/// page the tracker did not record gets the job's page, `job_page` in points.
 fn collect_display_lists(
     ctx: &mut Context,
     pages: &[PageDims],
     default_dpi: f64,
+    job_page: (f64, f64),
 ) -> Vec<DisplayListPage> {
     let captured = ctx.capture_display_lists.take().unwrap_or_default();
     captured
@@ -1033,28 +1016,10 @@ fn collect_display_lists(
             } else {
                 DisplayListPage {
                     display_list: dl,
-                    width: (612.0 * dpi / 72.0) as u32,
-                    height: (792.0 * dpi / 72.0) as u32,
+                    width: (job_page.0 * dpi / 72.0) as u32,
+                    height: (job_page.1 * dpi / 72.0) as u32,
                     dpi,
                 }
-            }
-        })
-        .collect()
-}
-
-/// Collect display lists without page dimension tracking (no-render fallback).
-#[cfg(not(feature = "render"))]
-fn collect_display_lists_simple(ctx: &mut Context, default_dpi: f64) -> Vec<DisplayListPage> {
-    let captured = ctx.capture_display_lists.take().unwrap_or_default();
-    captured
-        .into_iter()
-        .map(|(dl, dpi)| {
-            let dpi = if dpi > 0.0 { dpi } else { default_dpi };
-            DisplayListPage {
-                display_list: dl,
-                width: (612.0 * dpi / 72.0) as u32,
-                height: (792.0 * dpi / 72.0) as u32,
-                dpi,
             }
         })
         .collect()
