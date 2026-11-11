@@ -414,18 +414,10 @@ impl DisplayList {
                     DisplayElement::Image {
                         sample_data,
                         params,
-                    } if sample_data.is_empty() => {
-                        if let Some(jpeg) = params.jpeg.take() {
-                            let n = params.color_space.num_components() as usize;
-                            let want = params.width as usize * params.height as usize * n;
-                            match crate::jpeg::decode(&jpeg) {
-                                Ok(mut px) if px.len() >= want => {
-                                    px.truncate(want);
-                                    *sample_data = Arc::new(px);
-                                }
-                                _ => return None,
-                            }
-                        }
+                    } if sample_data.is_empty() && params.jpeg.is_some() => {
+                        let samples = params.samples(sample_data)?.into_owned();
+                        *sample_data = Arc::new(samples);
+                        params.jpeg = None;
                     }
                     _ => {}
                 }

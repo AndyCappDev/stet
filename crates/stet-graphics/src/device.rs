@@ -7,6 +7,7 @@
 use crate::color::{DashPattern, DeviceColor, FillRule, LineCap, LineJoin};
 use crate::display_list::DisplayList;
 use crate::icc::ProfileHash;
+use std::borrow::Cow;
 use std::sync::Arc;
 use stet_fonts::geometry::{Matrix, PsPath};
 
@@ -936,8 +937,8 @@ pub struct ImageParams {
     /// DeviceGray or DeviceRGB image with the default `Decode`, whose JPEG
     /// has the image's size and component count and stores its colour the
     /// usual way (YCbCr for three components), so any JPEG reader shows it
-    /// as the interpreter would. A consumer that needs the samples decodes
-    /// it with [`crate::jpeg::decode`].
+    /// as the interpreter would. A consumer that needs the samples gets them
+    /// from [`Self::samples`]; stet's renderer and PDF writer do.
     pub jpeg: Option<Arc<Vec<u8>>>,
 }
 
@@ -1373,6 +1374,28 @@ impl Default for TextParams {
             alpha_is_shape: false,
             text_knockout: true,
         }
+    }
+}
+
+impl ImageParams {
+    /// The samples of an image with these parameters: `sample_data` as it
+    /// is, or, for an image kept as JPEG data ([`Self::jpeg`]) and so without
+    /// samples, the JPEG decoded. `None` when the JPEG doesn't decode to the
+    /// image's size: draw nothing then, as the `image` operator would have
+    /// stopped on it.
+    pub fn samples<'a>(&self, sample_data: &'a [u8]) -> Option<Cow<'a, [u8]>> {
+        let jpeg = match &self.jpeg {
+            Some(jpeg) if sample_data.is_empty() => jpeg,
+            _ => return Some(Cow::Borrowed(sample_data)),
+        };
+        let want =
+            self.width as usize * self.height as usize * self.color_space.num_components() as usize;
+        let mut px = crate::jpeg::decode(jpeg).ok()?;
+        if px.len() < want {
+            return None;
+        }
+        px.truncate(want);
+        Some(Cow::Owned(px))
     }
 }
 

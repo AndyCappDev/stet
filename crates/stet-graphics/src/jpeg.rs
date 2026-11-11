@@ -315,7 +315,9 @@ pub fn patch_jpeg_sof_height(data: &mut [u8], new_height: u16) {
 /// (a JFIF marker, an Adobe marker saying YCbCr, or the component ids 1, 2,
 /// 3 without an Adobe marker). Arithmetic coding, 12 bits, a height in a DNL
 /// marker, RGB or CMYK storage, and any marker these rules read differently
-/// are left to [`decode`].
+/// are left to [`decode`]. So are two kinds of metadata that viewers apply and
+/// `DCTDecode` ignores: an Exif `Orientation` other than 1 (browsers rotate
+/// by it) and an `ICC_PROFILE` (browsers colour-manage with it).
 pub fn plain(data: &[u8], width: u32, height: u32, components: u8) -> bool {
     if !matches!(components, 1 | 3) || data.len() < 4 || data[0] != 0xFF || data[1] != 0xD8 {
         return false;
@@ -341,6 +343,10 @@ pub fn plain(data: &[u8], width: u32, height: u32, components: u8) -> bool {
         let seg = &data[i + 4..i + 2 + len];
         match marker {
             0xE0 if seg.starts_with(b"JFIF\0") => jfif = true,
+            0xE1 if seg.starts_with(b"Exif\0\0") && exif_orientation(&seg[6..]) != Some(1) => {
+                return false;
+            }
+            0xE2 if seg.starts_with(b"ICC_PROFILE\0") => return false,
             0xEE if seg.starts_with(b"Adobe") && seg.len() >= 12 => adobe = Some(seg[11]),
             0xC0..=0xC2 => {
                 if seg.len() < 6 || seg[0] != 8 || sof.is_some() {
@@ -374,6 +380,45 @@ pub fn plain(data: &[u8], width: u32, height: u32, components: u8) -> bool {
         Some(transform) => transform == 1,
         None => jfif || ids == [1, 2, 3],
     }
+}
+
+/// The `Orientation` (tag 0x0112) in the first IFD of the TIFF structure an
+/// Exif APP1 segment holds after its `Exif\0\0` header: `Some(1)` when the
+/// tag is absent, as viewers read it, and `None` when the structure can't
+/// be read.
+fn exif_orientation(tiff: &[u8]) -> Option<u16> {
+    let big = match tiff.get(..4)? {
+        [b'M', b'M', 0, 42] => true,
+        [b'I', b'I', 42, 0] => false,
+        _ => return None,
+    };
+    let u16_at = |at: usize| -> Option<u16> {
+        let b = tiff.get(at..at + 2)?;
+        Some(if big {
+            u16::from_be_bytes([b[0], b[1]])
+        } else {
+            u16::from_le_bytes([b[0], b[1]])
+        })
+    };
+    let u32_at = |at: usize| -> Option<u32> {
+        let b = tiff.get(at..at + 4)?;
+        let b = [b[0], b[1], b[2], b[3]];
+        Some(if big {
+            u32::from_be_bytes(b)
+        } else {
+            u32::from_le_bytes(b)
+        })
+    };
+    let ifd = u32_at(4)? as usize;
+    let entries = u16_at(ifd)? as usize;
+    for k in 0..entries {
+        let entry = ifd + 2 + k * 12;
+        if u16_at(entry)? == 0x0112 {
+            // A SHORT, its value in the first two bytes of the value field.
+            return u16_at(entry + 8);
+        }
+    }
+    Some(1)
 }
 
 /// Extract width, height, and component count from a JPEG SOF header.
