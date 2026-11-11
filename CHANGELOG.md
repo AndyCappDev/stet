@@ -16,9 +16,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Context::max_page_size_points` and the CLI's `--max-page-size <PT>`
   set the limit; `f64::INFINITY` (`inf` on the command line) removes it.
   The default is unchanged. Contributed by @nielsbosma (#36).
+- **`InterpreterBuilder::default_page_size(width, height)` sets the page a
+  PostScript job starts on** when the program asks for none; the default
+  stays Letter. It is a default rather than an override, unlike the CLI's
+  `--page`: a program's own `setpagedevice` still changes the page, and an
+  EPS file still gets its bounding box. `render_to_display_list`, `render`
+  and `render_to_pdf` all use it. Contributed by @nielsbosma (#44).
 
 ### Fixed
 
+- **A page built without the `render` feature reports its own size.**
+  `render_to_display_list` in a `default-features = false` build gave
+  every page Letter's dimensions, whatever an EPS bounding box or a
+  program's `setpagedevice` had made it. Contributed by @nielsbosma (#44).
 - **A `pdfmark` called without a test for it no longer stops the job when
   the output is not PDF.** Rendering to PNG, the viewer or WASM leaves
   `pdfmark` undefined, so prologues that test `/pdfmark where` take their

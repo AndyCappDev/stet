@@ -837,8 +837,8 @@ impl InterpreterBuilder {
     /// For a caller that knows the page better than the printer default,
     /// such as one that read it from the file's DSC comments and checked
     /// them against what the program draws. A width or height that is not
-    /// finite and greater than zero is ignored; the largest page a file may
-    /// declare is a separate limit.
+    /// finite and greater than zero is ignored. Like a page the file
+    /// declares, it is clamped to [`max_page_size`](Self::max_page_size).
     pub fn default_page_size(mut self, width: f64, height: f64) -> Self {
         if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 {
             self.default_page = (width, height);

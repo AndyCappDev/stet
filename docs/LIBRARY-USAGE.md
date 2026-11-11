@@ -347,7 +347,30 @@ stet::deny_host_access();
 
 Neither limits how long a document runs or how much memory it takes: set
 `PsContext::set_timeout` before each job, and `PsContext::max_local_vm`,
-through `interp.context()`.
+through `interp.context()`. The page a PostScript file may declare is
+bounded already, at 14400 pt (200 inches) a side; `max_page_size(points)`
+raises that for large-format artwork.
+
+### Page size
+
+A PostScript job that asks for no page size prints on Letter (612 × 792
+pt), as on a printer loaded with Letter paper — Ghostscript does the
+same. `default_page_size` gives such jobs a different page:
+
+```rust
+let mut interp = stet::Interpreter::builder()
+    .default_page_size(842.0, 1191.0) // A3
+    .build();
+```
+
+It is a default, not an override: a program's own `setpagedevice` still
+changes the page, and an EPS file still gets its `%%BoundingBox`. (The
+CLI's `--page` overrides both.) Some files draw beyond Letter without
+asking for anything larger — ImageMagick writes an A3 image with an A3
+`%%BoundingBox` and no `setpagedevice` — but a DSC bounding box is not
+reliable enough to follow on its own, so stet leaves the choice to the
+caller. Like a page the file declares, the default is clamped to
+`max_page_size` (14400 pt a side unless raised).
 
 ### Rendering intent
 
