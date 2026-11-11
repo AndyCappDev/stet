@@ -7,7 +7,7 @@
 use stet_core::context::Context;
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
-use stet_core::object::{EntityId, NameId, ObjFlags, PsObject, PsValue};
+use stet_core::object::{EntityId, NameId, ObjFlags, OpCode, PsObject, PsValue};
 use stet_core::tokenizer::{Token, Tokenizer, stream_next_token};
 
 /// Main eval loop: pop objects from the execution stack and execute them.
@@ -201,22 +201,25 @@ fn unwind_to_loop_bounded(ctx: &mut Context, min_depth: usize) -> Result<(), PsE
     Err(PsError::InvalidExit)
 }
 
-/// Process a single object from the execution stack.
-///
-/// Returns errors that the caller routes through `dispatch_error`.
 /// What an undefined executable name runs instead of raising `undefined`, if anything.
 ///
-/// `pdfmark` is left undefined so that prologs testing `/pdfmark where` take their printer branch,
-/// but files written for Distiller or Ghostscript (which define it) also call it unguarded. Such a
-/// call consumes its operands to the mark, as it does on a device that ignores pdfmarks.
+/// `pdfmark` is left out of `systemdict` without the PDF device, so that prologs testing
+/// `/pdfmark where` take their printer branch, but files written for Distiller or Ghostscript
+/// (which define it) also call it unguarded. Such a call runs the `pdfmark` operator itself, which
+/// is in the operator table from the start: it checks its operands as Ghostscript does, reports
+/// errors as `pdfmark`, and outside a PDF job consumes its operands to the mark, as on a device
+/// that ignores pdfmarks.
 fn undefined_stand_in(ctx: &Context, name_id: NameId) -> Option<PsObject> {
     if ctx.names.get_bytes(name_id) != b"pdfmark" {
         return None;
     }
-    let clear = ctx.names.find(b"cleartomark")?;
-    ctx.dicts.get(ctx.systemdict, &DictKey::Name(clear))
+    let index = ctx.operators.iter().position(|op| op.name == name_id)?;
+    Some(PsObject::operator(OpCode(u16::try_from(index).ok()?)))
 }
 
+/// Process a single object from the execution stack.
+///
+/// Returns errors that the caller routes through `dispatch_error`.
 fn eval_one(ctx: &mut Context, obj: PsObject) -> Result<(), PsError> {
     match obj.value {
         // Simple types always push (even if executable flag is set)
