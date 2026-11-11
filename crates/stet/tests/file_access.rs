@@ -410,7 +410,10 @@ fn safer_opens_a_provided_file_by_its_exact_name_only() {
         "(resources/Init/sysdict.ps) (r) file closefile",
         None,
     );
-    for name in ["/resources/ProcSet/Provided.ps", "/resources/Init/sysdict.ps"] {
+    for name in [
+        "/resources/ProcSet/Provided.ps",
+        "/resources/Init/sysdict.ps",
+    ] {
         expect(
             &mut interp,
             &format!("({name}) (r) file"),
