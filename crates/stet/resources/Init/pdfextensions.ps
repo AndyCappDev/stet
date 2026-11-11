@@ -25,44 +25,9 @@ systemdict begin
     /.currenttextknockout       /currenttextknockout load def
 
     % --- Phase 2: transparency groups ---
-    % Ghostscript's group operators differ from stet's in two ways, and these aliases follow
-    % Ghostscript. Its form is `paramdict llx lly urx ury .begintransparencygroup` (stet's operator
-    % takes the dict with the box as /BBox; both forms are accepted). And the group is composited
-    % with the opacity and blend mode current when it began: Ghostscript's own example sets
-    % `.5 .setfillconstantalpha` inside the group for the objects in it. stet's
-    % endtransparencygroup reads them when the group ends, so they are saved here at the start and
-    % put back around the end.
-    /.gstransp 1 dict dup /stack [] put def
-    /.begintransparencygroup {
-        currentglobal true setglobal
-        //.gstransp /stack get aload length
-        currentfillopacity currentblendmode 3 -1 roll 2 add array astore
-        //.gstransp exch /stack exch put
-        setglobal
-        dup type /dicttype eq {
-            begintransparencygroup
-        } {
-            4 array astore exch
-            dup length 1 add dict copy
-            dup /BBox 4 -1 roll put
-            begintransparencygroup
-        } ifelse
-    } bind def
-    /.endtransparencygroup {
-        currentblendmode currentfillopacity
-        //.gstransp /stack get
-        dup length 2 ge {
-            dup length 2 sub
-            2 copy 2 getinterval aload pop
-            4 2 roll 0 exch getinterval
-            //.gstransp exch /stack exch put
-            setblendmode setfillopacity
-            endtransparencygroup
-        } {
-            pop endtransparencygroup
-        } ifelse
-        setfillopacity setblendmode
-    } bind def
+    % .begintransparencygroup and .endtransparencygroup are operators of their own
+    % (transparency_ops.rs): Ghostscript's form takes the box as four numbers after the dict, and
+    % composites the group with the opacity and blend mode current when it began.
     % Ghostscript brackets transparency with its pdf14 compositor (`depth .pushpdf14devicefilter`,
     % `.poppdf14devicefilter`). stet's device composites transparency itself: nothing to push.
     /.pushpdf14devicefilter     { pop } bind def
