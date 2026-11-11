@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `pdfmark` called without a test for it no longer stops the job when
+  the output is not PDF.** Rendering to PNG, the viewer or WASM leaves
+  `pdfmark` undefined, so prologues that test `/pdfmark where` take their
+  printer branch. A file that calls it without a test, as files written
+  for Distiller or Ghostscript do, used to stop with `undefined`. The call
+  now pops its operands down to the mark and records nothing, as
+  Ghostscript does on a device that ignores pdfmarks. `where` and `known`
+  still report `pdfmark` as undefined. Contributed by @nielsbosma (#27).
+- **`[ pdfmark`, with no type tag, raises `stackunderflow`** as in
+  Ghostscript, not `typecheck`; this applies to PDF output too. Errors
+  from an unguarded call are reported as `pdfmark`. Contributed by
+  @nielsbosma (#27).
+
 ## [0.10.0] — 2026-11-09
 
 ### Breaking
