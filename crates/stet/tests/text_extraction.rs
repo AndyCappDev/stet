@@ -847,3 +847,20 @@ fn glyphshow_takes_a_cid_when_the_font_is_a_cidfont() {
     assert_eq!(runs.len(), 1, "{runs:#?}");
     assert_eq!(runs[0].text, "あ");
 }
+
+/// `glyphshow` of a CID composes the CIDFont with Identity-H once, not once per
+/// glyph: a CID table of thousands of glyphs left one font per glyph in VM.
+#[test]
+fn glyphshow_of_a_cid_composes_one_font() {
+    let runs = runs_of(&cid_font_ps(
+        "",
+        "/CIDF /CIDFont findresource 12 scalefont setfont 72 600 moveto\n\
+         843 glyphshow\n\
+         currentfont /CIDFontType known not { nonexistent_font } if\n\
+         vmstatus pop exch pop /before exch def\n\
+         200 { 843 glyphshow } repeat\n\
+         vmstatus pop exch pop before sub 2000 gt { vm_grew } if",
+    ));
+    let glyphs: usize = runs.iter().map(|r| r.glyphs.len()).sum();
+    assert_eq!(glyphs, 201, "{runs:#?}");
+}

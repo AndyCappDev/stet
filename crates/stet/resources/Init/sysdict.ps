@@ -295,17 +295,17 @@ false setglobal
         stop
     } bind def
 
-    % cid .cidglyphshow - -- `glyphshow` of a CID, the current font a
-    % CIDFont (PLRM): the CID shown through Identity-H, or Identity-V when the
-    % font's WMode is 1. The glyphshow operator calls it for an integer.
-    /.cidglyphshow {
-        currentfont exch
-        2 string dup 0 3 index -8 bitshift 255 and put
-        dup 1 3 index 255 and put exch pop
-        1 index dup /WMode known { /WMode get } { pop 0 } ifelse
+    % cidfont .cidglyphshowfont font -- the Type 0 font `glyphshow` shows a
+    % CID through when the current font is a CIDFont (PLRM): the CIDFont
+    % composed with Identity-H, or Identity-V when its WMode is 1, in the
+    % CIDFont's VM. The glyphshow operator calls it once per CIDFont and
+    % keeps the font.
+    /.cidglyphshowfont {
+        currentglobal 1 index gcheck setglobal exch
+        dup dup /WMode known { /WMode get } { pop 0 } ifelse
         1 eq { /Identity-V } { /Identity-H } ifelse
-        /.CIDGlyphshowFont exch 3 index 1 array astore composefont
-        setfont show setfont
+        /.CIDGlyphshowFont exch 3 -1 roll 1 array astore composefont
+        exch setglobal
     } bind def
 
     %% TN: 5044 operators
@@ -618,8 +618,13 @@ true setglobal
         } exec {
             3 -1 roll pop true
         } {
-            (/) [ResourceDir () [5 index =string cvs ResourceExtension] =string join] =string join
-            status { 4 {pop} repeat pop 2 -1 true } { pop false } ifelse
+            % A key naming a folder is not looked for, as in .LoadResource.
+            dup =string cvs //.plainfilename exec {
+                (/) [ResourceDir () [5 index =string cvs ResourceExtension] =string join] =string join
+                status { 4 {pop} repeat pop 2 -1 true } { pop false } ifelse
+            } {
+                pop false
+            } ifelse
         } ifelse
     } bind
     /ResourceForAll {

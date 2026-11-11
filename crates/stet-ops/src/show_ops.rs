@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use stet_core::cmap::CmapTables;
 use stet_core::context::{CidGlyphMetrics, Context};
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
@@ -435,137 +436,16 @@ struct CmapCode {
     cid: i32,
 }
 
-/// A CMap's codespace and CID mappings, its `usecmap` parents' included,
-/// as byte strings.
-#[derive(Default)]
-struct CmapTables {
-    codespace: Vec<(Vec<u8>, Vec<u8>)>,
-    chars: Vec<(Vec<u8>, i32)>,
-    ranges: Vec<(Vec<u8>, Vec<u8>, i32)>,
-    notdef_chars: Vec<(Vec<u8>, i32)>,
-    notdef_ranges: Vec<(Vec<u8>, Vec<u8>, i32)>,
-}
-
-impl CmapTables {
-    /// Read a CMap dictionary, then the CMap it names with `usecmap`: its own
-    /// entries come first and so win over the parent's.
-    fn read(ctx: &Context, cmap_entity: EntityId) -> Self {
-        let mut tables = Self::default();
-        let mut entity = Some(cmap_entity);
-        // A usecmap chain is short; the cap stops a CMap that names itself.
-        for _ in 0..8 {
-            let Some(e) = entity else { break };
-            tables.add(ctx, e);
-            entity = ctx
-                .names
-                .find(b"UseCMap")
-                .and_then(|id| ctx.dicts.get(e, &DictKey::Name(id)))
-                .and_then(|obj| match obj.value {
-                    PsValue::Dict(parent) if parent != e => Some(parent),
-                    _ => None,
-                });
-        }
-        tables
+/// A CMap's tables, read the first time text is shown with it and kept on
+/// the context: reading them for every string made a large CMap cost
+/// seconds.
+fn cmap_tables(ctx: &mut Context, cmap: EntityId) -> Arc<CmapTables> {
+    if let Some(tables) = ctx.cmap_tables.get(&cmap) {
+        return Arc::clone(tables);
     }
-
-    fn add(&mut self, ctx: &Context, cmap: EntityId) {
-        let array = |key: &[u8]| -> Vec<PsObject> {
-            ctx.names
-                .find(key)
-                .and_then(|id| ctx.dicts.get(cmap, &DictKey::Name(id)))
-                .and_then(|obj| match obj.value {
-                    PsValue::Array { entity, start, len } => {
-                        Some(ctx.arrays.get(entity, start, len).to_vec())
-                    }
-                    _ => None,
-                })
-                .unwrap_or_default()
-        };
-        let bytes = |obj: &PsObject| match obj.value {
-            PsValue::String { entity, start, len } => {
-                Some(ctx.strings.get(entity, start, len).to_vec())
-            }
-            _ => None,
-        };
-        let pairs = |key: &[u8]| -> Vec<(Vec<u8>, i32)> {
-            array(key)
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .filter_map(|[src, dst]| Some((bytes(src)?, dst.as_i32()?)))
-                .collect()
-        };
-        let triples = |key: &[u8]| -> Vec<(Vec<u8>, Vec<u8>, i32)> {
-            array(key)
-                .as_chunks::<3>()
-                .0
-                .iter()
-                .filter_map(|[lo, hi, cid]| Some((bytes(lo)?, bytes(hi)?, cid.as_i32()?)))
-                .collect()
-        };
-        self.codespace.extend(
-            array(b"CodeSpaceRange")
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .filter_map(|[lo, hi]| Some((bytes(lo)?, bytes(hi)?))),
-        );
-        self.chars.extend(pairs(b"CIDCharMappings"));
-        self.ranges.extend(triples(b"CIDRangeMappings"));
-        self.notdef_chars.extend(pairs(b"NotDefCharMappings"));
-        self.notdef_ranges.extend(triples(b"NotDefRangeMappings"));
-    }
-
-    /// The length of the code at the start of `bytes`: the shortest that a
-    /// codespace range holds, byte by byte (Adobe TN 5014). None when no
-    /// range does.
-    fn code_len(&self, bytes: &[u8]) -> Option<usize> {
-        (1..=4.min(bytes.len())).find(|&n| {
-            let code = &bytes[..n];
-            self.codespace.iter().any(|(lo, hi)| {
-                lo.len() == n
-                    && hi.len() == n
-                    && code
-                        .iter()
-                        .zip(lo.iter().zip(hi))
-                        .all(|(&b, (&l, &h))| l <= b && b <= h)
-            })
-        })
-    }
-
-    /// The CID of `code`: a cidchar, then a cidrange, then a notdef mapping
-    /// of the same length. With no mapping of that length, the old reading
-    /// that compares numbers whatever the length; with no mappings at all,
-    /// the code itself.
-    fn cid(&self, code: &[u8]) -> i32 {
-        let value = |b: &[u8]| b.iter().fold(0i64, |a, &x| (a << 8) | x as i64);
-        let c = value(code);
-        let find = |same_len: bool| -> Option<i32> {
-            let fits = |b: &[u8]| !same_len || b.len() == code.len();
-            let range = |list: &[(Vec<u8>, Vec<u8>, i32)]| {
-                list.iter().find_map(|(lo, hi, base)| {
-                    (fits(lo) && fits(hi) && value(lo) <= c && c <= value(hi))
-                        .then(|| base + (c - value(lo)) as i32)
-                })
-            };
-            let exact = |list: &[(Vec<u8>, i32)]| {
-                list.iter()
-                    .find_map(|(src, cid)| (fits(src) && value(src) == c).then_some(*cid))
-            };
-            exact(&self.chars)
-                .or_else(|| range(&self.ranges))
-                .or_else(|| exact(&self.notdef_chars))
-                .or_else(|| range(&self.notdef_ranges))
-        };
-        if let Some(cid) = find(true).or_else(|| find(false)) {
-            return cid;
-        }
-        if self.chars.is_empty() && self.ranges.is_empty() {
-            c as i32
-        } else {
-            0
-        }
-    }
+    let tables = Arc::new(CmapTables::read(ctx, cmap));
+    ctx.cmap_tables.insert(cmap, Arc::clone(&tables));
+    tables
 }
 
 /// The CMap dictionary of a Type 0 font and the font number its `usefont`
@@ -591,22 +471,16 @@ fn font_cmap(ctx: &Context, font_entity: EntityId) -> Option<(EntityId, usize)> 
 /// one- and two-byte codes can mix; a byte sequence no range holds is one
 /// code as long as the shortest range, mapped to CID 0 (`.notdef`).
 fn decode_cmap_codes(
-    ctx: &Context,
+    ctx: &mut Context,
     font_entity: EntityId,
     bytes: &[u8],
 ) -> Option<(Vec<CmapCode>, usize)> {
     let (cmap_entity, font_num) = font_cmap(ctx, font_entity)?;
-    let tables = CmapTables::read(ctx, cmap_entity);
-    if tables.codespace.is_empty() {
+    let tables = cmap_tables(ctx, cmap_entity);
+    if tables.is_empty() {
         return None;
     }
-    let shortest = tables
-        .codespace
-        .iter()
-        .map(|(lo, _)| lo.len())
-        .min()
-        .unwrap_or(1)
-        .max(1);
+    let shortest = tables.shortest();
     let mut codes = Vec::new();
     let mut pos = 0;
     while pos < bytes.len() {
@@ -626,7 +500,7 @@ fn decode_cmap_codes(
 }
 
 /// Decode bytes through CMap and return (CID, font_index) pairs.
-fn decode_cmap_bytes(ctx: &Context, font_entity: EntityId, bytes: &[u8]) -> Vec<(i32, usize)> {
+fn decode_cmap_bytes(ctx: &mut Context, font_entity: EntityId, bytes: &[u8]) -> Vec<(i32, usize)> {
     if let Some((codes, font_num)) = decode_cmap_codes(ctx, font_entity, bytes) {
         return codes.into_iter().map(|c| (c.cid, font_num)).collect();
     }
@@ -660,7 +534,7 @@ fn decode_cmap_bytes(ctx: &Context, font_entity: EntityId, bytes: &[u8]) -> Vec<
 /// Get the character count for a string with the current font.
 /// For Type 0 composite fonts, characters may be multi-byte (via CMap or FMapType).
 /// For all other font types, character count equals byte count.
-fn get_char_count(ctx: &Context, bytes: &[u8]) -> usize {
+fn get_char_count(ctx: &mut Context, bytes: &[u8]) -> usize {
     let font_obj = match ctx.gstate.current_font {
         Some(f) => f,
         None => return bytes.len(),
@@ -902,6 +776,38 @@ pub fn op_setcharwidth(ctx: &mut Context) -> Result<(), PsError> {
     Ok(())
 }
 
+/// The Type 0 font `glyphshow` shows a CID of `cidfont` through: the CIDFont
+/// composed with Identity-H, or Identity-V for WMode 1, by
+/// `.cidglyphshowfont` (sysdict.ps). Composed the first time and kept on the
+/// context, so a CID table of thousands of `glyphshow`s composes one font.
+fn cid_glyphshow_font(ctx: &mut Context, cidfont: PsObject) -> Result<PsObject, PsError> {
+    let PsValue::Dict(cidfont_entity) = cidfont.value else {
+        return Err(PsError::InvalidFont);
+    };
+    if let Some(font) = ctx.cid_glyphshow_fonts.get(&cidfont_entity) {
+        return Ok(*font);
+    }
+    let proc = ctx
+        .dicts
+        .get(
+            ctx.systemdict,
+            &DictKey::Name(ctx.names.intern(b".cidglyphshowfont")),
+        )
+        .ok_or(PsError::InvalidFont)?;
+    let depth = ctx.o_stack.len();
+    ctx.o_stack.push(cidfont)?;
+    ctx.exec_sync(proc)?;
+    if ctx.o_stack.len() != depth + 1 {
+        return Err(PsError::InvalidFont);
+    }
+    let font = ctx.o_stack.pop()?;
+    if !matches!(font.value, PsValue::Dict(_)) {
+        return Err(PsError::InvalidFont);
+    }
+    ctx.cid_glyphshow_fonts.insert(cidfont_entity, font);
+    Ok(font)
+}
+
 /// `glyphshow`: name → —
 ///
 /// Render a single glyph identified by name at the current point,
@@ -915,9 +821,9 @@ pub fn op_glyphshow(ctx: &mut Context) -> Result<(), PsError> {
     let glyph_name_id = match name_obj.value {
         PsValue::Name(id) => id,
         // PLRM (`glyphshow`): with a CIDFont as the current font the operand
-        // is a CID. `.cidglyphshow` (sysdict.ps) shows it through an
-        // Identity CMap.
-        PsValue::Int(_) => {
+        // is a CID. It is shown as a Type 0 font's CIDs are, through the
+        // CIDFont composed with an Identity CMap once.
+        PsValue::Int(cid) => {
             let font = ctx.gstate.current_font.ok_or(PsError::InvalidFont)?;
             let is_cidfont = match font.value {
                 PsValue::Dict(e) => ctx
@@ -932,14 +838,15 @@ pub fn op_glyphshow(ctx: &mut Context) -> Result<(), PsError> {
             if ctx.gstate.current_point.is_none() {
                 return Err(PsError::NoCurrentPoint);
             }
-            let proc = ctx
-                .dicts
-                .get(
-                    ctx.systemdict,
-                    &DictKey::Name(ctx.names.intern(b".cidglyphshow")),
-                )
-                .ok_or(PsError::TypeCheck)?;
-            return ctx.exec_sync(proc);
+            let code = u16::try_from(cid).map_err(|_| PsError::RangeCheck)?;
+            let wrapper = cid_glyphshow_font(ctx, font)?;
+            ctx.o_stack.pop()?;
+            let saved = ctx.gstate.current_font.replace(wrapper);
+            let result = recorded_show(ctx, |ctx| {
+                render_show(ctx, &code.to_be_bytes(), 0.0, 0.0, -1, 0.0, 0.0)
+            });
+            ctx.gstate.current_font = saved;
+            return result;
         }
         _ => return Err(PsError::TypeCheck),
     };
@@ -2611,7 +2518,7 @@ struct CidRecording {
 
 /// The character codes in `bytes` for a CMap-keyed Type 0 font, one for
 /// each CID [`decode_cmap_bytes`] decodes from them.
-fn cmap_codes(ctx: &Context, font_entity: EntityId, bytes: &[u8]) -> Vec<u32> {
+fn cmap_codes(ctx: &mut Context, font_entity: EntityId, bytes: &[u8]) -> Vec<u32> {
     match decode_cmap_codes(ctx, font_entity, bytes) {
         Some((codes, _)) => codes
             .iter()

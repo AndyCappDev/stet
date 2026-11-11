@@ -43,6 +43,7 @@ pub use stet_graphics::mesh_shading;
 // ── Modules that remain in stet-core ────────────────────────────────────────
 pub mod array_store;
 pub mod binary_token;
+pub mod cmap;
 pub mod context;
 pub mod device;
 pub mod dict;

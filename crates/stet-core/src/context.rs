@@ -355,6 +355,12 @@ pub struct Context {
 
     // Glyph path cache: per-font charstring interpretation results
     pub glyph_caches: rustc_hash::FxHashMap<EntityId, crate::glyph_cache::GlyphCache>,
+    /// Each CMap's codespace and CID mappings, by CMap dictionary, read the
+    /// first time text is shown with it (see [`crate::cmap`]).
+    pub cmap_tables: rustc_hash::FxHashMap<EntityId, std::sync::Arc<crate::cmap::CmapTables>>,
+    /// The Type 0 font `glyphshow` shows a CID through, by CIDFont: the
+    /// CIDFont composed with Identity-H (Identity-V for WMode 1), once.
+    pub cid_glyphshow_fonts: rustc_hash::FxHashMap<EntityId, PsObject>,
     /// The metrics show operators gave CIDFont glyphs through the font's
     /// `Metrics2` or `CDevProc` (PLRM 5.9.2), by CIDFont and CID. An output
     /// device that writes the font rather than its outlines — PDF output —
@@ -1416,6 +1422,8 @@ impl Context {
             char_bbox: None,
             char_width_mode1: None,
             glyph_caches: rustc_hash::FxHashMap::default(),
+            cmap_tables: rustc_hash::FxHashMap::default(),
+            cid_glyphshow_fonts: rustc_hash::FxHashMap::default(),
             cid_glyph_metrics: rustc_hash::FxHashMap::default(),
             font_snapshots: crate::font_snapshot::FontSnapshots::default(),
             char_cache_mode: None,
@@ -1855,6 +1863,10 @@ impl Context {
         let dict_mark = marks.dict_entities;
         let live_dict = |e: &EntityId| e.is_global() || e.raw_index() < dict_mark;
         self.glyph_caches.retain(|entity, _| live_dict(entity));
+        self.cmap_tables.retain(|entity, _| live_dict(entity));
+        self.cid_glyphshow_fonts.retain(|cidfont, font| {
+            live_dict(cidfont) && matches!(font.value, PsValue::Dict(e) if live_dict(&e))
+        });
         self.form_cache.retain(|entity, _| live_dict(entity));
         self.cid_glyph_metrics
             .retain(|(cidfont, _), _| live_dict(cidfont));
