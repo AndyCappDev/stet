@@ -1743,7 +1743,6 @@ impl FileStore {
     /// instead of its samples: the filter is left at its end, as reading every
     /// sample would leave it. `None`, with nothing read, when `entity` is not
     /// such a filter.
-    #[allow(clippy::type_complexity)]
     pub fn take_dct_data(
         &mut self,
         entity: EntityId,

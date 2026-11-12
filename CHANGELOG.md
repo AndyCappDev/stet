@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without `..` needs the field. The variant is interpreter state that
   `stet-ops` builds, so this is accepted in a patch release. Contributed
   by @nielsbosma (#32).
+- **`stet_graphics::device::ImageParams` has a new public field, `jpeg`**,
+  an image's JPEG data when the interpreter keeps it (see Added). Code
+  that builds `ImageParams` with a full struct literal needs the field
+  (`jpeg: None`), or `..Default::default()`. Accepted in a patch release,
+  as the param structs gain fields additively. Contributed by
+  @nielsbosma (#42).
 
 ### Added
 
@@ -41,6 +47,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   -dALLOWPSTRANSPARENCY` does instead of stopping at
   `.pushpdf14devicefilter`. `begintransparencygroup` is unchanged.
   Contributed by @nielsbosma (#32).
+- **`InterpreterBuilder::keep_jpeg_data()` keeps JPEG images in display
+  lists as their JPEG data**, not their samples, for a consumer that
+  writes images out as they are, such as an SVG writer. A page of
+  photographs then never holds them decoded: an EPS of 3,320 photographs
+  that ran out of memory decoded (3.5 GB of samples) peaks at 522 MB. It
+  applies only where every JPEG reader shows the data as stet decodes it;
+  anything else is decoded as before. `render()`, `render_to_pdf()` and
+  `image_samples_to_rgba` decode kept images, and
+  `DisplayList::decode_kept_jpeg()` decodes a whole list. Off by default.
+  Contributed by @nielsbosma (#42).
 
 ### Fixed
 
