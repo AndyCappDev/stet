@@ -488,6 +488,7 @@ fn handle_function_based(
     display_list.push(DisplayElement::Image {
         sample_data: std::sync::Arc::new(rgba),
         params: ImageParams {
+            jpeg: None,
             width,
             height,
             color_space: ImageColorSpace::PreconvertedRGBA,

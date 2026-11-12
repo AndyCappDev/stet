@@ -789,8 +789,14 @@ impl<'tracker> Builder<'tracker> {
                 sample_data,
                 params,
             } => {
+                // An image kept as JPEG data has no samples: decode it. One
+                // that doesn't decode to its size is left out, as the `image`
+                // operator would have stopped on it.
+                let Some(sample_data) = params.samples(sample_data) else {
+                    return;
+                };
                 let img_idx = self.images.len();
-                let xobj = image_ops::convert_image(sample_data, params);
+                let xobj = image_ops::convert_image(&sample_data, params);
                 let m = compute_image_matrix(params);
                 let pre_q_gs = self.gs.clone();
                 self.buf.extend(b"q ");

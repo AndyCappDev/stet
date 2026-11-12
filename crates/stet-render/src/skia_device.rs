@@ -3724,13 +3724,18 @@ fn register_shading_icc_profiles(list: &DisplayList, cache: &mut IccCache) {
 /// names cleared. For a consumer that takes images out of a display list.
 ///
 /// No transfer function is applied, and overprint is not simulated: a CMYK
-/// sample that paints nothing under OPM 1 still comes out opaque.
+/// sample that paints nothing under OPM 1 still comes out opaque. An image
+/// kept as JPEG data ([`ImageParams::jpeg`]) is decoded; one that doesn't
+/// decode to its size gives no pixels.
 pub fn image_samples_to_rgba(
     sample_data: &[u8],
     params: &ImageParams,
     icc: Option<&IccCache>,
 ) -> Vec<u8> {
-    image_to_rgba(sample_data, params, icc, false, None)
+    match params.samples(sample_data) {
+        Some(samples) => image_to_rgba(&samples, params, icc, false, None),
+        None => Vec::new(),
+    }
 }
 
 /// An image's samples as premultiplied RGBA: [`samples_to_rgba`], then the
@@ -5435,10 +5440,25 @@ fn render_element(
             if iw == 0 || ih == 0 {
                 return;
             }
-
             let needs_overprint = params.overprint
                 && band_state.cmyk_buffer.is_some()
                 && image_supports_overprint(&params.color_space);
+
+            // An image kept as JPEG data has no samples until it is decoded,
+            // which only the branches below that read them need: not a cached
+            // image with no CMYK buffer to update, drawn once per band.
+            let needs_samples = needs_overprint
+                || band_state.cmyk_buffer.is_some()
+                || cached_image(ctx.preprocessed, ctx.elem_idx).is_none();
+            let samples = if needs_samples {
+                let Some(samples) = params.samples(sample_data) else {
+                    return;
+                };
+                samples
+            } else {
+                std::borrow::Cow::Borrowed(&sample_data[..])
+            };
+            let sample_data: &[u8] = &samples;
 
             if needs_overprint {
                 let mut cmyk_buf = band_state.cmyk_buffer.take().unwrap();
@@ -8968,9 +8988,12 @@ fn paint_pattern_fill(
             {
                 let iw = ip.width;
                 let ih = ip.height;
-                if iw > 0 && ih > 0 {
+                if iw > 0
+                    && ih > 0
+                    && let Some(samples) = ip.samples(sample_data)
+                {
                     let rgba = image_to_rgba(
-                        sample_data,
+                        &samples,
                         ip,
                         ctx.icc,
                         ctx.opm_zero_transparent,
@@ -9725,6 +9748,10 @@ impl OutputDevice for SkiaDevice {
         if w == 0 || h == 0 {
             return;
         }
+        let Some(samples) = params.samples(sample_data) else {
+            return;
+        };
+        let sample_data: &[u8] = &samples;
         let rgba_data = image_to_rgba(
             sample_data,
             params,
@@ -13555,7 +13582,9 @@ fn build_cache_entry<T: Send>(
         DisplayElement::Image {
             sample_data,
             params,
-        } => image(sample_data, params, transfer_suppressed)
+        } => params
+            .samples(sample_data)
+            .and_then(|samples| image(&samples, params, transfer_suppressed))
             .map_or(CacheEntry::Empty, CacheEntry::Image),
         DisplayElement::OcgGroup {
             elements,

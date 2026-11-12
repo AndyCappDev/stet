@@ -226,8 +226,56 @@ fn image_dict_form(ctx: &mut Context) -> Result<(), PsError> {
 
     ctx.o_stack.pop()?; // dict
 
+    // A JPEG image kept as its JPEG data, for a display list whose consumer
+    // writes JPEG out as it is (`Context::keep_jpeg`). Its samples are never
+    // decoded; a JPEG that a reader might show otherwise is decoded here, as
+    // the filter would have.
+    let mut from_jpeg = None;
+    if ctx.keep_jpeg
+        && image_type == 1
+        && !multi
+        && bps == 8
+        && is_identity_decode(&decode, ncomp)
+        && matches!(
+            ctx.gstate.color_space,
+            ColorSpace::DeviceGray | ColorSpace::DeviceRGB
+        )
+        && let PsValue::File(entity) = data_source.value
+    {
+        ctx.pump_proc_sources(entity)?;
+        if let Some(read) = ctx.files.take_dct_data(entity) {
+            let (mut jpeg, color_transform) = read.map_err(|_| PsError::IOError)?;
+            // As the filter does: a JPEG in PostScript often comes without
+            // its end-of-image marker.
+            if !jpeg.ends_with(&[0xFF, 0xD9]) {
+                jpeg.extend_from_slice(&[0xFF, 0xD9]);
+            }
+            if color_transform.is_none()
+                && stet_graphics::jpeg::plain(&jpeg, width, height, ncomp as u8)
+            {
+                let color_space = if ncomp == 1 {
+                    ImageColorSpace::DeviceGray
+                } else {
+                    ImageColorSpace::DeviceRGB
+                };
+                let mut params = image_params(ctx, width, height, color_space, &image_matrix, None);
+                params.jpeg = Some(Arc::new(jpeg));
+                ctx.current_display_list_mut().push(DisplayElement::Image {
+                    sample_data: Arc::new(Vec::new()),
+                    params,
+                });
+                return Ok(());
+            }
+            let mut samples = stet_graphics::jpeg::decode(&jpeg).map_err(|_| PsError::IOError)?;
+            samples.truncate(total_bytes);
+            from_jpeg = Some(samples);
+        }
+    }
+
     // Read data from source(s)
-    let data = if multi {
+    let data = if let Some(samples) = from_jpeg {
+        samples
+    } else if multi {
         // MultipleDataSources: DataSource is an array of ncomp data sources.
         // Read each component separately (round-robin for procedures), then interleave.
         read_multi_source_data(ctx, data_source, ncomp, width, height, bps)?
@@ -995,6 +1043,7 @@ fn draw_image_mask(
     mask.push(DisplayElement::Image {
         sample_data: std::sync::Arc::new(gray),
         params: ImageParams {
+            jpeg: None,
             width,
             height,
             color_space: ImageColorSpace::DeviceGray,
@@ -1998,7 +2047,24 @@ fn draw_image_to_device(
     image_matrix: &Matrix,
     mask_color: Option<Vec<u8>>,
 ) {
-    let params = ImageParams {
+    let params = image_params(ctx, width, height, color_space, image_matrix, mask_color);
+    ctx.current_display_list_mut().push(DisplayElement::Image {
+        sample_data: std::sync::Arc::new(sample_data),
+        params,
+    });
+}
+
+/// The parameters of an image painted now, with the graphics state's.
+fn image_params(
+    ctx: &mut Context,
+    width: u32,
+    height: u32,
+    color_space: ImageColorSpace,
+    image_matrix: &Matrix,
+    mask_color: Option<Vec<u8>>,
+) -> ImageParams {
+    ImageParams {
+        jpeg: None,
         width,
         height,
         color_space,
@@ -2016,11 +2082,7 @@ fn draw_image_to_device(
         alpha_is_shape: ctx.gstate.alpha_is_shape,
         rendering_intent: ctx.gstate.rendering_intent,
         transfer: crate::paint_ops::capture_transfer_state(ctx),
-    };
-    ctx.current_display_list_mut().push(DisplayElement::Image {
-        sample_data: std::sync::Arc::new(sample_data),
-        params,
-    });
+    }
 }
 
 /// Capture the current color space as a VM-free `ImageColorSpace`.

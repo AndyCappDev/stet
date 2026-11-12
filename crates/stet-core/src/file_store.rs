@@ -1737,6 +1737,51 @@ impl FileStore {
         Ok(data)
     }
 
+    /// The JPEG data under a `DCTDecode` filter nothing has read from yet,
+    /// read whole from the filter's source, with the filter's
+    /// `ColorTransform`. For a consumer that keeps a JPEG image as it is
+    /// instead of its samples: the filter is left at its end, as reading every
+    /// sample would leave it. `None`, with nothing read, when `entity` is not
+    /// such a filter.
+    #[allow(clippy::type_complexity)]
+    pub fn take_dct_data(
+        &mut self,
+        entity: EntityId,
+    ) -> Option<io::Result<(Vec<u8>, Option<bool>)>> {
+        let (source, color_transform) = match self.files.get(entity.raw_index()).map(|e| &e.handle)
+        {
+            Some(FileHandle::Filter(state))
+                if state.bytes_read == 0
+                    && state.output_buf.is_empty()
+                    && state.putback.is_empty() =>
+            {
+                match state.kind {
+                    FilterKind::DCTDecode {
+                        decoded: false,
+                        color_transform,
+                    } => (state.source, color_transform),
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        let data = match self.read_jpeg(source) {
+            Ok(d) => d,
+            Err(e) => return Some(Err(e)),
+        };
+        if let Some(FileHandle::Filter(state)) = self
+            .files
+            .get_mut(entity.raw_index())
+            .map(|e| &mut e.handle)
+        {
+            if let FilterKind::DCTDecode { decoded, .. } = &mut state.kind {
+                *decoded = true;
+            }
+            state.eof = true;
+        }
+        Some(Ok((data, color_transform)))
+    }
+
     /// Read all remaining bytes from a source.
     pub fn read_all(&mut self, entity: EntityId) -> io::Result<Vec<u8>> {
         let mut data = Vec::new();
