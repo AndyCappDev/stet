@@ -12,15 +12,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Path to the `stet` binary built alongside this test.
+/// Path to the `stet` binary built alongside this test, as Cargo reports it.
+/// Not derived from the test's own path: Cargo does not promise where test
+/// executables live, and Rust 1.100 moved them out of `target/<profile>/deps`.
 fn stet_bin() -> PathBuf {
-    // target/<profile>/deps/<test> → target/<profile>/stet
-    let mut p = std::env::current_exe().expect("test exe path");
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    p.join(if cfg!(windows) { "stet.exe" } else { "stet" })
+    PathBuf::from(env!("CARGO_BIN_EXE_stet"))
 }
 
 /// A scratch directory that cleans itself up.
