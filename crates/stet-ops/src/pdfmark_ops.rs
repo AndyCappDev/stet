@@ -54,7 +54,12 @@ use stet_graphics::document_structure::{
 /// Behaviour by error class:
 ///
 /// - **No mark on stack** → `unmatchedmark`.
-/// - **Type-tag missing or not a name** → `typecheck`.
+/// - **Nothing above the mark** → `stackunderflow`, as in Ghostscript.
+/// - **Type-tag not a name** → `typecheck`.
+/// - **Not a PDF job** (the operator is not in `systemdict`; an unguarded
+///   call reaches it through the evaluator's stand-in for an undefined
+///   `pdfmark`) → the operands are checked as above, then consumed to the
+///   mark, as on a Ghostscript device that ignores pdfmarks.
 /// - **Unknown type-tag** → silent no-op (Adobe convention so PS code
 ///   that targets newer PDF features stays runnable on older
 ///   interpreters; AI's `/PUT`, `/OBJ`, `/StRoleMap`, etc. land here
@@ -72,12 +77,16 @@ pub fn op_pdfmark(ctx: &mut Context) -> Result<(), PsError> {
         .rposition(|o| matches!(o.value, PsValue::Mark))
         .ok_or(PsError::UnmatchedMark)?;
     if slice.len() == mark_pos + 1 {
-        return Err(PsError::TypeCheck);
+        return Err(PsError::StackUnderflow);
     }
     let tag_name = match slice[slice.len() - 1].value {
         PsValue::Name(n) => n,
         _ => return Err(PsError::TypeCheck),
     };
+    if !pdf_authoring(ctx) {
+        ctx.o_stack.truncate(mark_pos);
+        return Ok(());
+    }
 
     // Snapshot the payload before popping so handler helpers can read
     // strings / dicts via &Context without conflicting borrows.
@@ -1047,6 +1056,16 @@ fn parse_metadata(ctx: &Context, payload: &[PsObject]) -> Option<MetadataRecord>
     None
 }
 
+/// Whether `pdfmark` is in `systemdict`, as [`crate::register_pdf_authoring_ops`] puts it for a
+/// PDF job.
+fn pdf_authoring(ctx: &Context) -> bool {
+    ctx.names.find(b"pdfmark").is_some_and(|name| {
+        ctx.dicts
+            .get(ctx.systemdict, &DictKey::Name(name))
+            .is_some()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1108,7 +1127,7 @@ mod tests {
     fn missing_typetag_errors() {
         let mut ctx = make_ctx();
         ctx.o_stack.push(PsObject::mark()).unwrap();
-        assert!(matches!(op_pdfmark(&mut ctx), Err(PsError::TypeCheck)));
+        assert!(matches!(op_pdfmark(&mut ctx), Err(PsError::StackUnderflow)));
     }
 
     #[test]

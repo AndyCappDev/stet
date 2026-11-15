@@ -288,7 +288,9 @@ exist for either format and they're rare in the wild.
 
 Loaded automatically from `resources/Init/pdfextensions.ps` after
 font initialisation. Code written against GhostScript's leading-dot
-convention works unchanged.
+convention works unchanged — Ghostscript's own
+`examples/transparency_example.ps` renders as it does under
+`gs -dALLOWPSTRANSPARENCY`.
 
 | GS alias | stet operator |
 |----------|---------------|
@@ -303,8 +305,10 @@ convention works unchanged.
 | `.currentalphaisshape` | `currentalphaisshape` |
 | `.settextknockout` | `settextknockout` |
 | `.currenttextknockout` | `currenttextknockout` |
-| `.begintransparencygroup` | `begintransparencygroup` |
+| `.begintransparencygroup` | an operator of its own: `dict llx lly urx ury → —` or `dict → —` (see below) |
 | `.endtransparencygroup` | `endtransparencygroup` |
+| `.pushpdf14devicefilter` | `pop` — stet composites transparency itself |
+| `.poppdf14devicefilter` | nothing |
 | `.beginsoftmask` | `beginsoftmask` |
 | `.endsoftmask` | `endsoftmask` |
 | `.clearsoftmask` | `clearsoftmask` |
@@ -313,6 +317,17 @@ convention works unchanged.
 | `.defineocg` | `defineocg` |
 | `.beginoptionalcontent` | `beginoptionalcontent` |
 | `.endoptionalcontent` | `endoptionalcontent` |
+
+`.begintransparencygroup` differs from `begintransparencygroup` in two
+ways, both Ghostscript's:
+
+- It takes the group's box as four numbers after the dict, in user
+  space; the dict's `/BBox` is used only in the one-operand form.
+- The group is composited with the fill opacity and blend mode current
+  when it **begins**, so a program can set `.5 .setfillconstantalpha`
+  inside the group for the objects in it. `begintransparencygroup` reads
+  them when the group ends, as PDF's `q … Q` around `Do` needs.
+  Either end operator closes either kind of group.
 
 ---
 

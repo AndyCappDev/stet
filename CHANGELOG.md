@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **`stet_core::context::GroupKind::Transparency` has a new field,
+  `composite_at_begin`**: set for a group opened with Ghostscript's
+  `.begintransparencygroup`, whose opacity and blend mode are recorded
+  when it begins (see Added). Code that builds the variant or matches it
+  without `..` needs the field. The variant is interpreter state that
+  `stet-ops` builds, so this is accepted in a patch release. Contributed
+  by @nielsbosma (#32).
+- **`stet_graphics::device::ImageParams` has a new public field, `jpeg`**,
+  an image's JPEG data when the interpreter keeps it (see Added). Code
+  that builds `ImageParams` with a full struct literal needs the field
+  (`jpeg: None`), or `..Default::default()`. Accepted in a patch release,
+  as the param structs gain fields additively. Contributed by
+  @nielsbosma (#42).
+
+### Added
+
+- **The largest page a PostScript or EPS file may declare can be
+  raised.** Pages are clamped to 14400 pt (200 inches) a side, which cut
+  off real large-format artwork: an Illustrator EPS of a 204-inch banner
+  lost its last 4 inches. `InterpreterBuilder::max_page_size(points)`,
+  `Context::max_page_size_points` and the CLI's `--max-page-size <PT>`
+  set the limit; `f64::INFINITY` (`inf` on the command line) removes it.
+  The default is unchanged. Contributed by @nielsbosma (#36).
+- **`InterpreterBuilder::default_page_size(width, height)` sets the page a
+  PostScript job starts on** when the program asks for none; the default
+  stays Letter. It is a default rather than an override, unlike the CLI's
+  `--page`: a program's own `setpagedevice` still changes the page, and an
+  EPS file still gets its bounding box. `render_to_display_list`, `render`
+  and `render_to_pdf` all use it. Contributed by @nielsbosma (#44).
+- **Ghostscript's transparency-group form, `dict llx lly urx ury
+  .begintransparencygroup`,** and its `.pushpdf14devicefilter` /
+  `.poppdf14devicefilter` brackets, which do nothing in stet. A group
+  opened with `.begintransparencygroup` is composited with the opacity
+  and blend mode current when it began, as in Ghostscript, so its
+  `examples/transparency_example.ps` now renders as `gs
+  -dALLOWPSTRANSPARENCY` does instead of stopping at
+  `.pushpdf14devicefilter`. `begintransparencygroup` is unchanged.
+  Contributed by @nielsbosma (#32).
+- **`InterpreterBuilder::keep_jpeg_data()` keeps JPEG images in display
+  lists as their JPEG data**, not their samples, for a consumer that
+  writes images out as they are, such as an SVG writer. A page of
+  photographs then never holds them decoded: an EPS of 3,320 photographs
+  that ran out of memory decoded (3.5 GB of samples) peaks at 522 MB. It
+  applies only where every JPEG reader shows the data as stet decodes it;
+  anything else is decoded as before. `render()`, `render_to_pdf()` and
+  `image_samples_to_rgba` decode kept images, and
+  `DisplayList::decode_kept_jpeg()` decodes a whole list. Off by default.
+  Contributed by @nielsbosma (#42).
+
+### Fixed
+
+- **Type 0 fonts with the escape, 1/7, 9/7, double-escape and shift
+  mappings (`FMapType` 3, 4, 5, 7 and 8) choose their fonts as the PLRM
+  says.** The font number now selects a font through the font's
+  `Encoding`, an escape or shift byte switches fonts for the rest of the
+  string, and those bytes are not drawn as characters. `show` and
+  `xyshow` match Ghostscript for every mapping. `cshow` gives its
+  procedure the decoded character code, one per character, rather than
+  one entry per byte. Contributed by @nielsbosma (#29).
+- **A page built without the `render` feature reports its own size.**
+  `render_to_display_list` in a `default-features = false` build gave
+  every page Letter's dimensions, whatever an EPS bounding box or a
+  program's `setpagedevice` had made it. Contributed by @nielsbosma (#44).
+- **A `pdfmark` called without a test for it no longer stops the job when
+  the output is not PDF.** Rendering to PNG, the viewer or WASM leaves
+  `pdfmark` undefined, so prologues that test `/pdfmark where` take their
+  printer branch. A file that calls it without a test, as files written
+  for Distiller or Ghostscript do, used to stop with `undefined`. The call
+  now pops its operands down to the mark and records nothing, as
+  Ghostscript does on a device that ignores pdfmarks. `where` and `known`
+  still report `pdfmark` as undefined. Contributed by @nielsbosma (#27).
+- **`[ pdfmark`, with no type tag, raises `stackunderflow`** as in
+  Ghostscript, not `typecheck`; this applies to PDF output too. Errors
+  from an unguarded call are reported as `pdfmark`. Contributed by
+  @nielsbosma (#27).
+
 ## [0.10.0] — 2026-11-09
 
 ### Breaking

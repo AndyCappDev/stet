@@ -53,7 +53,8 @@ type-tag (inclusive); pushes nothing.
 | Error class | Behaviour |
 |---|---|
 | No `[` mark on stack | `unmatchedmark` |
-| Type-tag missing or not a name | `typecheck` |
+| Nothing above the mark (`[ pdfmark`) | `stackunderflow` |
+| Type-tag not a name | `typecheck` |
 | Unknown type-tag | Silent no-op (Adobe convention so PS code that targets newer PDF features stays runnable on older interpreters) |
 | Malformed payload inside a known type-tag | Handler-specific. Most handlers ignore unrecognised entries silently; required-key failures emit a diagnostic to stderr and skip the record |
 
@@ -598,6 +599,16 @@ So:
 |---|---|
 | `--device pdf` | `true` (and `currentdistillerparams` returns the version dict above) |
 | `--device png`, viewer, WASM | `false` (`pdfmark`, `currentdistillerparams`, `setdistillerparams` are all undefined) |
+
+Outside a PDF job, a `pdfmark` called without a `/pdfmark where` or
+`known` test still runs: when the name is looked up and found nowhere,
+the evaluator runs the `pdfmark` operator anyway. It checks its operands
+as above, reporting errors as `pdfmark`, and then pops everything down to
+the mark and records nothing, as Ghostscript does on a device that
+ignores pdfmarks. Files written for Distiller or Ghostscript call it
+unguarded, and used to stop with `undefined`. `where`, `known` and `load`
+are unaffected: to them `pdfmark` is still undefined, so a prologue's
+printer branch is still the one taken.
 
 Internally this is the `register_pdf_authoring_ops` function in
 `stet-ops`. The PDF rendering paths in `stet::Interpreter::render_to_pdf`

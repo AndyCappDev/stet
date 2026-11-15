@@ -2306,6 +2306,7 @@ mod tests {
         let image = |x: f64, width: f64| DisplayElement::Image {
             sample_data: std::sync::Arc::new(vec![0; 3]),
             params: stet_graphics::device::ImageParams {
+                jpeg: None,
                 width: 1,
                 height: 1,
                 color_space: ImageColorSpace::DeviceRGB,

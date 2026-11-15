@@ -7,7 +7,7 @@
 use stet_core::context::Context;
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
-use stet_core::object::{EntityId, ObjFlags, PsObject, PsValue};
+use stet_core::object::{EntityId, NameId, ObjFlags, OpCode, PsObject, PsValue};
 use stet_core::tokenizer::{Token, Tokenizer, stream_next_token};
 
 /// Main eval loop: pop objects from the execution stack and execute them.
@@ -201,6 +201,22 @@ fn unwind_to_loop_bounded(ctx: &mut Context, min_depth: usize) -> Result<(), PsE
     Err(PsError::InvalidExit)
 }
 
+/// What an undefined executable name runs instead of raising `undefined`, if anything.
+///
+/// `pdfmark` is left out of `systemdict` without the PDF device, so that prologs testing
+/// `/pdfmark where` take their printer branch, but files written for Distiller or Ghostscript
+/// (which define it) also call it unguarded. Such a call runs the `pdfmark` operator itself, which
+/// is in the operator table from the start: it checks its operands as Ghostscript does, reports
+/// errors as `pdfmark`, and outside a PDF job consumes its operands to the mark, as on a device
+/// that ignores pdfmarks.
+fn undefined_stand_in(ctx: &Context, name_id: NameId) -> Option<PsObject> {
+    if ctx.names.get_bytes(name_id) != b"pdfmark" {
+        return None;
+    }
+    let index = ctx.operators.iter().position(|op| op.name == name_id)?;
+    Some(PsObject::operator(OpCode(u16::try_from(index).ok()?)))
+}
+
 /// Process a single object from the execution stack.
 ///
 /// Returns errors that the caller routes through `dispatch_error`.
@@ -237,6 +253,10 @@ fn eval_one(ctx: &mut Context, obj: PsObject) -> Result<(), PsError> {
                     }
                 }
                 None => {
+                    if let Some(val) = undefined_stand_in(ctx, name_id) {
+                        ctx.e_stack.push(val)?;
+                        return Ok(());
+                    }
                     ctx.current_operator = Some(name_id);
                     return Err(PsError::Undefined);
                 }
@@ -386,7 +406,10 @@ fn eval_one(ctx: &mut Context, obj: PsObject) -> Result<(), PsError> {
                             if ver == ctx.dict_version {
                                 cached
                             } else {
-                                match ctx.dict_load(&DictKey::Name(name_id)) {
+                                match ctx
+                                    .dict_load(&DictKey::Name(name_id))
+                                    .or_else(|| undefined_stand_in(ctx, name_id))
+                                {
                                     Some(v) => v,
                                     None => {
                                         ctx.current_operator = Some(name_id);
@@ -406,7 +429,10 @@ fn eval_one(ctx: &mut Context, obj: PsObject) -> Result<(), PsError> {
                                 }
                             }
                         } else {
-                            match ctx.dict_load(&DictKey::Name(name_id)) {
+                            match ctx
+                                .dict_load(&DictKey::Name(name_id))
+                                .or_else(|| undefined_stand_in(ctx, name_id))
+                            {
                                 Some(v) => v,
                                 None => {
                                     ctx.current_operator = Some(name_id);

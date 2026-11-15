@@ -469,6 +469,24 @@ pub struct Context {
     /// are where a large prepress job actually spends memory.
     pub max_local_vm: usize,
 
+    /// Largest page side a file may declare, in points; a larger `PageSize`
+    /// is clamped to it.
+    ///
+    /// The default, 14400 pt (200 inches), is the largest `/MediaBox` extent
+    /// in Adobe's PDF 1.7 implementation limits. A host that does not
+    /// rasterise pages at the file's size, or that bounds memory by other
+    /// means, may raise it: Illustrator artboards reach 16383 pt (227 inches)
+    /// and its large canvas ten times that, and their EPS files declare that
+    /// bounding box. The points come from the file; the render resolution is
+    /// the caller's and is not capped (see `stet_ops::device_ops`).
+    /// `f64::INFINITY` lifts the limit; a value that is not greater than zero
+    /// (NaN included) counts as [`DEFAULT_MAX_PAGE_SIZE_POINTS`].
+    pub max_page_size_points: f64,
+    /// Whether `image` keeps a JPEG image as its JPEG data instead of its
+    /// samples, for a display-list consumer that writes JPEG out as it is
+    /// (see `ImageParams::jpeg`). Off by default.
+    pub keep_jpeg: bool,
+
     /// The program's own `MaxLocalVM`, from `setuserparams`; `None` until it
     /// sets one. Kept apart from [`Self::max_local_vm`] rather than written
     /// over it, so the host's ceiling survives whatever the program asks for
@@ -632,7 +650,16 @@ pub enum GroupKind {
     /// Opened by `begintransparencygroup`. On close, the captured
     /// `display_list` becomes the children of a
     /// `DisplayElement::Group` with these `params`.
-    Transparency { params: GroupParams },
+    ///
+    /// `composite_at_begin` is set by Ghostscript's
+    /// `.begintransparencygroup`, which composites the group with the fill
+    /// opacity and blend mode current when it began: they are in `params`
+    /// from the start and stay. Otherwise they are read from the gstate when
+    /// the group ends, as PDF's `q … Q` around `Do` needs.
+    Transparency {
+        params: GroupParams,
+        composite_at_begin: bool,
+    },
     /// Opened by `beginsoftmask`. While active, paint ops emit into the
     /// frame's `display_list` to build the mask form. `endsoftmask`
     /// transmutes the frame to [`Self::Masked`] without popping.
@@ -741,6 +768,10 @@ const DEFAULT_MAX_LOCAL_VM: usize = {
         usize::MAX / 4
     }
 };
+
+/// Default for [`Context::max_page_size_points`]: 200 inches, the largest
+/// `/MediaBox` extent in Adobe's PDF 1.7 implementation limits (Table C.1).
+pub const DEFAULT_MAX_PAGE_SIZE_POINTS: f64 = 14_400.0;
 
 impl Context {
     /// Permit a program `access` to `path` (a folder and what is inside it,
@@ -1442,6 +1473,8 @@ impl Context {
             interrupt_flag: None,
             exec_sync_depth: 0,
             max_local_vm: DEFAULT_MAX_LOCAL_VM,
+            max_page_size_points: DEFAULT_MAX_PAGE_SIZE_POINTS,
+            keep_jpeg: false,
             program_max_vm: None,
             deadline: None,
             steps_to_deadline_check: DEADLINE_CHECK_INTERVAL,

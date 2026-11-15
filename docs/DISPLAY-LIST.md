@@ -97,6 +97,26 @@ share the sample buffer without copying.
 | `alpha_is_shape` | `bool` | Alpha-is-shape (PDF `AIS`) |
 | `rendering_intent` | `u8` | Intent for converting the image's colours (see "Rendering intent") |
 | `transfer` | `TransferState` | Transfer function in force, applied after conversion to RGB (see "Print Production State") |
+| `jpeg` | `Option<Arc<Vec<u8>>>` | The image as JPEG data, with `sample_data` empty (see "Kept JPEG data"); `None` otherwise |
+
+#### Kept JPEG data
+
+With `InterpreterBuilder::keep_jpeg_data()`, the PostScript interpreter
+puts a JPEG image into the list as its JPEG bytes in `params.jpeg`, with
+an empty `sample_data`, instead of decoding it. That is for a consumer
+that writes images out as they are, such as an SVG or PDF writer, so that
+a page of photographs never holds them decoded. It only does this where
+any JPEG reader shows the bytes as stet decodes them: an 8-bit
+`DeviceGray` or `DeviceRGB` image with the default `Decode`, a JPEG of the
+image's size and component count stored as YCbCr (for three components),
+with no Exif rotation and no ICC profile. Any other JPEG is decoded as
+usual. The PDF reader never keeps JPEG data.
+
+A renderer that reads `sample_data` directly must decode such an image
+first. `params.samples(&sample_data)` gives the samples, decoding the JPEG
+when there is one, and `None` when it doesn't decode to the image's size.
+`DisplayList::decode_kept_jpeg()` does the same for a whole list, nested
+lists included. stet's own renderer and PDF writer call `samples()`.
 
 #### Sample depth
 

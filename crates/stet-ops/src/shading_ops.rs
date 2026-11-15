@@ -471,6 +471,7 @@ fn build_type1_shading(
     ctx.current_display_list_mut().push(DisplayElement::Image {
         sample_data: std::sync::Arc::new(rgb_data),
         params: ImageParams {
+            jpeg: None,
             width: size as u32,
             height: size as u32,
             color_space: stet_graphics::device::ImageColorSpace::DeviceRGB,
