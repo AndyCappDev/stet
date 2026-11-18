@@ -85,3 +85,16 @@ jobs:
           name: Cargo.lock-latest
           path: Cargo.lock
           if-no-files-found: warn
+
+  # The committed locks, not the updated one above: a version crates.io has
+  # yanked since it was pinned is in every --locked build and every release
+  # binary until someone runs `cargo update -p` for it. A separate job, so a
+  # yank does not hide the build and test results of the job above. Like
+  # the rest of this workflow, a failure is information; release.yml is
+  # where it gates.
+  yanked:
+    name: Committed locks pin no yanked versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: scripts/check-yanked.sh

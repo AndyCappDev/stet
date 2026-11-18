@@ -290,9 +290,21 @@ jobs:
           path: dist/*.${{ matrix.archive }}
           if-no-files-found: error
 
+  # A yanked version in the committed lock is in every binary built from
+  # it, and cargo says so only during `cargo publish` of stet-viewer and
+  # stet-cli, after the rest are published (0.11.0, 2026-11-18). Checked
+  # here so a yank stops the release while only the tag exists. It runs on
+  # workflow_dispatch too, so the pre-tag dispatch shows it as well.
+  yanked:
+    name: No yanked dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: scripts/check-yanked.sh
+
   release:
     name: Draft release
-    needs: build
+    needs: [build, yanked]
     # Only a tag produces a release. workflow_dispatch stops after `build`,
     # which is what makes it safe for exercising the packaging.
     if: startsWith(github.ref, 'refs/tags/v')
