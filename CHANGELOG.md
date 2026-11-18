@@ -22,6 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`jpeg: None`), or `..Default::default()`. Accepted in a patch release,
   as the param structs gain fields additively. Contributed by
   @nielsbosma (#42).
+- **`stet_core::file_store::FileStore::get_embedded_file` returns
+  `Option<EmbeddedFile>`**, not `Option<&'static [u8]>`, so that it can
+  hand back files a host program supplies at run time (see Added).
+  `EmbeddedFile` dereferences to `[u8]`: a caller that reads the bytes
+  passes `&data` where it passed `data`, and one that kept the `'static`
+  slice holds the `EmbeddedFile` instead. Accepted in a patch release.
+  Contributed by @nielsbosma (#34).
 
 ### Added
 
@@ -57,6 +64,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `image_samples_to_rgba` decode kept images, and
   `DisplayList::decode_kept_jpeg()` decodes a whole list. Off by default.
   Contributed by @nielsbosma (#42).
+- **A program embedding stet can supply resource files stet does not
+  ship,** such as CJK CMaps and CIDFonts, with
+  `FileStore::set_embedded_provider`. `findresource`, `resourcestatus`
+  and `file` find them as they find stet's own resources, and under
+  `--safer` or a `FileAccess` policy a supplied file is treated as
+  built-in only when it is opened by its exact name. Contributed by
+  @nielsbosma (#34).
+- **CJK fonts a file names but the machine lacks can be drawn with a
+  substitute for their character collection,** as Ghostscript's
+  `cidfmap` does. `.CIDFontSubstitutes` maps a collection (`/Japan1`,
+  `/GB1`, `/CNS1`, `/Korea1`) to the CIDFont to use in place of one that
+  is missing; it is empty by default, so nothing changes until a program
+  registers a substitute. `findfont` of a `CIDFontName-CMapName` name
+  such as `Ryumin-Light-90ms-RKSJ-H` composes the font from the CIDFont,
+  or its substitute, and the CMap. `/Font` and `/CIDFont`
+  `resourcestatus` report such fonts as available to load (status 2),
+  which Ghostscript's CJK test files check before every glyph.
+  Contributed by @nielsbosma (#34).
 
 ### Fixed
 
@@ -84,6 +109,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Ghostscript, not `typecheck`; this applies to PDF output too. Errors
   from an unguarded call are reported as `pdfmark`. Contributed by
   @nielsbosma (#27).
+- **CID-keyed text reads each code at the length the CMap's codespace
+  gives it** (Adobe TN 5014). Codes were read at the width of the first
+  codespace range, so in `90ms-RKSJ-H`, whose first range is one byte
+  wide, every two-byte Shift-JIS character came apart into two codes and
+  drew two `.notdef` glyphs. `show`, `cshow`, `xshow`, `xyshow`,
+  `widthshow` and text extraction all see the same codes. Contributed by
+  @nielsbosma (#33).
+- **A CMap keeps every block of mappings, and uses the CMap it names
+  with `usecmap`.** Each `endcidrange`, `endcidchar` or `endnotdef…`
+  block replaced the ones before it, so a CMap kept only its last block
+  of at most 100 entries, and a `usecmap` parent was never read. A code
+  now takes its CID from the nearest CMap in the chain that maps it, so
+  `UniJISPro-UTF8-V` gives its own vertical forms rather than its
+  parent's horizontal ones; `notdefchar` and `notdefrange` are used too.
+  Contributed by @nielsbosma (#33, #34).
+- **`glyphshow` with an integer shows that CID when the current font is
+  a CIDFont**, as the PLRM says, instead of raising `typecheck`.
+  Contributed by @nielsbosma (#33).
+- **`resourcestatus` gives status 2 for a resource that is not loaded
+  but whose file is there** (PLRM 3.9). Categories built on the Generic
+  implementation answered `false`. Contributed by @nielsbosma (#33).
 
 ## [0.10.0] — 2026-11-09
 
