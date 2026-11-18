@@ -3063,7 +3063,6 @@ name = "stet-ops"
 version = "0.10.0"
 dependencies = [
  "flate2",
- "glob",
  "stet-core",
  "stet-fonts",
  "stet-graphics",

@@ -429,36 +429,6 @@ fn add_instance_names(ctx: &Context, dict: EntityId, names: &mut Vec<Vec<u8>>) {
     }
 }
 
-/// Match a resource name against a PostScript template pattern.
-/// Supports `*` (match any sequence) and `?` (match single char).
-fn template_matches(template: &[u8], name: &[u8]) -> bool {
-    let mut ti = 0;
-    let mut ni = 0;
-    let mut star_ti = usize::MAX;
-    let mut star_ni = 0;
-
-    while ni < name.len() {
-        if ti < template.len() && (template[ti] == b'?' || template[ti] == name[ni]) {
-            ti += 1;
-            ni += 1;
-        } else if ti < template.len() && template[ti] == b'*' {
-            star_ti = ti;
-            star_ni = ni;
-            ti += 1;
-        } else if star_ti != usize::MAX {
-            ti = star_ti + 1;
-            star_ni += 1;
-            ni = star_ni;
-        } else {
-            return false;
-        }
-    }
-    while ti < template.len() && template[ti] == b'*' {
-        ti += 1;
-    }
-    ti == template.len()
-}
-
 /// `resourceforall`: template proc scratch category → —
 ///
 /// Native implementation that enumerates resource names without pushing
@@ -550,7 +520,7 @@ pub fn op_resourceforall(ctx: &mut Context) -> Result<(), PsError> {
     // Filter by template pattern and sort
     let mut matching_names: Vec<Vec<u8>> = names
         .into_iter()
-        .filter(|bytes| template_matches(&template_bytes, bytes))
+        .filter(|bytes| crate::template::matches(&template_bytes, bytes))
         .collect();
     matching_names.sort();
 

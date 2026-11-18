@@ -130,6 +130,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`resourcestatus` gives status 2 for a resource that is not loaded
   but whose file is there** (PLRM 3.9). Categories built on the Generic
   implementation answered `false`. Contributed by @nielsbosma (#33).
+- **`filenameforall` gives back names spelled as the template spells
+  them.** On Windows, `(fonts/*.pfb)` listed `fonts\a.pfb`, a name the
+  program never wrote, and on every system `./` and doubled separators
+  were dropped. Each name now keeps the template's own text, with only
+  its wildcard components replaced, as in Ghostscript. Reported by
+  @nielsbosma.
+- **`filenameforall` and `resourceforall` templates follow the PLRM:**
+  `\` makes the next character literal (`(x\\*y)` matches only `x*y`),
+  and `[` is an ordinary character rather than the start of a character
+  class. On Windows `\` separates path components in a `filenameforall`
+  template, as `/` does.
+- **`filenameforall` raises `rangecheck` when a name does not fit the
+  scratch string**, as the PLRM and Ghostscript do, rather than passing a
+  truncated name that may be some other file's; and `invalidaccess` for a
+  template it cannot read or a scratch string it cannot write.
 
 ## [0.10.0] — 2026-11-09
 

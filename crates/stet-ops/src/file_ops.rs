@@ -831,7 +831,13 @@ pub fn op_renamefile(ctx: &mut Context) -> Result<(), PsError> {
 }
 
 /// `filenameforall`: template proc scratch → —
-/// Simplified: enumerate files matching a glob pattern.
+///
+/// Calls `proc` with the name of each host file `template` matches, in byte
+/// order. The template follows the PLRM: `*` matches any run of characters
+/// within one path component, `?` one character, and `\` makes the next one
+/// literal; on Windows `\` separates components instead, as `/` does. Each
+/// name keeps the template's own spelling, separators included, with only
+/// its wildcard components replaced by what they matched.
 pub fn op_filenameforall(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.len() < 3 {
         return Err(PsError::StackUnderflow);
@@ -849,40 +855,46 @@ pub fn op_filenameforall(ctx: &mut Context) -> Result<(), PsError> {
         return Err(PsError::TypeCheck);
     }
     let template = match template_obj.value {
-        PsValue::String { entity, start, len } => {
-            String::from_utf8_lossy(ctx.strings.get(entity, start, len)).into_owned()
-        }
+        PsValue::String { entity, start, len } => ctx.strings.get(entity, start, len).to_vec(),
         _ => return Err(PsError::TypeCheck),
     };
+    // The template is read and the scratch string written (PLRM: invalidaccess).
+    if template_obj.flags.access() < ObjFlags::ACCESS_READ_ONLY
+        || scratch_obj.flags.access() < ObjFlags::ACCESS_WRITE_ONLY
+    {
+        return Err(PsError::InvalidAccess);
+    }
 
     ctx.o_stack.pop()?;
     let proc = ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
 
-    // Use glob to expand the template pattern
-    // Only paths the program may see: nothing on the host once
-    // deny_host_access was called, and under Safer only what is permitted.
-    let mut matches: Vec<String> = Vec::new();
-    if !stet_fonts::host::host_access_allowed() {
-        // Only embedded resources exist when the host is off limits.
-    } else if let Ok(paths) = glob::glob(&template) {
+    // Each name is spelled as the template spells it (crate::template), so a
+    // program gets back the separators it wrote on every system. Only paths
+    // the program may see: nothing on the host once deny_host_access was
+    // called, and under Safer only what is permitted.
+    let matches: Vec<Vec<u8>> = if stet_fonts::host::host_access_allowed() {
         let policy = ctx.host_policy();
-        for path in paths.flatten() {
-            if policy.sees(&path) {
-                matches.push(path.to_string_lossy().into_owned());
-            }
-        }
-    }
-    matches.sort();
+        crate::template::matching_files(&template)
+            .into_iter()
+            .filter(|name| policy.sees(&crate::template::host_path(name)))
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     // Execute callback for each match
-    for name in &matches {
-        let name_bytes = name.as_bytes();
-        let copy_len = name_bytes.len().min(scratch_len as usize);
+    for name_bytes in &matches {
+        // A name the scratch string cannot hold is a rangecheck (PLRM), as
+        // in Ghostscript, not a truncated name that names some other file.
+        if name_bytes.len() > scratch_len as usize {
+            return Err(PsError::RangeCheck);
+        }
+        let copy_len = name_bytes.len();
         let scratch_slice = ctx
             .strings
             .get_mut(scratch_entity, scratch_start, scratch_len);
-        scratch_slice[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+        scratch_slice[..copy_len].copy_from_slice(name_bytes);
 
         let str_obj = PsObject {
             value: PsValue::String {

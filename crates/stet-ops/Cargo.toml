@@ -16,4 +16,3 @@ stet-fonts.workspace = true
 stet-graphics.workspace = true
 stet-core.workspace = true
 flate2 = "1"
-glob = "0.3"

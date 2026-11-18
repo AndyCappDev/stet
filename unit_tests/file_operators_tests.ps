@@ -114,6 +114,23 @@ fn_count 0 gt [true] assert
 } 100 string filenameforall
 found_unittest [true] assert
 
+%% filenameforall - names are spelled as the template spells them %%
+/fn_count 0 def
+/fn_name () def
+(./unit_tests//unittest.p?) {
+    dup length string copy /fn_name exch def /fn_count fn_count 1 add def
+} 100 string filenameforall
+fn_count [1] assert
+fn_name (./unit_tests//unittest.ps) eq [true] assert
+
+%% filenameforall - a scratch string too short for a name %%
+{ { (unit_tests/unittest.ps) {} 3 string filenameforall } stopped pop
+  $error /errorname get $error /newerror false put } [/rangecheck] assert
+
+%% filenameforall - a scratch string it cannot write %%
+{ { (unit_tests/*.ps) {} 100 string readonly filenameforall } stopped pop
+  3 {pop} repeat $error /errorname get $error /newerror false put } [/invalidaccess] assert
+
 %% filenameforall - error conditions %%
 /filenameforall [/stackunderflow] assert
 (*) {} /filenameforall [(*) {} /stackunderflow] assert
