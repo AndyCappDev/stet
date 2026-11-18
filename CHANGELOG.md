@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The prebuilt binaries no longer carry two dependency versions
+  crates.io has yanked.** The viewer was built with `async-executor`
+  1.14.0, whose 1.14.1 fixes a use-after-free when a waker fires as an
+  executor is dropped (reached through the viewer's Linux accessibility
+  support), and with `clipboard-win` 5.4.1 (the Windows clipboard). They
+  had been pinned in `Cargo.lock` since 0.8.0 and are now 1.14.1 and
+  5.4.3. The musl binary has no viewer and was unaffected, and crates
+  built from crates.io resolve their own versions.
+
 ## [0.11.0] — 2026-11-18
 
 ### Breaking
