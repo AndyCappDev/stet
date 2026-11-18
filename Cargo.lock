@@ -3007,7 +3007,6 @@ version = "0.10.0"
 dependencies = [
  "fax",
  "flate2",
- "glob",
  "hayro-jbig2",
  "hayro-jpeg2000",
  "jpeg-encoder",
@@ -3037,7 +3036,6 @@ name = "stet-fonts"
 version = "0.10.0"
 dependencies = [
  "flate2",
- "glob",
  "rustc-hash 2.1.3",
  "serde",
  "serde_json",

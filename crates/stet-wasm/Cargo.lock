@@ -458,7 +458,6 @@ name = "stet-core"
 version = "0.10.0"
 dependencies = [
  "flate2",
- "glob",
  "hayro-jbig2",
  "hayro-jpeg2000",
  "jpeg-encoder",
@@ -486,7 +485,6 @@ name = "stet-fonts"
 version = "0.10.0"
 dependencies = [
  "flate2",
- "glob",
  "rustc-hash",
  "serde",
  "serde_json",
