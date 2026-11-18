@@ -348,7 +348,7 @@ true setglobal
         dup /Generic /Category findresource /ResourceStatus get exec {
             3 -1 roll pop true
         } {
-            .cidkeyedparts { pop pop 2 -1 true } { false } ifelse
+            .cidkeyedstatus { 2 -1 true } { false } ifelse
         } ifelse
     }
 

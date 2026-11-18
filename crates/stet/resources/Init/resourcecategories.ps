@@ -90,11 +90,12 @@ systemdict begin
         } ifelse
     } bind def
 
-    % key .cidkeyedparts cidfont cmap true | false -- for a font named
-    % CIDFontName-CMapName (Ryumin-Light-90ms-RKSJ-H), the CIDFont to use (it,
-    % or the substitute for the CMap's collection) and the CMap. The CMap is
-    % the longest suffix after a hyphen that names a CMap resource.
-    /.cidkeyedparts {
+    % key .cidkeyedsplit cidname cmapname cmapstatus true | false -- a font
+    % named CIDFontName-CMapName (Ryumin-Light-90ms-RKSJ-H) split into its
+    % CIDFont's name and its CMap's, with the CMap's resourcestatus status.
+    % The CMap is the longest suffix after a hyphen that names a CMap
+    % resource. Nothing is loaded.
+    /.cidkeyedsplit {
         6 dict begin
         /.key exch def
         /.s .key dup type /stringtype eq { dup length string copy } { dup length string cvs } ifelse def
@@ -104,25 +105,72 @@ systemdict begin
             .s .i get 45 eq {
                 .s .i 1 add .s length .i sub 1 sub getinterval cvn
                 dup /CMap resourcestatus {
-                    pop pop /.cmap exch def /.cid .s 0 .i getinterval cvn def
+                    pop /.status exch def /.cmap exch def /.cid .s 0 .i getinterval cvn def
                     /.found true def exit
                 } { pop } ifelse
             } if
         } for
-        .found {
+        .found { .cid .cmap .status true } { false } ifelse
+        end
+    } bind def
+
+    % cmap .cmapordering ordering -- the collection a CMap dictionary is for.
+    /.cmapordering {
+        /CIDSystemInfo get dup type /arraytype eq { 0 get } if /Ordering get cvn
+    } bind def
+
+    % cidname ordering .cidfontfor cidname' -- the CIDFont to use for a
+    % CIDFont that is not present, with a CMap for the collection ordering:
+    % the collection's substitute, else the CIDFont's own (.cidfontsubstitute).
+    /.cidfontfor {
+        .CIDFontSubstitutes 1 index known {
+            .CIDFontSubstitutes exch get exch pop
+        } { pop .cidfontsubstitute } ifelse
+    } bind def
+
+    % key .cidkeyedparts cidfont cmap true | false -- for a font named
+    % CIDFontName-CMapName, the CIDFont to use (it, or the substitute for the
+    % CMap's collection) and the CMap. This loads the CMap to read its
+    % collection when the CIDFont is not present.
+    /.cidkeyedparts {
+        .cidkeyedsplit {
+            4 dict begin
+            pop /.cmap exch def /.cid exch def
             .cid /CIDFont resourcestatus {
                 pop pop .cid
             } {
-                .cmap /CMap findresource /CIDSystemInfo get
-                dup type /arraytype eq { 0 get } if
-                /Ordering get cvn
-                .CIDFontSubstitutes 1 index known { .CIDFontSubstitutes exch get } { pop .cid .cidfontsubstitute } ifelse
+                .cid .cmap /CMap findresource .cmapordering .cidfontfor
             } ifelse
             dup /CIDFont resourcestatus {
                 pop pop .cmap true
             } { pop false } ifelse
+            end
         } { false } ifelse
-        end
+    } bind def
+
+    % key .cidkeyedstatus bool -- whether findfont can compose the font
+    % .cidkeyedparts names, for the Font category's ResourceStatus, which
+    % only reports. A CMap already defined gives its collection; one that is
+    % still to be loaded is not loaded for it, and then any substitute that is
+    % present will do (findfont resolves the collection).
+    /.cidkeyedstatus {
+        .cidkeyedsplit {
+            4 dict begin
+            /.status exch def /.cmap exch def /.cid exch def
+            .cid /CIDFont resourcestatus {
+                pop pop true
+            } {
+                .status 2 lt {
+                    .cid .cmap /CMap findresource .cmapordering .cidfontfor
+                    /CIDFont resourcestatus { pop pop true } { false } ifelse
+                } {
+                    false .CIDFontSubstitutes {
+                        exch pop /CIDFont resourcestatus { pop pop pop true exit } if
+                    } forall
+                } ifelse
+            } ifelse
+            end
+        } { false } ifelse
     } bind def
 
     % key .cidkeyedfont font true | false -- the font .cidkeyedparts names,

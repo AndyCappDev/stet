@@ -891,6 +891,83 @@ showpage
     assert_eq!(glyph_texts(&runs[0]), ["諭", "輸"]);
 }
 
+/// With `usecmap`, a code takes its CID from the nearest CMap that maps it,
+/// whatever the kind: the parent maps <41> and <42> with `cidchar`, the CMap
+/// itself maps <41> with a `cidrange`, as UniJISPro-UTF8-V does over -H.
+#[test]
+fn a_cmaps_own_cidrange_wins_over_its_parents_cidchar() {
+    let ps = r#"%!PS
+/SubJ <<
+  /CIDFontType 0 /CIDFontName /SubJ /FontType 9
+  /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 4 >>
+  /FontMatrix [0.001 0 0 0.001 0 0] /FontBBox [0 -120 1000 880]
+  /CIDCount 65536 /DW 1000
+  /CharStrings << 3851 <1C03E80E> 3852 <1C03E80E> >>
+>> /CIDFont defineresource pop
+/CIDInit /ProcSet findresource begin
+12 dict begin begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 4 >> def
+/CMapName /Parent-H def /CMapType 1 def
+1 begincodespacerange <00> <FF> endcodespacerange
+2 begincidchar <41> 3852 <42> 3852 endcidchar
+endcmap CMapName currentdict /CMap defineresource pop end
+12 dict begin
+/Parent-H usecmap
+begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 4 >> def
+/CMapName /Child-V def /CMapType 1 def
+1 begincidrange <41> <41> 3851 endcidrange
+endcmap CMapName currentdict /CMap defineresource pop end
+end
+/T /Child-V [/SubJ /CIDFont findresource] composefont 12 scalefont setfont
+72 700 moveto (AB) show
+showpage
+"#;
+    let runs = runs_of(ps);
+    assert_eq!(runs.len(), 1, "{runs:#?}");
+    assert_eq!(glyph_texts(&runs[0]), ["諭", "輸"]);
+}
+
+/// `resourcestatus` of a CID-keyed font name only reports: a CMap that is
+/// still to be loaded stays so (status 2), and `findfont` then loads it.
+#[test]
+fn font_resourcestatus_leaves_the_cmap_unloaded() {
+    let ps = r#"%!PS
+/SubJ <<
+  /CIDFontType 0 /CIDFontName /SubJ /FontType 9
+  /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 4 >>
+  /FontMatrix [0.001 0 0 0.001 0 0] /FontBBox [0 -120 1000 880]
+  /CIDCount 65536 /DW 1000
+  /CharStrings << 3851 <1C03E80E> 3852 <1C03E80E> >>
+>> /CIDFont defineresource pop
+.CIDFontSubstitutes begin /Japan1 /SubJ def end
+/Identity-H /CMap resourcestatus { pop 2 ne { 1 0 div } if } { 1 0 div } ifelse
+/Ryumin-Light-Identity-H /Font resourcestatus { pop pop } { 1 0 div } ifelse
+/Identity-H /CMap resourcestatus { pop 2 ne { 1 0 div } if } { 1 0 div } ifelse
+/NoSuchFont-Identity-H /Font resourcestatus not { 1 0 div } if
+/Ryumin-Light-Identity-H findfont 12 scalefont setfont
+/Identity-H /CMap resourcestatus { pop 2 eq { 1 0 div } if } { 1 0 div } ifelse
+72 700 moveto <0F0B0F0C> show
+showpage
+"#;
+    let runs = runs_of(ps);
+    assert_eq!(runs.len(), 1, "{runs:#?}");
+    assert_eq!(glyph_texts(&runs[0]), ["諭", "輸"]);
+}
+
+/// With no substitute present, a CID-keyed name whose CIDFont is missing has
+/// no status, and its CMap is still not loaded.
+#[test]
+fn font_resourcestatus_without_a_substitute_is_false() {
+    let ps = r#"%!PS
+/Ryumin-Light-Identity-H /Font resourcestatus { 1 0 div } if
+/Identity-H /CMap resourcestatus { pop 2 ne { 1 0 div } if } { 1 0 div } ifelse
+showpage
+"#;
+    let runs = runs_of(ps);
+    assert!(runs.is_empty(), "{runs:#?}");
+}
+
 #[test]
 fn a_host_program_supplies_resource_files_stet_does_not_ship() {
     static CMAP: &[u8] = b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap \

@@ -25,16 +25,31 @@ const MAX_CODE_LEN: usize = 4;
 /// A CMap's codespace and CID mappings, its `usecmap` parents' included.
 ///
 /// Mappings match a code of their own length only (TN 5014): a code no
-/// mapping holds is `.notdef`. A CMap's own entries come before its parent's,
-/// and within one CMap the first entry that holds a code wins.
+/// mapping holds is `.notdef`. A code takes its CID from the nearest CMap in
+/// the `usecmap` chain that maps it, the CMap itself first: within that CMap a
+/// `cidchar` comes before a `cidrange`, and the first entry that holds the
+/// code wins.
 #[derive(Debug, Default)]
 pub struct CmapTables {
     codespace: Vec<(Vec<u8>, Vec<u8>)>,
     shortest: usize,
-    chars: FxHashMap<(usize, u32), i32>,
+    chars: FxHashMap<(usize, u32), Mapped>,
     ranges: RangeTable,
-    notdef_chars: FxHashMap<(usize, u32), i32>,
+    notdef_chars: FxHashMap<(usize, u32), Mapped>,
     notdef_ranges: RangeTable,
+}
+
+/// A CID and the level of the CMap that maps it: 0 for the CMap itself, 1 for
+/// its `usecmap` parent, and so on.
+type Mapped = (usize, i32);
+
+/// The nearer of two mappings of one code, `a` on a tie.
+fn nearest(a: Option<Mapped>, b: Option<Mapped>) -> Option<Mapped> {
+    match (a, b) {
+        (Some(a), Some(b)) if b.0 < a.0 => Some(b),
+        (Some(a), _) => Some(a),
+        (None, b) => b,
+    }
 }
 
 /// One `cidrange` or `notdefrange` entry, by code length.
@@ -43,6 +58,8 @@ struct Range {
     lo: u32,
     hi: u32,
     cid: i32,
+    /// The level of the CMap the entry is in (see [`Mapped`]).
+    level: usize,
     /// Where the entry stands among its CMap's, parents' last: the first
     /// that holds a code wins.
     order: usize,
@@ -58,7 +75,7 @@ struct RangeTable {
 }
 
 impl RangeTable {
-    fn push(&mut self, lo: &[u8], hi: &[u8], cid: i32, order: usize) {
+    fn push(&mut self, lo: &[u8], hi: &[u8], cid: i32, level: usize, order: usize) {
         if lo.len() != hi.len() || lo.is_empty() || lo.len() > MAX_CODE_LEN {
             return;
         }
@@ -66,6 +83,7 @@ impl RangeTable {
             lo: value(lo),
             hi: value(hi),
             cid,
+            level,
             order,
             max_hi: 0,
         });
@@ -87,22 +105,23 @@ impl RangeTable {
     }
 
     /// The CID of code `c`, `len` bytes long, from the first range that holds
-    /// it.
-    fn find(&self, len: usize, c: u32) -> Option<i32> {
+    /// it, with that range's level. Entries are ordered by level first, so
+    /// that range is also in the nearest CMap that has one.
+    fn find(&self, len: usize, c: u32) -> Option<Mapped> {
         let list = self.by_len.get(len)?;
         let mut i = list.partition_point(|r| r.lo <= c);
-        let mut found: Option<(usize, i32)> = None;
+        let mut found: Option<&Range> = None;
         while i > 0 {
             i -= 1;
             let r = &list[i];
             if r.max_hi < c {
                 break;
             }
-            if c <= r.hi && found.is_none_or(|(order, _)| r.order < order) {
-                found = Some((r.order, r.cid.wrapping_add((c - r.lo) as i32)));
+            if c <= r.hi && found.is_none_or(|f| r.order < f.order) {
+                found = Some(r);
             }
         }
-        found.map(|(_, cid)| cid)
+        found.map(|r| (r.level, r.cid.wrapping_add((c - r.lo) as i32)))
     }
 }
 
@@ -112,16 +131,16 @@ fn value(bytes: &[u8]) -> u32 {
 }
 
 impl CmapTables {
-    /// Read a CMap dictionary, then the CMap it names with `usecmap`: its own
-    /// entries come first and so win over the parent's.
+    /// Read a CMap dictionary, then the CMap it names with `usecmap`, each at
+    /// the next level: the CMap's own entries win over the parent's.
     pub fn read(ctx: &Context, cmap_entity: EntityId) -> Self {
         let mut tables = Self::default();
         let mut order = 0;
         let mut entity = Some(cmap_entity);
         // A usecmap chain is short; the cap stops a CMap that names itself.
-        for _ in 0..8 {
+        for level in 0..8 {
             let Some(e) = entity else { break };
-            tables.add(ctx, e, &mut order);
+            tables.add(ctx, e, level, &mut order);
             entity = ctx
                 .names
                 .find(b"UseCMap")
@@ -143,7 +162,7 @@ impl CmapTables {
         tables
     }
 
-    fn add(&mut self, ctx: &Context, cmap: EntityId, order: &mut usize) {
+    fn add(&mut self, ctx: &Context, cmap: EntityId, level: usize, order: &mut usize) {
         let array = |key: &[u8]| -> Vec<PsObject> {
             ctx.names
                 .find(key)
@@ -167,12 +186,12 @@ impl CmapTables {
                 .iter()
                 .filter_map(|[lo, hi]| Some((bytes(lo)?.to_vec(), bytes(hi)?.to_vec()))),
         );
-        let chars = |key: &[u8], into: &mut FxHashMap<(usize, u32), i32>| {
+        let chars = |key: &[u8], into: &mut FxHashMap<(usize, u32), Mapped>| {
             for [src, dst] in array(key).as_chunks::<2>().0 {
                 if let (Some(src), Some(cid)) = (bytes(src), dst.as_i32())
                     && (1..=MAX_CODE_LEN).contains(&src.len())
                 {
-                    into.entry((src.len(), value(src))).or_insert(cid);
+                    into.entry((src.len(), value(src))).or_insert((level, cid));
                 }
             }
         };
@@ -181,7 +200,7 @@ impl CmapTables {
         let mut ranges = |key: &[u8], into: &mut RangeTable| {
             for [lo, hi, cid] in array(key).as_chunks::<3>().0 {
                 if let (Some(lo), Some(hi), Some(cid)) = (bytes(lo), bytes(hi), cid.as_i32()) {
-                    into.push(lo, hi, cid, *order);
+                    into.push(lo, hi, cid, level, *order);
                     *order += 1;
                 }
             }
@@ -218,18 +237,21 @@ impl CmapTables {
         })
     }
 
-    /// The CID of `code`: a cidchar, then a cidrange, then a notdef mapping,
-    /// each of the code's own length. With no CID mappings at all, the code
-    /// itself; otherwise a code nothing maps is CID 0.
+    /// The CID of `code`: a CID mapping, then a notdef mapping, each of the
+    /// code's own length and from the nearest CMap that has one, where a
+    /// cidchar (notdefchar) comes before a cidrange (notdefrange). With no CID
+    /// mappings at all, the code itself; otherwise a code nothing maps is
+    /// CID 0.
     pub fn cid(&self, code: &[u8]) -> i32 {
         let (len, c) = (code.len(), value(code));
-        if let Some(cid) = self
-            .chars
-            .get(&(len, c))
-            .copied()
-            .or_else(|| self.ranges.find(len, c))
-            .or_else(|| self.notdef_chars.get(&(len, c)).copied())
-            .or_else(|| self.notdef_ranges.find(len, c))
+        let key = (len, c);
+        if let Some((_, cid)) = nearest(self.chars.get(&key).copied(), self.ranges.find(len, c))
+            .or_else(|| {
+                nearest(
+                    self.notdef_chars.get(&key).copied(),
+                    self.notdef_ranges.find(len, c),
+                )
+            })
         {
             return cid;
         }
@@ -248,14 +270,32 @@ mod tests {
     #[test]
     fn the_first_range_that_holds_a_code_wins() {
         let mut t = RangeTable::default();
-        t.push(&[0x00, 0x10], &[0x00, 0x20], 100, 0);
-        t.push(&[0x00, 0x00], &[0x00, 0xff], 500, 1);
-        t.push(&[0x01, 0x00], &[0x01, 0x05], 900, 2);
+        t.push(&[0x00, 0x10], &[0x00, 0x20], 100, 0, 0);
+        t.push(&[0x00, 0x00], &[0x00, 0xff], 500, 0, 1);
+        t.push(&[0x01, 0x00], &[0x01, 0x05], 900, 1, 2);
         t.finish();
-        assert_eq!(t.find(2, 0x0015), Some(105));
-        assert_eq!(t.find(2, 0x0030), Some(548));
-        assert_eq!(t.find(2, 0x0103), Some(903));
+        assert_eq!(t.find(2, 0x0015), Some((0, 105)));
+        assert_eq!(t.find(2, 0x0030), Some((0, 548)));
+        assert_eq!(t.find(2, 0x0103), Some((1, 903)));
         assert_eq!(t.find(2, 0x0106), None);
         assert_eq!(t.find(1, 0x15), None, "a one-byte code");
+    }
+
+    #[test]
+    fn the_nearest_cmap_wins_whatever_the_kind() {
+        let mut t = CmapTables::default();
+        // The parent (level 1) maps <C2B0> with a cidchar and the CMap itself
+        // (level 0) with a cidrange, as UniJISPro-UTF8-V does over -H.
+        t.chars.insert((2, 0xc2b0), (1, 707));
+        t.ranges.push(&[0xc2, 0xb0], &[0xc2, 0xb1], 8269, 0, 0);
+        // Within one CMap a cidchar comes before a cidrange.
+        t.chars.insert((2, 0xc2b1), (0, 42));
+        // A parent's cidrange still serves a code the CMap leaves out.
+        t.ranges.push(&[0xc2, 0xb2], &[0xc2, 0xb2], 900, 1, 1);
+        t.ranges.finish();
+        assert_eq!(t.cid(&[0xc2, 0xb0]), 8269);
+        assert_eq!(t.cid(&[0xc2, 0xb1]), 42);
+        assert_eq!(t.cid(&[0xc2, 0xb2]), 900);
+        assert_eq!(t.cid(&[0xc2, 0xb3]), 0);
     }
 }

@@ -299,6 +299,7 @@ pub type EmbeddedProvider = Box<dyn Fn(&str) -> Option<Arc<[u8]>> + Send + Sync>
 /// An embedded file's bytes: built into the program, or supplied by the
 /// [`EmbeddedProvider`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum EmbeddedFile {
     /// Registered with [`FileStore::add_embedded_file`].
     Static(&'static [u8]),
