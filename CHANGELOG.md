@@ -7,28 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-11-18
+
 ### Breaking
 
 - **`stet_core::context::GroupKind::Transparency` has a new field,
   `composite_at_begin`**: set for a group opened with Ghostscript's
   `.begintransparencygroup`, whose opacity and blend mode are recorded
   when it begins (see Added). Code that builds the variant or matches it
-  without `..` needs the field. The variant is interpreter state that
-  `stet-ops` builds, so this is accepted in a patch release. Contributed
-  by @nielsbosma (#32).
+  without `..` needs the field. Contributed by @nielsbosma (#32).
 - **`stet_graphics::device::ImageParams` has a new public field, `jpeg`**,
   an image's JPEG data when the interpreter keeps it (see Added). Code
   that builds `ImageParams` with a full struct literal needs the field
-  (`jpeg: None`), or `..Default::default()`. Accepted in a patch release,
-  as the param structs gain fields additively. Contributed by
+  (`jpeg: None`), or `..Default::default()`. Contributed by
   @nielsbosma (#42).
 - **`stet_core::file_store::FileStore::get_embedded_file` returns
   `Option<EmbeddedFile>`**, not `Option<&'static [u8]>`, so that it can
   hand back files a host program supplies at run time (see Added).
   `EmbeddedFile` dereferences to `[u8]`: a caller that reads the bytes
   passes `&data` where it passed `data`, and one that kept the `'static`
-  slice holds the `EmbeddedFile` instead. Accepted in a patch release.
-  Contributed by @nielsbosma (#34).
+  slice holds the `EmbeddedFile` instead. Contributed by
+  @nielsbosma (#34).
 
 ### Added
 

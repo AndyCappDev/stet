@@ -455,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "stet-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "flate2",
  "hayro-jbig2",
@@ -474,7 +474,7 @@ dependencies = [
 
 [[package]]
 name = "stet-engine"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "stet-core",
  "stet-ops",
@@ -482,7 +482,7 @@ dependencies = [
 
 [[package]]
 name = "stet-fonts"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "flate2",
  "rustc-hash",
@@ -492,7 +492,7 @@ dependencies = [
 
 [[package]]
 name = "stet-graphics"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "fax",
  "glob",
@@ -507,7 +507,7 @@ dependencies = [
 
 [[package]]
 name = "stet-ops"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "flate2",
  "stet-core",
@@ -517,7 +517,7 @@ dependencies = [
 
 [[package]]
 name = "stet-pdf-reader"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "flate2",
  "hayro-jbig2",
@@ -532,7 +532,7 @@ dependencies = [
 
 [[package]]
 name = "stet-render"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "png",
  "stet-core",
