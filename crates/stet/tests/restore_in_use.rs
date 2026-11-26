@@ -339,7 +339,6 @@ fn makepattern_dict() {
 /// What EndPage leaves on the operand stack when `restore` runs it is
 /// discarded, as Ghostscript does, rather than freed in place.
 #[test]
-#[ignore = "EndPage run by restore: discard its leftover operands (#46, later phase)"]
 fn endpage_leaves_array() {
     assert_eq!(
         outcome(
@@ -353,7 +352,6 @@ fn endpage_leaves_array() {
 /// A dictionary EndPage leaves on the dictionary stack is still in use when
 /// `restore` runs it.
 #[test]
-#[ignore = "EndPage run by restore: check again after it runs (#46, later phase)"]
 fn endpage_leaves_dict() {
     assert_eq!(
         outcome(
@@ -361,6 +359,33 @@ fn endpage_leaves_dict() {
             "<< /EndPage { pop pop 1 dict begin true } >> setpagedevice { sv restore } t_try"
         ),
         "invalidrestore"
+    );
+}
+
+/// EndPage run by a restore may leave objects older than the save: they are
+/// discarded with the rest, as in Ghostscript.
+#[test]
+fn endpage_leaves_older_objects() {
+    assert_eq!(
+        outcome(
+            "/old 1 array def",
+            "<< /EndPage { pop pop old 5 true } >> setpagedevice { sv restore } t_try \
+             count 1 eq not { /stackleft } if"
+        ),
+        "ok"
+    );
+}
+
+/// The program's own operands under EndPage's stay.
+#[test]
+fn endpage_keeps_operands_below() {
+    assert_eq!(
+        outcome(
+            "",
+            "<< /EndPage { pop pop 9 true } >> setpagedevice 7 sv { restore } t_try \
+             exch 7 eq { count 1 eq { } { pop /stackleft } ifelse } { pop /lost } ifelse"
+        ),
+        "ok"
     );
 }
 

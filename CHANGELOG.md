@@ -58,6 +58,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restore through and `execform` then leaves a graphics state the program
   never set; stet refuses it. A `restore` that is the last thing its
   procedure does is still legal, as there. Reported by @adamwilmer (#46).
+- **What an `EndPage` procedure leaves on the operand stack besides its
+  answer is discarded**, at `showpage`, `copypage`, `setpagedevice`, a
+  `restore` that switches page devices, and the end of a job, as in
+  Ghostscript. It used to stay, under the program's next operand. At a
+  `restore` that also fixes a crash: the restore could reclaim an object
+  EndPage had just left there. And a `restore` whose EndPage leaves a
+  newer dictionary on the dictionary stack now raises `invalidrestore`,
+  where stet silently popped it. Part of #46.
 
 ## [0.11.0] — 2026-11-18
 

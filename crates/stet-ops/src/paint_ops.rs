@@ -7,7 +7,7 @@
 use stet_core::context::Context;
 use stet_core::error::PsError;
 use stet_core::graphics_state::ColorSpace;
-use stet_core::object::{PsObject, PsValue};
+use stet_core::object::PsValue;
 use stet_fonts::geometry::{Matrix, PathSegment, PsPath};
 use stet_graphics::color::{DashPattern, DeviceColor, FillRule};
 use stet_graphics::device::{
@@ -864,19 +864,8 @@ pub fn op_showpage(ctx: &mut Context) -> Result<(), PsError> {
 
     // If we have a page device with EndPage, use the continuation protocol
     if let Some(end_page) = crate::device_ops::end_page_proc(ctx) {
-        // Push args for EndPage: the showpage count, and reason 0 = showpage
-        ctx.o_stack.push(PsObject::int(ctx.showpage_count))?;
-        ctx.o_stack.push(PsObject::int(0))?;
-
-        // Push .showpage_continue first (runs second), then EndPage (runs first)
-        let continue_name = ctx.names.intern(b".showpage_continue");
-        if let Some(continue_op) = ctx.dict_load(&stet_core::dict::DictKey::Name(continue_name)) {
-            ctx.e_stack.push(continue_op)?;
-        } else {
-            eprintln!("Warning: .showpage_continue not found in dict stack");
-        }
-        ctx.e_stack.push(end_page)?;
-        return Ok(());
+        // Reason 0 = showpage.
+        return crate::device_ops::push_end_page(ctx, end_page, 0, b".showpage_continue");
     }
 
     // Fallback: direct rendering (no page device or no EndPage proc)

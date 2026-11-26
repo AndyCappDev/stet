@@ -474,14 +474,8 @@ pub fn op_copypage(ctx: &mut Context) -> Result<(), PsError> {
     }
 
     if let Some(end_page) = end_page_proc(ctx) {
-        ctx.o_stack.push(PsObject::int(ctx.showpage_count))?;
-        ctx.o_stack.push(PsObject::int(0))?; // reason 0, as for showpage
-        let continue_name = ctx.names.intern(b".copypage_continue");
-        if let Some(continue_op) = ctx.dict_load(&stet_core::dict::DictKey::Name(continue_name)) {
-            ctx.e_stack.push(continue_op)?;
-        }
-        ctx.e_stack.push(end_page)?;
-        return Ok(());
+        // Reason 0, as for showpage.
+        return push_end_page(ctx, end_page, 0, b".copypage_continue");
     }
 
     // No EndPage procedure: transmit and erase directly.
@@ -544,6 +538,48 @@ pub(crate) fn end_page_proc(ctx: &Context) -> Option<PsObject> {
     get_pd_value(ctx, b"EndPage").filter(is_nonempty_proc)
 }
 
+/// Run `end_page` from the execution stack with the showpage count and
+/// `reason`, then the internal operator `continuation` with its result.
+///
+/// The continuation needs the operand stack's depth from before EndPage's
+/// operands, to discard what EndPage leaves (see [`end_page_result`]). It
+/// goes on the execution stack as a literal integer, under `end_page`, so the
+/// eval loop pushes it onto the operand stack after EndPage returns, where the
+/// continuation pops it. An error in EndPage unwinds it with the rest.
+pub(crate) fn push_end_page(
+    ctx: &mut Context,
+    end_page: PsObject,
+    reason: i32,
+    continuation: &[u8],
+) -> Result<(), PsError> {
+    let continue_name = ctx.names.intern(continuation);
+    let continue_op = ctx
+        .dict_load(&DictKey::Name(continue_name))
+        .ok_or(PsError::Undefined)?;
+    let depth = ctx.o_stack.len();
+    ctx.o_stack.push(PsObject::int(ctx.showpage_count))?;
+    ctx.o_stack.push(PsObject::int(reason))?;
+    ctx.e_stack.push(continue_op)?;
+    ctx.e_stack.push(PsObject::int(depth as i64))?;
+    ctx.e_stack.push(end_page)?;
+    Ok(())
+}
+
+/// Take what an `EndPage` procedure returned, and discard anything else it
+/// left on the operand stack: everything above `depth`, the operand stack's
+/// depth before EndPage's two operands were pushed.
+///
+/// The result is the top of the stack, `true` unless it is `false`. The rest
+/// of what EndPage left goes, as in Ghostscript, for every caller (`showpage`,
+/// `copypage`, `setpagedevice`, `restore`, the end of a job). For `restore`
+/// that is required as well as compatible: the restore may reclaim an object
+/// EndPage made, so leaving it on the stack would leave a dangling reference.
+fn end_page_result(ctx: &mut Context, depth: usize) -> Result<bool, PsError> {
+    let result = ctx.o_stack.pop().map_err(|_| PsError::StackUnderflow)?;
+    ctx.o_stack.truncate(depth);
+    Ok(!matches!(result.value, PsValue::Bool(false)))
+}
+
 // ---------- showpage continuation ----------
 
 /// `.showpage_continue`: internal operator run after `showpage`'s `EndPage`
@@ -567,14 +603,17 @@ pub fn op_copypage_continue(ctx: &mut Context) -> Result<(), PsError> {
 /// `showpage` then performs `initgraphics`, `copypage` does not, and both
 /// call `BeginPage` last with the number of executions so far.
 fn finish_page(ctx: &mut Context, copypage: bool) -> Result<(), PsError> {
-    if ctx.o_stack.is_empty() {
+    // The depth `push_end_page` left for us, on top of EndPage's result.
+    if ctx.o_stack.len() < 2 {
         return Err(PsError::StackUnderflow);
     }
-    let result = ctx.o_stack.pop()?;
-    let transmit = match result.value {
-        PsValue::Bool(b) => b,
-        _ => true, // default to rendering if EndPage returned non-bool
+    let depth = match ctx.o_stack.peek(0)?.value {
+        PsValue::Int(d) => usize::try_from(d).map_err(|_| PsError::RangeCheck)?,
+        _ => return Err(PsError::TypeCheck),
     };
+    ctx.o_stack.pop()?;
+    // A result that is not a boolean counts as `true`.
+    let transmit = end_page_result(ctx, depth)?;
     ctx.showpage_count += 1;
 
     if transmit {
@@ -787,10 +826,7 @@ pub fn deactivate_page_device(ctx: &mut Context) -> Result<bool, PsError> {
     ctx.o_stack.push(PsObject::int(ctx.showpage_count))?;
     ctx.o_stack.push(PsObject::int(2))?;
     ctx.exec_sync(end_page)?;
-    if ctx.o_stack.len() <= depth {
-        return Err(PsError::StackUnderflow);
-    }
-    let transmit = !matches!(ctx.o_stack.pop()?.value, PsValue::Bool(false));
+    let transmit = end_page_result(ctx, depth)?;
     if transmit {
         transmit_page(ctx, "end of page device")?;
     }

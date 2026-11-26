@@ -208,6 +208,22 @@ fn device_procedures_consume_their_operands() {
     }
 }
 
+/// What `EndPage` leaves on the operand stack besides its answer is
+/// discarded, by `showpage`, `copypage` and `setpagedevice` alike, as in
+/// Ghostscript; the program's own operands underneath stay. stet kept the
+/// leftovers, under the program's next operand.
+#[test]
+fn end_page_leftovers_are_discarded() {
+    let (_, log) = run(
+        "7 8 << /PageSize [100 100] /EndPage { pop pop 42 43 dup 2 ne } >> \
+         setpagedevice\n\
+         showpage count =\n\
+         copypage count =\n\
+         << /PageSize [100 100] >> setpagedevice count =\n",
+    );
+    assert_eq!(log, ["2", "2", "2"]);
+}
+
 /// With `--device pdf`, a page leaves nothing on the operand stack.
 #[test]
 fn pdf_output_leaves_the_operand_stack_clean() {

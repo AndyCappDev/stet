@@ -97,6 +97,16 @@ pub fn op_restore_now(ctx: &mut Context) -> Result<(), PsError> {
             return Err(e);
         }
     };
+    // EndPage, if `begin_reinstate` ran one, is PostScript, and may have
+    // left something in use the restore would reclaim. Its operands are
+    // discarded (`device_ops::end_page_result`), but a dictionary it left on
+    // the dictionary stack, say, is not, so check again, as Ghostscript does.
+    if how == crate::device_ops::Reactivation::FromPage
+        && let Err(e) = check_invalidrestore(ctx, save_id)
+    {
+        let _ = ctx.o_stack.push(save_obj);
+        return Err(e);
+    }
 
     // Capture clip version before restore so we can emit InitClip+Clip if it changed
     let old_clip_version = ctx.gstate.clip_path_version;
