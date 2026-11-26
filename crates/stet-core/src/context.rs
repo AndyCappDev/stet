@@ -460,10 +460,9 @@ pub struct Context {
     /// interpreter state, not an argument.
     pub exec_sync_depth: u32,
 
-    /// The `exec_sync` calls in progress and what each caller holds, for
-    /// `restore`'s `invalidrestore` check (see [`crate::sync_frames`]).
-    /// Maintained by the engine's `exec_sync` alongside
-    /// [`exec_sync_depth`](Self::exec_sync_depth).
+    /// The `exec_sync` calls in progress, for `restore`'s `invalidrestore`
+    /// check (see [`crate::sync_frames`]). Maintained by the engine's
+    /// `exec_sync` alongside [`exec_sync_depth`](Self::exec_sync_depth).
     pub sync_frames: crate::sync_frames::SyncFrames,
 
     /// Ceiling on local VM, in bytes.
@@ -981,41 +980,12 @@ impl Context {
 
     /// Execute a PostScript procedure synchronously and return.
     ///
-    /// The caller declares nothing it holds, so a `restore` inside the
-    /// procedure of a save made before the call raises `invalidrestore` (see
-    /// [`crate::sync_frames`]). A caller that reads objects after the call
-    /// returns and can name them uses
-    /// [`exec_sync_holding`](Self::exec_sync_holding) instead.
+    /// A `restore` inside the procedure of a save made before the call
+    /// raises `invalidrestore`, since the caller may still hold objects that
+    /// save would reclaim (see [`crate::sync_frames`]).
     pub fn exec_sync(&mut self, proc_obj: PsObject) -> Result<(), PsError> {
         let f = self.exec_sync_fn.expect("exec_sync not initialized");
         f(self, proc_obj)
-    }
-
-    /// Execute a PostScript procedure synchronously, declaring what the
-    /// caller holds while it runs.
-    ///
-    /// `held` is every composite the caller reads after the procedure
-    /// returns without fetching it afresh: the string being shown, the font,
-    /// the dictionary it was given. `proc_obj` is a root as well. A `restore`
-    /// inside the procedure then raises `invalidrestore` only if it would
-    /// reclaim one of them, as on Ghostscript, where they are on the
-    /// execution stack.
-    ///
-    /// A rooted container protects what is read *through* it later: an
-    /// object put into it after the save is undone by copy-on-write, so a
-    /// fresh read gets the old value. An inner object the caller keeps in a
-    /// local must be rooted itself.
-    pub fn exec_sync_holding(
-        &mut self,
-        proc_obj: PsObject,
-        held: &[PsObject],
-    ) -> Result<(), PsError> {
-        self.sync_frames.declare(proc_obj, held);
-        let result = self.exec_sync(proc_obj);
-        // The engine's `exec_sync` takes the declaration up; one installed by
-        // an embedder may not.
-        self.sync_frames.abandon_declaration();
-        result
     }
 
     /// Run any not-yet-executed procedure data source underneath `entity`,

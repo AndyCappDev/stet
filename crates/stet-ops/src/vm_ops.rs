@@ -151,19 +151,11 @@ fn check_invalidrestore(ctx: &Context, save_id: u32) -> Result<(), PsError> {
             return Err(PsError::InvalidRestore);
         }
     }
-    // Callbacks the restore would cross: what each caller holds while its
-    // procedure runs, or, if it did not say, `invalidrestore` outright (see
-    // `stet_core::sync_frames`).
-    for roots in ctx.sync_frames.crossed_by(save_id) {
-        let Some(roots) = roots else {
-            return Err(PsError::InvalidRestore);
-        };
-        if roots
-            .iter()
-            .any(|r| is_newer_local(ctx, r, save_id) || is_newer_gstate(r, gstate_store_floor))
-        {
-            return Err(PsError::InvalidRestore);
-        }
+    // A callback in progress that began while the save was live: its
+    // caller holds objects on no stack, which the restore could reclaim
+    // (see `stet_core::sync_frames`).
+    if ctx.sync_frames.crossed_by(save_id) {
+        return Err(PsError::InvalidRestore);
     }
     // Check dict stack (skip systemdict and globaldict at bottom)
     for &dict_entity in ctx.d_stack.iter().skip(2) {

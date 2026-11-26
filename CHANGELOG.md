@@ -50,10 +50,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   procedure an operator calls and then carries on from: an `image` data
   procedure, `kshow` and `cshow`, a Type 3 `BuildChar`, a transfer, spot
   or tint function, a form's or pattern's `PaintProc`, and the procedures
-  of `resourceforall` and `filenameforall`. The PLRM makes each of these
-  an `invalidrestore`, as Ghostscript raises. A `restore` that is the last
-  thing its procedure does is still legal, as there. Reported by
-  @adamwilmer (#46).
+  of `resourceforall` and `filenameforall`. Each is now `invalidrestore`,
+  as on Ghostscript, even when everything the program passed in is older
+  than the save: Ghostscript keeps each operator's own working state on
+  its execution stack, newer than any enclosing save. The one difference
+  is a form whose dictionary predates the save, where Ghostscript lets the
+  restore through and `execform` then leaves a graphics state the program
+  never set; stet refuses it. A `restore` that is the last thing its
+  procedure does is still legal, as there. Reported by @adamwilmer (#46).
 
 ## [0.11.0] — 2026-11-18
 

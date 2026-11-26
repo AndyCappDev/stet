@@ -489,3 +489,139 @@ fn type3_xshow_error_keeps_gstate() {
         "ok"
     );
 }
+
+// --- Everything the program passed in is older than the save ---
+//
+// A restore inside a callback is still `invalidrestore` on Ghostscript 10.05
+// when the procedure, the string, the font and the dictionaries all predate
+// the save: each operator keeps working state of its own, allocated when it
+// starts, on the execution stack. stet refuses any restore that crosses a
+// callback (`stet_core::sync_frames`), which gives the same answer. One
+// case per group of call sites.
+
+/// The show family: string and procedure older than the save.
+#[test]
+fn kshow_older_operands() {
+    assert_eq!(
+        outcome(
+            &format!("{HELVETICA}\n/s (ab) def /p {{ pop pop sv restore }} def"),
+            "{ /p load s kshow } t_try"
+        ),
+        "invalidrestore"
+    );
+}
+
+/// A Type 3 `BuildChar`, with font and string older than the save.
+#[test]
+fn type3_older_font_and_string() {
+    assert_eq!(
+        outcome(
+            &format!("/T3BC {{ pop pop 500 0 setcharwidth sv restore }} def\n{TYPE3}\n/s (a) def"),
+            "{ s show } t_try"
+        ),
+        "invalidrestore"
+    );
+}
+
+/// A transfer procedure older than the save.
+#[test]
+fn settransfer_older_proc() {
+    assert_eq!(
+        outcome(
+            "/p { pop 0 sv restore } def",
+            "{ /p load settransfer } t_try"
+        ),
+        "invalidrestore"
+    );
+}
+
+/// A halftone dictionary and its spot function older than the save.
+#[test]
+fn sethalftone_older_dict() {
+    assert_eq!(
+        outcome(
+            "/p { pop pop 0 sv restore } def \
+             /h << /HalftoneType 1 /Frequency 72 /Angle 45 /SpotFunction /p load >> def",
+            "{ h sethalftone } t_try"
+        ),
+        "invalidrestore"
+    );
+}
+
+/// A Separation colour space, with its tint transform, older than the save.
+#[test]
+fn separation_older_space() {
+    assert_eq!(
+        outcome(
+            "/cs [/Separation /Foo /DeviceGray { pop 0 sv restore }] def",
+            "{ cs setcolorspace 0.5 setcolor 0 0 1 1 rectfill } t_try"
+        ),
+        "invalidrestore"
+    );
+}
+
+/// An Indexed colour space's lookup procedure older than the save.
+#[test]
+fn indexed_older_proc() {
+    assert_eq!(
+        outcome(
+            "/cs [/Indexed /DeviceGray 1 { pop 0 sv restore }] def",
+            "{ cs setcolorspace 1 setcolor 0 0 1 1 rectfill } t_try"
+        ),
+        "invalidrestore"
+    );
+}
+
+/// An image data procedure and its data older than the save.
+#[test]
+fn image_older_proc() {
+    assert_eq!(
+        outcome(
+            r"/s1 (\377\377) def /p { s1 sv restore } def /m [2 0 0 1 0 0] def",
+            "{ 2 1 8 m /p load image } t_try"
+        ),
+        "invalidrestore"
+    );
+}
+
+/// `resourceforall` with procedure and scratch string older than the save.
+#[test]
+fn resourceforall_older_operands() {
+    assert_eq!(
+        outcome(
+            "/scr 100 string def /p { pop sv restore } def",
+            "{ (StandardEncoding) /p load scr /Encoding resourceforall } t_try"
+        ),
+        "invalidrestore"
+    );
+}
+
+/// A procedure data source older than the save.
+#[test]
+fn data_source_older_proc() {
+    assert_eq!(
+        outcome(
+            "/d (41>) def /p { d sv restore } def",
+            "{ /p load /ASCIIHexDecode filter read pop pop } t_try"
+        ),
+        "invalidrestore"
+    );
+}
+
+/// `execform` with a form dictionary older than the save: the one case
+/// where stet is stricter than Ghostscript. Ghostscript lets the restore
+/// through, but then `execform`'s closing `grestore` pops past the graphics
+/// state the restore reinstated, so the program carries on in a state none of
+/// its own operators set (with no `gsave` before the save, the initial
+/// default line width). stet refuses the restore, as at every other callback.
+#[test]
+fn execform_older_dict() {
+    assert_eq!(
+        outcome(
+            "/f << /FormType 1 /BBox [0 0 1 1] /Matrix [1 0 0 1 0 0] \
+             /PaintProc { pop sv restore } >> def",
+            "{ f execform } t_try"
+        ),
+        "invalidrestore"
+    );
+}
