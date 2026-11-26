@@ -165,6 +165,45 @@ UserObjects 0 get type /nulltype eq [true] assert
 % undefineuserobject rangecheck (negative)
 -1 /undefineuserobject [-1 /rangecheck] assert
 
+%% user objects and save/restore %%
+% PLRM 3e: defineuserobject's writes "can be undone by a subsequent restore
+% operation according to the usual VM rules" -- both the store into the array
+% and, when it grows, userdict's entry for it.
+
+% a store into the existing array is undone
+0 (before) defineuserobject
+save 0 (inside) defineuserobject restore
+0 execuserobject (before) eq [true] assert
+
+% undefineuserobject is undone too
+save 0 undefineuserobject restore
+0 execuserobject (before) eq [true] assert
+
+% an array grown after the save is freed by restore, and userdict goes back
+% to the old one (this panicked: issue #45, from dvips + NeXT EPS figures)
+UserObjects length /uo_len exch def
+save uo_len 10 add (grown) defineuserobject restore
+UserObjects length uo_len eq [true] assert
+uo_len 10 add (again) defineuserobject
+uo_len 10 add execuserobject (again) eq [true] assert
+0 execuserobject (before) eq [true] assert
+
+%% user object index limits %%
+% an index past the largest array length: limitcheck, not wrapped to 0
+4294967295 (x) /defineuserobject [4294967295 (x) /limitcheck] assert
+4294967296 (x) /defineuserobject [4294967296 (x) /limitcheck] assert
+0 execuserobject (before) eq [true] assert
+
+% the largest index an array can hold, but more than VM can: VMerror, checked
+% before anything is allocated
+4294967294 (x) /defineuserobject [4294967294 (x) /VMerror] assert
+
+% undefineuserobject / execuserobject: an index that wraps to a valid one
+% is still out of range
+4294967296 /undefineuserobject [4294967296 /rangecheck] assert
+4294967296 /execuserobject [4294967296 /rangecheck] assert
+0 execuserobject (before) eq [true] assert
+
 
 %% usertime %%
 % usertime returns an integer

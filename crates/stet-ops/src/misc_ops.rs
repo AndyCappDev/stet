@@ -1217,6 +1217,12 @@ fn get_userobjects(ctx: &Context) -> Option<(EntityId, u32)> {
 ///
 /// Stores obj at the given index in the UserObjects array in userdict.
 /// Creates or grows the array as needed.
+///
+/// PLRM 3e: the array lives in local VM "regardless of the current VM
+/// allocation mode", and both the store into it and the userdict entry that
+/// names it are ordinary VM writes, undone by `restore`. So each write goes
+/// through the save journal, as `put` and `def` do: a `restore` that frees an
+/// array grown after its `save` must also revert userdict's reference to it.
 pub fn op_defineuserobject(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.len() < 2 {
         return Err(PsError::StackUnderflow);
@@ -1224,46 +1230,58 @@ pub fn op_defineuserobject(ctx: &mut Context) -> Result<(), PsError> {
     let obj = ctx.o_stack.peek(0)?;
     let idx_obj = ctx.o_stack.peek(1)?;
     let index = match idx_obj.value {
-        PsValue::Int(v) if v >= 0 => v as u32,
+        PsValue::Int(v) if v >= 0 => v,
         PsValue::Int(_) => return Err(PsError::RangeCheck),
         _ => return Err(PsError::TypeCheck),
     };
+    // An array's length is a `u32`, so `index + 1` must fit one; past that the
+    // index is beyond the range permitted for arrays (PLRM: limitcheck).
+    let needed = u32::try_from(index)
+        .ok()
+        .and_then(|i| i.checked_add(1))
+        .ok_or(PsError::LimitCheck)?;
+    let index = needed - 1;
+
+    // Either the existing array holds `index`, or a new one of `new_len` is
+    // allocated, taking over the old one's elements if there was one.
+    let (store_in, grow) = match get_userobjects(ctx) {
+        Some((entity, len)) if needed <= len => (Some(entity), None),
+        Some((entity, old_len)) => (
+            None,
+            Some((
+                Some((entity, old_len)),
+                needed.max(old_len.saturating_mul(2)),
+            )),
+        ),
+        None => (None, Some((None, needed.max(4)))),
+    };
+    // Checked before allocating, as `array` does: a failed allocation aborts
+    // rather than returning, and a large index is a large array.
+    if let Some((_, new_len)) = grow {
+        ctx.check_vm_alloc((new_len as usize).saturating_mul(std::mem::size_of::<PsObject>()))?;
+    }
 
     // Pop operands after validation
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
 
-    let needed = index + 1;
-
-    match get_userobjects(ctx) {
-        Some((entity, len)) if needed <= len => {
-            // Array exists and is large enough — just store
-            ctx.arrays.set_element(entity, index, obj);
-        }
-        Some((entity, old_len)) => {
-            // Array exists but too small — allocate new, copy old, store
-            let new_len = needed.max(old_len * 2);
+    if let Some(entity) = store_in {
+        ctx.cow_check_array(entity);
+        ctx.arrays.set_element(entity, index, obj);
+    }
+    if let Some((old, new_len)) = grow {
+        // A fresh array is created at the current save level, so `restore`
+        // frees it; the journalled userdict entry reverts to the old one.
+        let new_entity = crate::vm_ops::alloc_array_in(ctx, new_len as usize, false);
+        if let Some((entity, old_len)) = old {
             let old_data: Vec<PsObject> = ctx.arrays.get(entity, 0, old_len).to_vec();
-            let new_entity =
-                crate::vm_ops::alloc_array_in(ctx, new_len as usize, ctx.userdict.is_global());
             let new_slice = ctx.arrays.get_mut(new_entity, 0, new_len);
             new_slice[..old_len as usize].copy_from_slice(&old_data);
-            ctx.arrays.set_element(new_entity, index, obj);
-            // Update userdict to point to new array
-            let name_id = ctx.names.intern(b"UserObjects");
-            let arr_obj = PsObject::array(new_entity, new_len);
-            ctx.dicts.put(ctx.userdict, DictKey::Name(name_id), arr_obj);
         }
-        None => {
-            // No UserObjects array — create one
-            let new_len = needed.max(4);
-            let new_entity =
-                crate::vm_ops::alloc_array_in(ctx, new_len as usize, ctx.userdict.is_global());
-            ctx.arrays.set_element(new_entity, index, obj);
-            let name_id = ctx.names.intern(b"UserObjects");
-            let arr_obj = PsObject::array(new_entity, new_len);
-            ctx.dicts.put(ctx.userdict, DictKey::Name(name_id), arr_obj);
-        }
+        ctx.arrays.set_element(new_entity, index, obj);
+        let name_id = ctx.names.intern(b"UserObjects");
+        let arr_obj = PsObject::array(new_entity, new_len);
+        ctx.dict_put_cow(ctx.userdict, DictKey::Name(name_id), arr_obj);
     }
 
     Ok(())
@@ -1276,17 +1294,20 @@ pub fn op_undefineuserobject(ctx: &mut Context) -> Result<(), PsError> {
     }
     let idx_obj = ctx.o_stack.peek(0)?;
     let index = match idx_obj.value {
-        PsValue::Int(v) if v >= 0 => v as u32,
+        PsValue::Int(v) if v >= 0 => v,
         PsValue::Int(_) => return Err(PsError::RangeCheck),
         _ => return Err(PsError::TypeCheck),
     };
 
     let (entity, len) = get_userobjects(ctx).ok_or(PsError::Undefined)?;
-    if index >= len {
-        return Err(PsError::RangeCheck);
-    }
+    let index = u32::try_from(index)
+        .ok()
+        .filter(|&i| i < len)
+        .ok_or(PsError::RangeCheck)?;
 
     ctx.o_stack.pop()?;
+    // An ordinary VM write, undone by `restore` (see `op_defineuserobject`).
+    ctx.cow_check_array(entity);
     ctx.arrays.set_element(entity, index, PsObject::null());
     Ok(())
 }
@@ -1300,15 +1321,16 @@ pub fn op_execuserobject(ctx: &mut Context) -> Result<(), PsError> {
     }
     let idx_obj = ctx.o_stack.peek(0)?;
     let index = match idx_obj.value {
-        PsValue::Int(v) if v >= 0 => v as u32,
+        PsValue::Int(v) if v >= 0 => v,
         PsValue::Int(_) => return Err(PsError::RangeCheck),
         _ => return Err(PsError::TypeCheck),
     };
 
     let (entity, len) = get_userobjects(ctx).ok_or(PsError::Undefined)?;
-    if index >= len {
-        return Err(PsError::RangeCheck);
-    }
+    let index = u32::try_from(index)
+        .ok()
+        .filter(|&i| i < len)
+        .ok_or(PsError::RangeCheck)?;
 
     let obj = ctx.arrays.get_element(entity, index);
     ctx.o_stack.pop()?;

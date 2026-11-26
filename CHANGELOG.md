@@ -17,6 +17,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   had been pinned in `Cargo.lock` since 0.8.0 and are now 1.14.1 and
   5.4.3. The musl binary has no viewer and was unaffected, and crates
   built from crates.io resolve their own versions.
+- **`defineuserobject` after a `restore` no longer panics.**
+  `defineuserobject` and `undefineuserobject` changed the `UserObjects`
+  array, and userdict's entry for it, without recording the change for
+  `restore`, so a `restore` freed an array grown inside the `save` while
+  userdict still pointed to it, and the next `defineuserobject` crashed.
+  dvips output that includes NeXT EPS figures does this on every page.
+  Both writes are now undone by `restore`, as the PLRM requires. An index
+  of 2³² or more no longer wraps around to a low slot: `defineuserobject`
+  raises `limitcheck`, and `undefineuserobject` and `execuserobject` raise
+  `rangecheck`. An index too large for memory raises `VMerror` instead of
+  trying to allocate the array. Reported by @adamwilmer (#45).
 
 ## [0.11.0] — 2026-11-18
 
