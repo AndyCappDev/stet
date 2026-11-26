@@ -59,6 +59,18 @@ impl ThreeFiles {
         }
         Self(dir)
     }
+
+    /// A `filenameforall` template matching the three files, as the contents
+    /// of a PostScript string. Written with `/`, since a Windows path's
+    /// backslashes are escapes in a PostScript string.
+    fn template(&self) -> String {
+        format!(
+            "{}/*",
+            self.0
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/")
+        )
+    }
 }
 
 impl Drop for ThreeFiles {
@@ -420,8 +432,8 @@ fn filenameforall_proc() {
         outcome(
             "",
             &format!(
-                "{{ ({}/*) {{ pop sv restore }} 200 string filenameforall }} t_try",
-                dir.0.display()
+                "{{ ({}) {{ pop sv restore }} 512 string filenameforall }} t_try",
+                dir.template()
             )
         ),
         "invalidrestore"
@@ -460,12 +472,15 @@ fn resourceforall_scratch_reverts() {
 #[test]
 fn filenameforall_scratch_reverts() {
     let dir = ThreeFiles::new("filenameforall_scratch_reverts");
+    let template = dir.template();
+    // Longer than any name the template matches, however long the temp
+    // folder's path is (on macOS it is over 100 bytes).
+    let scratch = "X".repeat(template.len() + 32);
     assert_eq!(
         outcome(
-            "/scr (XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX) def",
+            &format!("/scr ({scratch}) def"),
             &format!(
-                "({}/*) {{pop}} scr filenameforall sv restore scr 0 1 getinterval (X) eq {{ /ok }} {{ /notreverted }} ifelse",
-                dir.0.display()
+                "({template}) {{pop}} scr filenameforall sv restore scr 0 1 getinterval (X) eq {{ /ok }} {{ /notreverted }} ifelse"
             )
         ),
         "ok"
