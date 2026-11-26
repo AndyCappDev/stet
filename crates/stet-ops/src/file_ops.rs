@@ -578,11 +578,19 @@ pub fn op_flushfile(ctx: &mut Context) -> Result<(), PsError> {
 
 /// `currentfile`: — → file
 /// Returns the file on the exec stack nearest to the top.
+///
+/// PLRM 3e: "The returned file has the literal attribute." The file on the
+/// execution stack is executable — that is how the interpreter runs it — so
+/// the copy pushed here is made literal. The Windows PostScript driver builds
+/// image data procedures as `[currentfile s /readhexstring cvx /pop cvx] cvx`;
+/// an executable file in that array would run the rest of the program instead
+/// of being read from.
 pub fn op_currentfile(ctx: &mut Context) -> Result<(), PsError> {
     // Scan exec stack top-down for a File object
     for i in 0..ctx.e_stack.len() {
-        let obj = ctx.e_stack.peek(i)?;
+        let mut obj = ctx.e_stack.peek(i)?;
         if matches!(obj.value, PsValue::File(_)) {
+            obj.flags.set_literal();
             ctx.o_stack.push(obj)?;
             return Ok(());
         }

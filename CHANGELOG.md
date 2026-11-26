@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   raises `limitcheck`, and `undefineuserobject` and `execuserobject` raise
   `rangecheck`. An index too large for memory raises `VMerror` instead of
   trying to allocate the array. Reported by @adamwilmer (#45).
+- **`currentfile` returns a literal file, as the PLRM specifies.** It
+  returned the file as it sits on the execution stack, executable. The
+  Windows PostScript driver (PScript5) builds image data procedures as
+  `[currentfile s /readhexstring cvx /pop cvx] cvx`, so with an
+  executable file in the array, `image` ran the rest of the program
+  instead of reading its data, and such files could crash at the next
+  `restore`. Reported by @adamwilmer (#46).
 
 ## [0.11.0] — 2026-11-18
 

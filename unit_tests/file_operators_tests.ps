@@ -206,6 +206,26 @@ currentfile line 0 gt [true] assert
 
 
 %% =============================================================================
+%% currentfile - "The returned file has the literal attribute" (PLRM 3e)
+%% =============================================================================
+
+%% currentfile - literal, though the file being executed is executable %%
+currentfile xcheck [false] assert
+
+%% currentfile - literal inside a procedure built with [ ] %%
+[ currentfile ] 0 get xcheck [false] assert
+
+%% currentfile - the Windows driver's data procedure reads, not runs, the file %%
+% PScript5 builds image data procedures this way; an executable file in the
+% array ran the rest of the program instead (issue #46). The procedure leaves
+% the string it read, as `image` expects.
+/cf_s 1 string def
+[ currentfile cf_s /readhexstring cvx /pop cvx ] cvx exec
+41
+(A) eq [true] assert
+
+
+%% =============================================================================
 %% end of file closes the file (PLRM 3e `file`: "closed ... implicitly (by
 %% encountering end-of-file while reading or executing the file)").
 %% Expected values are Ghostscript 10.05's.
