@@ -343,7 +343,9 @@ pub fn op_join(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?; // array
     ctx.o_stack.pop()?; // separator
 
-    // Write result into dest string
+    // Write result into dest string, backed up first, or a `restore` keeps
+    // what was written.
+    ctx.cow_check_string(dest_entity);
     let dest_buf = ctx.strings.get_mut(dest_entity, dest_start, dest_len);
     dest_buf[..result.len()].copy_from_slice(&result);
 

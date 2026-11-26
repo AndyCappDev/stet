@@ -57,6 +57,47 @@ pub fn op_grestore(ctx: &mut Context) -> Result<(), PsError> {
     Ok(())
 }
 
+/// End the `gsave` an operator made around a procedure it ran, undoing every
+/// `gsave` the procedure left unmatched as well, as Ghostscript does after a
+/// Type 3 glyph procedure.
+///
+/// `outer_depth` is the graphics state stack's depth just before the
+/// operator's `gsave`. This makes the procedure's graphics state its own
+/// (PLRM 3e 5.7: BuildGlyph "is called within the confines of a gsave and a
+/// grestore"): a `gsave` it forgot to match no longer surfaces at the
+/// program's next `grestore`. A procedure that popped more than it pushed is
+/// where Ghostscript's two paths part:
+///
+/// - `succeeded`: unwind to just inside the operator's `gsave`, then
+///   `grestore` once, which after such a procedure pops the level below;
+/// - otherwise: unwind until the stack is no deeper than `outer_depth`,
+///   which after such a procedure undoes nothing.
+///
+/// The unwinding stops at an entry `grestore` does not pop (one a `save`
+/// made, or the floor of an open transparency group).
+pub(crate) fn end_procedure_gsave(
+    ctx: &mut Context,
+    outer_depth: usize,
+    succeeded: bool,
+) -> Result<(), PsError> {
+    let floor = if succeeded {
+        outer_depth + 1
+    } else {
+        outer_depth
+    };
+    while ctx.gstate_stack.len() > floor {
+        let before = ctx.gstate_stack.len();
+        op_grestore(ctx)?;
+        if ctx.gstate_stack.len() >= before {
+            return Ok(());
+        }
+    }
+    if succeeded {
+        op_grestore(ctx)?;
+    }
+    Ok(())
+}
+
 /// `grestoreall`: — → — (restore to bottommost graphics state)
 ///
 /// PLRM: repeatedly performs grestore until hitting a save-created entry,
@@ -80,6 +121,14 @@ pub fn op_grestoreall(ctx: &mut Context) -> Result<(), PsError> {
     let how = crate::device_ops::begin_reinstate(ctx, incoming)?;
 
     let old_version = ctx.gstate.clip_path_version;
+
+    // `begin_reinstate` may have run an EndPage, which is PostScript and can
+    // change the stack, even empty it with a `grestoreall` of its own; so
+    // what follows reads the stack as it is now, not as it was above.
+    if ctx.gstate_stack.is_empty() {
+        restore_device_clip(ctx, old_version);
+        return crate::device_ops::finish_reinstate(ctx, how);
+    }
 
     // Check if any save-created entry exists
     let has_save = ctx.gstate_stack.iter().any(|e| e.saved_by_save);

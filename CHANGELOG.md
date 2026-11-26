@@ -66,6 +66,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   EndPage had just left there. And a `restore` whose EndPage leaves a
   newer dictionary on the dictionary stack now raises `invalidrestore`,
   where stet silently popped it. Part of #46.
+- **`restore` reverts what `cvs`, `cvrs`, `join`, `resourceforall` and
+  `filenameforall` wrote into a string older than the `save`.** They wrote
+  without the backup every other string write keeps, so the restore left
+  their output in place. Found with #46.
+- **A Type 3 glyph procedure's graphics state stays its own.** An error
+  in BuildChar or BuildGlyph left the glyph's coordinate system (and
+  everything else the procedure had set) in place after `show`, `xshow`,
+  `charpath` and the other show operators, and a `gsave` the procedure
+  forgot to match surfaced at the program's next `grestore`. Both are now
+  undone, error or not, as in Ghostscript. `execform` likewise no longer
+  leaves the form's matrix and clip behind when its PaintProc fails, and
+  a `gsave` left unmatched by a pattern's PaintProc no longer surfaces
+  after `makepattern`. Found with #46.
 
 ## [0.11.0] — 2026-11-18
 

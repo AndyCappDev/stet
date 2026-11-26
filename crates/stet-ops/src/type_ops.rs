@@ -93,6 +93,8 @@ pub fn op_cvs(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
 
+    // Back the string up first, or a `restore` keeps what was written.
+    ctx.cow_check_string(str_entity);
     let dest = ctx.strings.get_mut(str_entity, str_start, str_len);
     dest[..repr.len()].copy_from_slice(repr.as_bytes());
 
@@ -207,6 +209,8 @@ pub fn op_cvrs(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?;
     ctx.o_stack.pop()?;
 
+    // Back the string up first, or a `restore` keeps what was written.
+    ctx.cow_check_string(str_entity);
     let dest = ctx.strings.get_mut(str_entity, str_start, str_len);
     dest[..repr.len()].copy_from_slice(repr.as_bytes());
 

@@ -528,6 +528,9 @@ pub fn op_resourceforall(ctx: &mut Context) -> Result<(), PsError> {
     // Write name into scratch string and push substring onto o_stack.
     for name_bytes in &matching_names {
         let copy_len = name_bytes.len().min(scratch_len as usize);
+        // The scratch string is the program's, and may be older than a
+        // `save`: back it up first, or `restore` keeps the last name written.
+        ctx.cow_check_string(scratch_entity);
         let scratch_slice = ctx
             .strings
             .get_mut(scratch_entity, scratch_start, scratch_len);

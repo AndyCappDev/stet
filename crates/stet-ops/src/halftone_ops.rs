@@ -974,6 +974,12 @@ pub fn op_makepattern(ctx: &mut Context) -> Result<(), PsError> {
     let cached_display_list = if pattern_type == 1 {
         let pp = paint_proc.unwrap();
 
+        // The pattern dict for PaintProc to consume, pushed before anything
+        // below is swapped out, so a full operand stack fails with nothing
+        // to put back.
+        let depth_before = ctx.o_stack.len();
+        ctx.o_stack.push(PsObject::dict(new_dict))?;
+
         // Save the display list and set the CTM to identity so PaintProc
         // captures paths in pattern space (not device space)
         let saved_dl = std::mem::take(&mut ctx.display_list);
@@ -998,9 +1004,15 @@ pub fn op_makepattern(ctx: &mut Context) -> Result<(), PsError> {
         ctx.gstate.path.clear();
         ctx.gstate.current_point = None;
 
-        // Push pattern dict on o_stack for PaintProc to consume
-        let depth_before = ctx.o_stack.len();
-        ctx.o_stack.push(PsObject::dict(new_dict))?;
+        // A `gsave` PaintProc leaves unmatched must not surface at the
+        // program's next `grestore`, as in Ghostscript: the stack goes back
+        // to this depth after. (Ghostscript also stops a `grestore` too many
+        // from popping one of the program's entries; stet does not. Running
+        // PaintProc on an empty stack would, but an open transparency
+        // group's floor is a depth in the program's stack, below which a
+        // `grestore` does nothing, so PaintProc's own `gsave`s could not be
+        // undone inside one.)
+        let gstate_depth = ctx.gstate_stack.len();
 
         // Execute PaintProc
         // Text a pattern cell shows is paint, repeated per tile, not the
@@ -1017,6 +1029,7 @@ pub fn op_makepattern(ctx: &mut Context) -> Result<(), PsError> {
         ctx.o_stack.truncate(depth_before);
 
         // Restore graphics state, display list and charpath capture
+        ctx.gstate_stack.truncate(gstate_depth);
         ctx.gstate = saved_gstate;
         ctx.charpath_capture = saved_charpath;
         let captured = std::mem::replace(&mut ctx.display_list, saved_dl);
@@ -1402,7 +1415,7 @@ pub fn op_execform(ctx: &mut Context) -> Result<(), PsError> {
     let impl_key = DictKey::Name(ctx.names.intern(b"Implementation"));
     let implementation = ctx.dicts.get(dict_entity, &impl_key);
     let first_invocation = implementation.is_none();
-    let mut direct = matches!(implementation.map(|o| o.value), Some(PsValue::Bool(false)));
+    let direct = matches!(implementation.map(|o| o.value), Some(PsValue::Bool(false)));
 
     if first_invocation {
         // Validate FormType
@@ -1436,6 +1449,24 @@ pub fn op_execform(ctx: &mut Context) -> Result<(), PsError> {
     // 1. gsave
     crate::graphics_state_ops::op_gsave(ctx)?;
 
+    // 2–5, then 6. grestore, which runs whether the form painted or failed:
+    // an error inside must not leave the form's matrix and clip behind, as
+    // in Ghostscript, which does one grestore either way.
+    let painted = paint_form(ctx, dict_entity, first_invocation, direct);
+    let restored = crate::graphics_state_ops::op_grestore(ctx);
+    painted?;
+    restored
+}
+
+/// Steps 2–5 of [`op_execform`], inside its `gsave`: concatenate the form's
+/// Matrix, clip to its BBox, and paint it, from the cache or by running the
+/// PaintProc.
+fn paint_form(
+    ctx: &mut Context,
+    dict_entity: stet_core::object::EntityId,
+    first_invocation: bool,
+    mut direct: bool,
+) -> Result<(), PsError> {
     // 2. Concat form's Matrix with CTM
     let matrix_key = DictKey::Name(ctx.names.intern(b"Matrix"));
     let matrix_obj = ctx
@@ -1547,9 +1578,6 @@ pub fn op_execform(ctx: &mut Context) -> Result<(), PsError> {
         let cached_clone = cached.clone();
         replay_form_elements(&cached_clone, &real_ctm, ctx.current_display_list_mut());
     }
-
-    // 6. grestore
-    crate::graphics_state_ops::op_grestore(ctx)?;
 
     Ok(())
 }

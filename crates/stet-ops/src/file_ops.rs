@@ -899,6 +899,9 @@ pub fn op_filenameforall(ctx: &mut Context) -> Result<(), PsError> {
             return Err(PsError::RangeCheck);
         }
         let copy_len = name_bytes.len();
+        // The scratch string is the program's, and may be older than a
+        // `save`: back it up first, or `restore` keeps the last name written.
+        ctx.cow_check_string(scratch_entity);
         let scratch_slice = ctx
             .strings
             .get_mut(scratch_entity, scratch_start, scratch_len);

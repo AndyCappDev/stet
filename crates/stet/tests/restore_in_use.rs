@@ -389,6 +389,29 @@ fn endpage_keeps_operands_below() {
     );
 }
 
+/// `cvs`, `cvrs` and `join` (a stet extension) write into the program's
+/// string, which `restore` must revert like any other change to a string
+/// older than the save (PLRM 3.7.3; stet's `putinterval` does). They wrote
+/// without a backup, so the restore kept what they wrote. Ghostscript reverts
+/// no string contents on `restore`, so the PLRM decides these.
+#[test]
+fn string_writes_revert() {
+    for write in [
+        "12 s cvs pop",
+        "255 16 s cvrs pop",
+        "(-) [(a) (b)] s join pop",
+    ] {
+        assert_eq!(
+            outcome(
+                "/s (XXXXXX) def",
+                &format!("{write} sv restore s (XXXXXX) eq {{ /ok }} {{ /notreverted }} ifelse")
+            ),
+            "ok",
+            "{write}"
+        );
+    }
+}
+
 /// `filenameforall` keeps its procedure and scratch string.
 #[test]
 fn filenameforall_proc() {
@@ -422,7 +445,6 @@ fn inline_restore_keeps_operand() {
 /// undone by `restore`, as `putinterval`'s are. (Ghostscript reverts no string
 /// contents at all, so it is no oracle here; this is PLRM 3.7.3.)
 #[test]
-#[ignore = "scratch-string write skips cow_check_string (#46, later phase)"]
 fn resourceforall_scratch_reverts() {
     assert_eq!(
         outcome(
@@ -436,7 +458,6 @@ fn resourceforall_scratch_reverts() {
 /// `filenameforall`'s writes into a scratch string made before the save are
 /// undone by `restore`. (See `resourceforall_scratch_reverts`.)
 #[test]
-#[ignore = "scratch-string write skips cow_check_string (#46, later phase)"]
 fn filenameforall_scratch_reverts() {
     let dir = ThreeFiles::new("filenameforall_scratch_reverts");
     assert_eq!(
@@ -454,7 +475,6 @@ fn filenameforall_scratch_reverts() {
 /// An error in a Type 3 BuildChar leaves the graphics state as it was before
 /// `show`.
 #[test]
-#[ignore = "error path skips grestore (#46, later phase)"]
 fn type3_error_keeps_gstate() {
     assert_eq!(
         outcome(
@@ -473,7 +493,6 @@ fn type3_error_keeps_gstate() {
 /// An error in a form's PaintProc leaves the graphics state as it was before
 /// `execform`.
 #[test]
-#[ignore = "error path skips grestore (#46, later phase)"]
 fn execform_error_keeps_gstate() {
     assert_eq!(
         outcome(
@@ -499,7 +518,6 @@ fn makepattern_error_keeps_gstate() {
 /// An error in a Type 3 BuildChar under `xshow` leaves the graphics state as it
 /// was.
 #[test]
-#[ignore = "error path skips grestore (#46, later phase)"]
 fn type3_xshow_error_keeps_gstate() {
     assert_eq!(
         outcome(
@@ -648,5 +666,100 @@ fn execform_older_dict() {
             "{ f execform } t_try"
         ),
         "invalidrestore"
+    );
+}
+
+// --- A procedure's graphics state stack, checked against Ghostscript 10.05 ---
+//
+// Each leaves the line width as a name: 5 is set before the operator, the
+// procedure sets 6, makes a `gsave` of its own and sets 7.
+
+const LINE_WIDTH: &str = "currentlinewidth cvi 10 string cvs cvn";
+
+/// A Type 3 font whose glyph procedure sets 6, `gsave`s, sets 7, then runs
+/// `tail`.
+fn type3_unmatched_gsave(tail: &str) -> String {
+    format!(
+        "/T3BC {{ pop pop 500 0 setcharwidth 6 setlinewidth gsave 7 setlinewidth {tail} }} def\n{TYPE3}"
+    )
+}
+
+/// A glyph procedure's unmatched `gsave` is undone with the operator's own,
+/// whether it succeeds or fails, for every operator that runs one.
+#[test]
+fn type3_unmatched_gsave_is_undone() {
+    for tail in ["", "nosuchname"] {
+        for op in [
+            "(a) show",
+            "(a) [10] xshow",
+            "(a) false charpath",
+            "(a) stringwidth pop pop",
+        ] {
+            assert_eq!(
+                outcome(
+                    &type3_unmatched_gsave(tail),
+                    &format!("5 setlinewidth {{ {op} }} t_try pop {LINE_WIDTH}")
+                ),
+                "5",
+                "{op} with `{tail}`"
+            );
+        }
+    }
+}
+
+/// A glyph procedure that pops a level too many: on success the operator's
+/// closing `grestore` pops the program's level too; on error nothing more
+/// is undone. Ghostscript does both.
+#[test]
+fn type3_extra_grestore() {
+    for (tail, expected) in [("", "3"), ("nosuchname", "7")] {
+        let setup = format!(
+            "/T3BC {{ pop pop 500 0 setcharwidth grestore 7 setlinewidth {tail} }} def\n{TYPE3}"
+        );
+        assert_eq!(
+            outcome(
+                &setup,
+                &format!(
+                    "3 setlinewidth gsave 5 setlinewidth {{ (a) show }} t_try pop {LINE_WIDTH}"
+                )
+            ),
+            expected,
+            "`{tail}`"
+        );
+    }
+}
+
+/// `execform` does one `grestore` whether PaintProc succeeds or fails, so a
+/// `gsave` PaintProc leaves unmatched stays, as in Ghostscript.
+#[test]
+fn execform_grestores_once() {
+    for tail in ["", "nosuchname"] {
+        assert_eq!(
+            outcome(
+                &format!(
+                    "/f << /FormType 1 /BBox [0 0 1 1] /Matrix [1 0 0 1 0 0] \
+                     /PaintProc {{ pop 6 setlinewidth gsave 7 setlinewidth {tail} }} >> def"
+                ),
+                &format!("5 setlinewidth {{ f execform }} t_try pop {LINE_WIDTH}")
+            ),
+            "6",
+            "`{tail}`"
+        );
+    }
+}
+
+/// A `gsave` a pattern's PaintProc leaves unmatched does not surface at the
+/// program's next `grestore`: it popped into the PaintProc's state.
+#[test]
+fn makepattern_unmatched_gsave_is_dropped() {
+    assert_eq!(
+        outcome(
+            "/d << /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 1 1] /XStep 1 /YStep 1 \
+             /PaintProc { pop gsave 7 setlinewidth } >> def /m matrix def",
+            &format!(
+                "3 setlinewidth gsave 5 setlinewidth d m makepattern pop grestore {LINE_WIDTH}"
+            )
+        ),
+        "3"
     );
 }

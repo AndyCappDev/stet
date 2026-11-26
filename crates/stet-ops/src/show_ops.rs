@@ -3515,6 +3515,36 @@ struct Type3Metrics {
     bbox: Option<[f64; 4]>,
 }
 
+/// Inside the `gsave` a Type 3 glyph procedure runs in: move to the glyph's
+/// `origin` in user space (if given), concatenate the font's FontMatrix, and
+/// push the procedure's operands, the font dict and then `operand` (the
+/// character name for BuildGlyph, the code for BuildChar).
+///
+/// The FontMatrix is read from the dict afresh, in case an earlier glyph
+/// procedure changed it.
+fn enter_glyph_space(
+    ctx: &mut Context,
+    font_entity: EntityId,
+    font_obj: PsObject,
+    operand: PsObject,
+    origin: Option<(f64, f64)>,
+) -> Result<(), PsError> {
+    if let Some((x, y)) = origin {
+        ctx.o_stack.push(PsObject::real(x))?;
+        ctx.o_stack.push(PsObject::real(y))?;
+        crate::matrix_ops::op_translate(ctx)?;
+    }
+    let fm_obj = ctx
+        .dicts
+        .get(font_entity, &DictKey::Name(ctx.name_cache.n_font_matrix))
+        .ok_or(PsError::InvalidFont)?;
+    ctx.o_stack.push(fm_obj)?;
+    crate::matrix_ops::op_concat(ctx)?;
+    ctx.o_stack.push(font_obj)?;
+    ctx.o_stack.push(operand)?;
+    Ok(())
+}
+
 /// Run one Type 3 glyph's build procedure at `(cur_x, cur_y)` in user space.
 ///
 /// The procedure runs inside a gsave/grestore with the current position and
@@ -3552,51 +3582,39 @@ fn build_type3_glyph(
     // Record device-space origin for cache
     let (origin_dev_x, origin_dev_y) = ctm.transform_point(cur_x, cur_y);
 
-    // gsave, translate to current position, concat FontMatrix
+    let outer_depth = ctx.gstate_stack.len();
     crate::graphics_state_ops::op_gsave(ctx)?;
-
-    ctx.o_stack.push(PsObject::real(cur_x))?;
-    ctx.o_stack.push(PsObject::real(cur_y))?;
-    crate::matrix_ops::op_translate(ctx)?;
-
-    // Re-read FontMatrix from dict (in case the procedure modified it)
-    let fm_obj = ctx
-        .dicts
-        .get(font_entity, &DictKey::Name(ctx.name_cache.n_font_matrix))
-        .ok_or(PsError::InvalidFont)?;
-    ctx.o_stack.push(fm_obj)?;
-    crate::matrix_ops::op_concat(ctx)?;
-
-    // The font dict, then the operand the procedure expects — the character
-    // name for BuildGlyph, the character code for BuildChar.
-    ctx.o_stack.push(font_obj)?;
-    ctx.o_stack.push(operand)?;
-
-    // Execute the procedure synchronously. In charpath mode the painting
-    // operators divert their paths into `charpath_capture` instead of
-    // marking the page; anything else the procedure emits lands on the
-    // display list and is drained below. A nested `show` leaves the
-    // installed buffer alone, so painting inside it still diverts to
-    // the charpath that is running.
-    let outer_capture = if charpath {
-        ctx.charpath_capture.replace(PsPath::new())
-    } else {
-        None
-    };
-    // What the procedure shows draws the glyph; the glyph itself is the
-    // text, recorded by the caller.
-    let suspended = text_record::suspend(ctx);
-    let build_result = ctx.exec_sync(build_proc);
-    text_record::resume(ctx, suspended);
-    let captured = if charpath {
-        std::mem::replace(&mut ctx.charpath_capture, outer_capture)
-    } else {
-        None
-    };
+    let mut captured = None;
+    let build_result = enter_glyph_space(ctx, font_entity, font_obj, operand, Some((cur_x, cur_y)))
+        .and_then(|()| {
+            // Execute the procedure synchronously. In charpath mode the
+            // painting operators divert their paths into
+            // `charpath_capture` instead of marking the page; anything
+            // else the procedure emits lands on the display list and is
+            // drained below. A nested `show` leaves the installed buffer
+            // alone, so painting inside it still diverts to the charpath
+            // that is running.
+            let outer_capture = if charpath {
+                ctx.charpath_capture.replace(PsPath::new())
+            } else {
+                None
+            };
+            // What the procedure shows draws the glyph; the glyph itself
+            // is the text, recorded by the caller.
+            let suspended = text_record::suspend(ctx);
+            let result = ctx.exec_sync(build_proc);
+            text_record::resume(ctx, suspended);
+            if charpath {
+                captured = std::mem::replace(&mut ctx.charpath_capture, outer_capture);
+            }
+            result
+        });
+    // Undo the gsave, and any the procedure left unmatched, whether or not
+    // it succeeded.
+    let restored =
+        crate::graphics_state_ops::end_procedure_gsave(ctx, outer_depth, build_result.is_ok());
     build_result?;
-
-    // grestore to undo the gsave+translate+concat
-    crate::graphics_state_ops::op_grestore(ctx)?;
+    restored?;
 
     // Get char width set by setcachedevice/setcharwidth during the procedure
     let char_width = ctx.char_width.take().unwrap_or((0.0, 0.0));
@@ -4147,25 +4165,23 @@ fn measure_string_width_type3(
 
                 let dl_start = ctx.current_display_list().len();
 
-                crate::graphics_state_ops::op_gsave(ctx)?;
-                let fm_obj = ctx
-                    .dicts
-                    .get(font_entity, &DictKey::Name(ctx.name_cache.n_font_matrix))
-                    .ok_or(PsError::InvalidFont)?;
-                ctx.o_stack.push(fm_obj)?;
-                crate::matrix_ops::op_concat(ctx)?;
-
                 let operand = type3_build_operand(ctx, font_entity, build_kind, byte);
-                ctx.o_stack.push(font_obj)?;
-                ctx.o_stack.push(operand)?;
+                let outer_depth = ctx.gstate_stack.len();
+                crate::graphics_state_ops::op_gsave(ctx)?;
+                let build_result = enter_glyph_space(ctx, font_entity, font_obj, operand, None)
+                    .and_then(|()| ctx.exec_sync(build_proc));
 
-                let build_result = ctx.exec_sync(build_proc);
-
-                // Unwind the gsave and drop the marks before propagating, so a
-                // failing glyph procedure can't leave either behind.
-                crate::graphics_state_ops::op_grestore(ctx)?;
+                // Unwind the gsave, with any the procedure left unmatched,
+                // and drop the marks before propagating, so a failing glyph
+                // procedure can't leave either behind.
+                let restored = crate::graphics_state_ops::end_procedure_gsave(
+                    ctx,
+                    outer_depth,
+                    build_result.is_ok(),
+                );
                 let _ = ctx.current_display_list_mut().split_off(dl_start);
                 build_result?;
+                restored?;
 
                 ctx.char_width.take().unwrap_or((0.0, 0.0))
             }
@@ -5399,35 +5415,27 @@ fn render_show_displaced_type3(
         ctx.char_width = None;
         ctx.char_bbox = None;
 
-        // gsave, translate to current position, concat FontMatrix
-        crate::graphics_state_ops::op_gsave(ctx)?;
-
-        ctx.o_stack.push(PsObject::real(cur_x))?;
-        ctx.o_stack.push(PsObject::real(cur_y))?;
-        crate::matrix_ops::op_translate(ctx)?;
-
-        let fm_obj = ctx
-            .dicts
-            .get(font_entity, &DictKey::Name(ctx.name_cache.n_font_matrix))
-            .ok_or(PsError::InvalidFont)?;
-        ctx.o_stack.push(fm_obj)?;
-        crate::matrix_ops::op_concat(ctx)?;
-
-        // Push the font dict and the operand the procedure expects — the
-        // character name for BuildGlyph, the character code for BuildChar.
         let operand = type3_build_operand(ctx, font_entity, build_kind, byte);
-        ctx.o_stack.push(font_obj)?;
-        ctx.o_stack.push(operand)?;
-
-        // Execute the procedure synchronously. What it shows draws the
-        // glyph; the glyph itself is the text, recorded below.
-        let suspended = text_record::suspend(ctx);
-        let build_result = ctx.exec_sync(build_proc);
-        text_record::resume(ctx, suspended);
+        let outer_depth = ctx.gstate_stack.len();
+        crate::graphics_state_ops::op_gsave(ctx)?;
+        let build_result =
+            enter_glyph_space(ctx, font_entity, font_obj, operand, Some((cur_x, cur_y))).and_then(
+                |()| {
+                    // Execute the procedure synchronously. What it shows
+                    // draws the glyph; the glyph itself is the text, recorded
+                    // below.
+                    let suspended = text_record::suspend(ctx);
+                    let result = ctx.exec_sync(build_proc);
+                    text_record::resume(ctx, suspended);
+                    result
+                },
+            );
+        // Undo the gsave, and any the procedure left unmatched, whether or
+        // not it succeeded.
+        let restored =
+            crate::graphics_state_ops::end_procedure_gsave(ctx, outer_depth, build_result.is_ok());
         build_result?;
-
-        // grestore
-        crate::graphics_state_ops::op_grestore(ctx)?;
+        restored?;
 
         if ctx.text_capture.is_some() {
             let font_matrix = read_font_matrix(ctx, font_entity);
