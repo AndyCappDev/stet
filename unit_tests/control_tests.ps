@@ -94,10 +94,14 @@ mark 0 {(will not happen)} /repeat [null] dup 0 mark put assert
 10 {1 exit} /repeat [1] assert
 {1 exit} /loop [1] assert
 % cshow
-% filenameforall
+% exit ends the enumeration after the first name
+0 (unit_tests/*.ps) {pop 1 add exit} 100 string /filenameforall [1] assert
 % kshow
 % pathforall
-% resourceforall
+0 (*) {pop 1 add exit} 100 string /Encoding /resourceforall [1] assert
+% stop in the procedure reaches the enclosing stopped, as any error does
+{(unit_tests/*.ps) {pop stop} 100 string filenameforall} /stopped [true] assert
+{(*) {pop stop} 100 string /Encoding resourceforall} /stopped [true] assert
     % exit errors
     /exit [/invalidexit] assert
 

@@ -35,6 +35,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   executable file in the array, `image` ran the rest of the program
   instead of reading its data, and such files could crash at the next
   `restore`. Reported by @adamwilmer (#46).
+- **`stop` and errors inside a `resourceforall` or `filenameforall`
+  procedure reach the enclosing `stopped`, and `exit` ends the
+  enumeration.** The two had been swapped: `stop`, and with it any error
+  the procedure raised, quietly ended the enumeration as if it had
+  finished, while `exit` escaped to an enclosing loop or raised
+  `invalidexit`. Both now behave as in Ghostscript.
 
 ## [0.11.0] — 2026-11-18
 

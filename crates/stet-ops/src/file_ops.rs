@@ -914,9 +914,13 @@ pub fn op_filenameforall(ctx: &mut Context) -> Result<(), PsError> {
         };
         ctx.o_stack.push(str_obj)?;
 
+        // `exit` in the procedure ends the enumeration, as in a loop.
+        // `stop`, and any error, belongs to whatever encloses the operator:
+        // swallowing it here dropped the error, `invalidrestore` included,
+        // and the enclosing `stopped` saw a normal return.
         match ctx.exec_sync(proc) {
             Ok(()) => {}
-            Err(PsError::Stop) => break,
+            Err(PsError::Exit) => break,
             Err(e) => return Err(e),
         }
     }
