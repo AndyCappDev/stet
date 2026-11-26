@@ -344,6 +344,17 @@ pub struct Context {
     // Synchronous procedure execution (set by engine crate)
     pub exec_sync_fn: Option<ExecSyncFn>,
 
+    /// The internal operator `restore` hands its work to, set when the
+    /// operators are registered.
+    ///
+    /// `restore` checks its operand, then pushes this onto the execution
+    /// stack instead of restoring at once. An operator called from inside a
+    /// procedure runs with that procedure's cursor off every stack, so a
+    /// check made there cannot see the procedure that called it. Pushing
+    /// makes the eval loop put the caller's cursor back underneath, if the
+    /// procedure has anything left to run, before the check runs.
+    pub restore_op: Option<crate::object::OpCode>,
+
     // Character width set by setcachedevice/setcharwidth during BuildChar execution
     pub char_width: Option<(f64, f64)>,
     // Mode 1 metrics from setcachedevice2: ((w1x, w1y), (vx, vy))
@@ -448,6 +459,12 @@ pub struct Context {
     /// call sites are spread across four crates and the value is genuinely
     /// interpreter state, not an argument.
     pub exec_sync_depth: u32,
+
+    /// The `exec_sync` calls in progress and what each caller holds, for
+    /// `restore`'s `invalidrestore` check (see [`crate::sync_frames`]).
+    /// Maintained by the engine's `exec_sync` alongside
+    /// [`exec_sync_depth`](Self::exec_sync_depth).
+    pub sync_frames: crate::sync_frames::SyncFrames,
 
     /// Ceiling on local VM, in bytes.
     ///
@@ -963,9 +980,42 @@ impl Context {
     }
 
     /// Execute a PostScript procedure synchronously and return.
+    ///
+    /// The caller declares nothing it holds, so a `restore` inside the
+    /// procedure of a save made before the call raises `invalidrestore` (see
+    /// [`crate::sync_frames`]). A caller that reads objects after the call
+    /// returns and can name them uses
+    /// [`exec_sync_holding`](Self::exec_sync_holding) instead.
     pub fn exec_sync(&mut self, proc_obj: PsObject) -> Result<(), PsError> {
         let f = self.exec_sync_fn.expect("exec_sync not initialized");
         f(self, proc_obj)
+    }
+
+    /// Execute a PostScript procedure synchronously, declaring what the
+    /// caller holds while it runs.
+    ///
+    /// `held` is every composite the caller reads after the procedure
+    /// returns without fetching it afresh: the string being shown, the font,
+    /// the dictionary it was given. `proc_obj` is a root as well. A `restore`
+    /// inside the procedure then raises `invalidrestore` only if it would
+    /// reclaim one of them, as on Ghostscript, where they are on the
+    /// execution stack.
+    ///
+    /// A rooted container protects what is read *through* it later: an
+    /// object put into it after the save is undone by copy-on-write, so a
+    /// fresh read gets the old value. An inner object the caller keeps in a
+    /// local must be rooted itself.
+    pub fn exec_sync_holding(
+        &mut self,
+        proc_obj: PsObject,
+        held: &[PsObject],
+    ) -> Result<(), PsError> {
+        self.sync_frames.declare(proc_obj, held);
+        let result = self.exec_sync(proc_obj);
+        // The engine's `exec_sync` takes the declaration up; one installed by
+        // an embedder may not.
+        self.sync_frames.abandon_declaration();
+        result
     }
 
     /// Run any not-yet-executed procedure data source underneath `entity`,
@@ -1449,6 +1499,7 @@ impl Context {
             internaldict,
             icc_cache: crate::icc::IccCache::new(),
             exec_sync_fn: None,
+            restore_op: None,
             char_width: None,
             char_bbox: None,
             char_width_mode1: None,
@@ -1472,6 +1523,7 @@ impl Context {
             name_resolve_cache: Vec::new(),
             interrupt_flag: None,
             exec_sync_depth: 0,
+            sync_frames: crate::sync_frames::SyncFrames::new(),
             max_local_vm: DEFAULT_MAX_LOCAL_VM,
             max_page_size_points: DEFAULT_MAX_PAGE_SIZE_POINTS,
             keep_jpeg: false,
@@ -1639,6 +1691,52 @@ impl Context {
     /// Get a mutable loop state by EntityId.
     pub fn get_loop_mut(&mut self, entity: EntityId) -> &mut LoopState {
         &mut self.loops[entity.0 as usize]
+    }
+
+    /// Call `f` with each object an execution-stack entry keeps in use.
+    ///
+    /// Most entries are simply themselves. Two are not, because they stand
+    /// for state kept outside the stack:
+    ///
+    /// - a procedure cursor ([`PsValue::ExecArray`]) is the procedure it is
+    ///   running, reported as that array;
+    /// - a loop mark ([`PsValue::Loop`]) is what its [`LoopState`] holds: the
+    ///   loop's procedure, the object `forall` is walking, and the four
+    ///   procedures of `pathforall`.
+    ///
+    /// PLRM 3e: `restore` raises `invalidrestore` if a stack holds a local
+    /// composite newer than the save, and on Ghostscript these are all on the
+    /// execution stack. So `restore`'s check and the debug sweep for dangling
+    /// references both go through this one walk, and cannot disagree about
+    /// what is in use.
+    pub fn exec_entry_refs(&self, obj: &PsObject, mut f: impl FnMut(PsObject)) {
+        match obj.value {
+            PsValue::ExecArray {
+                entity, start, len, ..
+            } => f(PsObject {
+                value: PsValue::Array { entity, start, len },
+                flags: obj.flags,
+            }),
+            PsValue::Loop(id) => {
+                let state = self.get_loop(id);
+                if let Some(procs) = state.path_procs {
+                    // `pathforall` keeps its procedures here; its
+                    // `proc_entity` is a placeholder.
+                    procs.into_iter().for_each(&mut f);
+                } else {
+                    f(PsObject {
+                        value: PsValue::Array {
+                            entity: state.proc_entity,
+                            start: state.proc_start,
+                            len: state.proc_len,
+                        },
+                        flags: ObjFlags::literal_composite(),
+                    });
+                }
+                f(state.source);
+            }
+            _ => f(*obj),
+        }
     }
 
     /// Return the display list paint operators should currently append to.

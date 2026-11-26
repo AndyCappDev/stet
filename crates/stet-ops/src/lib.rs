@@ -338,6 +338,11 @@ pub fn build_system_dict(ctx: &mut Context) {
     // --- VM operators ---
     register(ctx, sd, "save", vm_ops::op_save);
     register(ctx, sd, "restore", vm_ops::op_restore);
+    // What `restore` hands its work to (see `vm_ops::op_restore`): in the
+    // operator table under the same name, so its errors report `restore`,
+    // but not in `systemdict`.
+    let restore_name = ctx.names.intern(b"restore");
+    ctx.restore_op = Some(push_operator(ctx, restore_name, vm_ops::op_restore_now));
     register(ctx, sd, "vmstatus", vm_ops::op_vmstatus);
     register(ctx, sd, "setglobal", vm_ops::op_setglobal);
     register(ctx, sd, "currentglobal", vm_ops::op_currentglobal);

@@ -20,7 +20,35 @@ pub fn op_save(ctx: &mut Context) -> Result<(), PsError> {
 }
 
 /// `restore`: save → — (revert VM to saved state)
+///
+/// Checks its operand, then hands the restore to [`op_restore_now`] through
+/// the execution stack rather than doing it here. PLRM 3e: `restore` raises
+/// `invalidrestore` if the execution stack holds a composite newer than the
+/// save, and that includes the procedure `restore` was called from. But an
+/// operator called from inside a procedure runs while that procedure's
+/// cursor is off every stack (the eval loop holds it while it dispatches), so
+/// a check made here would miss it, and the restore would free a procedure
+/// that is still running. Pushing onto the execution stack makes the eval loop
+/// put the caller's cursor back underneath first, but only if the procedure
+/// has elements left. So a procedure whose last element is `restore` has
+/// finished, and may be freed, as in Ghostscript.
 pub fn op_restore(ctx: &mut Context) -> Result<(), PsError> {
+    if ctx.o_stack.is_empty() {
+        return Err(PsError::StackUnderflow);
+    }
+    if !matches!(ctx.o_stack.peek(0)?.value, PsValue::Save(_)) {
+        return Err(PsError::TypeCheck);
+    }
+    match ctx.restore_op {
+        Some(op) => ctx.e_stack.push(PsObject::operator(op)),
+        // Only an operator table built without `build_system_dict`
+        // lacks it; nothing can be running a procedure there.
+        None => op_restore_now(ctx),
+    }
+}
+
+/// The work of `restore`, run from the execution stack (see [`op_restore`]).
+pub fn op_restore_now(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
     }
@@ -112,9 +140,28 @@ fn check_invalidrestore(ctx: &Context, save_id: u32) -> Result<(), PsError> {
             return Err(PsError::InvalidRestore);
         }
     }
-    // Check execution stack
+    // Check execution stack, including the procedures that cursors are
+    // running and what loops hold (see `Context::exec_entry_refs`).
     for obj in ctx.e_stack.as_slice() {
-        if is_newer_local(ctx, obj, save_id) || is_newer_gstate(obj, gstate_store_floor) {
+        let mut newer = false;
+        ctx.exec_entry_refs(obj, |r| {
+            newer |= is_newer_local(ctx, &r, save_id) || is_newer_gstate(&r, gstate_store_floor);
+        });
+        if newer {
+            return Err(PsError::InvalidRestore);
+        }
+    }
+    // Callbacks the restore would cross: what each caller holds while its
+    // procedure runs, or, if it did not say, `invalidrestore` outright (see
+    // `stet_core::sync_frames`).
+    for roots in ctx.sync_frames.crossed_by(save_id) {
+        let Some(roots) = roots else {
+            return Err(PsError::InvalidRestore);
+        };
+        if roots
+            .iter()
+            .any(|r| is_newer_local(ctx, r, save_id) || is_newer_gstate(r, gstate_store_floor))
+        {
             return Err(PsError::InvalidRestore);
         }
     }
@@ -634,7 +681,7 @@ mod tests {
         assert_eq!(ctx.o_stack.len(), 1);
         let save_obj = ctx.o_stack.peek(0).unwrap();
         assert!(matches!(save_obj.value, PsValue::Save(_)));
-        op_restore(&mut ctx).unwrap();
+        op_restore_now(&mut ctx).unwrap();
         assert!(ctx.o_stack.is_empty());
     }
 
@@ -704,7 +751,7 @@ mod tests {
     fn test_restore_typecheck() {
         let mut ctx = test_ctx();
         ctx.o_stack.push(PsObject::int(42)).unwrap();
-        assert_eq!(op_restore(&mut ctx), Err(PsError::TypeCheck));
+        assert_eq!(op_restore_now(&mut ctx), Err(PsError::TypeCheck));
     }
 
     #[test]
@@ -717,7 +764,7 @@ mod tests {
                 flags: stet_core::object::ObjFlags::literal(),
             })
             .unwrap();
-        assert_eq!(op_restore(&mut ctx), Err(PsError::InvalidRestore));
+        assert_eq!(op_restore_now(&mut ctx), Err(PsError::InvalidRestore));
     }
 
     #[test]
@@ -730,9 +777,9 @@ mod tests {
 
         // Must restore in order: s2 first, then s1
         ctx.o_stack.push(s2).unwrap();
-        op_restore(&mut ctx).unwrap();
+        op_restore_now(&mut ctx).unwrap();
         ctx.o_stack.push(s1).unwrap();
-        op_restore(&mut ctx).unwrap();
+        op_restore_now(&mut ctx).unwrap();
     }
 
     #[test]
@@ -748,11 +795,11 @@ mod tests {
 
         // Restoring s1 should succeed and also invalidate s2
         ctx.o_stack.push(s1).unwrap();
-        assert_eq!(op_restore(&mut ctx), Ok(()));
+        assert_eq!(op_restore_now(&mut ctx), Ok(()));
 
         // s2 is now invalid — restoring it should fail
         ctx.o_stack.push(s2).unwrap();
-        assert_eq!(op_restore(&mut ctx), Err(PsError::InvalidRestore));
+        assert_eq!(op_restore_now(&mut ctx), Err(PsError::InvalidRestore));
     }
 
     #[test]

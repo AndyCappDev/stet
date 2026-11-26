@@ -87,13 +87,22 @@ pub fn exec_sync(ctx: &mut Context, proc_obj: PsObject) -> Result<(), PsError> {
     // that sets its own colour space is roughly 200 bytes and aborts the
     // process on a stack overflow. `PsError::ExecStackOverflow` is the PLRM
     // error for exhausting the execution stack, which is what this is.
-    if ctx.exec_sync_depth >= MAX_EXEC_SYNC_DEPTH {
-        return Err(PsError::ExecStackOverflow);
-    }
-    ctx.exec_sync_depth += 1;
-    let result = exec_sync_inner(ctx, proc_obj);
-    // Decrement through every exit, including the error paths inside.
-    ctx.exec_sync_depth -= 1;
+    //
+    // The frame records what the caller holds while the procedure runs, for
+    // `restore`'s check (`stet_core::sync_frames`). It begins before the
+    // depth check so that a declaration made for this call is always taken
+    // up, and ends through every exit.
+    ctx.sync_frames.begin(ctx.save_stack.last_save_id());
+    let result = if ctx.exec_sync_depth >= MAX_EXEC_SYNC_DEPTH {
+        Err(PsError::ExecStackOverflow)
+    } else {
+        ctx.exec_sync_depth += 1;
+        let result = exec_sync_inner(ctx, proc_obj);
+        // Decrement through every exit, including the error paths inside.
+        ctx.exec_sync_depth -= 1;
+        result
+    };
+    ctx.sync_frames.end();
     result
 }
 

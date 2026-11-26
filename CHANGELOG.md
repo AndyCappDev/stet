@@ -41,6 +41,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the procedure raised, quietly ended the enumeration as if it had
   finished, while `exit` escaped to an enclosing loop or raised
   `invalidexit`. Both now behave as in Ghostscript.
+- **A `restore` that would free something still in use raises
+  `invalidrestore` instead of crashing.** `/sv save def { sv restore 1
+  pop } exec` restored while the procedure that called it was still
+  running, and the interpreter crashed reading its next element. So did a
+  `restore` inside a loop's procedure (`repeat`, `for`, `loop`, `forall`
+  and its array, string or dictionary, `pathforall`), and inside a
+  procedure an operator calls and then carries on from: an `image` data
+  procedure, `kshow` and `cshow`, a Type 3 `BuildChar`, a transfer, spot
+  or tint function, a form's or pattern's `PaintProc`, and the procedures
+  of `resourceforall` and `filenameforall`. The PLRM makes each of these
+  an `invalidrestore`, as Ghostscript raises. A `restore` that is the last
+  thing its procedure does is still legal, as there. Reported by
+  @adamwilmer (#46).
 
 ## [0.11.0] — 2026-11-18
 

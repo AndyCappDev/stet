@@ -434,7 +434,11 @@ fn check_ref(
 /// Sweeps both VM arenas plus every interpreter root that outlives a
 /// `restore`:
 ///
-/// - the operand, execution, and dictionary stacks
+/// - the operand, execution, and dictionary stacks, with the procedures the
+///   execution stack's cursors are running and what its loops hold
+///   ([`Context::exec_entry_refs`])
+/// - what callbacks in progress declared they hold
+///   ([`Context::exec_sync_holding`])
 /// - the well-known dictionary handles cached on [`Context`]
 /// - the graphics state, the gstate stack, and `gstate_store`
 /// - the entity-keyed caches (`glyph_caches`, `form_cache`)
@@ -493,8 +497,17 @@ pub fn audit_dangling_refs(ctx: &Context) -> Vec<DanglingRef> {
     for (index, obj) in ctx.o_stack.as_slice().iter().enumerate() {
         check_ref(ctx, obj, "operand stack", index.to_string(), &mut out);
     }
+    // What each entry keeps in use, as `restore` checks it: a cursor's
+    // procedure, and what a loop holds.
     for (index, obj) in ctx.e_stack.as_slice().iter().enumerate() {
-        check_ref(ctx, obj, "execution stack", index.to_string(), &mut out);
+        ctx.exec_entry_refs(obj, |r| {
+            check_ref(ctx, &r, "execution stack", index.to_string(), &mut out);
+        });
+    }
+    // What callbacks in progress declared they hold
+    // (`Context::exec_sync_holding`).
+    for (index, obj) in ctx.sync_frames.roots().iter().enumerate() {
+        check_ref(ctx, obj, "exec_sync roots", index.to_string(), &mut out);
     }
     for (index, entity) in ctx.d_stack.iter().enumerate() {
         check_ref(
