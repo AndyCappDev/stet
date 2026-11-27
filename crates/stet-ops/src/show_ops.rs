@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use stet_core::cmap::CmapTables;
+use stet_core::cmap::{CmapTables, Selector, Target};
 use stet_core::context::{CidGlyphMetrics, Context};
 use stet_core::dict::DictKey;
 use stet_core::error::PsError;
@@ -359,7 +359,7 @@ pub fn op_cshow(ctx: &mut Context) -> Result<(), PsError> {
         let (spans, cid_pairs): CodeSpans = match decode_cmap_codes(ctx, font_entity, &bytes) {
             Some((codes, font_num)) => codes
                 .iter()
-                .map(|c| (Some((c.start, c.len)), (c.cid, font_num)))
+                .map(|c| (Some((c.start, c.len)), (c.cid(), font_num)))
                 .unzip(),
             None => {
                 let pairs = decode_cmap_bytes(ctx, font_entity, &bytes);
@@ -426,7 +426,18 @@ struct CmapCode {
     /// Where the code starts in the string, and its length in bytes.
     start: usize,
     len: usize,
-    cid: i32,
+    /// What the CMap maps the code to.
+    target: Target,
+}
+
+impl CmapCode {
+    /// The code's CID: its target's when that is a CID, otherwise 0.
+    fn cid(&self) -> i32 {
+        match self.target.selector {
+            Selector::Cid(cid) => cid,
+            _ => 0,
+        }
+    }
 }
 
 /// A CMap's tables, read the first time text is shown with it and kept on
@@ -460,9 +471,9 @@ fn font_cmap(ctx: &Context, font_entity: EntityId) -> Option<(EntityId, usize)> 
 }
 
 /// Split `bytes` into the character codes of a CMap-keyed Type 0 font and
-/// map each to its CID. Codes take their length from the codespace, so
-/// one- and two-byte codes can mix; a byte sequence no range holds is one
-/// code as long as the shortest range, mapped to CID 0 (`.notdef`).
+/// map each to its target ([`CmapTables::decode`]). Codes take their length
+/// from the codespace, so one- and two-byte codes can mix, or from a
+/// mapping when no mapping of that length holds the code.
 fn decode_cmap_codes(
     ctx: &mut Context,
     font_entity: EntityId,
@@ -473,19 +484,13 @@ fn decode_cmap_codes(
     if tables.is_empty() {
         return None;
     }
-    let shortest = tables.shortest();
     let mut codes = Vec::new();
     let mut pos = 0;
-    while pos < bytes.len() {
-        let (len, cid) = match tables.code_len(&bytes[pos..]) {
-            Some(n) => (n, tables.cid(&bytes[pos..pos + n])),
-            None if pos + shortest <= bytes.len() => (shortest, 0),
-            None => break,
-        };
+    while let Some((len, target)) = tables.decode(&bytes[pos..]) {
         codes.push(CmapCode {
             start: pos,
             len,
-            cid,
+            target,
         });
         pos += len;
     }
@@ -495,7 +500,7 @@ fn decode_cmap_codes(
 /// Decode bytes through CMap and return (CID, font_index) pairs.
 fn decode_cmap_bytes(ctx: &mut Context, font_entity: EntityId, bytes: &[u8]) -> Vec<(i32, usize)> {
     if let Some((codes, font_num)) = decode_cmap_codes(ctx, font_entity, bytes) {
-        return codes.into_iter().map(|c| (c.cid, font_num)).collect();
+        return codes.into_iter().map(|c| (c.cid(), font_num)).collect();
     }
 
     // Check FMapType for non-CMap composite fonts

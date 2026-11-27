@@ -155,3 +155,28 @@ fn font_0_records_nothing_and_a_parent_keeps_its_fonts() {
         },
     );
 }
+
+/// Aspose.Words writes a two-byte codespace over one-byte `bfchar` codes
+/// (#48). Each byte is read as one code all the same, as Ghostscript reads
+/// them, the last lone byte too.
+#[test]
+fn one_byte_mappings_in_a_two_byte_codespace_read_one_byte_codes() {
+    with_tables(
+        "/CMapName /OneByte def\n\
+         1 begincodespacerange <0000> <FFFF> endcodespacerange\n\
+         4 beginbfchar <48> <48> <65> <65> <6C> <6C> <6F> <6F> endbfchar",
+        |t, _| {
+            let mut bytes: &[u8] = b"Hello";
+            let mut codes = Vec::new();
+            while let Some((len, target)) = t.decode(bytes) {
+                codes.push((len, target));
+                bytes = &bytes[len..];
+            }
+            let code = |c| (1, target(0, Selector::Code(c)));
+            assert_eq!(
+                codes,
+                [code(0x48), code(0x65), code(0x6c), code(0x6c), code(0x6f)]
+            );
+        },
+    );
+}

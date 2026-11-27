@@ -55,7 +55,10 @@ pub enum Selector {
 /// A CMap's codespace and mappings, its `usecmap` parents' included.
 ///
 /// Mappings match a code of their own length only (TN 5014): a code no
-/// mapping holds is `.notdef`. A code takes its target from the nearest CMap
+/// mapping holds is `.notdef`. [`decode`](Self::decode) takes a code's
+/// length from the codespace, but uses a mapping of another length when no
+/// mapping of the codespace's length holds the code, as Ghostscript does.
+/// A code takes its target from the nearest CMap
 /// in the `usecmap` chain that maps it, the CMap itself first: within that
 /// CMap a `cidchar` or `bfchar` comes before a `cidrange` or `bfrange`, and
 /// the first entry that holds the code wins. Notdef mappings are looked at
@@ -411,7 +414,8 @@ impl CmapTables {
 
     /// The length of the code at the start of `bytes`: the shortest that a
     /// codespace range holds, byte by byte (Adobe TN 5014). None when no
-    /// range does.
+    /// range does. [`decode`](Self::decode) reads a code's length and target
+    /// together, and also reads codes a CMap maps outside its codespace.
     pub fn code_len(&self, bytes: &[u8]) -> Option<usize> {
         (1..=MAX_CODE_LEN.min(bytes.len())).find(|&n| {
             let code = &bytes[..n];
@@ -424,6 +428,50 @@ impl CmapTables {
                         .all(|(&b, (&l, &h))| l <= b && b <= h)
             })
         })
+    }
+
+    /// The length and target of the code at the start of `bytes`, None when
+    /// they hold no code: too few bytes for one, and none that a mapping
+    /// holds.
+    ///
+    /// The codespace gives the length (TN 5014: "determined exclusively by
+    /// the codespace ranges"). When no mapping of that length holds the code,
+    /// or no codespace range holds the bytes, a mapping of another length
+    /// that matches the bytes there gives it instead, the shortest first.
+    /// Ghostscript ignores the codespace altogether and matches the mappings
+    /// directly (`gs_cmap_adobe1_decode_next`), and some producers write
+    /// CMaps that rely on it: Aspose.Words writes a codespace of `<0000>
+    /// <FFFF>` over `bfchar` codes of one byte (#48). In a valid CMap, whose
+    /// codespace no code is a prefix of another in, a mapping that matches
+    /// the bytes is in a range of its own length, the length the codespace
+    /// gives, so this changes nothing for it.
+    ///
+    /// Bytes no codespace range or mapping holds are one code as long as the
+    /// shortest codespace range, and `.notdef` (PLRM 5.11.5).
+    pub fn decode(&self, bytes: &[u8]) -> Option<(usize, Target)> {
+        let len = self.code_len(bytes);
+        if let Some(n) = len
+            && let Some(target) = self.mapped(&bytes[..n])
+        {
+            return Some((n, target));
+        }
+        let other = (1..=MAX_CODE_LEN.min(bytes.len()))
+            .filter(|&m| Some(m) != len)
+            .find_map(|m| Some((m, self.mapped(&bytes[..m])?)));
+        if other.is_some() {
+            return other;
+        }
+        match len {
+            Some(n) => Some((n, self.target(&bytes[..n]))),
+            None if self.shortest <= bytes.len() => Some((
+                self.shortest,
+                Target {
+                    font: 0,
+                    selector: Selector::Notdef,
+                },
+            )),
+            None => None,
+        }
     }
 
     /// The target of `code`, when a mapping holds it: a character mapping,
@@ -470,6 +518,95 @@ impl CmapTables {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Tables with `codespace` and the CID mappings `chars` (code, CID), as
+    /// one CMap writes them: the first mapping of a code wins.
+    fn cmap(codespace: &[(&[u8], &[u8])], chars: &[(&[u8], i32)]) -> CmapTables {
+        let mut t = CmapTables {
+            codespace: codespace
+                .iter()
+                .map(|(lo, hi)| (lo.to_vec(), hi.to_vec()))
+                .collect(),
+            ..Default::default()
+        };
+        t.shortest = codespace.iter().map(|(lo, _)| lo.len()).min().unwrap_or(1);
+        for (code, c) in chars {
+            t.chars
+                .entry((code.len(), value(code)))
+                .or_insert((0, cid(0, *c)));
+        }
+        t
+    }
+
+    /// Each code `decode` reads from `bytes`, as (length, CID).
+    fn codes(t: &CmapTables, mut bytes: &[u8]) -> Vec<(usize, i32)> {
+        let mut out = Vec::new();
+        while let Some((len, target)) = t.decode(bytes) {
+            let cid = match target.selector {
+                Selector::Cid(c) => c,
+                _ => 0,
+            };
+            out.push((len, cid));
+            bytes = &bytes[len..];
+        }
+        out
+    }
+
+    const TWO_BYTES: &[(&[u8], &[u8])] = &[(&[0x00, 0x00], &[0xff, 0xff])];
+
+    #[test]
+    fn a_code_no_mapping_of_the_codespace_length_holds_takes_a_mapped_length() {
+        // A two-byte codespace over one-byte mappings (#48's shape).
+        let t = cmap(TWO_BYTES, &[(b"H", 72), (b"e", 101)]);
+        assert_eq!(codes(&t, b"He"), [(1, 72), (1, 101)]);
+        assert_eq!(
+            codes(&t, b"Hee"),
+            [(1, 72), (1, 101), (1, 101)],
+            "a last lone byte"
+        );
+        assert_eq!(
+            codes(&t, b"Hez"),
+            [(1, 72), (1, 101)],
+            "an unmapped lone byte"
+        );
+        assert_eq!(codes(&t, b"zH"), [(2, 0)], "one unmapped two-byte code");
+        // A one-byte codespace over a two-byte mapping.
+        let t = cmap(&[(&[0x00], &[0xff])], &[(b"He", 500)]);
+        assert_eq!(codes(&t, b"Hez"), [(2, 500), (1, 0)]);
+    }
+
+    #[test]
+    fn a_mapping_of_the_codespace_length_wins() {
+        let t = cmap(TWO_BYTES, &[(b"H", 72), (b"He", 500)]);
+        assert_eq!(codes(&t, b"He"), [(2, 500)]);
+        let t = cmap(TWO_BYTES, &[(b"He", 500), (b"H", 72)]);
+        assert_eq!(codes(&t, b"He"), [(2, 500)]);
+        // A notdef mapping is a mapping, of either length.
+        let mut t = cmap(TWO_BYTES, &[]);
+        t.notdef_chars.insert((1, 0x48), (0, cid(0, 3)));
+        t.notdef_chars.insert((2, 0x4142), (0, cid(0, 9)));
+        assert_eq!(codes(&t, b"HAB"), [(1, 3), (2, 9)]);
+    }
+
+    #[test]
+    fn a_valid_cmap_reads_as_its_codespace_says() {
+        // Shift-JIS style: one-byte and two-byte codes, prefix-free.
+        let t = cmap(
+            &[(&[0x00], &[0x80]), (&[0x81, 0x40], &[0x9f, 0xfc])],
+            &[(b"A", 34), (&[0x81, 0x41], 634)],
+        );
+        assert_eq!(codes(&t, b"A\x81\x41"), [(1, 34), (2, 634)]);
+        assert_eq!(codes(&t, b"B\x81\x42"), [(1, 0), (2, 0)], "unmapped");
+        assert_eq!(codes(&t, b"\x81"), [(1, 0)], "a lead byte alone");
+        assert_eq!(
+            codes(&t, b"\xa0\xa0"),
+            [(1, 0), (1, 0)],
+            "outside the codespace"
+        );
+        // With no mappings at all, a code is its own CID.
+        let t = cmap(TWO_BYTES, &[]);
+        assert_eq!(codes(&t, b"\x01\x02"), [(2, 0x0102)]);
+    }
 
     fn cid(font: usize, cid: i32) -> Target {
         Target {
