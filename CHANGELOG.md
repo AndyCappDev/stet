@@ -98,6 +98,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does not alter the dictionary stack, and Ghostscript leaves it alone; a
   dictionary on it newer than the save still makes `restore` raise
   `invalidrestore`. Found with #46.
+- **Nested `save`s no longer cost memory in proportion to their depth.**
+  Each `save` copied the whole graphics state stack, which every `save`
+  deepens by one, so N outstanding saves held about N²/2 copies of the
+  graphics state: 800 took 490 MB, and 10,000 could not finish. A `save`
+  now records only the stack's length, about 5 KB each at any depth: 800
+  take 17 MB, and 100,000 take 490 MB. Found with #46.
 
 ## [0.11.0] — 2026-11-18
 

@@ -64,8 +64,13 @@ pub struct SaveSnapshot {
     pub vm_alloc_mode: bool,
     /// Binary object format (`setobjectformat`/`currentobjectformat`).
     pub object_format: i32,
-    /// Graphics state and graphics state stack.
+    /// Graphics state.
     pub gstate: GraphicsState,
+    /// Not filled: always empty. `save` used to copy the whole graphics
+    /// state stack here, which made each of N nested saves cost O(N). The
+    /// entries below a live save's own are never changed while it lives,
+    /// so `restore` needs only the stack's length, which the `Context`
+    /// keeps.
     pub gstate_stack: Vec<GstateEntry>,
     /// `Context::gstate_store` length at save time.
     ///
@@ -97,8 +102,9 @@ pub struct SaveLevel {
     pub vm_alloc_mode: bool,
     /// Saved binary object format (`setobjectformat`/`currentobjectformat`).
     pub object_format: i32,
-    /// Saved graphics state and graphics state stack.
+    /// Saved graphics state.
     pub gstate: GraphicsState,
+    /// Not filled: always empty. See [`SaveSnapshot::gstate_stack`].
     pub gstate_stack: Vec<GstateEntry>,
     /// `Context::gstate_store` length at save time.
     ///

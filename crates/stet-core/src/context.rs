@@ -229,6 +229,13 @@ pub struct Context {
     /// The capture of a pattern cell or form in progress, innermost: see
     /// [`Self::capture_marks`].
     mark_capture: Option<MarkCapture>,
+    /// For each live save, oldest first, its id and the length of
+    /// `gstate_stack` when it was made: what `restore` cuts the stack back
+    /// to. The entries below a live save's own are never changed while it
+    /// lives (`grestore` and `grestoreall` stop at a save's entry), so the
+    /// length is all `restore` needs, where copying the stack made each of
+    /// N nested saves cost O(N).
+    save_gstate_depths: Vec<(u32, usize)>,
     /// Registry of OCGs (PDF Optional Content Groups) declared via the
     /// `defineocg` operator. Keyed by the interned `NameId` of the
     /// human-readable layer name from the OCG dict's `/Name` entry.
@@ -1454,6 +1461,7 @@ impl Context {
             group_stack: Vec::new(),
             save_group_depths: rustc_hash::FxHashMap::default(),
             mark_capture: None,
+            save_gstate_depths: Vec::new(),
             ocg_registry: rustc_hash::FxHashMap::default(),
             next_ocg_id: 0,
             doc_structure: stet_graphics::document_structure::DocumentStructure::new(),
@@ -1913,7 +1921,6 @@ impl Context {
     pub fn vm_save(&mut self) -> PsObject {
         let d_depth = self.d_stack.len();
         let gstate_snapshot = self.gstate.clone();
-        let gstate_stack_snapshot = self.gstate_stack.clone();
         let marks = self.vm_marks();
         let (_level, save_id) = self.save_stack.save(crate::save_stack::SaveSnapshot {
             d_stack_depth: d_depth,
@@ -1921,10 +1928,13 @@ impl Context {
             vm_alloc_mode: self.vm_alloc_mode,
             object_format: self.object_format,
             gstate: gstate_snapshot,
-            gstate_stack: gstate_stack_snapshot,
+            gstate_stack: Vec::new(),
             gstate_store_len: self.gstate_store.len(),
             marks,
         });
+
+        self.save_gstate_depths
+            .push((save_id, self.gstate_stack.len()));
 
         // Implicit gsave: push current gstate marked as save-created (per PLRM).
         // grestoreall stops at this entry; grestore skips it.
@@ -1990,9 +2000,18 @@ impl Context {
         self.vm_alloc_mode = target.vm_alloc_mode;
         self.object_format = target.object_format;
 
-        // Restore graphics state from the target level
+        // Restore the graphics state from the target level, and cut the
+        // stack back to where it was before the save pushed its own entry:
+        // PLRM's `grestoreall`, then removing the save's entry.
         self.gstate = target.gstate.clone();
-        self.gstate_stack = target.gstate_stack.clone();
+        if let Some(i) = self
+            .save_gstate_depths
+            .iter()
+            .position(|&(id, _)| id == save_id)
+        {
+            self.gstate_stack.truncate(self.save_gstate_depths[i].1);
+            self.save_gstate_depths.truncate(i);
+        }
 
         // Put back the gstate objects written since the save. The backups of
         // every level being restored are the newest ones; undoing them newest
@@ -2387,6 +2406,62 @@ mod tests {
 
         let val = ctx.dict_load(&key).unwrap();
         assert_eq!(val.as_i32(), Some(2));
+    }
+
+    /// `save` records the gstate stack's length rather than a copy, and
+    /// `restore` cuts the stack back to it: the save's own entry and
+    /// everything above go, and what was below stays, at every level of a
+    /// nest restored out of order.
+    #[test]
+    fn restore_cuts_the_gstate_stack_back_to_its_save() {
+        fn gsave(ctx: &mut Context, width: f64) {
+            ctx.gstate.line_width = width;
+            ctx.gstate_stack.push(crate::graphics_state::GstateEntry {
+                state: ctx.gstate.clone(),
+                saved_by_save: false,
+            });
+        }
+        fn id(save: PsObject) -> u32 {
+            match save.value {
+                PsValue::Save(SaveLevel(id)) => id,
+                _ => panic!("expected a save"),
+            }
+        }
+        let widths = |ctx: &Context| -> Vec<f64> {
+            ctx.gstate_stack
+                .iter()
+                .map(|e| e.state.line_width)
+                .collect()
+        };
+
+        let mut ctx = Context::new();
+        gsave(&mut ctx, 1.0);
+        let outer = id(ctx.vm_save());
+        gsave(&mut ctx, 2.0);
+        let middle = id(ctx.vm_save());
+        gsave(&mut ctx, 3.0);
+        let _inner = id(ctx.vm_save());
+        gsave(&mut ctx, 4.0);
+        assert_eq!(ctx.gstate_stack.len(), 7);
+        assert!(
+            ctx.save_stack
+                .levels_ref()
+                .iter()
+                .all(|l| l.gstate_stack.is_empty()),
+            "a save copied the gstate stack"
+        );
+
+        // Restoring the middle save also ends the inner one. Left: the first
+        // gsave, the outer save's own entry, and the second gsave.
+        ctx.vm_restore(middle).unwrap();
+        assert_eq!(widths(&ctx), [1.0, 1.0, 2.0]);
+        assert_eq!(ctx.gstate.line_width, 2.0);
+
+        gsave(&mut ctx, 5.0);
+        ctx.vm_restore(outer).unwrap();
+        assert_eq!(widths(&ctx), [1.0]);
+        assert_eq!(ctx.gstate.line_width, 1.0);
+        assert!(ctx.save_gstate_depths.is_empty());
     }
 
     #[test]
