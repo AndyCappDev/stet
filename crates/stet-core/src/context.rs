@@ -222,10 +222,13 @@ pub struct Context {
     /// the next-innermost target. See `op_begintransparencygroup` /
     /// `op_endtransparencygroup` in `stet-ops::transparency_ops`.
     pub group_stack: Vec<GroupFrame>,
-    /// `group_stack.len()` recorded at each `save`. `restore` consults
+    /// [`Self::group_depth`] recorded at each `save`. `restore` consults
     /// this to refuse a revert that would unwind across an unbalanced
     /// `begintransparencygroup` / `endtransparencygroup` pair.
     pub save_group_depths: rustc_hash::FxHashMap<u32, usize>,
+    /// The capture of a pattern cell or form in progress, innermost: see
+    /// [`Self::capture_marks`].
+    mark_capture: Option<MarkCapture>,
     /// Registry of OCGs (PDF Optional Content Groups) declared via the
     /// `defineocg` operator. Keyed by the interned `NameId` of the
     /// human-readable layer name from the OCG dict's `/Name` entry.
@@ -658,6 +661,16 @@ pub struct GroupFrame {
     /// `gsave` / `grestore` and `restore` to refuse pops that would
     /// orphan this frame.
     pub saved_gsave_depth: usize,
+}
+
+/// A capture in progress: see [`Context::capture_marks`].
+#[derive(Clone, Copy, Debug)]
+struct MarkCapture {
+    /// The graphics state's page device when the capture began.
+    page_device: Option<EntityId>,
+    /// [`Context::group_depth`] when the capture began: the groups it, and
+    /// any capture enclosing it, set aside.
+    groups_set_aside: usize,
 }
 
 /// What a [`GroupFrame`] is capturing, determining what gets emitted
@@ -1440,6 +1453,7 @@ impl Context {
             display_list: DisplayList::new(),
             group_stack: Vec::new(),
             save_group_depths: rustc_hash::FxHashMap::default(),
+            mark_capture: None,
             ocg_registry: rustc_hash::FxHashMap::default(),
             next_ocg_id: 0,
             doc_structure: stet_graphics::document_structure::DocumentStructure::new(),
@@ -1712,14 +1726,16 @@ impl Context {
     /// Return the display list paint operators should currently append to.
     ///
     /// While the null device is current, a list of marks that go nowhere
-    /// ([`Self::null_device_active`]). While a transparency group is
+    /// ([`Self::null_device_active`]), unless it is the device a capture
+    /// began under ([`Self::capture_marks`]). While a transparency group is
     /// active (`group_stack` non-empty), the topmost frame's display list.
-    /// Otherwise the page-level `display_list`. Every paint-emitting
-    /// operator must route through this helper to keep group capture and
-    /// the null device correct.
+    /// Otherwise the page-level `display_list`, which during a capture is
+    /// the capture's. Every paint-emitting operator must route through this
+    /// helper to keep group capture, pattern and form capture, and the null
+    /// device correct.
     #[inline]
     pub fn current_display_list_mut(&mut self) -> &mut DisplayList {
-        if self.null_device_active() {
+        if self.marks_discarded() {
             &mut self.null_marks
         } else if let Some(frame) = self.group_stack.last_mut() {
             &mut frame.display_list
@@ -1731,13 +1747,61 @@ impl Context {
     /// Read-only counterpart to [`Self::current_display_list_mut`].
     #[inline]
     pub fn current_display_list(&self) -> &DisplayList {
-        if self.null_device_active() {
+        if self.marks_discarded() {
             &self.null_marks
         } else if let Some(frame) = self.group_stack.last() {
             &frame.display_list
         } else {
             &self.display_list
         }
+    }
+
+    /// Whether marks made now go nowhere: the null device is current, and
+    /// is not the one a capture in progress began under. A pattern cell or
+    /// form made under the null device is still drawn where it is used.
+    #[inline]
+    fn marks_discarded(&self) -> bool {
+        self.null_device_active()
+            && self
+                .mark_capture
+                .is_none_or(|c| c.page_device != self.gstate.page_device)
+    }
+
+    /// The transparency-group nesting depth, counting the groups a capture
+    /// in progress has set aside ([`Self::capture_marks`]), so that a
+    /// `save` and a `restore` on either side of a capture agree.
+    pub fn group_depth(&self) -> usize {
+        self.group_stack.len() + self.mark_capture.map_or(0, |c| c.groups_set_aside)
+    }
+
+    /// Run `paint` with its marks captured in a list of their own, for a
+    /// pattern cell or a form: what PLRM calls the "special device"
+    /// `makepattern` gives a PaintProc. Returns the captured marks with
+    /// `paint`'s result.
+    ///
+    /// The marks are the cell's or form's alone, wherever the capture is
+    /// made. An open transparency group is set aside, so they do not go
+    /// into it, and `paint` can neither close it nor `grestore` past its
+    /// floor; a group `paint` opens and leaves open is dropped with its
+    /// marks. The null device current at the start is not this capture's,
+    /// so a pattern or form first painted under it is not left empty for
+    /// the rest of the job; a `nulldevice` that `paint` runs is honoured. A
+    /// Type 3 `charpath` in progress does not take `paint`'s paths either.
+    pub fn capture_marks<R>(&mut self, paint: impl FnOnce(&mut Self) -> R) -> (DisplayList, R) {
+        let enclosing = self.mark_capture.replace(MarkCapture {
+            page_device: self.gstate.page_device,
+            groups_set_aside: self.group_depth(),
+        });
+        let page = std::mem::take(&mut self.display_list);
+        let groups = std::mem::take(&mut self.group_stack);
+        let charpath = self.charpath_capture.take();
+
+        let result = paint(self);
+
+        self.charpath_capture = charpath;
+        self.group_stack = groups;
+        self.mark_capture = enclosing;
+        (std::mem::replace(&mut self.display_list, page), result)
     }
 
     /// Whether the null device is current: the graphics state's page device

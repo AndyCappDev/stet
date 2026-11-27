@@ -112,7 +112,11 @@ Recognised dict keys (all optional):
   is the active device-clip bbox if any, otherwise the page bbox.
 
 While a group is open, paint operators emit into the frame's display
-list rather than the page-level list. `endtransparencygroup` emits a
+list rather than the page-level list. A pattern's `PaintProc`, and a
+form's first `PaintProc` run (the one `execform` caches), paint into a
+capture of their own instead: the open group is set aside while they run,
+so they cannot add to it or end it, and a group they leave open is
+dropped. `endtransparencygroup` emits a
 `DisplayElement::Group` carrying the captured children and reads the
 compositing alpha and blend mode from the gstate active at end time —
 matching PDF's "the q/Q around `Do` controls the group composite"

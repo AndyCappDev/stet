@@ -79,6 +79,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   leaves the form's matrix and clip behind when its PaintProc fails, and
   a `gsave` left unmatched by a pattern's PaintProc no longer surfaces
   after `makepattern`. Found with #46.
+- **A pattern made, or a form first drawn, inside a transparency group or
+  under `nulldevice` is no longer empty.** `makepattern` and `execform`
+  captured the procedure's marks from the page, but marks go to an open
+  transparency group, or nowhere under the null device. The pattern
+  painted nothing wherever it was used, the form drew nothing for the rest
+  of the job (`execform` keeps its first drawing), and inside a group the
+  pattern's cell was drawn once into the group, at the page's top left. A
+  pattern's procedure now draws as on a device of its own, as the PLRM
+  specifies and as in Ghostscript, and a form's first drawing is kept
+  whatever is current. The pattern's procedure now also has a graphics
+  state stack of its own, so one `grestore` too many no longer pops a
+  `gsave` of the program's. Found with #46.
 
 ## [0.11.0] — 2026-11-18
 

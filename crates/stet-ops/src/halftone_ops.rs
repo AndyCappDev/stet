@@ -980,9 +980,8 @@ pub fn op_makepattern(ctx: &mut Context) -> Result<(), PsError> {
         let depth_before = ctx.o_stack.len();
         ctx.o_stack.push(PsObject::dict(new_dict))?;
 
-        // Save the display list and set the CTM to identity so PaintProc
-        // captures paths in pattern space (not device space)
-        let saved_dl = std::mem::take(&mut ctx.display_list);
+        // Set the CTM to identity so PaintProc captures paths in pattern
+        // space (not device space).
         // PaintProc runs between an implicit gsave and grestore (PLRM 4.9.1):
         // the colour, line width and the rest that it sets are the cell's,
         // not the program's.
@@ -995,30 +994,24 @@ pub fn op_makepattern(ctx: &mut Context) -> Result<(), PsError> {
         ctx.gstate.current_pattern_dict = None;
         ctx.gstate.pattern_underlying_color = None;
 
-        // The tile is being captured, not painted, so a Type 3 `charpath`
-        // running above must not swallow the PaintProc's paths — they belong
-        // to the tile, not to the glyph outline.
-        let saved_charpath = ctx.charpath_capture.take();
-
         // Clear path for PaintProc
         ctx.gstate.path.clear();
         ctx.gstate.current_point = None;
 
-        // A `gsave` PaintProc leaves unmatched must not surface at the
-        // program's next `grestore`, as in Ghostscript: the stack goes back
-        // to this depth after. (Ghostscript also stops a `grestore` too many
-        // from popping one of the program's entries; stet does not. Running
-        // PaintProc on an empty stack would, but an open transparency
-        // group's floor is a depth in the program's stack, below which a
-        // `grestore` does nothing, so PaintProc's own `gsave`s could not be
-        // undone inside one.)
-        let gstate_depth = ctx.gstate_stack.len();
+        // PaintProc runs on a graphics-state stack of its own, as in
+        // Ghostscript: a `gsave` it leaves unmatched does not surface at
+        // the program's next `grestore`, and a `grestore` too many does not
+        // pop one of the program's entries. (The capture sets any open
+        // transparency group aside, so no group floor is a depth in the
+        // program's stack while it runs.)
+        let program_gstates = std::mem::take(&mut ctx.gstate_stack);
 
-        // Execute PaintProc
+        // Execute PaintProc, its marks the cell's wherever this pattern is
+        // made: in an open transparency group, or under the null device.
         // Text a pattern cell shows is paint, repeated per tile, not the
         // document's text.
         let suspended = crate::text_record::suspend(ctx);
-        let result = ctx.exec_sync(pp);
+        let (captured, result) = ctx.capture_marks(|ctx| ctx.exec_sync(pp));
         crate::text_record::resume(ctx, suspended);
 
         // `makepattern` is `pattern matrix → pattern`; whatever PaintProc left
@@ -1028,11 +1021,9 @@ pub fn op_makepattern(ctx: &mut Context) -> Result<(), PsError> {
         // private to the pattern in a real implementation.
         ctx.o_stack.truncate(depth_before);
 
-        // Restore graphics state, display list and charpath capture
-        ctx.gstate_stack.truncate(gstate_depth);
+        // Restore the graphics state and its stack.
+        ctx.gstate_stack = program_gstates;
         ctx.gstate = saved_gstate;
-        ctx.charpath_capture = saved_charpath;
-        let captured = std::mem::replace(&mut ctx.display_list, saved_dl);
 
         result?;
         captured
@@ -1497,15 +1488,6 @@ fn paint_form(
         // Set CTM to identity so display list is in form space
         ctx.gstate.ctm = Matrix::identity();
 
-        // Save display list, execute PaintProc
-        let saved_dl = std::mem::take(&mut ctx.display_list);
-
-        // As in `makepattern`: the form is being captured for the cache, so a
-        // Type 3 `charpath` running above must not divert its paths. The cache
-        // is permanent, so a diverted PaintProc would blank the form for the
-        // rest of the job, not just this invocation.
-        let saved_charpath = ctx.charpath_capture.take();
-
         // Push form dict for PaintProc to consume
         let depth_before = ctx.o_stack.len();
         ctx.o_stack.push(PsObject::dict(dict_entity))?;
@@ -1516,16 +1498,18 @@ fn paint_form(
             .get(dict_entity, &pp_key)
             .ok_or(PsError::TypeCheck)?;
 
-        let result = ctx.exec_sync(paint_proc);
+        // Captured for the cache, as `makepattern` captures a cell, and
+        // replayed below into wherever this invocation paints. The cache is
+        // permanent, so marks diverted from it (into an open transparency
+        // group, to the null device, or into a Type 3 `charpath`'s outline)
+        // would blank the form for the rest of the job, not just here.
+        let (captured, result) = ctx.capture_marks(|ctx| ctx.exec_sync(paint_proc));
 
         // `execform` is `form → —`, so a PaintProc that fails to consume the
         // form dictionary must not turn that into a stack effect — and this
         // runs only on the first invocation, so any residue would also make
         // the operator behave differently the second time round.
         ctx.o_stack.truncate(depth_before);
-
-        ctx.charpath_capture = saved_charpath;
-        let captured = std::mem::replace(&mut ctx.display_list, saved_dl);
         result?;
 
         // Restore real CTM for replay

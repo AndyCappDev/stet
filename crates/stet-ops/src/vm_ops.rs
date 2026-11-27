@@ -13,7 +13,7 @@ use stet_core::object::{EntityId, ObjFlags, PsObject, PsValue, SaveLevel};
 pub fn op_save(ctx: &mut Context) -> Result<(), PsError> {
     let save_obj = ctx.vm_save();
     if let PsValue::Save(SaveLevel(id)) = save_obj.value {
-        ctx.save_group_depths.insert(id, ctx.group_stack.len());
+        ctx.save_group_depths.insert(id, ctx.group_depth());
     }
     ctx.o_stack.push(save_obj)?;
     Ok(())
@@ -66,7 +66,7 @@ pub fn op_restore_now(ctx: &mut Context) -> Result<(), PsError> {
     // begintransparencygroup that hasn't been closed (or close one that
     // wasn't open at save time).
     if let Some(&saved_depth) = ctx.save_group_depths.get(&save_id)
-        && ctx.group_stack.len() != saved_depth
+        && ctx.group_depth() != saved_depth
     {
         let _ = ctx.o_stack.push(save_obj);
         return Err(PsError::InvalidRestore);
