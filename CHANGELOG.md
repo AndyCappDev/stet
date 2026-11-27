@@ -117,6 +117,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its end as the PLRM specifies, so `resetfile` and `setfileposition`
   read it again where they failed, and `bytesavailable` there is 0, not
   -1. Reported by @adamwilmer (#47).
+- **A `notdefrange` maps every code in its range to its one CID**, as
+  Adobe TN 5014 and Ghostscript have it. stet counted up from it, like a
+  `cidrange`, so every code after the first in such a range drew a
+  later CID's glyph instead of the one the CMap names.
 
 ## [0.11.0] — 2026-11-18
 

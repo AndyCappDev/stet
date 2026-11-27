@@ -21,6 +21,7 @@
 
     /endcmap {
         % Finalize the CMap
+        .joinfonts
         .joinmappings
         % Build a CodeMap array from collected mappings if not already present
         currentdict /CIDCharMappings known
@@ -60,6 +61,59 @@
         dup 2 index known not { dup 2 index 8 dict put } if
         exch get
         dup length 3 -1 roll put
+    } bind
+
+    % arr key .appendfontmappings -
+    % .appendmappings for a block of character mappings, which also notes
+    % the font number usefont last set (0 if none) as the block's font, under
+    % key in the CMap's .MappingFontBlocks.
+    /.appendfontmappings {
+        currentdict /.MappingFontBlocks known not {
+            currentdict /.MappingFontBlocks 8 dict put
+        } if
+        currentdict /.MappingFontBlocks get
+        dup 2 index known not { dup 2 index 8 dict put } if
+        1 index get
+        dup length
+        currentdict /CurrentFontNum known {
+            currentdict /CurrentFontNum get
+        } {
+            0
+        } ifelse
+        put
+        .appendmappings
+    } bind
+
+    % - .joinfonts -
+    % For each key whose blocks are not all font 0, put under that key in the
+    % CMap's .MappingFonts an array of (length font) pairs, one per block in
+    % order: the next length elements of the joined mappings belong to that
+    % font. Remove .MappingFontBlocks. Runs before .joinmappings, which
+    % removes the blocks this reads the lengths of.
+    /.joinfonts {
+        currentdict /.MappingFontBlocks known {
+            currentdict 8 dict begin
+                /cmap exch def
+                /blocks cmap /.MappingBlocks get def
+                cmap /.MappingFontBlocks get {
+                    /fonts exch def
+                    /key exch def
+                    false fonts { exch pop 0 ne or } forall {
+                        /runs fonts length 2 mul array def
+                        0 1 fonts length 1 sub {
+                            /i exch def
+                            runs i 2 mul blocks key get i get length put
+                            runs i 2 mul 1 add fonts i get put
+                        } for
+                        cmap /.MappingFonts known not {
+                            cmap /.MappingFonts 8 dict put
+                        } if
+                        cmap /.MappingFonts get key runs put
+                    } if
+                } forall
+                cmap /.MappingFontBlocks undef
+            end
+        } if
     } bind
 
     % - .joinmappings -
@@ -109,7 +163,7 @@
     /endcidchar {
         % src1 dst1 ... srcn dstn endcidchar -
         .cidcharcount 2 mul array astore
-        /CIDCharMappings .appendmappings
+        /CIDCharMappings .appendfontmappings
     } bind
 
     /begincidrange {
@@ -120,7 +174,7 @@
     /endcidrange {
         % srclo1 srchi1 dstcid1 ... srclon srhin dstcidn endcidrange -
         .cidrangecount 3 mul array astore
-        /CIDRangeMappings .appendmappings
+        /CIDRangeMappings .appendfontmappings
     } bind
 
     /beginbfchar {
@@ -131,7 +185,7 @@
     /endbfchar {
         % src1 dst1 ... srcn dstn endbfchar -
         .bfcharcount 2 mul array astore
-        /BFCharMappings .appendmappings
+        /BFCharMappings .appendfontmappings
     } bind
 
     /beginbfrange {
@@ -142,7 +196,7 @@
     /endbfrange {
         % srclo1 srchi1 dst1 ... srclon srhin dstn endbfrange -
         .bfrangecount 3 mul array astore
-        /BFRangeMappings .appendmappings
+        /BFRangeMappings .appendfontmappings
     } bind
 
     /beginnotdefchar {
@@ -153,7 +207,7 @@
     /endnotdefchar {
         % src1 dst1 ... srcn dstn endnotdefchar -
         .notdefcharcount 2 mul array astore
-        /NotDefCharMappings .appendmappings
+        /NotDefCharMappings .appendfontmappings
     } bind
 
     /beginnotdefrange {
@@ -164,7 +218,7 @@
     /endnotdefrange {
         % srclo1 srchi1 dst1 ... srclon srhin dstn endnotdefrange -
         .notdefrangecount 3 mul array astore
-        /NotDefRangeMappings .appendmappings
+        /NotDefRangeMappings .appendfontmappings
     } bind
 
     /beginusematrix {
