@@ -263,6 +263,39 @@ fn xyshow_draws_the_glyphs() {
     assert!(close(boxes[1], CID2_AT_60_100), "{:?}", boxes[1]);
 }
 
+/// A CMap can send codes to a CIDFont and to a base font in one string,
+/// each by the font number of its `usefont` (PLRM 5.11.4). Here the CIDFont
+/// is font 1 and Helvetica font 0: `A` and `C` are CIDs 1 and 2, `B` is
+/// Helvetica's `B`, 66.7 points wide at 100.
+#[test]
+fn one_string_shows_cids_and_base_font_glyphs() {
+    let boxes = fills(&format!(
+        "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
+         /CMapName /Mixed def /CMapType 1 def\n\
+         1 begincodespacerange <00> <FF> endcodespacerange\n\
+         0 usefont 1 beginbfchar <42> /B endbfchar\n\
+         1 usefont 2 begincidchar <41> 1 <43> 2 endcidchar\n\
+         endcmap CMapName currentdict /CMap defineresource pop end end\n\
+         /M /Mixed [/Helvetica findfont /T1CID /CIDFont findresource] composefont\n\
+         100 scalefont setfont\n\
+         10 100 moveto (ABC) show {MARK}\n\
+         10 100 moveto (ABC) stringwidth rmoveto {MARK}"
+    ));
+    assert_eq!(boxes.len(), 5, "{boxes:?}");
+    assert!(close(boxes[0], CID1_AT_10_100), "{:?}", boxes[0]);
+    // Helvetica's B from x = 60: its left side bearing is 79 units.
+    assert!((boxes[1][0] - 67.9).abs() < 0.05, "{:?}", boxes[1]);
+    // CID 2 after 50 + 66.7 points: FD 1 doubles it.
+    let cid2 = [146.7, 260.0, 166.7, 280.0];
+    assert!(
+        boxes[2].iter().zip(cid2).all(|(a, b)| (a - b).abs() < 1e-6),
+        "{:?}",
+        boxes[2]
+    );
+    assert!((marker_x(boxes[3]) - 226.7).abs() < 1e-6, "{:?}", boxes[3]);
+    assert!((marker_x(boxes[4]) - 226.7).abs() < 1e-6, "{:?}", boxes[4]);
+}
+
 // ---------------------------------------------------------------------------
 // PDF output
 // ---------------------------------------------------------------------------

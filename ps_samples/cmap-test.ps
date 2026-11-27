@@ -1,0 +1,17 @@
+%!PS
+/CIDInit /ProcSet findresource begin
+12 dict begin
+begincmap
+/CMapName /OneByte def
+/CMapType 1 def
+1 begincodespacerange <0000> <FFFF> endcodespacerange
+4 beginbfchar <48> <48> <65> <65> <6C> <6C> <6F> <6F> endbfchar
+endcmap
+CMapName currentdict /CMap defineresource pop
+end end
+/F /Helvetica findfont def
+/C /Composed /OneByte [ F ] composefont pop
+/Composed 24 selectfont
+72 700 moveto (Hello) show
+currentpoint pop 72 sub ==
+showpage
