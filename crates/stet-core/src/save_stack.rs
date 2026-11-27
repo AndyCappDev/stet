@@ -54,7 +54,9 @@ pub struct VmMarks {
 /// state the interpreter has to rewind, and the set grows as more of the
 /// interpreter learns to participate in save/restore.
 pub struct SaveSnapshot {
-    /// `d_stack` length at save time (for restore validation).
+    /// `d_stack` length at save time. Recorded but not used: `restore`
+    /// leaves the dictionary stack as it is (PLRM `restore`), refusing
+    /// instead if it holds a dictionary newer than the save.
     pub d_stack_depth: usize,
     /// Packing mode (`setpacking`/`currentpacking`).
     pub packing_mode: bool,
@@ -86,7 +88,8 @@ pub struct SaveLevel {
     pub records: Vec<SaveRecord>,
     /// Whether this save level is still valid (becomes false on restore).
     pub valid: bool,
-    /// Snapshot of d_stack length at save time (for restore validation).
+    /// Snapshot of d_stack length at save time. Recorded but not used:
+    /// see [`SaveSnapshot::d_stack_depth`].
     pub d_stack_depth: usize,
     /// Saved packing mode (`setpacking`/`currentpacking`).
     pub packing_mode: bool,

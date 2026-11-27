@@ -110,6 +110,17 @@ outer_val 2 eq [true] assert
 save1 restore
 outer_val 1 eq [true] assert
 
+%% restore leaves the dictionary stack as it is (PLRM restore) %%
+% A dictionary older than the save, begun after it, stays on the stack.
+/rds_dict 1 dict def
+countdictstack /rds_depth exch def
+save /rds_save exch def
+rds_dict begin
+rds_save restore
+countdictstack rds_depth 1 add eq currentdict rds_dict eq and
+end
+[true] assert
+
 
 %% =============================================================================
 %% vmreclaim

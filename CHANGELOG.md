@@ -91,6 +91,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whatever is current. The pattern's procedure now also has a graphics
   state stack of its own, so one `grestore` too many no longer pops a
   `gsave` of the program's. Found with #46.
+- **`restore` leaves the dictionary stack as it is.** It popped every
+  dictionary pushed since the `save`, so a dictionary older than the
+  save, begun after it, was gone afterwards and the program's next `end`
+  or name lookup went to the wrong dictionary. The PLRM says `restore`
+  does not alter the dictionary stack, and Ghostscript leaves it alone; a
+  dictionary on it newer than the save still makes `restore` raise
+  `invalidrestore`. Found with #46.
 
 ## [0.11.0] — 2026-11-18
 

@@ -2007,8 +2007,11 @@ impl Context {
         // truncating here can only drop slots nothing can name.
         self.gstate_store.truncate(target.gstate_store_len);
 
-        // Restore d_stack depth from the target level
-        self.d_stack.truncate(target.d_stack_depth);
+        // The dictionary stack is left as it is: "restore does not alter the
+        // contents of the operand, dictionary, or execution stack" (PLRM
+        // `restore`). A dictionary on it newer than the save has already
+        // made `check_invalidrestore` refuse the restore, so what remains is
+        // older and survives it.
 
         // Reclaim everything the restored levels allocated in local VM.
         //
