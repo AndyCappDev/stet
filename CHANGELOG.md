@@ -104,6 +104,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   graphics state: 800 took 490 MB, and 10,000 could not finish. A `save`
   now records only the stack's length, about 5 KB each at any depth: 800
   take 17 MB, and 100,000 take 490 MB. Found with #46.
+- **`ReusableStreamDecode` applies the `/Filter` and `/DecodeParms` of
+  its parameter dictionary.** It ignored them and buffered its source
+  undecoded, to the source's end: over `currentfile`, that swallowed the
+  rest of the program, which never ran, and the job still reported
+  success. Aspose.Words writes every image this way (`currentfile <<
+  /Filter [/ASCII85Decode /DCTDecode] >> /ReusableStreamDecode filter`),
+  so such documents lost everything from the first image on. The stream
+  now holds what the last filter decodes, read to its end of data, and
+  the program carries on after it; the errors for a bad `/Filter` or
+  `/DecodeParms` are Ghostscript's. A reusable stream also stays open at
+  its end as the PLRM specifies, so `resetfile` and `setfileposition`
+  read it again where they failed, and `bytesavailable` there is 0, not
+  -1. Reported by @adamwilmer (#47).
 
 ## [0.11.0] — 2026-11-18
 

@@ -1193,11 +1193,18 @@ pub fn op_resetfile(ctx: &mut Context) -> Result<(), PsError> {
     if ctx.o_stack.is_empty() {
         return Err(PsError::StackUnderflow);
     }
-    match ctx.o_stack.peek(0)?.value {
-        PsValue::File(_) => {}
+    let entity = match ctx.o_stack.peek(0)?.value {
+        PsValue::File(entity) => entity,
         _ => return Err(PsError::TypeCheck),
-    }
+    };
     ctx.o_stack.pop()?;
+    // A reusable stream goes back to its start (PLRM 3.13); other files
+    // have no buffer of their own to discard here.
+    if ctx.files.is_reusable(entity) {
+        ctx.files
+            .set_position(entity, 0)
+            .map_err(|_| PsError::IOError)?;
+    }
     Ok(())
 }
 

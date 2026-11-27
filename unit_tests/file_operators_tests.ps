@@ -255,6 +255,9 @@ currentfile xcheck [false] assert
 %% eof - ReusableStreamDecode reads its source to the end, closing it %%
 {(ft_eof_hex.txt) (r) file dup /ReusableStreamDecode filter pop status} [false] assert
 
+%% eof - ReusableStreamDecode with /Filter leaves the source open, as a filter does %%
+{(ft_eof_hex.txt) (r) file dup << /Filter /ASCIIHexDecode >> /ReusableStreamDecode filter pop status} [true] assert
+
 %% eof - reading again after the end answers end of file, not ioerror %%
 {(ft_eof_test.txt) (r) file dup 10 string readstring pop pop 10 string readstring exch length} [false 0] assert
 {(ft_eof_test.txt) (r) file dup 10 string readstring pop pop dup read exch bytesavailable} [false -1] assert

@@ -259,6 +259,69 @@ type /filetype eq} stopped
 5 string readstring pop
 length [0] assert
 
+%% ReusableStreamDecode: /Filter decodes the source before buffering %%
+(48656C6C6F> trailing) << /Filter /ASCIIHexDecode >> /ReusableStreamDecode filter
+10 string readstring pop
+(Hello) /eq [true] assert
+
+%% ReusableStreamDecode: a /Filter array, with /DecodeParms for SubFileDecode %%
+(48656C586C6F>) << /Filter [/ASCIIHexDecode /SubFileDecode]
+  /DecodeParms [null << /EODCount 0 /EODString (X) >>] >> /ReusableStreamDecode filter
+10 string readstring pop
+(Hel) /eq [true] assert
+
+%% ReusableStreamDecode: SubFileDecode's EODCount alone counts bytes %%
+(414243>) << /Filter [/ASCIIHexDecode /SubFileDecode]
+  /DecodeParms [null << /EODCount 2 /EODString () >>] >> /ReusableStreamDecode filter
+10 string readstring pop
+(AB) /eq [true] assert
+
+%% ReusableStreamDecode: a procedure source through /Filter %%
+{ (4142>) } << /Filter /ASCIIHexDecode >> /ReusableStreamDecode filter
+10 string readstring pop
+(AB) /eq [true] assert
+
+%% ReusableStreamDecode: over currentfile, the chain ends at its end of data %%
+% The rest of the program runs: this assertion is that rest.
+currentfile << /Filter /ASCIIHexDecode >> /ReusableStreamDecode filter
+4142>
+10 string readstring pop
+(AB) /eq [true] assert
+
+%% ReusableStreamDecode: stays open at its end, and can be read again %%
+/rsd_s (ABC) /ReusableStreamDecode filter def
+rsd_s 10 string readstring pop (ABC) /eq [true] assert
+rsd_s /status [true] assert
+rsd_s /bytesavailable [0] assert
+rsd_s resetfile
+rsd_s 10 string readstring pop (ABC) /eq [true] assert
+rsd_s 1 setfileposition
+rsd_s /read [66 true] assert
+rsd_s flushfile
+rsd_s /bytesavailable [0] assert
+
+%% ReusableStreamDecode: /Filter and /DecodeParms errors, as in Ghostscript %%
+/rsd_p << /Filter /NoSuchDecode >> def
+(41>) rsd_p /ReusableStreamDecode /filter [(41>) rsd_p /ReusableStreamDecode /undefined] assert
+/rsd_p << /Filter /ASCIIHexEncode >> def
+(41>) rsd_p /ReusableStreamDecode /filter [(41>) rsd_p /ReusableStreamDecode /rangecheck] assert
+/rsd_p << /Filter (ASCIIHexDecode) >> def
+(41>) rsd_p /ReusableStreamDecode /filter [(41>) rsd_p /ReusableStreamDecode /typecheck] assert
+/rsd_p << /Filter [/ASCIIHexDecode 5] >> def
+(41>) rsd_p /ReusableStreamDecode /filter [(41>) rsd_p /ReusableStreamDecode /typecheck] assert
+/rsd_p << /Filter /ASCIIHexDecode /DecodeParms [null] >> def
+(41>) rsd_p /ReusableStreamDecode /filter [(41>) rsd_p /ReusableStreamDecode /typecheck] assert
+/rsd_p << /Filter [/ASCIIHexDecode] /DecodeParms null >> def
+(41>) rsd_p /ReusableStreamDecode /filter [(41>) rsd_p /ReusableStreamDecode /typecheck] assert
+/rsd_p << /Filter [/ASCIIHexDecode] /DecodeParms [null null] >> def
+(41>) rsd_p /ReusableStreamDecode /filter [(41>) rsd_p /ReusableStreamDecode /rangecheck] assert
+/rsd_p << /Filter [/ASCIIHexDecode] /DecodeParms [5] >> def
+(41>) rsd_p /ReusableStreamDecode /filter [(41>) rsd_p /ReusableStreamDecode /typecheck] assert
+/rsd_p << /Filter [/ASCIIHexDecode /SubFileDecode] /DecodeParms [null << /EODCount 0 >>] >> def
+(41>) rsd_p /ReusableStreamDecode /filter [(41>) rsd_p /ReusableStreamDecode /rangecheck] assert
+/rsd_p << /Filter /ASCIIHexDecode /DecodeParms null >> def
+(41>) rsd_p /ReusableStreamDecode filter 10 string readstring pop (A) /eq [true] assert
+
 
 % Clean up temp file
 {(unit_tests/.filter_test_tmp.bin) deletefile} stopped {pop} if

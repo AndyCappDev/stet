@@ -269,6 +269,9 @@ pub struct FileEntry {
     /// A file held in memory moves its position back instead, and a filter
     /// keeps its own.
     pushback: Vec<u8>,
+    /// Whether this is a reusable stream: see
+    /// [`FileStore::create_reusable_stream`].
+    reusable: bool,
 }
 
 /// Storage for all open PostScript files.
@@ -343,6 +346,7 @@ impl FileStore {
             global: true,
             created_after_save: 0,
             pushback: Vec::new(),
+            reusable: false,
         });
         store.files.push(FileEntry {
             handle: FileHandle::Stdout,
@@ -353,6 +357,7 @@ impl FileStore {
             global: true,
             created_after_save: 0,
             pushback: Vec::new(),
+            reusable: false,
         });
         store.files.push(FileEntry {
             handle: FileHandle::Stderr,
@@ -363,6 +368,7 @@ impl FileStore {
             global: true,
             created_after_save: 0,
             pushback: Vec::new(),
+            reusable: false,
         });
         store
     }
@@ -512,6 +518,7 @@ impl FileStore {
                 global: false,
                 created_after_save: 0,
                 pushback: Vec::new(),
+                reusable: false,
             });
             return Ok(id);
         }
@@ -554,6 +561,7 @@ impl FileStore {
             global: false,
             created_after_save: 0,
             pushback: Vec::new(),
+            reusable: false,
         });
         Ok(id)
     }
@@ -579,6 +587,7 @@ impl FileStore {
             global: false,
             created_after_save: 0,
             pushback: Vec::new(),
+            reusable: false,
         });
         id
     }
@@ -609,6 +618,7 @@ impl FileStore {
             global: false,
             created_after_save: 0,
             pushback: Vec::new(),
+            reusable: false,
         });
         id
     }
@@ -634,6 +644,7 @@ impl FileStore {
             global: false,
             created_after_save: 0,
             pushback: Vec::new(),
+            reusable: false,
         });
         id
     }
@@ -653,8 +664,28 @@ impl FileStore {
             global: false,
             created_after_save: 0,
             pushback: Vec::new(),
+            reusable: false,
         });
         id
+    }
+
+    /// Create a reusable stream (PLRM 3.13 "ReusableStreamDecode Filter")
+    /// holding `data`: a file that can be positioned anywhere from 0 to its
+    /// length and read many times. Reaching its end does not close it,
+    /// `resetfile` takes it back to its start, and `bytesavailable` is its
+    /// length less its position.
+    pub fn create_reusable_stream(&mut self, data: Vec<u8>) -> EntityId {
+        let id = self.create_string_source(data);
+        let entry = &mut self.files[id.raw_index()];
+        entry.name = "%reusablestream".to_string();
+        entry.reusable = true;
+        id
+    }
+
+    /// Whether `entity` is a reusable stream
+    /// ([`Self::create_reusable_stream`]).
+    pub fn is_reusable(&self, entity: EntityId) -> bool {
+        self.files[entity.raw_index()].reusable
     }
 
     /// Create a not-yet-run procedure data source (PLRM 3.8.4).
@@ -674,6 +705,7 @@ impl FileStore {
             global: false,
             created_after_save: 0,
             pushback: Vec::new(),
+            reusable: false,
         });
         id
     }
@@ -881,7 +913,9 @@ impl FileStore {
     /// what releases what the file holds: a string source's bytes, a filter's
     /// buffers, a real file's descriptor.
     pub fn close_at_eof(&mut self, entity: EntityId) {
-        if self.files[entity.raw_index()].mode.starts_with('r') {
+        let entry = &self.files[entity.raw_index()];
+        // A reusable stream stays open at its end, to be repositioned.
+        if entry.mode.starts_with('r') && !entry.reusable {
             let _ = self.close(entity);
         }
     }
@@ -1615,7 +1649,13 @@ impl FileStore {
             }
             FileHandle::StringSource { data, pos } => {
                 let remaining = data.len() - *pos;
-                if remaining == 0 { -1 } else { remaining as i32 }
+                // A reusable stream's is its length less its position, 0 at
+                // its end (PLRM 3.13), where other files say -1.
+                if remaining == 0 && !entry.reusable {
+                    -1
+                } else {
+                    remaining.min(i32::MAX as usize) as i32
+                }
             }
             FileHandle::Closed => -1,
             _ => -1,

@@ -167,23 +167,9 @@ fn create_subfile_filter(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?; // count
     ctx.o_stack.pop()?; // source
 
+    let kind = sub_file_decode_kind(count, eod_string)?;
     let source_entity = resolve_source(ctx, source_obj)?;
-
-    // Determine byte limit: if count > 0, use as byte count; otherwise use EOD string
-    let bytes_remaining = if count > 0 && eod_string.is_empty() {
-        Some(count)
-    } else {
-        None
-    };
-
-    let filter_entity = ctx.files.create_filter(
-        source_entity,
-        FilterKind::sub_file_decode(
-            eod_string,
-            i32::try_from(count).map_err(|_| PsError::RangeCheck)?,
-            bytes_remaining,
-        ),
-    );
+    let filter_entity = ctx.files.create_filter(source_entity, kind);
     if owns_source(&source_obj) {
         ctx.files.set_owns_source(filter_entity);
     }
@@ -195,6 +181,170 @@ fn create_subfile_filter(ctx: &mut Context) -> Result<(), PsError> {
         flags: ObjFlags::literal_composite(),
     })?;
     Ok(())
+}
+
+/// The `SubFileDecode` filter that ends after `count` occurrences of
+/// `eod_string`, or after `count` bytes when `eod_string` is empty.
+fn sub_file_decode_kind(count: i64, eod_string: Vec<u8>) -> Result<FilterKind, PsError> {
+    let bytes_remaining = (count > 0 && eod_string.is_empty()).then_some(count);
+    let count = i32::try_from(count).map_err(|_| PsError::RangeCheck)?;
+    Ok(FilterKind::sub_file_decode(
+        eod_string,
+        count,
+        bytes_remaining,
+    ))
+}
+
+/// One decoding filter of a reusable stream's `/Filter` chain, with its
+/// `/DecodeParms` entry (`None` for `null` or none).
+struct ChainFilter {
+    name: Vec<u8>,
+    parms: Option<EntityId>,
+}
+
+/// Read and check a `ReusableStreamDecode` parameter dictionary's
+/// `/Filter` and `/DecodeParms` (PLRM Table 3.24), before anything is
+/// popped. The errors are Ghostscript's: `typecheck` for a value of the
+/// wrong type, `rangecheck` for `/DecodeParms` of the wrong length, an
+/// encoding filter in the chain, or `SubFileDecode` without its
+/// `EODCount` and `EODString`, and `undefined` for an unknown filter.
+fn reusable_stream_chain(ctx: &Context, dict: EntityId) -> Result<Vec<ChainFilter>, PsError> {
+    let get = |key: &[u8]| {
+        let id = ctx.names.find(key)?;
+        ctx.dicts.get(dict, &DictKey::Name(id))
+    };
+    let elements = |obj: PsObject| match obj.value {
+        PsValue::Array { entity, start, len } | PsValue::PackedArray { entity, start, len } => {
+            Some(ctx.arrays.get(entity, start, len).to_vec())
+        }
+        _ => None,
+    };
+    // A parameter dictionary, or `null` for none.
+    let parms_of = |obj: PsObject| match obj.value {
+        PsValue::Dict(e) => Ok(Some(e)),
+        PsValue::Null => Ok(None),
+        _ => Err(PsError::TypeCheck),
+    };
+
+    let Some(filter) = get(b"Filter") else {
+        return Ok(Vec::new());
+    };
+    let decode_parms = get(b"DecodeParms");
+    let (names, parms) = match filter.value {
+        // One filter: `/DecodeParms` is its dictionary, or `null`.
+        PsValue::Name(name) => {
+            let parms = decode_parms.map_or(Ok(None), parms_of)?;
+            (vec![name], vec![parms])
+        }
+        _ => {
+            let filters = elements(filter).ok_or(PsError::TypeCheck)?;
+            let names = filters
+                .iter()
+                .map(|f| match f.value {
+                    PsValue::Name(name) => Ok(name),
+                    _ => Err(PsError::TypeCheck),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            // An array of filters: `/DecodeParms` is an array as long, of
+            // dictionaries and `null`s.
+            let parms = match decode_parms {
+                None => vec![None; names.len()],
+                Some(obj) => {
+                    let parms = elements(obj).ok_or(PsError::TypeCheck)?;
+                    if parms.len() != names.len() {
+                        return Err(PsError::RangeCheck);
+                    }
+                    parms
+                        .into_iter()
+                        .map(parms_of)
+                        .collect::<Result<Vec<_>, _>>()?
+                }
+            };
+            (names, parms)
+        }
+    };
+
+    let mut chain = Vec::with_capacity(names.len());
+    for (name, parms) in names.into_iter().zip(parms) {
+        let name = ctx.names.get_bytes(name).to_vec();
+        if !is_known_filter_name(&name) {
+            return Err(PsError::Undefined);
+        }
+        if !name.ends_with(b"Decode") {
+            return Err(PsError::RangeCheck);
+        }
+        // The checks `filter` makes of these filters' parameters, made here
+        // so that none fails once the operands are gone.
+        match name.as_slice() {
+            b"SubFileDecode" => {
+                sub_file_decode_parms(ctx, parms)?;
+            }
+            b"DCTDecode" => {
+                if let Some(parms) = parms {
+                    validate_dct_decode_params(ctx, parms)?;
+                }
+            }
+            b"CCITTFaxDecode" => {
+                if let Some(parms) = parms {
+                    extract_ccitt_params(ctx, parms)?;
+                }
+            }
+            _ => {}
+        }
+        chain.push(ChainFilter { name, parms });
+    }
+    Ok(chain)
+}
+
+/// The `EODCount` and `EODString` of a `SubFileDecode` parameter
+/// dictionary, both required (PLRM Table 3.24, note).
+fn sub_file_decode_parms(
+    ctx: &Context,
+    parms: Option<EntityId>,
+) -> Result<(i64, Vec<u8>), PsError> {
+    let parms = parms.ok_or(PsError::RangeCheck)?;
+    let get = |key: &[u8]| {
+        let id = ctx.names.find(key)?;
+        ctx.dicts.get(parms, &DictKey::Name(id))
+    };
+    let count = match get(b"EODCount").ok_or(PsError::RangeCheck)?.value {
+        PsValue::Int(n) if n >= 0 => n,
+        PsValue::Int(_) => return Err(PsError::RangeCheck),
+        _ => return Err(PsError::TypeCheck),
+    };
+    let eod_string = match get(b"EODString").ok_or(PsError::RangeCheck)?.value {
+        PsValue::String { entity, start, len } => ctx.strings.get(entity, start, len).to_vec(),
+        _ => return Err(PsError::TypeCheck),
+    };
+    Ok((count, eod_string))
+}
+
+/// Make one filter of a reusable stream's chain, reading `source`.
+fn make_chain_filter(
+    ctx: &mut Context,
+    filter: &ChainFilter,
+    source: EntityId,
+) -> Result<EntityId, PsError> {
+    if filter.name == b"SubFileDecode" {
+        let (count, eod_string) = sub_file_decode_parms(ctx, filter.parms)?;
+        let kind = sub_file_decode_kind(count, eod_string)?;
+        return Ok(ctx.files.create_filter(source, kind));
+    }
+    let (predictor, columns, colors, bpc, early_change) = match filter.parms {
+        Some(parms) => extract_filter_params(ctx, parms),
+        None => (1, 1, 1, 8, 1),
+    };
+    create_filter_by_name(
+        ctx,
+        &filter.name,
+        source,
+        predictor,
+        columns,
+        colors,
+        bpc,
+        early_change,
+        filter.parms,
+    )
 }
 
 /// Handle ReusableStreamDecode: reads all data from source into a seekable buffer.
@@ -221,6 +371,15 @@ fn create_reusable_stream(ctx: &mut Context) -> Result<(), PsError> {
         return Err(PsError::TypeCheck);
     }
 
+    // The decoding filters to read the source through (PLRM Table 3.24).
+    // `CloseSource` is ignored, as in Ghostscript: the PLRM has closing the
+    // stream close the source, which over `currentfile` would end the job
+    // there, where Ghostscript runs it to the end.
+    let chain = match ctx.o_stack.peek(1)?.value {
+        PsValue::Dict(dict) if has_dict => reusable_stream_chain(ctx, dict)?,
+        _ => Vec::new(),
+    };
+
     ctx.o_stack.pop()?; // filter name
     if has_dict {
         ctx.o_stack.pop()?; // dict
@@ -229,29 +388,59 @@ fn create_reusable_stream(ctx: &mut Context) -> Result<(), PsError> {
 
     let source_entity = resolve_source(ctx, source_obj)?;
 
-    // ReusableStreamDecode is defined to read its source eagerly, so a
-    // procedure source is run here rather than deferred to the read path.
-    ctx.pump_proc_sources(source_entity)?;
-
-    // Read all data from the source into a buffer
-    let mut data = Vec::new();
-    let mut buf = [0u8; 8192];
-    loop {
-        let n = ctx
-            .files
-            .read_into(source_entity, &mut buf)
-            .map_err(|_| PsError::IOError)?;
-        if n == 0 {
-            break;
+    // The chain is "equivalent to supplying the same filter pipeline as the
+    // data source" (PLRM 3.13), so the stream holds what the last filter
+    // delivers, read to its end of data: over `currentfile`, the program
+    // carries on after the encoded data. Each filter owns the one below it,
+    // and the first owns the source when the source is a private copy of a
+    // string or procedure; every `CloseSource` in `/DecodeParms` is ignored.
+    let mut top = source_entity;
+    for (i, filter) in chain.iter().enumerate() {
+        let made = make_chain_filter(ctx, filter, top);
+        let filter = match made {
+            Ok(filter) => filter,
+            Err(e) => {
+                if top != source_entity || owns_source(&source_obj) {
+                    let _ = ctx.files.close(top);
+                }
+                return Err(e);
+            }
+        };
+        if i > 0 || owns_source(&source_obj) {
+            ctx.files.set_owns_source(filter);
         }
-        data.extend_from_slice(&buf[..n]);
+        top = filter;
     }
 
-    // Read to its end, which closes the source (PLRM 3e `file`), as
-    // Ghostscript does.
-    ctx.files.close_at_eof(source_entity);
+    // ReusableStreamDecode is defined to read its source eagerly, so a
+    // procedure source is run here rather than deferred to the read path.
+    let data = ctx.pump_proc_sources(top).and_then(|()| {
+        let mut data = Vec::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = ctx
+                .files
+                .read_into(top, &mut buf)
+                .map_err(|_| PsError::IOError)?;
+            if n == 0 {
+                return Ok(data);
+            }
+            data.extend_from_slice(&buf[..n]);
+        }
+    });
 
-    let entity = ctx.files.create_string_source(data);
+    if chain.is_empty() {
+        // Read to its end, which closes the source (PLRM 3e `file`), as
+        // Ghostscript does.
+        ctx.files.close_at_eof(source_entity);
+    } else {
+        // The filters are the stream's own, and are done with; closing the
+        // top one closes them all, and a private source with them.
+        let _ = ctx.files.close(top);
+    }
+    let data = data?;
+
+    let entity = ctx.files.create_reusable_stream(data);
     let entity = ctx.adopt_file(entity);
     ctx.o_stack.push(PsObject {
         value: PsValue::File(entity),
