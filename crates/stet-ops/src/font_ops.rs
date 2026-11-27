@@ -591,7 +591,7 @@ fn read_matrix_from_array(elems: &[PsObject]) -> Result<Matrix, PsError> {
 
 /// Copy a font dictionary and compose a transformation matrix with its FontMatrix.
 /// Removes /FID from the copy (per PLRM).
-fn copy_font_with_matrix(
+pub(crate) fn copy_font_with_matrix(
     ctx: &mut Context,
     font_entity: stet_core::object::EntityId,
     transform: &Matrix,

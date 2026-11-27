@@ -148,3 +148,77 @@ fn the_base_font_glyphs_are_drawn() {
     assert!((12..=14).contains(&first), "H starts at x = {first}");
     assert!((89..=92).contains(&last), "o ends at x = {last}");
 }
+
+/// `cshow` hands its procedure each code with the glyph's width and the
+/// selected descendant, scaled by the composite font's matrix, as the
+/// current font (PLRM, `cshow`). The code is the selected character code
+/// for a code selector (`<0142>` gives 66), 0 for an unmapped code, and the
+/// string's byte for a glyph name; a `show` of it inside the procedure
+/// shows that byte in the descendant (Ghostscript: `Z` mapped to `/B`
+/// shows `Z`, 611).
+#[test]
+fn cshow_gives_the_code_width_and_descendant() {
+    passes(
+        "/Nm /one { 3 beginbfchar <5A> /B <58> /eacute <57> <0142> endbfchar\n\
+                    1 beginbfchar <56> /nosuchglyph endbfchar } cmap\n\
+         /C /Nm [/Helvetica findfont] composefont pop /C 1000 selectfont\n\
+         [ { 3 array astore } (ZXWVY) cshow ] /got exch def\n\
+         got length 5 ne { 1 0 div } if\n\
+         [[90 667 0] [88 556 0] [66 667 0] [86 278 0] [0 278 0]] {\n\
+           /want exch def /g got 0 get def /got got 1 got length 1 sub getinterval def\n\
+           0 1 2 { dup g exch get exch want exch get near } for\n\
+         } forall\n\
+         0 0 moveto { pop pop 1 string dup 0 4 -1 roll put show } (ZXWVY) cshow\n\
+         currentpoint pop 2890 near",
+    );
+}
+
+/// Inside the procedure `currentfont` is the descendant at the composite
+/// font's size and `rootfont` the composite font; afterwards the composite
+/// font is current again.
+#[test]
+fn cshow_makes_the_scaled_descendant_current() {
+    passes(
+        "/Uf /one { 0 usefont 1 beginbfchar <41> <41> endbfchar\n\
+                    1 usefont 1 beginbfchar <42> <42> endbfchar } cmap\n\
+         /D /Uf [/Helvetica findfont /Courier findfont] composefont pop /D 100 selectfont\n\
+         [ { pop pop pop currentfont /FontName get currentfont /FontMatrix get 0 get\n\
+             rootfont /FontName get } (AB) cshow ] /names exch def\n\
+         names 0 get /Helvetica ne { 1 0 div } if names 1 get 0.1 near\n\
+         names 2 get /D ne { 1 0 div } if\n\
+         names 3 get /Courier ne { 1 0 div } if names 4 get 0.1 near\n\
+         names 5 get /D ne { 1 0 div } if\n\
+         currentfont /FontName get /D ne { 1 0 div } if",
+    );
+}
+
+/// `cshow` gave every glyph a width of 0 0, whatever the font.
+#[test]
+fn cshow_gives_a_base_fonts_widths() {
+    passes(
+        "/Helvetica 1000 selectfont [ {} (AB) cshow ] /w exch def\n\
+         w 1 get 667 near w 2 get 0 near w 4 get 667 near",
+    );
+}
+
+/// PLRM, `kshow`: only base fonts.
+#[test]
+fn kshow_refuses_a_composite_font() {
+    passes(
+        "/Uf /one { 1 beginbfchar <41> <41> endbfchar } cmap\n\
+         /D /Uf [/Helvetica findfont] composefont pop /D 1000 selectfont\n\
+         0 0 moveto { {pop pop} (AB) kshow } stopped not { 1 0 div } if\n\
+         $error /errorname get /invalidfont ne { 1 0 div } if",
+    );
+}
+
+#[test]
+fn xshow_and_xyshow_place_base_font_glyphs() {
+    passes(
+        "/Uf /one { 0 usefont 1 beginbfchar <41> <41> endbfchar\n\
+                    1 usefont 1 beginbfchar <42> <42> endbfchar } cmap\n\
+         /D /Uf [/Helvetica findfont /Courier findfont] composefont pop /D 1000 selectfont\n\
+         0 0 moveto (ABA) [100 200 300] xshow currentpoint pop 600 near\n\
+         0 0 moveto (AB) [100 5 200 7] xyshow currentpoint 12 near 300 near",
+    );
+}

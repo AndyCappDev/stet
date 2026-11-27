@@ -296,6 +296,60 @@ fn one_string_shows_cids_and_base_font_glyphs() {
     assert!((marker_x(boxes[4]) - 226.7).abs() < 1e-6, "{:?}", boxes[4]);
 }
 
+/// The CMap of [`one_string_shows_cids_and_base_font_glyphs`].
+const MIXED: &str = "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
+     /CMapName /Mixed def /CMapType 1 def\n\
+     1 begincodespacerange <00> <FF> endcodespacerange\n\
+     0 usefont 1 beginbfchar <42> /B endbfchar\n\
+     1 usefont 2 begincidchar <41> 1 <43> 2 endcidchar\n\
+     endcmap CMapName currentdict /CMap defineresource pop end end\n\
+     /M /Mixed [/Helvetica findfont /T1CID /CIDFont findresource] composefont\n\
+     100 scalefont setfont\n";
+
+/// pdftops clips text by showing each character from a `cshow` procedure:
+/// `1 string dup 0 4 3 roll put show`. With a CIDFont selected the byte
+/// can't name the CID, which still draws; with Helvetica the byte is
+/// Helvetica's. The procedure gets each glyph's width, and the CIDFont, at
+/// the composite font's size, as the current font.
+#[test]
+fn cshow_shows_cids_and_base_font_glyphs() {
+    let boxes = fills(&format!(
+        "{MIXED}10 100 moveto\n\
+         {{ pop pop 1 string dup 0 4 -1 roll put show }} (ABC) cshow {MARK}\n\
+         [ {{ pop exch pop currentfont /CIDFontName known }} (ABC) cshow ] /r exch def\n\
+         r 0 get 50 sub abs 0.01 gt {{ 1 0 div }} if r 1 get not {{ 1 0 div }} if\n\
+         r 2 get 66.7 sub abs 0.05 gt {{ 1 0 div }} if r 3 get {{ 1 0 div }} if\n\
+         r 4 get 100 sub abs 0.01 gt {{ 1 0 div }} if r 5 get not {{ 1 0 div }} if"
+    ));
+    assert_eq!(boxes.len(), 4, "{boxes:?}");
+    assert!(close(boxes[0], CID1_AT_10_100), "{:?}", boxes[0]);
+    assert!((boxes[1][0] - 67.9).abs() < 0.05, "{:?}", boxes[1]);
+    let cid2 = [146.7, 260.0, 166.7, 280.0];
+    assert!(
+        boxes[2].iter().zip(cid2).all(|(a, b)| (a - b).abs() < 1e-6),
+        "{:?}",
+        boxes[2]
+    );
+    assert!((marker_x(boxes[3]) - 226.7).abs() < 1e-6, "{:?}", boxes[3]);
+}
+
+#[test]
+fn xshow_places_cids_and_base_font_glyphs() {
+    let boxes = fills(&format!(
+        "{MIXED}10 100 moveto (ABC) [50 70 100] xshow {MARK}"
+    ));
+    assert_eq!(boxes.len(), 4, "{boxes:?}");
+    assert!(close(boxes[0], CID1_AT_10_100), "{:?}", boxes[0]);
+    assert!((boxes[1][0] - 67.9).abs() < 0.05, "{:?}", boxes[1]);
+    // CID 2 at 130: FD 1 doubles it, from (150, 120).
+    assert!(
+        close(boxes[2], [150.0, 260.0, 170.0, 280.0]),
+        "{:?}",
+        boxes[2]
+    );
+    assert_eq!(marker_x(boxes[3]), 230.0);
+}
+
 // ---------------------------------------------------------------------------
 // PDF output
 // ---------------------------------------------------------------------------

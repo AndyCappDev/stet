@@ -194,6 +194,16 @@ pub fn op_kshow(ctx: &mut Context) -> Result<(), PsError> {
         return Err(PsError::TypeCheck);
     }
 
+    // PLRM, `kshow`: it "can be applied only to base fonts. If the current
+    // font is a composite font or a CIDFont, an invalidfont error occurs."
+    let is_cidfont = match ctx.gstate.current_font.map(|f| f.value) {
+        Some(PsValue::Dict(font)) => is_cidfont(ctx, font),
+        _ => false,
+    };
+    if current_font_is_composite(ctx) || is_cidfont {
+        return Err(PsError::InvalidFont);
+    }
+
     if ctx.gstate.current_point.is_none() {
         return Err(PsError::NoCurrentPoint);
     }
@@ -367,63 +377,31 @@ pub fn op_cshow(ctx: &mut Context) -> Result<(), PsError> {
         .and_then(|obj| obj.as_i32())
         .unwrap_or(1);
 
-    if font_type == 0 {
-        // Type 0: decode through the CMap or the FMapType mapping. A CMap's
-        // codes take their length from its codespace, whose codes may differ
-        // in length (Shift-JIS mixes one- and two-byte codes).
-        let (spans, cid_pairs): CodeSpans = match decode_cmap_codes(ctx, font_entity, &bytes) {
-            Some((codes, font_num)) => codes
-                .iter()
-                .map(|c| (Some((c.start, c.len)), (c.cid(), font_num)))
-                .unzip(),
-            None => {
-                let pairs = decode_cmap_bytes(ctx, font_entity, &bytes);
-                (vec![None; pairs.len()], pairs)
-            }
-        };
-        for ((cid, _font_idx), span) in cid_pairs.into_iter().zip(spans) {
-            let (code, whole_code) = match span {
-                // PLRM, cshow: when the mapping algorithm selects a CIDFont,
-                // what goes on the stack for proc is the character code from
-                // the string — its last byte if the code is longer than one —
-                // not the CID. Handing over the CID breaks the standard idiom
-                // `1 string dup 0 4 3 roll put ... show`, which `pdftops`
-                // emits for every clipped text run: any CID above 255 is a
-                // rangecheck in `put`. The CID is carried out of band instead,
-                // so a `show` inside proc still paints the right glyph.
-                Some((start, len)) => (
-                    (start + len)
-                        .checked_sub(1)
-                        .and_then(|last| bytes.get(last))
-                        .copied()
-                        .unwrap_or(0) as i32,
-                    bytes
-                        .get(start..start + len)
-                        .map(|code| code.iter().fold(0u32, |a, &b| (a << 8) | b as u32)),
-                ),
-                // The FMapType mappings: the decoded character code, as
-                // Ghostscript gives it. Escape and shift bytes select a font
-                // and are no character, so byte positions don't line up with
-                // characters.
-                None => (cid, u32::try_from(cid).ok()),
-            };
-            ctx.o_stack.push(PsObject::int(code))?;
+    if font_type == 0 && has_cmap(ctx, font_entity) {
+        cshow_cmap(ctx, font_obj, font_entity, &bytes, proc)?;
+    } else if font_type == 0 {
+        // The FMapType mappings: the decoded character code, as Ghostscript
+        // gives it. Escape and shift bytes select a font and are no
+        // character, so byte positions don't line up with characters.
+        for (cid, _font_idx) in decode_cmap_bytes(ctx, font_entity, &bytes) {
+            ctx.o_stack.push(PsObject::int(cid))?;
             ctx.o_stack.push(PsObject::real(0.0))?; // wx
             ctx.o_stack.push(PsObject::real(0.0))?; // wy
 
             ctx.cshow_pending_cid = Some(cid);
-            ctx.cshow_pending_code = whole_code;
+            ctx.cshow_pending_code = u32::try_from(cid).ok();
             let result = ctx.exec_sync(proc);
             ctx.cshow_pending_cid = None;
             ctx.cshow_pending_code = None;
             result?;
         }
     } else {
-        // Simple font: one byte per character
+        // Simple font: one byte per character, with its width.
         for &byte in &bytes {
+            let (wx, wy) = measure_string_width(ctx, &[byte])?;
             ctx.o_stack.push(PsObject::int(byte as i32))?;
-            ctx.o_stack.push(PsObject::real(0.0))?; // wx
-            ctx.o_stack.push(PsObject::real(0.0))?; // wy
+            ctx.o_stack.push(PsObject::real(wx))?;
+            ctx.o_stack.push(PsObject::real(wy))?;
 
             ctx.exec_sync(proc)?;
         }
@@ -432,9 +410,106 @@ pub fn op_cshow(ctx: &mut Context) -> Result<(), PsError> {
     Ok(())
 }
 
-/// Each character code's (start, length) in a string (none for the
-/// FMapType mappings), and its (CID, font number).
-type CodeSpans = (Vec<Option<(usize, usize)>>, Vec<(i32, usize)>);
+/// `cshow` with CMap-keyed Type 0 font `font_obj`: for each code of
+/// `bytes`, call `proc` with the code, the glyph's width, and the selected
+/// descendant, scaled by the Type 0 font's matrix, as the current font
+/// (PLRM, `cshow`; Ghostscript gives the same). The code is the string's,
+/// its last byte if longer, when a CIDFont or a glyph name is selected,
+/// the selected character code's last byte for a code, and 0 for an
+/// unmapped code in a base font. A `show` of that byte inside `proc`
+/// draws from the descendant: a base font's glyph for the byte, and for a
+/// CIDFont the CID that was selected, which goes to it out of band
+/// ([`Context::cshow_pending_cid`]) since a byte can't name it. The
+/// current font is put back after each call, and `rootfont` is the Type 0
+/// font meanwhile.
+fn cshow_cmap(
+    ctx: &mut Context,
+    font_obj: PsObject,
+    font_entity: EntityId,
+    bytes: &[u8],
+    proc: PsObject,
+) -> Result<(), PsError> {
+    let type0_fm = read_font_matrix(ctx, font_entity);
+    let wmode = font_wmode(ctx, font_entity);
+    for c in type0_codes(ctx, font_entity, bytes) {
+        let font_num = c.target.font;
+        let (code, (wx, wy), desc, pending) = match descendant(ctx, font_entity, font_num)? {
+            Descendant::Cid(cidfont) => {
+                let cid = c.cid_selector();
+                let width = measure_cid_run(ctx, cidfont, wmode, &type0_fm, &[cid])?;
+                (c.code & 0xff, width, PsObject::dict(cidfont), Some(cid))
+            }
+            Descendant::Base(base) => {
+                let code = match c.target.selector {
+                    Selector::Code(code) => code & 0xff,
+                    Selector::Notdef => 0,
+                    _ => c.code & 0xff,
+                };
+                let width = measure_base_run(ctx, base, &type0_fm, &[c])?;
+                (code, width, base, None)
+            }
+        };
+        let proc_font = cshow_font(ctx, font_entity, font_num, desc, &type0_fm)?;
+        ctx.o_stack.push(PsObject::int(code as i32))?;
+        ctx.o_stack.push(PsObject::real(wx))?;
+        ctx.o_stack.push(PsObject::real(wy))?;
+
+        let saved_font = ctx.gstate.current_font.replace(proc_font);
+        let saved_root = ctx.gstate.root_font.replace(font_obj);
+        ctx.cshow_pending_cid = pending;
+        ctx.cshow_pending_code = pending.map(|_| c.code);
+        let result = ctx.exec_sync(proc);
+        ctx.cshow_pending_cid = None;
+        ctx.cshow_pending_code = None;
+        ctx.gstate.current_font = saved_font;
+        ctx.gstate.root_font = saved_root;
+        result?;
+    }
+    Ok(())
+}
+
+/// The font `cshow` makes current for descendant `font_num` (`desc`) of
+/// Type 0 font `root`: `desc` with `type0_fm` joined to its matrix, as
+/// `makefont` makes it, made once per Type 0 font and kept in
+/// [`Context::cshow_fonts`].
+fn cshow_font(
+    ctx: &mut Context,
+    root: EntityId,
+    font_num: usize,
+    desc: PsObject,
+    type0_fm: &Matrix,
+) -> Result<PsObject, PsError> {
+    if let Some(font) = ctx.cshow_fonts.get(&(root, font_num)) {
+        return Ok(*font);
+    }
+    let PsValue::Dict(desc_entity) = desc.value else {
+        return Err(PsError::InvalidFont);
+    };
+    let font = crate::font_ops::copy_font_with_matrix(ctx, desc_entity, type0_fm)?;
+    ctx.cshow_fonts.insert((root, font_num), font);
+    Ok(font)
+}
+
+/// Whether `font` is a CIDFont: the current font only while a `cshow`
+/// procedure runs for a CID, where it is the selected CIDFont.
+fn is_cidfont(ctx: &Context, font: EntityId) -> bool {
+    ctx.names
+        .find(b"CIDFontType")
+        .is_some_and(|id| ctx.dicts.get(font, &DictKey::Name(id)).is_some())
+}
+
+/// With CIDFont `cidfont` current, inside a `cshow` procedure: the Type 0
+/// font `cshow` was called with, its writing mode, and the code it
+/// selected the CIDFont with, mapped to its CID. Anywhere else a CIDFont
+/// can't be shown with (PLRM 5.11.3: it is no base font), `invalidfont`.
+fn cshow_cid(ctx: &Context) -> Result<(EntityId, i32, ShownCode), PsError> {
+    let cid = ctx.cshow_pending_cid.ok_or(PsError::InvalidFont)?;
+    let Some(PsValue::Dict(root)) = ctx.gstate.root_font.map(|f| f.value) else {
+        return Err(PsError::InvalidFont);
+    };
+    let code = ctx.cshow_pending_code.unwrap_or(cid as u32);
+    Ok((root, font_wmode(ctx, root), ShownCode::cid(code, cid)))
+}
 
 /// One character code of a string shown with a CMap-keyed Type 0 font.
 struct CmapCode {
@@ -1450,6 +1525,26 @@ fn render_show(
 
     if font_type == 3 {
         return render_show_type3(ctx, bytes, extra_ax, extra_ay, width_char, cx, cy, false);
+    }
+
+    if is_cidfont(ctx, font_entity) {
+        let (root, wmode, code) = cshow_cid(ctx)?;
+        let spacing = Spacing {
+            ax: extra_ax,
+            ay: extra_ay,
+            width_char,
+            cx,
+            cy,
+        };
+        return show_cid_run(
+            ctx,
+            root,
+            font_entity,
+            wmode,
+            &Matrix::identity(),
+            &[code],
+            &spacing,
+        );
     }
 
     // Type 0 (composite) and Type 42 (TrueType)
@@ -2911,22 +3006,6 @@ struct CidRecording {
     text: text_record::CidText,
 }
 
-/// The character codes in `bytes` for a CMap-keyed Type 0 font, one for
-/// each CID [`decode_cmap_bytes`] decodes from them.
-fn cmap_codes(ctx: &mut Context, font_entity: EntityId, bytes: &[u8]) -> Vec<u32> {
-    match decode_cmap_codes(ctx, font_entity, bytes) {
-        Some((codes, _)) => codes
-            .iter()
-            .map(|c| {
-                bytes[c.start..c.start + c.len]
-                    .iter()
-                    .fold(0u32, |a, &b| (a << 8) | b as u32)
-            })
-            .collect(),
-        None => bytes.iter().map(|&b| b as u32).collect(),
-    }
-}
-
 /// Record the `index`th glyph of a CID loop, CID `cid`.
 #[expect(clippy::too_many_arguments)]
 fn record_cid_glyph(
@@ -4265,6 +4344,11 @@ fn measure_string_width(ctx: &mut Context, bytes: &[u8]) -> Result<(f64, f64), P
     if font_type == 2 {
         return measure_string_width_type2(ctx, font_entity_id, bytes);
     }
+    if is_cidfont(ctx, font_entity_id) {
+        let (_, wmode, code) = cshow_cid(ctx)?;
+        let cid = code.cid_selector();
+        return measure_cid_run(ctx, font_entity_id, wmode, &Matrix::identity(), &[cid]);
+    }
     if font_type == 0 || font_type == 42 {
         return measure_string_width_composite(ctx, font_entity_id, bytes);
     }
@@ -4356,6 +4440,11 @@ fn render_charpath(ctx: &mut Context, bytes: &[u8]) -> Result<(), PsError> {
         .unwrap_or(1);
     if font_type == 2 {
         return render_charpath_type2(ctx, font_entity_id, bytes);
+    }
+    if is_cidfont(ctx, font_entity_id) {
+        let (_, wmode, code) = cshow_cid(ctx)?;
+        let cid = code.cid_selector();
+        return charpath_cid_run(ctx, font_entity_id, wmode, &Matrix::identity(), &[cid]);
     }
     if font_type == 0 || font_type == 42 {
         return render_charpath_composite(ctx, font_entity_id, bytes);
@@ -5608,141 +5697,46 @@ fn render_show_displaced_composite(
             );
         }
 
-        // CMap-based Type 0 font (CIDFont descendants)
-        let fdep_name = ctx.names.intern(b"FDepVector");
-        let fdep_obj = ctx
-            .dicts
-            .get(font_entity, &DictKey::Name(fdep_name))
-            .ok_or(PsError::InvalidFont)?;
-        let (fdep_entity, fdep_start, _) = match fdep_obj.value {
-            PsValue::Array { entity, start, len } => (entity, start, len),
-            _ => return Err(PsError::InvalidFont),
-        };
-        let cidfont_obj = ctx.arrays.get_element(fdep_entity, fdep_start);
-        let cidfont_entity = match cidfont_obj.value {
-            PsValue::Dict(e) => e,
-            _ => return Err(PsError::InvalidFont),
-        };
-
-        let cidfont_fm = read_font_matrix(ctx, cidfont_entity);
-        let cids = decode_cmap_bytes(ctx, font_entity, bytes);
+        // CMap-keyed Type 0 font: each run of codes by its own descendant.
+        ctx.gstate.current_point = Some(ctm.transform_point(cur_x, cur_y));
+        let codes = type0_codes(ctx, font_entity, bytes);
         let wmode = font_wmode(ctx, font_entity);
-        let cid_metrics = CidMetrics::of(ctx, cidfont_entity, wmode);
-        let recording = if ctx.text_capture.is_some() {
-            CidRecording {
-                codes: cmap_codes(ctx, font_entity, bytes),
-                text: text_record::cid_text_source(ctx, font_entity, cidfont_entity),
-            }
-        } else {
-            CidRecording::default()
-        };
-
-        let has_sfnts = ctx
-            .names
-            .find(b"sfnts")
-            .and_then(|id| ctx.dicts.get(cidfont_entity, &DictKey::Name(id)))
-            .is_some();
-
-        if has_sfnts {
-            // TrueType CIDFont
-            let tt = TrueTypeCid::of(ctx, cidfont_entity);
-            let upm = tt.upm;
-            let em_scale = Matrix::scale(1.0 / upm, 1.0 / upm);
-            let combined_fm = type0_fm.multiply(&cidfont_fm).multiply(&em_scale);
-            let (paint_type, stroke_width_dev) =
-                get_paint_info(ctx, cidfont_entity, &combined_fm, &ctm);
-
-            for (i, (cid, _)) in cids.iter().enumerate() {
-                // Emit per-character Text element with device-space position
-                let (dev_x, dev_y) = ctm.transform_point(cur_x, cur_y);
-                let cid_bytes = vec![(*cid >> 8) as u8, (*cid & 0xFF) as u8];
-                emit_text_element(ctx, cid_bytes, font_entity, font_type, Some((dev_x, dev_y)));
-
-                let glyph = tt.glyph(ctx, cidfont_entity, *cid);
-                let place =
-                    cid_metrics.place(ctx, *cid, (glyph.width_x, 0.0), &glyph.segments, upm)?;
-                if !glyph.segments.is_empty() {
-                    // From origin 0 in vertical writing.
-                    let (gx, gy) = place.origin(&combined_fm, (cur_x, cur_y));
-                    let user_path = transform_segments(&glyph.segments, &combined_fm, gx, gy);
-                    let device_path = ctm_transform_path(&user_path, &ctm);
-                    push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
-                }
-
-                if ctx.text_capture.is_some() {
-                    let metrics = if place.vertical {
-                        text_record::GlyphMetrics::Given {
-                            ascent: upm / 2.0,
-                            descent: -upm / 2.0,
-                        }
-                    } else {
-                        text_record::truetype_metrics(tt.font_data.as_deref())
+        let mut first = 0;
+        for run in codes.chunk_by(|a, b| a.target.font == b.target.font) {
+            match descendant(ctx, font_entity, run[0].target.font)? {
+                Descendant::Cid(cidfont_entity) => show_cid_run_displaced(
+                    ctx,
+                    font_entity,
+                    cidfont_entity,
+                    wmode,
+                    &type0_fm,
+                    run,
+                    (displacements, first, &mode),
+                )?,
+                Descendant::Base(base) => {
+                    let PsValue::Dict(base_entity) = base.value else {
+                        return Err(PsError::InvalidFont);
                     };
-                    record_cid_glyph(
-                        ctx,
-                        cidfont_entity,
-                        &combined_fm,
-                        metrics,
-                        &recording,
-                        (i, *cid),
-                        (cur_x, cur_y),
-                        place.advance(&combined_fm),
-                        place.vertical,
-                    );
-                }
-
-                advance_by_displacement(&mut cur_x, &mut cur_y, displacements, i, &mode);
-            }
-        } else {
-            // CIDFontType 0 (CFF or Type 1 charstrings)
-            let source = CidGlyphSource::of(ctx, cidfont_entity).ok().flatten();
-            let combined_fm = type0_fm.multiply(&cidfont_fm);
-            let (paint_type, stroke_width_dev) =
-                get_paint_info(ctx, cidfont_entity, &combined_fm, &ctm);
-
-            for (i, (cid, _)) in cids.iter().enumerate() {
-                // Emit per-character Text element with device-space position
-                let (dev_x, dev_y) = ctm.transform_point(cur_x, cur_y);
-                let cid_bytes = vec![(*cid >> 8) as u8, (*cid & 0xFF) as u8];
-                emit_text_element(ctx, cid_bytes, font_entity, font_type, Some((dev_x, dev_y)));
-
-                let glyph = match &source {
-                    Some(source) => source.glyph(ctx, cidfont_entity, *cid).ok().flatten(),
-                    None => None,
-                };
-                if let Some(glyph) = glyph {
-                    let width = (glyph.width_x, glyph.width_y);
-                    let place = cid_metrics.place(ctx, *cid, width, &glyph.segments, 1.0)?;
-                    if !glyph.segments.is_empty() {
-                        // From origin 0 in vertical writing.
-                        let (gx, gy) = place.origin(&combined_fm, (cur_x, cur_y));
-                        let user_path = transform_segments(&glyph.segments, &combined_fm, gx, gy);
-                        let device_path = ctm_transform_path(&user_path, &ctm);
-                        push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
+                    for (k, c) in run.iter().enumerate() {
+                        // Drawn as the base font draws it, then placed by
+                        // its displacement, which is user space.
+                        let start = ctx.gstate.current_point.ok_or(PsError::NoCurrentPoint)?;
+                        let glyph = base_glyph(ctx, base_entity, c.target.selector);
+                        in_descendant(ctx, base, &type0_fm, |ctx| match glyph {
+                            BaseGlyph::Code(code) => {
+                                render_show(ctx, &[code], 0.0, 0.0, -1, 0.0, 0.0)
+                            }
+                            BaseGlyph::Name(name) => render_glyphshow(ctx, base, base_entity, name),
+                        })?;
+                        let (mut x, mut y) = ictm.transform_point(start.0, start.1);
+                        advance_by_displacement(&mut x, &mut y, displacements, first + k, &mode);
+                        ctx.gstate.current_point = Some(ctm.transform_point(x, y));
                     }
-                    let metrics = if place.vertical {
-                        text_record::GlyphMetrics::Given {
-                            ascent: 500.0,
-                            descent: -500.0,
-                        }
-                    } else {
-                        text_record::GlyphMetrics::FontBBox
-                    };
-                    record_cid_glyph(
-                        ctx,
-                        cidfont_entity,
-                        &combined_fm,
-                        metrics,
-                        &recording,
-                        (i, *cid),
-                        (cur_x, cur_y),
-                        place.advance(&combined_fm),
-                        place.vertical,
-                    );
                 }
-                advance_by_displacement(&mut cur_x, &mut cur_y, displacements, i, &mode);
             }
+            first += run.len();
         }
+        return Ok(());
     } else {
         // Type 42: simple TrueType font
         let font_data = concatenate_sfnts_array(ctx, font_entity);
@@ -5869,6 +5863,145 @@ fn render_show_displaced_composite(
 
     let (dev_x, dev_y) = ctm.transform_point(cur_x, cur_y);
     ctx.gstate.current_point = Some((dev_x, dev_y));
+    Ok(())
+}
+
+/// Show `codes`, all mapped to CIDFont `cidfont_entity`, a descendant of
+/// Type 0 font `font_entity`, from the current point, each placed by its
+/// displacement: `displacements` from index `first`, read as `mode` says
+/// (`xshow`, `yshow`, `xyshow`).
+fn show_cid_run_displaced(
+    ctx: &mut Context,
+    font_entity: EntityId,
+    cidfont_entity: EntityId,
+    wmode: i32,
+    type0_fm: &Matrix,
+    codes: &[ShownCode],
+    (displacements, first, mode): (&[f64], usize, &DisplacementMode),
+) -> Result<(), PsError> {
+    let type0_fm = *type0_fm;
+    let (dev_cpx, dev_cpy) = ctx.gstate.current_point.ok_or(PsError::NoCurrentPoint)?;
+    let ictm = ctx.gstate.ctm.invert().ok_or(PsError::UndefinedResult)?;
+    let (mut cur_x, mut cur_y) = ictm.transform_point(dev_cpx, dev_cpy);
+    let ctm = ctx.gstate.ctm;
+    let cidfont_fm = read_font_matrix(ctx, cidfont_entity);
+    let cids: Vec<i32> = codes.iter().map(ShownCode::cid_selector).collect();
+    let cid_metrics = CidMetrics::of(ctx, cidfont_entity, wmode);
+    let recording = if ctx.text_capture.is_some() {
+        CidRecording {
+            codes: codes.iter().map(|c| c.code).collect(),
+            text: text_record::cid_text_source(ctx, font_entity, cidfont_entity),
+        }
+    } else {
+        CidRecording::default()
+    };
+
+    let has_sfnts = ctx
+        .names
+        .find(b"sfnts")
+        .and_then(|id| ctx.dicts.get(cidfont_entity, &DictKey::Name(id)))
+        .is_some();
+
+    if has_sfnts {
+        // TrueType CIDFont
+        let tt = TrueTypeCid::of(ctx, cidfont_entity);
+        let upm = tt.upm;
+        let em_scale = Matrix::scale(1.0 / upm, 1.0 / upm);
+        let combined_fm = type0_fm.multiply(&cidfont_fm).multiply(&em_scale);
+        let (paint_type, stroke_width_dev) =
+            get_paint_info(ctx, cidfont_entity, &combined_fm, &ctm);
+
+        for (i, cid) in cids.iter().enumerate() {
+            // Emit per-character Text element with device-space position
+            let (dev_x, dev_y) = ctm.transform_point(cur_x, cur_y);
+            let cid_bytes = vec![(*cid >> 8) as u8, (*cid & 0xFF) as u8];
+            emit_text_element(ctx, cid_bytes, font_entity, 0, Some((dev_x, dev_y)));
+
+            let glyph = tt.glyph(ctx, cidfont_entity, *cid);
+            let place = cid_metrics.place(ctx, *cid, (glyph.width_x, 0.0), &glyph.segments, upm)?;
+            if !glyph.segments.is_empty() {
+                // From origin 0 in vertical writing.
+                let (gx, gy) = place.origin(&combined_fm, (cur_x, cur_y));
+                let user_path = transform_segments(&glyph.segments, &combined_fm, gx, gy);
+                let device_path = ctm_transform_path(&user_path, &ctm);
+                push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
+            }
+
+            if ctx.text_capture.is_some() {
+                let metrics = if place.vertical {
+                    text_record::GlyphMetrics::Given {
+                        ascent: upm / 2.0,
+                        descent: -upm / 2.0,
+                    }
+                } else {
+                    text_record::truetype_metrics(tt.font_data.as_deref())
+                };
+                record_cid_glyph(
+                    ctx,
+                    cidfont_entity,
+                    &combined_fm,
+                    metrics,
+                    &recording,
+                    (i, *cid),
+                    (cur_x, cur_y),
+                    place.advance(&combined_fm),
+                    place.vertical,
+                );
+            }
+
+            advance_by_displacement(&mut cur_x, &mut cur_y, displacements, first + i, mode);
+        }
+    } else {
+        // CIDFontType 0 (CFF or Type 1 charstrings)
+        let source = CidGlyphSource::of(ctx, cidfont_entity).ok().flatten();
+        let combined_fm = type0_fm.multiply(&cidfont_fm);
+        let (paint_type, stroke_width_dev) =
+            get_paint_info(ctx, cidfont_entity, &combined_fm, &ctm);
+
+        for (i, cid) in cids.iter().enumerate() {
+            // Emit per-character Text element with device-space position
+            let (dev_x, dev_y) = ctm.transform_point(cur_x, cur_y);
+            let cid_bytes = vec![(*cid >> 8) as u8, (*cid & 0xFF) as u8];
+            emit_text_element(ctx, cid_bytes, font_entity, 0, Some((dev_x, dev_y)));
+
+            let glyph = match &source {
+                Some(source) => source.glyph(ctx, cidfont_entity, *cid).ok().flatten(),
+                None => None,
+            };
+            if let Some(glyph) = glyph {
+                let width = (glyph.width_x, glyph.width_y);
+                let place = cid_metrics.place(ctx, *cid, width, &glyph.segments, 1.0)?;
+                if !glyph.segments.is_empty() {
+                    // From origin 0 in vertical writing.
+                    let (gx, gy) = place.origin(&combined_fm, (cur_x, cur_y));
+                    let user_path = transform_segments(&glyph.segments, &combined_fm, gx, gy);
+                    let device_path = ctm_transform_path(&user_path, &ctm);
+                    push_glyph_element(ctx, device_path, paint_type, stroke_width_dev);
+                }
+                let metrics = if place.vertical {
+                    text_record::GlyphMetrics::Given {
+                        ascent: 500.0,
+                        descent: -500.0,
+                    }
+                } else {
+                    text_record::GlyphMetrics::FontBBox
+                };
+                record_cid_glyph(
+                    ctx,
+                    cidfont_entity,
+                    &combined_fm,
+                    metrics,
+                    &recording,
+                    (i, *cid),
+                    (cur_x, cur_y),
+                    place.advance(&combined_fm),
+                    place.vertical,
+                );
+            }
+            advance_by_displacement(&mut cur_x, &mut cur_y, displacements, first + i, mode);
+        }
+    }
+    ctx.gstate.current_point = Some(ctm.transform_point(cur_x, cur_y));
     Ok(())
 }
 
