@@ -168,6 +168,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (237, 28, 36). The reader already used its own profile with
   `set_host_files` off; it now does so with it on, too, when the search
   finds nothing it can use.
+- **`setpagedevice` merges a request's `Policies` into the device's.**
+  PLRM 6.2.7 says changes to `Policies` "are cumulative", and stet
+  replaced the whole dictionary with the request's. Each device was
+  starting with an empty one in any case. Devices now start with
+  Ghostscript's policies (`PolicyNotFound 1`, `PageSize 0` and a
+  `PolicyReport` that does nothing). `InputAttributes` and
+  `OutputAttributes` merge the same way, as in Ghostscript.
+  - **Bad values raise errors:** a value for any of the three that isn't
+    a dictionary gives `typecheck`; a `PolicyNotFound` that isn't an
+    integer from 0 to 7 gives `typecheck` or `rangecheck`; and a
+    `PageSize` policy that isn't an integer gives `typecheck`.
+  - **A request that fails leaves the page device, the page and the
+    graphics state as they were.** Its `EndPage` still runs, with reason
+    2, as in Ghostscript.
 
 ## [0.11.0] — 2026-11-18
 

@@ -40,7 +40,9 @@
     /OutputAttributes <<>>
     /ColorModel /DeviceRGB
     /ProcessColorModel /DeviceRGB
-    /Policies <<>>
+    % The recovery policies for requests the device cannot satisfy (PLRM 6.2.7), as in
+    % Ghostscript: ignore an unknown parameter, refuse a page size there is no medium for.
+    /Policies << /PolicyNotFound 1 /PageSize 0 /PolicyReport {pop} bind >>
     /PageCount 0
     /.IsPageDevice true
     /Separations false

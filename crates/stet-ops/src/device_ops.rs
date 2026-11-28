@@ -162,6 +162,15 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
     // including one that only changes a parameter.
     deactivate_page_device(ctx)?;
 
+    // A request that fails leaves the page device as it was (PLRM 6.2.7):
+    // its parameters, the page and the graphics state. Ghostscript has
+    // called EndPage by then, so the check comes after deactivation. The
+    // request goes back on the stack for the error.
+    if let Err(e) = check_request(ctx, req_entity) {
+        ctx.o_stack.push(req_obj)?;
+        return Err(e);
+    }
+
     // PLRM: when current device is not a page device (e.g. after nulldevice),
     // or when switching to a different output device, create a new device
     // dictionary from scratch before merging request params.
@@ -863,8 +872,98 @@ fn alloc_page_device(ctx: &mut Context) -> EntityId {
     crate::vm_ops::alloc_dict_in(ctx, 50, b"pagedevice", false)
 }
 
+/// The page device parameters whose requests merge into the current value
+/// instead of replacing it: `Policies`, whose changes "are cumulative"
+/// (PLRM 6.2.7), and, as in Ghostscript, `InputAttributes` and
+/// `OutputAttributes`. pdftops output sends `<< /PageSize 6 >>` as its
+/// `Policies`, which replacing would leave with no `PolicyNotFound`.
+const MERGED_PARAMS: [&[u8]; 3] = [b"Policies", b"InputAttributes", b"OutputAttributes"];
+
+/// The dictionary `dict` holds under `key`: `Ok(None)` if it has none, and
+/// `typecheck` if it holds something else.
+fn dict_entry(ctx: &Context, dict: EntityId, key: &[u8]) -> Result<Option<EntityId>, PsError> {
+    let Some(name) = ctx.names.find(key) else {
+        return Ok(None);
+    };
+    match ctx.dicts.get(dict, &DictKey::Name(name)) {
+        None => Ok(None),
+        Some(obj) => match obj.value {
+            PsValue::Dict(e) => Ok(Some(e)),
+            _ => Err(PsError::TypeCheck),
+        },
+    }
+}
+
+/// The policy in force for `key` once the request's `Policies` are merged
+/// into the current ones: the request's entry, else the page device's.
+fn merged_policy(
+    ctx: &Context,
+    requested: Option<EntityId>,
+    current: Option<EntityId>,
+    key: &[u8],
+) -> Option<PsObject> {
+    let name = ctx.names.find(key)?;
+    let key = DictKey::Name(name);
+    requested
+        .and_then(|p| ctx.dicts.get(p, &key))
+        .or_else(|| current.and_then(|p| ctx.dicts.get(p, &key)))
+}
+
+/// Check a `setpagedevice` request before anything changes.
+///
+/// Each merged parameter must be a dictionary (`typecheck`). Of the policies
+/// in force after the merge, `PolicyNotFound` must be an integer
+/// (`typecheck`) from 0 to 7 (`rangecheck`), and `PageSize` an integer
+/// (`typecheck`): Ghostscript checks both on every `setpagedevice`, and
+/// accepts any integer for `PageSize`. A policy for any other key is
+/// checked only when a request needs it.
+fn check_request(ctx: &Context, req: EntityId) -> Result<(), PsError> {
+    for key in MERGED_PARAMS {
+        dict_entry(ctx, req, key)?;
+    }
+    let requested = dict_entry(ctx, req, b"Policies")?;
+    // The page device's own Policies, which only setpagedevice changes,
+    // through this check, and the device resources give as a dictionary.
+    let current = ctx
+        .gstate
+        .page_device
+        .and_then(|pd| dict_entry(ctx, pd, b"Policies").ok().flatten());
+    if let Some(policy) = merged_policy(ctx, requested, current, b"PolicyNotFound") {
+        match policy.value {
+            PsValue::Int(0..=7) => {}
+            PsValue::Int(_) => return Err(PsError::RangeCheck),
+            _ => return Err(PsError::TypeCheck),
+        }
+    }
+    if let Some(policy) = merged_policy(ctx, requested, current, b"PageSize")
+        && !matches!(policy.value, PsValue::Int(_))
+    {
+        return Err(PsError::TypeCheck);
+    }
+    Ok(())
+}
+
+/// The value the page device takes for a merged parameter: a new dictionary
+/// with the entries of `pd`'s, then the request's over them. A new one, not
+/// `pd`'s changed, since `pd` is a copy that shares it with the page device
+/// it was copied from, and with the device resource.
+fn merged_param(ctx: &mut Context, pd: EntityId, requested: EntityId, key: &[u8]) -> PsObject {
+    let current = dict_entry(ctx, pd, key).ok().flatten();
+    let len = current.map_or(0, |c| ctx.dicts.entry(c).entries.len())
+        + ctx.dicts.entry(requested).entries.len();
+    let merged = crate::vm_ops::alloc_dict_in(ctx, len.max(1), b"pagedevice", false);
+    if let Some(current) = current {
+        copy_dict(ctx, current, merged);
+    }
+    copy_dict(ctx, requested, merged);
+    // Local whatever `currentglobal` says, as the page device is
+    // (`alloc_page_device`), so the object says so too.
+    PsObject::dict(merged)
+}
+
 /// Merge request dict entries into page device dict.
 /// Skips HWResolution unless `allow_ps_resolution` is set (WASM mode).
+/// The [`MERGED_PARAMS`] merge into the page device's own.
 ///
 /// Also skips `ProcessColorModel` when the device has one. It is what the
 /// device paints in, and none of stet's devices can change it, so a request
@@ -882,6 +981,10 @@ fn merge_request_dict(ctx: &mut Context, req: EntityId, pd: EntityId) {
         .names
         .find(b"ProcessColorModel")
         .filter(|&id| ctx.dicts.get(pd, &DictKey::Name(id)).is_some());
+    let merged_names: Vec<_> = MERGED_PARAMS
+        .iter()
+        .filter_map(|key| ctx.names.find(key).map(|id| (id, *key)))
+        .collect();
     let entries: Vec<(DictKey, PsObject)> = ctx
         .dicts
         .entry(req)
@@ -889,12 +992,18 @@ fn merge_request_dict(ctx: &mut Context, req: EntityId, pd: EntityId) {
         .iter()
         .map(|(k, v)| (k.clone(), *v))
         .collect();
-    for (key, value) in entries {
+    for (key, mut value) in entries {
         // Skip HWResolution in CLI mode (user-controlled)
         if let DictKey::Name(id) = &key
             && (hw_res_name == Some(*id) || pcm_name == Some(*id))
         {
             continue;
+        }
+        if let DictKey::Name(id) = &key
+            && let Some(&(_, name)) = merged_names.iter().find(|(m, _)| m == id)
+            && let PsValue::Dict(requested) = value.value
+        {
+            value = merged_param(ctx, pd, requested, name);
         }
         ctx.cow_check_dict(pd);
         ctx.dicts.put(pd, key, value);
