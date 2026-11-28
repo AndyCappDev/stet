@@ -24,6 +24,8 @@
     /HWResolution [300 300]
     /Margins [0.0 0.0]
     /PageOffset [0 0]
+    % Stored but not applied, as in Ghostscript's raster devices: null is the whole page.
+    /ImagingBBox null
     /BitsPerPixel 24
     /NumCopies null
     /Install {
@@ -40,6 +42,8 @@
     /OutputAttributes <<>>
     /ColorModel /DeviceRGB
     /ProcessColorModel /DeviceRGB
+    % Paint device colours through the Default* ColorSpace resources (PLRM 6.2.5).
+    /UseCIEColor false
     % The recovery policies for requests the device cannot satisfy (PLRM 6.2.7), as in
     % Ghostscript: ignore an unknown parameter, refuse a page size there is no medium for.
     /Policies << /PolicyNotFound 1 /PageSize 0 /PolicyReport {pop} bind >>

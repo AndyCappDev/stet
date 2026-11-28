@@ -162,15 +162,6 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
     // including one that only changes a parameter.
     deactivate_page_device(ctx)?;
 
-    // A request that fails leaves the page device as it was (PLRM 6.2.7):
-    // its parameters, the page and the graphics state. Ghostscript has
-    // called EndPage by then, so the check comes after deactivation. The
-    // request goes back on the stack for the error.
-    if let Err(e) = check_request(ctx, req_entity) {
-        ctx.o_stack.push(req_obj)?;
-        return Err(e);
-    }
-
     // PLRM: when current device is not a page device (e.g. after nulldevice),
     // or when switching to a different output device, create a new device
     // dictionary from scratch before merging request params.
@@ -213,71 +204,35 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
         }
     }
 
-    let base_pd = if need_full_reload {
-        // Determine device: request dict /OutputDevice > .PrevOutputDevice > fallback
-        let prev_od_name = ctx.names.intern(b".PrevOutputDevice");
-        let device_name_obj = ctx
-            .dicts
-            .get(req_entity, &DictKey::Name(od_name))
-            .or_else(|| {
-                ctx.gstate
-                    .page_device
-                    .and_then(|pd| ctx.dicts.get(pd, &DictKey::Name(prev_od_name)))
-            })
-            .or_else(|| {
-                // Fallback: use "viewer" if available, else "png"
-                let fallback = ctx.names.intern(b"viewer");
-                Some(PsObject::name_lit(fallback))
-            });
-        if let Some(name_obj) = device_name_obj {
-            // Load full device dict via findresource on OutputDevice category
-            let fr_name = ctx.names.intern(b"findresource");
-            let cat_name_id = ctx.names.intern(b"OutputDevice");
-            let proc_elements = [
-                name_obj,
-                PsObject::name_lit(cat_name_id),
-                PsObject::name_exec(fr_name),
-            ];
-            let proc_entity = crate::vm_ops::alloc_array_from(ctx, &proc_elements);
-            let proc_obj = PsObject::procedure(proc_entity, proc_elements.len() as u32);
-            // A device with no resource falls back to the request alone, so
-            // whatever `findresource` leaves when it fails (its key and
-            // category) is dropped: the program's stack is as it was.
-            let depth = ctx.o_stack.len();
-            let found = ctx.exec_sync(proc_obj).is_ok() && ctx.o_stack.len() > depth;
-            let dev_entity = if found {
-                ctx.o_stack.pop().ok().and_then(|obj| {
-                    if let PsValue::Dict(e) = obj.value {
-                        Some(e)
-                    } else {
-                        None
-                    }
-                })
-            } else {
-                None
-            };
-            ctx.o_stack.truncate(depth);
-            if let Some(dev_entity) = dev_entity {
-                // Copy device resource dict, merge request entries on top
-                let new_pd = alloc_page_device(ctx);
-                copy_dict(ctx, dev_entity, new_pd);
-                merge_request_dict(ctx, req_entity, new_pd);
-                new_pd
-            } else {
-                req_entity
-            }
-        } else {
-            req_entity
-        }
-    } else if let Some(old_pd) = ctx.gstate.page_device {
-        // Incremental merge: COW copy of existing page device, then merge request
-        let new_pd = alloc_page_device(ctx);
-        copy_dict(ctx, old_pd, new_pd);
-        merge_request_dict(ctx, req_entity, new_pd);
-        new_pd
+    // The dictionary the request merges into: the current page device, or
+    // the device resource when the request starts a new device.
+    let base = if need_full_reload {
+        load_output_device(ctx, req_entity)
     } else {
-        // No existing page device and request isn't a full dict — use request as-is
-        req_entity
+        ctx.gstate.page_device
+    };
+
+    // A request that fails leaves the page device as it was (PLRM 6.2.7):
+    // its parameters, the page and the graphics state. Ghostscript has
+    // called EndPage by then, so the check comes after deactivation. The
+    // request goes back on the stack for the error.
+    let unmet = match check_request(ctx, req_entity, base) {
+        Ok(unmet) => unmet,
+        Err(e) => {
+            ctx.o_stack.push(req_obj)?;
+            return Err(e);
+        }
+    };
+
+    let base_pd = match base {
+        Some(base) => {
+            let new_pd = alloc_page_device(ctx);
+            copy_dict(ctx, base, new_pd);
+            merge_request_dict(ctx, req_entity, new_pd, &unmet);
+            new_pd
+        }
+        // A device with no resource: the request alone.
+        None => req_entity,
     };
 
     ctx.gstate.page_device = Some(base_pd);
@@ -336,8 +291,11 @@ pub fn op_setpagedevice(ctx: &mut Context) -> Result<(), PsError> {
     let begin_obj = get_pd_value(ctx, b"BeginPage").filter(is_nonempty_proc);
 
     // e_stack is LIFO: last pushed runs first.
-    // Desired execution order: Install, then push the count, then BeginPage.
-    // So push order (bottom→top): BeginPage, count literal, Install.
+    // Desired execution order: Install, then push the count, then BeginPage,
+    // then the PolicyReport for any unmet requests.
+    // So push order (bottom→top): PolicyReport, its dict, BeginPage, count
+    // literal, Install.
+    push_policy_report(ctx, &unmet)?;
     if let Some(begin_obj) = begin_obj {
         ctx.e_stack.push(begin_obj)?;
         // A literal int on e_stack gets pushed to o_stack by the eval loop
@@ -858,6 +816,47 @@ fn copy_dict(ctx: &mut Context, src: EntityId, dst: EntityId) {
     }
 }
 
+/// The device resource for a request that starts a new device: the
+/// request's `OutputDevice`, else the device the null device replaced, else
+/// `viewer`, found with `findresource`. `None` if there is no such resource.
+fn load_output_device(ctx: &mut Context, req: EntityId) -> Option<EntityId> {
+    let od_name = ctx.names.intern(b"OutputDevice");
+    let prev_od_name = ctx.names.intern(b".PrevOutputDevice");
+    let fallback = PsObject::name_lit(ctx.names.intern(b"viewer"));
+    let name_obj = ctx
+        .dicts
+        .get(req, &DictKey::Name(od_name))
+        .or_else(|| {
+            ctx.gstate
+                .page_device
+                .and_then(|pd| ctx.dicts.get(pd, &DictKey::Name(prev_od_name)))
+        })
+        .unwrap_or(fallback);
+    let fr_name = ctx.names.intern(b"findresource");
+    let cat_name_id = ctx.names.intern(b"OutputDevice");
+    let proc_elements = [
+        name_obj,
+        PsObject::name_lit(cat_name_id),
+        PsObject::name_exec(fr_name),
+    ];
+    let proc_entity = crate::vm_ops::alloc_array_from(ctx, &proc_elements);
+    let proc_obj = PsObject::procedure(proc_entity, proc_elements.len() as u32);
+    // Whatever `findresource` leaves when it fails (its key and category)
+    // is dropped: the program's stack is as it was.
+    let depth = ctx.o_stack.len();
+    let found = ctx.exec_sync(proc_obj).is_ok() && ctx.o_stack.len() > depth;
+    let dev_entity = if found {
+        ctx.o_stack.pop().ok().and_then(|obj| match obj.value {
+            PsValue::Dict(e) => Some(e),
+            _ => None,
+        })
+    } else {
+        None
+    };
+    ctx.o_stack.truncate(depth);
+    dev_entity
+}
+
 /// Allocate a page device dictionary, or a copy of one, in local VM.
 ///
 /// Local, whatever `currentglobal` says, for two reasons. A page device made
@@ -879,6 +878,57 @@ fn alloc_page_device(ctx: &mut Context) -> EntityId {
 /// `Policies`, which replacing would leave with no `PolicyNotFound`.
 const MERGED_PARAMS: [&[u8]; 3] = [b"Policies", b"InputAttributes", b"OutputAttributes"];
 
+/// The parameters a device takes whether or not its dictionary has them, as
+/// in Ghostscript: the media selection requests, which a device with one
+/// medium of any size satisfies, and `SeparationColorNames` and
+/// `OutputDevice`.
+const ALWAYS_KNOWN_PARAMS: [&[u8]; 13] = [
+    b"PageSize",
+    b"MediaColor",
+    b"MediaWeight",
+    b"MediaType",
+    b"InsertSheet",
+    b"ManualFeed",
+    b"LeadingEdge",
+    b"MediaClass",
+    b"MediaPosition",
+    b"Orientation",
+    b"OutputType",
+    b"SeparationColorNames",
+    b"OutputDevice",
+];
+
+/// The parameters a device reports but cannot change: what it renders in
+/// and what it is. A request for one is ignored silently, as Ghostscript's
+/// png16m ignores one, even under a policy of 0: the device has the
+/// parameter, so the request is not for an unknown feature, and reporting
+/// the requested value would misdescribe the device. A job that asks for
+/// `/ProcessColorModel /DeviceGray` would read back that it is on a gray
+/// device (`statusdict /processcolors`) and paint its images in gray.
+const READ_ONLY_PARAMS: [&[u8]; 12] = [
+    b"BitsPerPixel",
+    b"Colors",
+    b"ColorModel",
+    b"ProcessColorModel",
+    b"Separations",
+    b"RedValues",
+    b"GreenValues",
+    b"BlueValues",
+    b"OutputDeviceName",
+    b"PageCount",
+    b"MediaSize",
+    b".IsPageDevice",
+];
+
+/// Whether `key` names one of `params`.
+fn is_one_of(ctx: &Context, key: &DictKey, params: &[&[u8]]) -> bool {
+    params.iter().any(|p| {
+        ctx.names
+            .find(p)
+            .is_some_and(|id| *key == DictKey::Name(id))
+    })
+}
+
 /// The dictionary `dict` holds under `key`: `Ok(None)` if it has none, and
 /// `typecheck` if it holds something else.
 fn dict_entry(ctx: &Context, dict: EntityId, key: &[u8]) -> Result<Option<EntityId>, PsError> {
@@ -894,52 +944,145 @@ fn dict_entry(ctx: &Context, dict: EntityId, key: &[u8]) -> Result<Option<Entity
     }
 }
 
-/// The policy in force for `key` once the request's `Policies` are merged
-/// into the current ones: the request's entry, else the page device's.
-fn merged_policy(
-    ctx: &Context,
+/// The `Policies` in force for a request: its own, merged over those of the
+/// dictionary it merges into.
+#[derive(Clone, Copy)]
+struct Policies {
     requested: Option<EntityId>,
     current: Option<EntityId>,
-    key: &[u8],
-) -> Option<PsObject> {
-    let name = ctx.names.find(key)?;
-    let key = DictKey::Name(name);
-    requested
-        .and_then(|p| ctx.dicts.get(p, &key))
-        .or_else(|| current.and_then(|p| ctx.dicts.get(p, &key)))
 }
 
-/// Check a `setpagedevice` request before anything changes.
+impl Policies {
+    /// The policy for `key`: the request's entry, else the current one.
+    fn get(&self, ctx: &Context, key: &DictKey) -> Option<PsObject> {
+        self.requested
+            .and_then(|p| ctx.dicts.get(p, key))
+            .or_else(|| self.current.and_then(|p| ctx.dicts.get(p, key)))
+    }
+
+    /// The policy named `key`.
+    fn get_named(&self, ctx: &Context, key: &[u8]) -> Option<PsObject> {
+        self.get(ctx, &DictKey::Name(ctx.names.find(key)?))
+    }
+
+    /// The policy for a request for `key` the device cannot satisfy: its own
+    /// entry, else `PolicyNotFound`, else 1, to ignore it.
+    fn for_unmet(&self, ctx: &Context, key: &DictKey) -> PsObject {
+        self.get(ctx, key)
+            .or_else(|| self.get_named(ctx, b"PolicyNotFound"))
+            .unwrap_or_else(|| PsObject::int(1))
+    }
+}
+
+/// Check a `setpagedevice` request against `base`, the dictionary it merges
+/// into, before anything changes. Returns the requests the device cannot
+/// satisfy and ignores, each with its policy, for the `PolicyReport`.
 ///
 /// Each merged parameter must be a dictionary (`typecheck`). Of the policies
 /// in force after the merge, `PolicyNotFound` must be an integer
 /// (`typecheck`) from 0 to 7 (`rangecheck`), and `PageSize` an integer
 /// (`typecheck`): Ghostscript checks both on every `setpagedevice`, and
-/// accepts any integer for `PageSize`. A policy for any other key is
-/// checked only when a request needs it.
-fn check_request(ctx: &Context, req: EntityId) -> Result<(), PsError> {
+/// accepts any integer for `PageSize`.
+///
+/// A request for a parameter the device does not have (PLRM 6.2.7: "even if
+/// the requested value is false") goes to its policy. 1 ignores it, and the
+/// page device has no entry for it afterwards; anything else is a
+/// `configurationerror`, with the key and value in `$error /errorinfo`, as
+/// in Ghostscript, which has no operator to interact with.
+fn check_request(
+    ctx: &mut Context,
+    req: EntityId,
+    base: Option<EntityId>,
+) -> Result<Vec<(DictKey, PsObject)>, PsError> {
     for key in MERGED_PARAMS {
         dict_entry(ctx, req, key)?;
     }
-    let requested = dict_entry(ctx, req, b"Policies")?;
-    // The page device's own Policies, which only setpagedevice changes,
-    // through this check, and the device resources give as a dictionary.
-    let current = ctx
-        .gstate
-        .page_device
-        .and_then(|pd| dict_entry(ctx, pd, b"Policies").ok().flatten());
-    if let Some(policy) = merged_policy(ctx, requested, current, b"PolicyNotFound") {
+    let policies = Policies {
+        requested: dict_entry(ctx, req, b"Policies")?,
+        // The base's own Policies, which only setpagedevice changes, through
+        // this check, and the device resources give as a dictionary.
+        current: base.and_then(|b| dict_entry(ctx, b, b"Policies").ok().flatten()),
+    };
+    if let Some(policy) = policies.get_named(ctx, b"PolicyNotFound") {
         match policy.value {
             PsValue::Int(0..=7) => {}
             PsValue::Int(_) => return Err(PsError::RangeCheck),
             _ => return Err(PsError::TypeCheck),
         }
     }
-    if let Some(policy) = merged_policy(ctx, requested, current, b"PageSize")
+    if let Some(policy) = policies.get_named(ctx, b"PageSize")
         && !matches!(policy.value, PsValue::Int(_))
     {
         return Err(PsError::TypeCheck);
     }
+
+    // A device with no resource takes the request as it is.
+    let Some(base) = base else {
+        return Ok(Vec::new());
+    };
+    let entries: Vec<(DictKey, PsObject)> = ctx
+        .dicts
+        .entry(req)
+        .entries
+        .iter()
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    let mut unmet = Vec::new();
+    for (key, value) in entries {
+        if ctx.dicts.get(base, &key).is_some()
+            || is_one_of(ctx, &key, &ALWAYS_KNOWN_PARAMS)
+            || is_one_of(ctx, &key, &MERGED_PARAMS)
+        {
+            continue;
+        }
+        let policy = policies.for_unmet(ctx, &key);
+        if !matches!(policy.value, PsValue::Int(1)) {
+            set_errorinfo(ctx, &key, value);
+            return Err(PsError::ConfigurationError);
+        }
+        unmet.push((key, policy));
+    }
+    Ok(unmet)
+}
+
+/// Put `[key value]` in `$error /errorinfo`, for a `configurationerror`
+/// (PLRM 3.11). It stays until `handleerror` clears it.
+fn set_errorinfo(ctx: &mut Context, key: &DictKey, value: PsObject) {
+    let key_obj = crate::dict_ops::dict_key_to_object(ctx, key);
+    let global = ctx.dollar_error.is_global();
+    let info = crate::vm_ops::alloc_array_from_in(ctx, &[key_obj, value], global);
+    let name = ctx.names.intern(b"errorinfo");
+    ctx.dict_put_cow(
+        ctx.dollar_error,
+        DictKey::Name(name),
+        PsObject::array(info, 2),
+    );
+}
+
+/// Schedule the page device's `PolicyReport` with a dictionary of the
+/// `unmet` requests and their policies (PLRM 6.2.7), to run after
+/// `BeginPage`. Nothing is called when every request was met.
+fn push_policy_report(ctx: &mut Context, unmet: &[(DictKey, PsObject)]) -> Result<(), PsError> {
+    if unmet.is_empty() {
+        return Ok(());
+    }
+    let Some(report_proc) = get_pd_value(ctx, b"Policies").and_then(|p| match p.value {
+        PsValue::Dict(policies) => {
+            let key = DictKey::Name(ctx.names.find(b"PolicyReport")?);
+            ctx.dicts.get(policies, &key)
+        }
+        _ => None,
+    }) else {
+        return Ok(());
+    };
+    // Local, as Ghostscript makes it, and as the page device is.
+    let report = crate::vm_ops::alloc_dict_in(ctx, unmet.len(), b"policyreport", false);
+    for (key, policy) in unmet {
+        ctx.dicts.put(report, key.clone(), *policy);
+    }
+    ctx.e_stack.push(report_proc)?;
+    // A literal dict on e_stack gets pushed to o_stack by the eval loop.
+    ctx.e_stack.push(PsObject::dict(report))?;
     Ok(())
 }
 
@@ -961,26 +1104,24 @@ fn merged_param(ctx: &mut Context, pd: EntityId, requested: EntityId, key: &[u8]
     PsObject::dict(merged)
 }
 
-/// Merge request dict entries into page device dict.
-/// Skips HWResolution unless `allow_ps_resolution` is set (WASM mode).
-/// The [`MERGED_PARAMS`] merge into the page device's own.
+/// Merge the request's entries into `pd`, a copy of the dictionary it
+/// merges into, leaving out the `unmet` requests [`check_request`] ignored.
 ///
-/// Also skips `ProcessColorModel` when the device has one. It is what the
-/// device paints in, and none of stet's devices can change it, so a request
-/// for another is ignored, as Ghostscript's png16m ignores one: recorded, it
-/// would report a colour model the device does not use, and a job that asks
-/// for `/DeviceGray` would read back that it is on a gray device
-/// (`statusdict /processcolors`) and paint its images in gray.
-fn merge_request_dict(ctx: &mut Context, req: EntityId, pd: EntityId) {
+/// The [`MERGED_PARAMS`] merge into `pd`'s own. The [`READ_ONLY_PARAMS`]
+/// `pd` has keep its values. So does `HWResolution` unless
+/// `allow_ps_resolution` is set (WASM mode): the resolution is the caller's,
+/// not the program's.
+fn merge_request_dict(
+    ctx: &mut Context,
+    req: EntityId,
+    pd: EntityId,
+    unmet: &[(DictKey, PsObject)],
+) {
     let hw_res_name = if !ctx.allow_ps_resolution {
         ctx.names.find(b"HWResolution")
     } else {
         None
     };
-    let pcm_name = ctx
-        .names
-        .find(b"ProcessColorModel")
-        .filter(|&id| ctx.dicts.get(pd, &DictKey::Name(id)).is_some());
     let merged_names: Vec<_> = MERGED_PARAMS
         .iter()
         .filter_map(|key| ctx.names.find(key).map(|id| (id, *key)))
@@ -993,10 +1134,15 @@ fn merge_request_dict(ctx: &mut Context, req: EntityId, pd: EntityId) {
         .map(|(k, v)| (k.clone(), *v))
         .collect();
     for (key, mut value) in entries {
-        // Skip HWResolution in CLI mode (user-controlled)
+        if unmet.iter().any(|(k, _)| *k == key) {
+            continue;
+        }
         if let DictKey::Name(id) = &key
-            && (hw_res_name == Some(*id) || pcm_name == Some(*id))
+            && hw_res_name == Some(*id)
         {
+            continue;
+        }
+        if is_one_of(ctx, &key, &READ_ONLY_PARAMS) && ctx.dicts.get(pd, &key).is_some() {
             continue;
         }
         if let DictKey::Name(id) = &key

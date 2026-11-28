@@ -182,6 +182,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **A request that fails leaves the page device, the page and the
     graphics state as they were.** Its `EndPage` still runs, with reason
     2, as in Ghostscript.
+- **`setpagedevice` applies the `Policies` to parameters the device does
+  not have.** It stored every request, so `<< /Duplex true >>` read back
+  as a duplex device, and a `PolicyNotFound` of 0 had no effect. As in
+  PLRM 6.2.7 and Ghostscript:
+  - **The default policy, 1, ignores such a request**, and the page
+    device has no entry for it afterwards. The `PolicyReport` procedure
+    is called, after `BeginPage`, with a dictionary of the keys it
+    ignored and their policies.
+  - **Any other policy is a `configurationerror`**, which leaves the
+    page device as it was. `$error /errorinfo` holds the key and value,
+    and `handleerror` prints them (`ErrorInfo: Duplex true`) and clears
+    them. `$error` now has `errorinfo`, null until then.
+  - **The media requests are always taken** (`MediaType`,
+    `MediaPosition`, `Orientation` and the rest), as are
+    `SeparationColorNames` and `ImagingBBox`, which every device now
+    has, as in Ghostscript. Neither is applied: there is one medium, of
+    any size, and the whole page is imaged.
+  - **A request for what the device renders in is ignored silently**,
+    even under policy 0, as in Ghostscript: `BitsPerPixel`, `Colors`,
+    `ColorModel`, `ProcessColorModel`, `Separations`, the
+    `Red`/`Green`/`BlueValues`, `PageCount`, `MediaSize` and
+    `OutputDeviceName` keep the device's values.
 
 ## [0.11.0] — 2026-11-18
 

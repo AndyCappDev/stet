@@ -9,6 +9,7 @@ use stet_core::dict::DictKey;
 use stet_core::error::PsError;
 use stet_core::object::{EntityId, NameId, ObjFlags, OpCode, PsObject, PsValue};
 use stet_core::tokenizer::{Token, Tokenizer, stream_next_token};
+use stet_ops::dict_ops::dict_key_to_object;
 
 /// Main eval loop: pop objects from the execution stack and execute them.
 ///
@@ -1016,28 +1017,6 @@ fn advance_pathforall(ctx: &mut Context, loop_entity: EntityId) -> Result<(), Ps
     exec_procedure(ctx, proc_entity, proc_start, proc_len)?;
 
     Ok(())
-}
-
-/// Convert a DictKey back to a PsObject for forall iteration.
-fn dict_key_to_object(ctx: &mut Context, key: &DictKey) -> PsObject {
-    match key {
-        DictKey::Name(id) => PsObject::name_lit(*id),
-        DictKey::Int(v) => PsObject::int(*v),
-        DictKey::Real(bits) => PsObject::real(f64::from_bits(*bits)),
-        DictKey::Bool(v) => PsObject::bool(*v),
-        DictKey::String(bytes) => {
-            let entity = stet_ops::vm_ops::alloc_string(ctx, bytes);
-            PsObject::string(entity, bytes.len() as u32)
-        }
-        DictKey::Operator(op) => {
-            use stet_core::object::OpCode;
-            PsObject::operator(OpCode(*op))
-        }
-        DictKey::Identity(eid, _start, len) => {
-            // Return as array (best approximation for identity keys)
-            PsObject::array(EntityId(*eid), *len)
-        }
-    }
 }
 
 /// Dispatch a PostScript error via errordict.

@@ -6,8 +6,9 @@
 //! maxlength, currentdict, countdictstack, dictstack, undef, cleardictstack.
 
 use stet_core::context::Context;
+use stet_core::dict::DictKey;
 use stet_core::error::PsError;
-use stet_core::object::{ObjFlags, PsObject, PsValue};
+use stet_core::object::{EntityId, ObjFlags, OpCode, PsObject, PsValue};
 
 /// `dict`: int → dict (create new dict with capacity)
 pub fn op_dict(ctx: &mut Context) -> Result<(), PsError> {
@@ -318,6 +319,26 @@ pub fn op_dictname(ctx: &mut Context) -> Result<(), PsError> {
     ctx.o_stack.pop()?;
     ctx.o_stack.push(PsObject::name_lit(name_id))?;
     Ok(())
+}
+
+/// The object a dictionary key stands for, as `forall` and `setpagedevice`
+/// hand it to a program. A string key is a new string with the key's bytes.
+pub fn dict_key_to_object(ctx: &mut Context, key: &DictKey) -> PsObject {
+    match key {
+        DictKey::Name(id) => PsObject::name_lit(*id),
+        DictKey::Int(v) => PsObject::int(*v),
+        DictKey::Real(bits) => PsObject::real(f64::from_bits(*bits)),
+        DictKey::Bool(v) => PsObject::bool(*v),
+        DictKey::String(bytes) => {
+            let entity = crate::vm_ops::alloc_string(ctx, bytes);
+            PsObject::string(entity, bytes.len() as u32)
+        }
+        DictKey::Operator(op) => PsObject::operator(OpCode(*op)),
+        DictKey::Identity(eid, _start, len) => {
+            // Return as array (best approximation for identity keys)
+            PsObject::array(EntityId(*eid), *len)
+        }
+    }
 }
 
 #[cfg(test)]

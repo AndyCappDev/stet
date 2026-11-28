@@ -369,6 +369,9 @@ false setglobal
     /doclose false def
     /ostackarry null def
     /.savedglobal false def     % VM allocation mode to restore when .error returns
+    % [key value] for the request setpagedevice could not satisfy (PLRM 3.11);
+    % handleerror sets it back to null.
+    /errorinfo null def
 end % $error
 
 
@@ -393,7 +396,15 @@ end % $error
                 } if
                 print
             }
-            exec ( ]%%)
+            exec
+            % A configurationerror's unsatisfied request, as `key value`.
+            errorinfo type /arraytype eq { errorinfo length 2 eq } { false } ifelse {
+                (; ErrorInfo: ) print errorinfo aload pop exch
+                dup type /stringtype ne { =string cvs } if print
+                ( ) print //==only exec
+            } if
+            /errorinfo null def
+            ( ]%%)
             {
                 {
                     dup type /stringtype ne
