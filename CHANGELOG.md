@@ -143,6 +143,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the PLRM specifies.
 - **`kshow` refuses a composite font or a CIDFont** with `invalidfont`, as
   the PLRM specifies, instead of showing the string a byte at a time.
+- **Adobe Photoshop EPS files paint their images in colour.** They ask
+  `statusdict /processcolors` whether the device prints colour, and
+  stet did not define it, so they painted every image from its gray
+  composite. `processcolors` now gives the number of colours the device
+  paints in: 3, and 1 after `nulldevice`, as in Ghostscript.
+  `setpagedevice` also keeps the device's own `ProcessColorModel`: it
+  recorded any model a job asked for, though the device went on
+  painting in RGB, so `currentpagedevice` reported a model the device
+  did not use. Reported by @gitmaru0 (#49).
 
 ## [0.11.0] — 2026-11-18
 

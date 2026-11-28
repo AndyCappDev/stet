@@ -865,12 +865,23 @@ fn alloc_page_device(ctx: &mut Context) -> EntityId {
 
 /// Merge request dict entries into page device dict.
 /// Skips HWResolution unless `allow_ps_resolution` is set (WASM mode).
+///
+/// Also skips `ProcessColorModel` when the device has one. It is what the
+/// device paints in, and none of stet's devices can change it, so a request
+/// for another is ignored, as Ghostscript's png16m ignores one: recorded, it
+/// would report a colour model the device does not use, and a job that asks
+/// for `/DeviceGray` would read back that it is on a gray device
+/// (`statusdict /processcolors`) and paint its images in gray.
 fn merge_request_dict(ctx: &mut Context, req: EntityId, pd: EntityId) {
     let hw_res_name = if !ctx.allow_ps_resolution {
         ctx.names.find(b"HWResolution")
     } else {
         None
     };
+    let pcm_name = ctx
+        .names
+        .find(b"ProcessColorModel")
+        .filter(|&id| ctx.dicts.get(pd, &DictKey::Name(id)).is_some());
     let entries: Vec<(DictKey, PsObject)> = ctx
         .dicts
         .entry(req)
@@ -881,7 +892,7 @@ fn merge_request_dict(ctx: &mut Context, req: EntityId, pd: EntityId) {
     for (key, value) in entries {
         // Skip HWResolution in CLI mode (user-controlled)
         if let DictKey::Name(id) = &key
-            && hw_res_name == Some(*id)
+            && (hw_res_name == Some(*id) || pcm_name == Some(*id))
         {
             continue;
         }

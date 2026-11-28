@@ -77,3 +77,69 @@ fn settings_are_answered_by_their_queries() {
          duplexmode not { 0 0 div } if tumble not { 0 0 div } if end",
     );
 }
+
+/// `processcolors` answers the number of colours the device paints in: 3 on
+/// an RGB device, as Ghostscript's png16m answers.
+#[test]
+fn processcolors_answers_the_devices_colours() {
+    passes("statusdict /processcolors get exec 3 ne { 0 0 div } if");
+}
+
+/// A request for another colour model leaves the device's: the device still
+/// paints in RGB, so `currentpagedevice` and `processcolors` say so, as in
+/// Ghostscript's png16m. Were the request recorded, a job asking for gray
+/// would read back that the device is gray and paint its images in gray.
+#[test]
+fn a_request_for_another_colour_model_keeps_the_devices() {
+    for model in ["DeviceGray", "DeviceCMYK"] {
+        passes(&format!(
+            "<< /ProcessColorModel /{model} >> setpagedevice\n\
+             currentpagedevice /ProcessColorModel get /DeviceRGB ne {{ 0 0 div }} if\n\
+             statusdict /processcolors get exec 3 ne {{ 0 0 div }} if"
+        ));
+    }
+}
+
+/// The null device has no colour model, and paints in one colour, as in
+/// Ghostscript.
+#[test]
+fn processcolors_is_1_on_the_null_device() {
+    passes("gsave nulldevice statusdict /processcolors get exec 1 ne { 0 0 div } if grestore");
+}
+
+/// The check Adobe Photoshop's EPS files make before painting an image
+/// (issue #49): with no `deviceinfo`, `statusdict /processcolors` decides
+/// whether the image is painted in colour or from its gray composite.
+#[test]
+fn a_photoshop_eps_paints_its_image_in_colour() {
+    let src = b"%!PS-Adobe-3.0 EPSF-3.0\n\
+        %%BoundingBox: 0 0 100 100\n\
+        /hascolor\n\
+        /deviceinfo where\n\
+        {pop deviceinfo /Colors known\n\
+        {deviceinfo /Colors get exec 1 gt}\n\
+        {false} ifelse}\n\
+        {/statusdict where\n\
+        {pop statusdict /processcolors known\n\
+        {statusdict /processcolors get exec 1 gt}\n\
+        {false} ifelse}\n\
+        {false} ifelse}\n\
+        ifelse\n\
+        def\n\
+        hascolor {/band 0 def} {/band 5 def} ifelse\n\
+        band 0 eq { /DeviceCMYK setcolorspace 0 1 1 0 setcolor }\n\
+        { /DeviceGray setcolorspace 0.5 setcolor } ifelse\n\
+        0 0 100 100 rectfill showpage\n";
+    let mut interp = Interpreter::builder().suppress_output().build();
+    let pages = interp.render(src, 72.0).expect("renders");
+    let page = &pages[0];
+    let (x, y) = (page.width as usize / 2, page.height as usize / 2);
+    let i = (y * page.width as usize + x) * 4;
+    let [r, g, b, _] = page.rgba[i..i + 4] else {
+        unreachable!()
+    };
+    assert!(
+        r > 150 && g < 100 && b < 100,
+        "painted ({r}, {g}, {b}), not red"
+    );
+}

@@ -853,6 +853,20 @@ statusdict begin
     /tumble false def
     /settumble {statusdict exch /tumble exch put} bind def
     /manualfeed false def
+
+    % The number of colours the device paints in, from its ProcessColorModel: 1 for DeviceGray, 4
+    % for DeviceCMYK, 3 otherwise, and 1 with no model, after nulldevice, as in Ghostscript.
+    % Photoshop EPS files ask for it to decide whether to paint an image in colour or from its gray
+    % composite. setpagedevice keeps the device's own model, so this answers what the device does,
+    % not what a job asked of it.
+    /processcolors {
+        currentpagedevice dup /ProcessColorModel known {
+            /ProcessColorModel get
+            dup /DeviceGray eq { pop 1 } { /DeviceCMYK eq { 4 } { 3 } ifelse } ifelse
+        } {
+            pop 1
+        } ifelse
+    } bind def
 end % statusdict
 
 
