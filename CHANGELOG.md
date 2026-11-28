@@ -129,12 +129,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CMap. Each mapping now selects the descendant its `usefont` names, and a
   base font shows the code or glyph name it is given, in `show` and its
   spacing variants, `xshow`, `yshow`, `xyshow`, `cshow`, `stringwidth`
-  and `charpath`, through the composite font's matrix. `widthshow` takes
-  any integer with a composite font and compares it as PLRM 5.11 gives
-  it. A code also takes its length from a mapping when no mapping of the
-  codespace's length holds it, as Ghostscript reads it: Aspose.Words
-  writes a two-byte codespace over one-byte codes. Reported by
-  @adamwilmer (#48).
+  and `charpath`, through the composite font's matrix; PDF output draws
+  a CIDFont at any font number, where it drew only the first descendant's
+  glyphs. `widthshow` takes any integer with a composite font and
+  compares it as PLRM 5.11 gives it. A code also takes its length from a
+  mapping when no mapping of the codespace's length holds it, as
+  Ghostscript reads it: Aspose.Words writes a two-byte codespace over
+  one-byte codes. Reported by @adamwilmer (#48).
 - **`cshow` gives its procedure each glyph's width.** It pushed `0 0` for
   every character, whatever the font. With a composite font the procedure
   now also runs with the selected descendant, at the composite font's

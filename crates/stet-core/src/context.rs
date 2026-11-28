@@ -387,6 +387,12 @@ pub struct Context {
     /// Type 0 font's matrix (PLRM, `cshow`), by (Type 0 font, font number).
     /// Kept so each call reuses one font, and its glyph cache.
     pub cshow_fonts: rustc_hash::FxHashMap<(EntityId, usize), PsObject>,
+    /// The Type 0 font the text of a CMap-keyed Type 0 font's CIDs names
+    /// in the display list when they come from a descendant other than its
+    /// first, by (Type 0 font, font number): that CIDFont composed with an
+    /// Identity CMap, since a device takes a Type 0 font's glyphs from its
+    /// first descendant.
+    pub cid_text_fonts: rustc_hash::FxHashMap<(EntityId, usize), PsObject>,
     /// The metrics show operators gave CIDFont glyphs through the font's
     /// `Metrics2` or `CDevProc` (PLRM 5.9.2), by CIDFont and CID. An output
     /// device that writes the font rather than its outlines — PDF output —
@@ -1504,6 +1510,7 @@ impl Context {
             cmap_tables: rustc_hash::FxHashMap::default(),
             cid_glyphshow_fonts: rustc_hash::FxHashMap::default(),
             cshow_fonts: rustc_hash::FxHashMap::default(),
+            cid_text_fonts: rustc_hash::FxHashMap::default(),
             cid_glyph_metrics: rustc_hash::FxHashMap::default(),
             font_snapshots: crate::font_snapshot::FontSnapshots::default(),
             char_cache_mode: None,
@@ -2061,6 +2068,9 @@ impl Context {
             live_dict(cidfont) && matches!(font.value, PsValue::Dict(e) if live_dict(&e))
         });
         self.cshow_fonts.retain(|(root, _), font| {
+            live_dict(root) && matches!(font.value, PsValue::Dict(e) if live_dict(&e))
+        });
+        self.cid_text_fonts.retain(|(root, _), font| {
             live_dict(root) && matches!(font.value, PsValue::Dict(e) if live_dict(&e))
         });
         self.form_cache.retain(|entity, _| live_dict(entity));

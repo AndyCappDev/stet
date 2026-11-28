@@ -423,6 +423,29 @@ fn pdf_output_draws_glyph_data_fonts_as_the_interpreter_does() {
     assert_same_fills(&expected, &pdf_fills(&ps));
 }
 
+/// A CIDFont that is not a Type 0 font's first descendant reaches PDF
+/// output too: a device takes a Type 0 font's glyphs from its first
+/// descendant, Helvetica in [`MIXED`], so the CIDs drew nothing there.
+#[cfg(feature = "pdf-output")]
+#[test]
+fn pdf_output_draws_a_cidfont_at_any_font_number() {
+    let mut ps = b"%!PS\n<< /PageSize [600 400] >> setpagedevice\n".to_vec();
+    ps.extend(font(false));
+    ps.extend(
+        format!(
+            "{MIXED}10 100 moveto (ABC) show {MARK}\n\
+             10 200 moveto (ABC) [50 70 100] xshow {MARK}\n\
+             10 300 moveto {{ pop pop 1 string dup 0 4 -1 roll put show }} (ABC) cshow\n\
+             {MARK}\nshowpage\n"
+        )
+        .bytes(),
+    );
+    let expected = ps_fills(&ps);
+    // CID 1, Helvetica's B, CID 2 and the marker, three times.
+    assert_eq!(expected.len(), 12, "{expected:?}");
+    assert_same_fills(&expected, &pdf_fills(&ps));
+}
+
 /// A subset CFF CIDFont, as a producer embeds one: its charset maps GIDs
 /// to scattered CIDs, and its FDSelect picks between two Font DICTs with
 /// different default widths. CID 3 is a 100-unit square at (100, 100),

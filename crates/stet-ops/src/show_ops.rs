@@ -1536,10 +1536,20 @@ fn render_show(
             cx,
             cy,
         };
+        // The descendant `cshow` scaled this CIDFont from, for its text.
+        let font_num = ctx
+            .cshow_fonts
+            .iter()
+            .find(|((r, _), f)| *r == root && f.value == font_obj.value)
+            .map_or(0, |((_, n), _)| *n);
+        let text_cidfont = match descendant(ctx, root, font_num)? {
+            Descendant::Cid(cidfont) => cidfont,
+            Descendant::Base(_) => return Err(PsError::InvalidFont),
+        };
         return show_cid_run(
             ctx,
-            root,
-            font_entity,
+            (root, font_num),
+            (font_entity, text_cidfont),
             wmode,
             &Matrix::identity(),
             &[code],
@@ -2313,8 +2323,8 @@ fn render_show_composite(
             match desc {
                 Descendant::Cid(cidfont_entity) => show_cid_run(
                     ctx,
-                    font_entity,
-                    cidfont_entity,
+                    (font_entity, run[0].target.font),
+                    (cidfont_entity, cidfont_entity),
                     wmode,
                     &type0_fm,
                     run,
@@ -2735,17 +2745,20 @@ fn shift_current_point(ctx: &mut Context, dx: f64, dy: f64) {
     }
 }
 
-/// Show `codes`, all mapped to CIDFont `cidfont_entity`, a descendant of
-/// Type 0 font `font_entity`, from the current point.
+/// Show `codes`, all mapped to CIDFont `cidfont_entity`, descendant
+/// `font_num` of Type 0 font `font_entity`, from the current point. Its
+/// text names `text_cidfont`: the descendant itself, where
+/// `cidfont_entity` may be a scaled copy of it (inside `cshow`).
 fn show_cid_run(
     ctx: &mut Context,
-    font_entity: EntityId,
-    cidfont_entity: EntityId,
+    (font_entity, font_num): (EntityId, usize),
+    (cidfont_entity, text_cidfont): (EntityId, EntityId),
     wmode: i32,
     type0_fm: &Matrix,
     codes: &[ShownCode],
     spacing: &Spacing,
 ) -> Result<(), PsError> {
+    let text_font = cid_text_font(ctx, font_entity, font_num, text_cidfont)?;
     let cidfont_fm = read_font_matrix(ctx, cidfont_entity);
     let cids: Vec<i32> = codes.iter().map(ShownCode::cid_selector).collect();
     let recording = CidRecording {
@@ -2818,7 +2831,7 @@ fn show_cid_run(
     // The Text elements go in even when a glyph failed, for the glyphs
     // drawn before it.
     let adjusted = ax != 0.0 || ay != 0.0 || width_char >= 0;
-    emit_cid_show_text(ctx, font_entity, &cids, text_start, &placed, adjusted);
+    emit_cid_show_text(ctx, text_font, &cids, text_start, &placed, adjusted);
     rendered?;
     ctx.gstate.current_point = Some(ctm.transform_point(cur_x, cur_y));
     Ok(())
@@ -2900,7 +2913,7 @@ struct PlacedGlyph {
 /// with a glyph a PDF font in its writing mode cannot advance across.
 fn emit_cid_show_text(
     ctx: &mut Context,
-    font: EntityId,
+    (font, fm): (EntityId, Option<Matrix>),
     cids: &[i32],
     start: (f64, f64),
     placed: &[PlacedGlyph],
@@ -2909,12 +2922,55 @@ fn emit_cid_show_text(
     let cid_bytes = |cid: i32| [(cid >> 8) as u8, cid as u8];
     if !adjusted && placed.len() == cids.len() && placed.iter().all(|g| g.pdf_advances) {
         let text = cids.iter().flat_map(|&cid| cid_bytes(cid)).collect();
-        emit_text_element(ctx, text, font, 0, Some(start));
+        emit_text_element_with_fm(ctx, text, font, 0, Some(start), fm);
     } else {
         for (&cid, glyph) in cids.iter().zip(placed) {
-            emit_text_element(ctx, cid_bytes(cid).to_vec(), font, 0, Some(glyph.origin));
+            let text = cid_bytes(cid).to_vec();
+            emit_text_element_with_fm(ctx, text, font, 0, Some(glyph.origin), fm);
         }
     }
+}
+
+/// The font the Text elements of CIDs from descendant `font_num`
+/// (`cidfont`) of CMap-keyed Type 0 font `root` name, and the `FontMatrix`
+/// to give them in place of its own. A device takes a Type 0 font's glyphs
+/// from its first descendant, so text from any other names that CIDFont
+/// composed with an Identity CMap in the root's writing mode
+/// (`.cidtextfont`), made once and kept in [`Context::cid_text_fonts`],
+/// with the root's matrix.
+fn cid_text_font(
+    ctx: &mut Context,
+    root: EntityId,
+    font_num: usize,
+    cidfont: EntityId,
+) -> Result<(EntityId, Option<Matrix>), PsError> {
+    if font_num == 0 {
+        return Ok((root, None));
+    }
+    let fm = Some(read_font_matrix(ctx, root));
+    if let Some(PsValue::Dict(font)) = ctx.cid_text_fonts.get(&(root, font_num)).map(|f| f.value) {
+        return Ok((font, fm));
+    }
+    let proc = ctx
+        .dicts
+        .get(
+            ctx.systemdict,
+            &DictKey::Name(ctx.names.intern(b".cidtextfont")),
+        )
+        .ok_or(PsError::InvalidFont)?;
+    let depth = ctx.o_stack.len();
+    ctx.o_stack.push(PsObject::dict(cidfont))?;
+    ctx.o_stack.push(PsObject::int(font_wmode(ctx, root)))?;
+    ctx.exec_sync(proc)?;
+    if ctx.o_stack.len() != depth + 1 {
+        return Err(PsError::InvalidFont);
+    }
+    let font = ctx.o_stack.pop()?;
+    let PsValue::Dict(entity) = font.value else {
+        return Err(PsError::InvalidFont);
+    };
+    ctx.cid_text_fonts.insert((root, font_num), font);
+    Ok((entity, fm))
 }
 
 /// Render CIDs using TrueType (sfnts) data from a CIDFont descriptor.
@@ -5706,7 +5762,7 @@ fn render_show_displaced_composite(
             match descendant(ctx, font_entity, run[0].target.font)? {
                 Descendant::Cid(cidfont_entity) => show_cid_run_displaced(
                     ctx,
-                    font_entity,
+                    (font_entity, run[0].target.font),
                     cidfont_entity,
                     wmode,
                     &type0_fm,
@@ -5866,19 +5922,20 @@ fn render_show_displaced_composite(
     Ok(())
 }
 
-/// Show `codes`, all mapped to CIDFont `cidfont_entity`, a descendant of
-/// Type 0 font `font_entity`, from the current point, each placed by its
-/// displacement: `displacements` from index `first`, read as `mode` says
-/// (`xshow`, `yshow`, `xyshow`).
+/// Show `codes`, all mapped to CIDFont `cidfont_entity`, descendant
+/// `font_num` of Type 0 font `font_entity`, from the current point, each
+/// placed by its displacement: `displacements` from index `first`, read as
+/// `mode` says (`xshow`, `yshow`, `xyshow`).
 fn show_cid_run_displaced(
     ctx: &mut Context,
-    font_entity: EntityId,
+    (font_entity, font_num): (EntityId, usize),
     cidfont_entity: EntityId,
     wmode: i32,
     type0_fm: &Matrix,
     codes: &[ShownCode],
     (displacements, first, mode): (&[f64], usize, &DisplacementMode),
 ) -> Result<(), PsError> {
+    let (text_font, text_fm) = cid_text_font(ctx, font_entity, font_num, cidfont_entity)?;
     let type0_fm = *type0_fm;
     let (dev_cpx, dev_cpy) = ctx.gstate.current_point.ok_or(PsError::NoCurrentPoint)?;
     let ictm = ctx.gstate.ctm.invert().ok_or(PsError::UndefinedResult)?;
@@ -5915,7 +5972,7 @@ fn show_cid_run_displaced(
             // Emit per-character Text element with device-space position
             let (dev_x, dev_y) = ctm.transform_point(cur_x, cur_y);
             let cid_bytes = vec![(*cid >> 8) as u8, (*cid & 0xFF) as u8];
-            emit_text_element(ctx, cid_bytes, font_entity, 0, Some((dev_x, dev_y)));
+            emit_text_element_with_fm(ctx, cid_bytes, text_font, 0, Some((dev_x, dev_y)), text_fm);
 
             let glyph = tt.glyph(ctx, cidfont_entity, *cid);
             let place = cid_metrics.place(ctx, *cid, (glyph.width_x, 0.0), &glyph.segments, upm)?;
@@ -5962,7 +6019,7 @@ fn show_cid_run_displaced(
             // Emit per-character Text element with device-space position
             let (dev_x, dev_y) = ctm.transform_point(cur_x, cur_y);
             let cid_bytes = vec![(*cid >> 8) as u8, (*cid & 0xFF) as u8];
-            emit_text_element(ctx, cid_bytes, font_entity, 0, Some((dev_x, dev_y)));
+            emit_text_element_with_fm(ctx, cid_bytes, text_font, 0, Some((dev_x, dev_y)), text_fm);
 
             let glyph = match &source {
                 Some(source) => source.glyph(ctx, cidfont_entity, *cid).ok().flatten(),

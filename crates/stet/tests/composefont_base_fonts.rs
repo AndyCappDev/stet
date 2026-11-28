@@ -222,3 +222,37 @@ fn xshow_and_xyshow_place_base_font_glyphs() {
          0 0 moveto (AB) [100 5 200 7] xyshow currentpoint 12 near 300 near",
     );
 }
+
+/// Text extraction reads base-font glyphs by their names, whichever
+/// descendant and show operator drew them.
+#[test]
+fn base_font_text_is_extracted() {
+    use stet::{LayerSet, TextExtraction, text_lines, text_runs};
+    let src = format!(
+        "%!PS\n{PRELUDE}\n\
+         /Two-Hello /two /hello cmap\n\
+         /C /Two-Hello [/Helvetica findfont] composefont pop /C 24 selectfont\n\
+         72 700 moveto (Hello) show\n\
+         /Uf /one {{ 0 usefont 1 beginbfrange <41> <5A> <41> endbfrange\n\
+                     1 usefont 1 beginbfrange <61> <7A> <61> endbfrange\n\
+                     1 beginbfchar <20> /space endbfchar }} cmap\n\
+         /D /Uf [/Helvetica-Bold findfont /Times-Roman findfont] composefont pop\n\
+         /D 24 selectfont\n\
+         72 650 moveto (Two Fonts) show\n\
+         72 600 moveto (XShow) [16 16 12 12 17] xshow\n\
+         72 550 moveto {{ pop pop 1 string dup 0 4 -1 roll put show }} (Cshow) cshow\n\
+         showpage\n"
+    );
+    let mut interp = Interpreter::builder()
+        .suppress_output()
+        .text_extraction(TextExtraction::Runs)
+        .build();
+    let pages = interp
+        .render_to_display_list(src.as_bytes(), 72.0)
+        .expect("renders");
+    let lines: Vec<String> = text_lines(text_runs(&pages[0].display_list, &LayerSet::new()))
+        .into_iter()
+        .map(|l| l.text)
+        .collect();
+    assert_eq!(lines, ["Hello", "Two Fonts", "XShow", "Cshow"]);
+}

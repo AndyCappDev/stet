@@ -308,6 +308,18 @@ false setglobal
         exch setglobal
     } bind def
 
+    % cidfont wmode .cidtextfont font
+    % cidfont composed with Identity-H, or Identity-V for writing mode 1: the
+    % font a CMap-keyed Type 0 font's text names in the display list when
+    % the CIDFont it shows is not its first descendant, which is the one a
+    % device takes the glyphs of a Type 0 font's text from.
+    /.cidtextfont {
+        1 eq { /Identity-V } { /Identity-H } ifelse
+        currentglobal 2 index gcheck setglobal 3 1 roll
+        /.CIDTextFont exch 3 -1 roll 1 array astore composefont
+        exch setglobal
+    } bind def
+
     %% TN: 5044 operators
     /findcmykcustomcolor { 5 array astore } bind def
     /findrgbcustomcolor { 4 array astore } bind def
