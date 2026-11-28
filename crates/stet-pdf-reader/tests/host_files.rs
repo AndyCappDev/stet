@@ -19,6 +19,7 @@ fn a_document_reads_the_machines_files_by_default() {
     cmap_files_are_read();
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     the_systems_cmyk_profile_is_taken();
+    a_cmyk_profile_is_always_taken();
 }
 
 /// A font the document lacks is looked for among the machine's, which
@@ -63,4 +64,12 @@ fn the_systems_cmyk_profile_is_taken() {
         doc.icc_cache().default_cmyk_hash(),
         Some(&IccCache::hash_profile(PLANTED_PROFILE))
     );
+}
+
+/// A document opened without a color cache has a CMYK profile wherever it
+/// runs: the system's, or stet's own on a machine that has none, rather
+/// than the PLRM formulas, which would give its CMYK other colours there.
+fn a_cmyk_profile_is_always_taken() {
+    let doc = PdfDocument::from_owned(cmyk_page()).unwrap();
+    assert!(doc.icc_cache().default_cmyk_hash().is_some());
 }

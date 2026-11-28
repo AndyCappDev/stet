@@ -255,7 +255,10 @@ use stet_graphics::document_structure::OutputIntentRecord;
 use stet_graphics::icc::IccCache;
 
 /// The colour cache a document opened without one starts from: default
-/// options, with the system's CMYK profile if it has one.
+/// options, with the system's CMYK profile, or stet's own when the system
+/// has none it can use. Without one, CMYK would be converted with the PLRM
+/// formulas, and a document would come out in other colours on a machine
+/// with no profile installed than on one with Ghostscript's.
 ///
 /// Finding and preparing that profile takes about 30 ms, which used to be
 /// paid by every `from_bytes` and `from_owned` and was most of the cost of
@@ -270,6 +273,7 @@ fn default_icc_cache() -> IccCache {
         .get_or_init(|| {
             let mut cache = IccCache::new();
             cache.search_system_cmyk_profile();
+            ensure_cmyk_profile(&mut cache);
             cache
         })
         .clone()
@@ -288,10 +292,17 @@ fn own_icc_cache() -> IccCache {
     TEMPLATE
         .get_or_init(|| {
             let mut cache = IccCache::new();
-            cache.load_cmyk_profile_bytes(OWN_CMYK_PROFILE);
+            ensure_cmyk_profile(&mut cache);
             cache
         })
         .clone()
+}
+
+/// Give `cache` stet's own CMYK profile if it has none.
+fn ensure_cmyk_profile(cache: &mut IccCache) {
+    if cache.default_cmyk_hash().is_none() {
+        cache.load_cmyk_profile_bytes(OWN_CMYK_PROFILE);
+    }
 }
 
 /// Where a document's color cache reports what it cannot use: into
@@ -938,7 +949,7 @@ impl<'a> PdfDocument<'a> {
     /// [`from_bytes`](Self::from_bytes) or
     /// [`from_owned`](PdfDocument::from_owned), takes the system's CMYK
     /// profile from the ColorSync folders, `/usr/share/color/icc` or
-    /// Windows' spool color folder.
+    /// Windows' spool color folder, or stet's own when it finds none.
     ///
     /// Off, none of that is read, nor any other file: for an application
     /// reading files it did not write, on a machine whose fonts and
@@ -983,11 +994,8 @@ impl<'a> PdfDocument<'a> {
         self.resolver.fonts.borrow_mut().clear();
         if self.icc_cache_is_default {
             self.icc_cache = OnceCell::new();
-        } else if !enabled
-            && let Some(cache) = self.icc_cache.get_mut()
-            && cache.default_cmyk_hash().is_none()
-        {
-            cache.load_cmyk_profile_bytes(OWN_CMYK_PROFILE);
+        } else if !enabled && let Some(cache) = self.icc_cache.get_mut() {
+            ensure_cmyk_profile(cache);
         }
     }
 
@@ -1482,7 +1490,7 @@ impl<'a> PdfDocument<'a> {
     /// Access the ICC color profile cache.
     ///
     /// For a document opened without one, the reader's own: with the
-    /// system's CMYK profile, or stet's when
+    /// system's CMYK profile, or stet's when the system has none or
     /// [`set_host_files`](Self::set_host_files) is off.
     pub fn icc_cache(&self) -> &IccCache {
         self.icc()
@@ -2067,6 +2075,18 @@ fn has_pdf_header(data: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cache with no CMYK profile, as the system search leaves it on a
+    /// machine that has none, is given stet's own.
+    #[test]
+    fn a_cache_with_no_cmyk_profile_gets_stets_own() {
+        let mut cache = IccCache::new();
+        ensure_cmyk_profile(&mut cache);
+        assert_eq!(
+            cache.default_cmyk_hash(),
+            Some(&IccCache::hash_profile(OWN_CMYK_PROFILE))
+        );
+    }
 
     #[test]
     fn not_a_pdf() {

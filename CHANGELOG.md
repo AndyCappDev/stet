@@ -160,6 +160,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (0, 174, 239). It now uses the CMYK profile stet carries
   (`CGATS001Compat-v2-micro`, SWOP), as the `stet` library always does.
   `--no-icc` still selects the formulas (#49).
+- **`stet-pdf-reader` gives a document opened without a colour cache
+  stet's own CMYK profile when the machine has none.** `from_bytes` and
+  `from_owned` looked for the system's and, finding none, left CMYK to
+  the PLRM formulas, so a document's CMYK came out in other colours on
+  such a machine: pure red was (255, 0, 0), where with a profile it is
+  (237, 28, 36). The reader already used its own profile with
+  `set_host_files` off; it now does so with it on, too, when the search
+  finds nothing it can use.
 
 ## [0.11.0] — 2026-11-18
 
