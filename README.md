@@ -403,7 +403,7 @@ renders at different resolutions. See the
 - **Text extraction** from every show operator, for simple, composite and CID fonts in horizontal and vertical writing — the same display-list text runs the PDF reader produces
 - All 7 shading types (axial, radial, Gouraud mesh, Coons/tensor patch)
 - CIE color spaces (CIEBasedABC, CIEBasedA, CIEBasedDEF, CIEBasedDEFG)
-- ICC color management with system CMYK profile auto-detection
+- ICC color management with system CMYK profile auto-detection, and stet's own CMYK profile where none is installed
 - Filters: ASCII85, ASCIIHex, Flate, LZW, RunLength, DCT (JPEG), CCITTFax, JBIG2, JPX (JPEG 2000), eexec, SubFile
 - **PDF-imaging extensions**: constant alpha + 16 blend modes, transparency groups, soft masks, optional-content layers — all driven from PostScript with stet-specific operators ([reference](docs/PDF-EXTENSIONS.md))
 - Resource system with embedded fonts (35 URW equivalents of the standard PS fonts)

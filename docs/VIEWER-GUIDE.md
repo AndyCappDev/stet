@@ -170,5 +170,6 @@ higher effective DPI.
 | `--bpc <on\|off\|auto>` | Black-point compensation for CMYK→sRGB (default: `auto`, currently equivalent to `on`; `off` skips BPC) |
 
 Precedence for the source CMYK profile is `--cmyk-profile` > `--output-profile` >
-PDF OutputIntent (unless `--no-output-intent`) > system default. `--no-icc`
+PDF OutputIntent (unless `--no-output-intent`) > the system's CMYK profile >
+stet's own (`CGATS001Compat-v2-micro`, SWOP), used when none is installed. `--no-icc`
 conflicts with `--cmyk-profile` and `--bpc`.

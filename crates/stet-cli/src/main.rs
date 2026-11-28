@@ -982,7 +982,12 @@ fn run_viewer_mode(
         if let Some(path) = icc_cfg.source_cmyk_path() {
             std::fs::read(path).ok().map(std::sync::Arc::new)
         } else {
-            stet_graphics::icc::find_system_cmyk_profile_bytes()
+            // The profile the interpreter's cache gets (`build_icc_cache`),
+            // so that the viewer renders with the one the page was made with.
+            let mut cache = stet_graphics::icc::IccCache::new();
+            let system = stet_graphics::icc::find_system_cmyk_profile_bytes();
+            load_default_cmyk_profile(&mut cache, system.as_deref().map(Vec::as_slice));
+            cache.system_cmyk_bytes().cloned()
         }
     } else {
         None
@@ -1560,7 +1565,9 @@ fn parse_page_ranges(spec: &str) -> Result<std::collections::HashSet<i32>, Strin
 /// - `--output-profile <path>` (without `--cmyk-profile`) preserves prior
 ///   behavior: bytes serve as both the source CMYK profile and the embedded
 ///   PDF output profile. Validated as a generic ICC (`acsp` magic) only.
-/// - Otherwise the system CMYK profile is searched in the standard locations.
+/// - Otherwise the system CMYK profile is searched in the standard locations,
+///   and stet's own is used when there is none
+///   ([`load_default_cmyk_profile`]).
 fn build_icc_cache(icc_cfg: &IccCliConfig) -> stet_graphics::icc::IccCache {
     use stet_graphics::icc::IccCache;
 
@@ -1610,11 +1617,35 @@ fn build_icc_cache(icc_cfg: &IccCliConfig) -> stet_graphics::icc::IccCache {
     }
 
     let mut cache = new_cache(None);
-    cache.search_system_cmyk_profile();
-    if cache.default_cmyk_hash().is_some() {
+    let system = stet_graphics::icc::find_system_cmyk_profile_bytes();
+    if load_default_cmyk_profile(&mut cache, system.as_deref().map(Vec::as_slice)) {
         eprintln!("[ICC] Loaded system CMYK profile");
+    } else {
+        eprintln!("[ICC] No usable system CMYK profile; using stet's own (CGATS001, SWOP)");
     }
     cache
+}
+
+/// Load into `cache` the source CMYK profile used when no option names one:
+/// `system`, the profile found where Ghostscript and colord install theirs,
+/// or else, with none or one that cannot be used, stet's own
+/// (`CGATS001Compat-v2-micro`, a SWOP profile), which the `stet` library
+/// always uses. With no profile at all, CMYK would be converted with the
+/// PLRM formulas, and the same file would come out in other colours on a
+/// machine that has no profile installed (issue #49). True when the system's
+/// profile was loaded.
+fn load_default_cmyk_profile(
+    cache: &mut stet_graphics::icc::IccCache,
+    system: Option<&[u8]>,
+) -> bool {
+    if let Some(bytes) = system {
+        cache.load_cmyk_profile_bytes(bytes);
+        if cache.default_cmyk_hash().is_some() {
+            return true;
+        }
+    }
+    cache.load_cmyk_profile_bytes(stet::embedded_resources::DEFAULT_CMYK_ICC);
+    false
 }
 
 /// Validate that an ICC profile byte slice is a 4-component CMYK profile.
@@ -3387,5 +3418,50 @@ mod tests {
         // A trailing token that is not an orientation is part of the name,
         // so it fails as an unknown size rather than being silently dropped.
         assert!(parse_page_size("a4-sideways").is_err());
+    }
+}
+
+/// The source CMYK profile used when no option names one.
+#[cfg(test)]
+mod default_cmyk_profile_tests {
+    use super::load_default_cmyk_profile;
+    use stet_graphics::icc::IccCache;
+
+    fn loaded(cache: &IccCache) -> &[u8] {
+        assert!(
+            cache.default_cmyk_hash().is_some(),
+            "no CMYK profile loaded"
+        );
+        cache.system_cmyk_bytes().expect("profile bytes")
+    }
+
+    /// With no system profile, stet's own is used, not the PLRM formulas.
+    #[test]
+    fn no_system_profile_uses_stets_own() {
+        let mut cache = IccCache::new();
+        assert!(!load_default_cmyk_profile(&mut cache, None));
+        assert_eq!(loaded(&cache), stet::embedded_resources::DEFAULT_CMYK_ICC);
+    }
+
+    /// A system profile that cannot be used is passed over for stet's own.
+    #[test]
+    fn an_unusable_system_profile_uses_stets_own() {
+        let mut cache = IccCache::new();
+        assert!(!load_default_cmyk_profile(
+            &mut cache,
+            Some(b"not a profile")
+        ));
+        assert_eq!(loaded(&cache), stet::embedded_resources::DEFAULT_CMYK_ICC);
+    }
+
+    /// A system profile is preferred to stet's own.
+    #[test]
+    fn a_system_profile_is_used() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../stet-graphics/tests/data/cmyk_intent/split.icc");
+        let system = std::fs::read(path).expect("test profile");
+        let mut cache = IccCache::new();
+        assert!(load_default_cmyk_profile(&mut cache, Some(&system)));
+        assert_eq!(loaded(&cache), system.as_slice());
     }
 }

@@ -152,6 +152,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recorded any model a job asked for, though the device went on
   painting in RGB, so `currentpagedevice` reported a model the device
   did not use. Reported by @gitmaru0 (#49).
+- **The `stet` command converts CMYK with stet's own CMYK profile when
+  none is installed.** It looked for a system profile (Ghostscript's or
+  colord's) and, finding none, converted CMYK with the PLRM formulas, so
+  the same file came out in other colours on a machine without
+  Ghostscript: pure cyan was (0, 255, 255) where Ghostscript paints
+  (0, 174, 239). It now uses the CMYK profile stet carries
+  (`CGATS001Compat-v2-micro`, SWOP), as the `stet` library always does.
+  `--no-icc` still selects the formulas (#49).
 
 ## [0.11.0] — 2026-11-18
 
